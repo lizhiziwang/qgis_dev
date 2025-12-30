@@ -3,7 +3,7 @@ setlocal
 echo Starting PyQGIS application build... THE BATTLE-TESTED FINAL VERSION ...
 
 rem --- qgis安装位置 ---
-set "QGIS_INSTALL_PATH=D:\pf\qgis"
+set "QGIS_INSTALL_PATH=D:\zsh\app\qgis_3.40"
 
 rem --- [脚本核心配置，通常无需修改] ---
 set "QGIS_PYTHON_LAUNCHER=%QGIS_INSTALL_PATH%\bin\python-qgis-ltr.bat"
@@ -81,7 +81,7 @@ call "%QGIS_PYTHON_LAUNCHER%" -m PyInstaller ^
     --add-data "%QGIS_INSTALL_PATH%\share\proj\proj.db;." ^
     --add-binary "%QGIS_APP_BIN_PATH%\qgis_core.dll;." ^
     --add-binary "%QGIS_APP_BIN_PATH%\qgis_gui.dll;." ^
-    --add-binary "%OSGEO_DLL_PATH%\gdal311.dll;." ^
+    --add-binary "%OSGEO_DLL_PATH%\gdal312.dll;." ^
     --add-binary "%QGIS_MAIN_BIN_PATH%\geos_c.dll;." ^
     --add-binary "%QGIS_MAIN_BIN_PATH%\pdalcpp.dll;." ^
     --add-binary "%QGIS_MAIN_BIN_PATH%\proj_9.dll;proj" ^
@@ -117,7 +117,6 @@ if exist "%DIST_PATH%" (
     echo =================================
     echo.
     echo The portable application is in:
-    echo %DIST_PATH%
     echo.
 ) else (
     echo.

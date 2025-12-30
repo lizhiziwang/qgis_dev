@@ -746,7 +746,7 @@ class QGISMapWindow(QMainWindow):
 
     def closeEvent(self, event):
         """关闭窗口时释放QGIS资源"""
-        QgsProject.instance().clear()
+        self.project.clear()
         app.exitQgis()
         event.accept()
 
