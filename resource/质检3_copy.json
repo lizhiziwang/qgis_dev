@@ -1,0 +1,390 @@
+{
+    "checkItemName": "测试项目A",
+    "checkType": 0,
+    "id": 1989154991997009921,
+    "isApply": 0,
+    "items": [
+        {
+            "checkItemName": "属性质检",
+            "checkType": 0,
+            "id": 1989154991997009922,
+            "isApply": 0,
+            "items": [
+                {
+                    "checkItemName": "值域范围",
+                    "checkType": 0,
+                    "id": 1989154991997009923,
+                    "isApply": 0,
+                    "items": [
+                        {
+                            "checkItemName": "地类",
+                            "checkParam": "{\"where\": \"1 =1\", \"fieldName\": [\"DI_LEI\"], \"checkName\": \"地类检查\", \"domainValues\": [\"030100\", \"030200\", \"030301\", \"030302\", \"030401\", \"030402\", \"030403\", \"030404\", \"030405\", \"0304\"]}",
+                            "checkType": 0,
+                            "id": 1989154991997009924,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154991997009923
+                        },
+                        {
+                            "checkItemName": "林地权属",
+                            "checkParam": "{\"where\": \"1 =1\", \"fieldName\": [\"LD_QS\"], \"checkName\": \"林地权属检查\", \"domainValues\": [\"10\", \"20\", \"21\", \"22\", \"23\"]}",
+                            "checkType": 0,
+                            "id": 1989154992001204224,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154991997009923
+                        },
+                        {
+                            "checkItemName": "保护等级",
+                            "checkParam": "{\"where\": \"1 =1\", \"fieldName\": [\"BH_DJ\"], \"checkName\": \"保护等级检查\", \"domainValues\": [\"1\", \"2\", \"3\", \"4\"]}",
+                            "checkType": 0,
+                            "id": 1989154992001204225,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154991997009923
+                        },
+                        {
+                            "checkItemName": "森林类别",
+                            "checkParam": "{\"where\": \"1 =1\", \"fieldName\": [\"SEN_LIN_LB\"], \"checkName\": \"森林类别检查\", \"domainValues\": [\"1\", \"10\", \"010\", \"011\", \"012\", \"2\", \"20\", \"020\", \"21\", \"021\", \"22\", \"022\"]}",
+                            "checkType": 0,
+                            "id": 1989154992001204226,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154991997009923
+                        },
+                        {
+                            "checkItemName": "事权等级",
+                            "checkParam": "{\"where\": \"1 =1\", \"fieldName\": [\"SHI_QUAN_D\"], \"checkName\": \"事权等级检查\", \"domainValues\": [\"10\", \"20\", \"21\", \"22\", \"23\"]}",
+                            "checkType": 0,
+                            "id": 1989154992001204227,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154991997009923
+                        },
+                        {
+                            "checkItemName": "国家公益林等级",
+                            "checkParam": "{\"where\": \"1 =1\", \"fieldName\": [\"GJGYL_BHDJ\"], \"checkName\": \"国家公益林等级检查\", \"domainValues\": [\"\", \"1\", \"2\"]}",
+                            "checkType": 0,
+                            "id": 1989154992001204228,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154991997009923
+                        },
+                        {
+                            "checkItemName": "林种",
+                            "checkParam": "{\"where\": \"1 =1\", \"fieldName\": [\"LIN_ZHONG\"], \"checkName\": \"林种检查\", \"domainValues\": [\"\", \"无\", \"110\", \"111\", \"112\", \"113\", \"114\", \"115\", \"116\", \"117\", \"120\", \"121\", \"122\", \"123\", \"124\", \"125\", \"126\", \"127\", \"230\", \"231\", \"232\", \"233\", \"240\", \"241\", \"242\", \"250\", \"251\", \"252\", \"253\", \"254\", \"255\"]}",
+                            "checkType": 0,
+                            "id": 1989154992001204229,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154991997009923
+                        },
+                        {
+                            "checkItemName": "龄组",
+                            "checkParam": "{\"where\": \"1 =1\", \"fieldName\": [\"LING_ZU\"], \"checkName\": \"龄组检查\", \"domainValues\": [\"\", \"无\", \"1\", \"2\", \"3\", \"4\", \"5\"]}",
+                            "checkType": 0,
+                            "id": 1989154992001204230,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154991997009923
+                        },
+                        {
+                            "checkItemName": "起源",
+                            "checkParam": "{\"where\": \"1 =1\", \"fieldName\": [\"QI_YUAN\"], \"checkName\": \"起源检查\", \"domainValues\": [\"无\", \"\", \"11\", \"12\", \"13\", \"21\", \"22\", \"23\", \"24\"]}",
+                            "checkType": 0,
+                            "id": 1989154992001204231,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154991997009923
+                        },
+                        {
+                            "checkItemName": "使用林地性质",
+                            "checkParam": "{\"where\": \"1 =1\", \"fieldName\": [\"LD_XZ\"], \"checkName\": \"使用林地性质检查\", \"domainValues\": [\"无\", \"\", \"1\", \"2\", \"3\"]}",
+                            "checkType": 0,
+                            "id": 1989154992001204232,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154991997009923
+                        },
+                        {
+                            "checkItemName": "树种",
+                            "checkParam": "{\"where\": \"1 =1\", \"fieldName\": [\"YOU_SHI_SZ\"], \"checkName\": \"树种检查\", \"domainValues\": [\"无\", \"\", \"110\", \"120\", \"130\", \"140\", \"150\", \"160\", \"170\", \"180\", \"190\", \"200\", \"210\", \"220\", \"230\", \"240\", \"250\", \"260\", \"261\", \"262\", \"290\", \"310\", \"320\", \"330\", \"340\", \"350\", \"360\", \"390\", \"410\", \"420\", \"421\", \"422\", \"430\", \"431\", \"432\", \"433\", \"440\", \"450\", \"460\", \"470\", \"480\", \"490\", \"510\", \"520\", \"530\", \"535\", \"540\", \"550\", \"560\", \"570\", \"580\", \"590\", \"610\", \"620\", \"630\", \"641\", \"642\", \"643\", \"644\", \"659\", \"660\", \"670\", \"680\", \"690\", \"701\", \"702\", \"703\", \"704\", \"705\", \"706\", \"707\", \"708\", \"709\", \"710\", \"711\", \"712\", \"713\", \"714\", \"715\", \"716\", \"749\", \"751\", \"752\", \"753\", \"754\", \"755\", \"756\", \"757\", \"758\", \"759\", \"760\", \"761\", \"799\", \"801\", \"804\", \"805\", \"819\", \"821\", \"822\", \"823\", \"824\", \"825\", \"826\", \"827\", \"828\", \"849\", \"851\", \"852\", \"859\", \"901\", \"902\", \"903\", \"904\", \"941\", \"942\", \"943\", \"944\", \"961\", \"971\", \"981\", \"999\"]}",
+                            "checkType": 0,
+                            "id": 1989154992001204233,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154991997009923
+                        }
+                    ],
+                    "pId": "321321654651",
+                    "parentId": 1989154991997009922
+                },
+                {
+                    "checkItemName": "非空（必填）校验",
+                    "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"XIAN\", \"XIANG\", \"XIANGNAME\", \"CUN\", \"CUNNAME\", \"LIN_BAN\", \"SYLDDKXH\", \"XIAO_BAN\", \"DCRY\", \"DCRQ\", \"XMMC\", \"JSNR\", \"SJND\", \"DI_LEI_20\", \"zbfglx_24\", \"LD_QS_24\", \"BH_DJ_24\", \"LINZHONG24\", \"QI_YUAN_24\", \"YUBIDU_24\", \"MIAN_JI\"], \"checkName\": \"非空（必填）校验\"}",
+                    "checkType": 1,
+                    "id": 1989154992001204234,
+                    "isApply": 0,
+                    "pId": "321321654651",
+                    "parentId": 1989154991997009922
+                },
+                {
+                    "checkItemName": "逻辑校验",
+                    "checkType": 2,
+                    "id": 1989154992001204235,
+                    "isApply": 0,
+                    "items": [
+                        {
+                            "checkItemName": "国家公园林地面积(公顷)",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"GJGYLD_MJ\"], \"checkName\": \"国家公园林地面积(公顷)校验\", \"logicalSql\": \"GJGYLD_MJ > 0\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204236,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "自然保护区等级",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"ZRBHQ_DJ\"], \"checkName\": \"自然保护区等级校验\", \"logicalSql\": \"(ZRBHQ_DJ IN ('国家级', '省级', '其他') AND ZRBHQ_MC IS NOT NULL) OR (ZRBHQ_DJ = '无' AND ZRBHQ_MC = '无') OR (ZRBHQ_DJ IS NULL AND ZRBHQ_MC IS NULL) or (ZRBHQ_DJ = '' AND ZRBHQ_MC = '') or (ZRBHQ_DJ = ' ' AND ZRBHQ_MC = ' ')\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204237,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "自然保护区名称",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"ZRBHQ_MC\"], \"checkName\": \"自然保护区名称校验\", \"logicalSql\": \"(ZRBHQ_DJ IN ('国家级', '省级', '其他') AND ZRBHQ_MC IS NOT NULL) OR (ZRBHQ_DJ = '无' AND ZRBHQ_MC = '无') OR (ZRBHQ_DJ IS NULL AND ZRBHQ_MC IS NULL) or (ZRBHQ_DJ = '' AND ZRBHQ_MC = '') or (ZRBHQ_DJ = ' ' AND ZRBHQ_MC = ' ')\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204238,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "自然保护区类型",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"ZRBHDLX\"], \"checkName\": \"自然保护区类型校验\", \"logicalSql\": \"(ZRBHDLX IN ('森林生态系统类型','草原和草甸生态系统类型','荒漠生态系统类型','内陆湿地和水域生态系统类型','海洋和海岸生态系统类型','野生动物类型','野生植物类型','地质遗迹类型','古生物遗迹类型') AND ZRBHQ_MC IS NOT NULL) OR (ZRBHDLX = '无' AND ZRBHQ_MC = '无') OR (ZRBHDLX IS NULL AND ZRBHQ_MC IS NULL) or (ZRBHDLX = '' AND ZRBHQ_MC = '') or (ZRBHDLX = ' ' AND ZRBHQ_MC = ' ')\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204239,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "森林公园名称",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"SLGY_MC\"], \"checkName\": \"森林公园名称检查\", \"logicalSql\": \"(SLGY_DJ IN ('国家级', '省级', '其他') AND SLGY_MC IS NOT NULL) OR (SLGY_DJ = '无' AND SLGY_MC = '无') OR (SLGY_DJ IS NULL AND SLGY_MC IS NULL) or (SLGY_DJ = '' AND SLGY_MC = '') or (SLGY_DJ = ' ' AND SLGY_MC = ' ')\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204240,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "森林公园等级",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"SLGY_DJ\"], \"checkName\": \"森林公园等级检查\", \"logicalSql\": \"(SLGY_DJ IN ('国家级', '省级', '其他') AND SLGY_MC IS NOT NULL) OR (SLGY_DJ = '无' AND SLGY_MC = '无') OR (SLGY_DJ IS NULL AND SLGY_MC IS NULL) or (SLGY_DJ = '' AND SLGY_MC = '') or (SLGY_DJ = ' ' AND SLGY_MC = ' ')\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204241,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "湿地公园名称",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"SDGY_MC\"], \"checkName\": \"湿地公园名称检查\", \"logicalSql\": \"(SDGY_DJ IN ('国家级', '省级', '其他') AND SDGY_MC IS NOT NULL) OR (SDGY_DJ = '无' AND SDGY_MC = '无') OR (SDGY_DJ IS NULL AND SDGY_MC IS NULL) or (SDGY_DJ = '' AND SDGY_MC = '') or (SDGY_DJ = ' ' AND SDGY_MC = ' ')\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204242,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "湿地公园等级",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"SDGY_DJ\"], \"checkName\": \"湿地公园等级检查\", \"logicalSql\": \"(SDGY_DJ IN ('国家级', '省级', '其他') AND SDGY_MC IS NOT NULL) OR (SDGY_DJ = '无' AND SDGY_MC = '无') OR (SDGY_DJ IS NULL AND SDGY_MC IS NULL) or (SDGY_DJ = '' AND SDGY_MC = '') or (SDGY_DJ = ' ' AND SDGY_MC = ' ')\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204243,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "风景名胜区名称",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"FJMSQ_MC\"], \"checkName\": \"风景名胜区名称检查\", \"logicalSql\": \"(FJMSQ_DJ IN ('国家级', '省级', '其他') AND FJMSQ_MC IS NOT NULL) OR (FJMSQ_DJ = '无' AND FJMSQ_MC = '无') OR (FJMSQ_DJ IS NULL AND FJMSQ_MC IS NULL) or (FJMSQ_DJ = '' AND FJMSQ_MC = '') or (FJMSQ_DJ = ' ' AND FJMSQ_MC = ' ')\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204244,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "风景名胜区等级",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"FJMSQ_DJ\"], \"checkName\": \"风景名胜区名称检查\", \"logicalSql\": \"(FJMSQ_DJ IN ('国家级', '省级', '其他') AND FJMSQ_MC IS NOT NULL) OR (FJMSQ_DJ = '无' AND FJMSQ_MC = '无') OR (FJMSQ_DJ IS NULL AND FJMSQ_MC IS NULL) or (FJMSQ_DJ = '' AND FJMSQ_MC = '') or (FJMSQ_DJ = ' ' AND FJMSQ_MC = ' ')\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204245,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "地质公园名称",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"DZGY_MC\"], \"checkName\": \"地质公园名称检查\", \"logicalSql\": \"(DZGY_DJ IN ('国家级', '省级', '其他') AND DZGY_MC IS NOT NULL) OR (DZGY_DJ = '无' AND DZGY_MC = '无') OR (DZGY_DJ IS NULL AND DZGY_MC IS NULL) or (DZGY_DJ = '' AND DZGY_MC = '') or (DZGY_DJ = ' ' AND DZGY_MC = ' ')\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204246,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "地质公园等级",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"DZGY_DJ\"], \"checkName\": \"地质公园等级检查\", \"logicalSql\": \"(DZGY_DJ IN ('国家级', '省级', '其他') AND DZGY_MC IS NOT NULL) OR (DZGY_DJ = '无' AND DZGY_MC = '无') OR (DZGY_DJ IS NULL AND DZGY_MC IS NULL) or (DZGY_DJ = '' AND DZGY_MC = '') or (DZGY_DJ = ' ' AND DZGY_MC = ' ')\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204247,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "海洋公园名称",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"HYGY_MC\"], \"checkName\": \"海洋公园名称检查\", \"logicalSql\": \"(HYGY_DJ IN ('国家级', '省级', '其他') AND HYGY_MC IS NOT NULL) OR (HYGY_DJ = '无' AND HYGY_MC = '无') OR (HYGY_DJ IS NULL AND HYGY_MC IS NULL) or (HYGY_DJ = '' AND HYGY_MC = '') or (HYGY_DJ = ' ' AND HYGY_MC = ' ')\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204248,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "海洋公园等级",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"HYGY_DJ\"], \"checkName\": \"海洋公园等级检查\", \"logicalSql\": \"(HYGY_DJ IN ('国家级', '省级', '其他') AND HYGY_MC IS NOT NULL) OR (HYGY_DJ = '无' AND HYGY_MC = '无') OR (HYGY_DJ IS NULL AND HYGY_MC IS NULL) or (HYGY_DJ = '' AND HYGY_MC = '') or (HYGY_DJ = ' ' AND HYGY_MC = ' ')\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204249,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "沙漠公园名称",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"SMGY_MC\"], \"checkName\": \"沙漠公园名称检查\", \"logicalSql\": \"(SMGY_DJ IN ('国家级', '省级', '其他') AND SMGY_MC IS NOT NULL) OR (SMGY_DJ = '无' AND SMGY_MC = '无') OR (SMGY_DJ IS NULL AND SMGY_MC IS NULL) or (SMGY_DJ = '' AND SMGY_MC = '') or (SMGY_DJ = ' ' AND SMGY_MC = ' ')\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204250,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "沙漠公园等级",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"SMGY_DJ\"], \"checkName\": \"沙漠公园等级检查\", \"logicalSql\": \"(SMGY_DJ IN ('国家级', '省级', '其他') AND SMGY_MC IS NOT NULL) OR (SMGY_DJ = '无' AND SMGY_MC = '无') OR (SMGY_DJ IS NULL AND SMGY_MC IS NULL) or (SMGY_DJ = '' AND SMGY_MC = '') or (SMGY_DJ = ' ' AND SMGY_MC = ' ')\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204251,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "草原公园名称",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"CYGY_MC\"], \"checkName\": \"草原公园名称检查\", \"logicalSql\": \"(CYGY_DJ IN ('国家级', '省级', '其他') AND CYGY_MC IS NOT NULL) OR (CYGY_DJ = '无' AND CYGY_MC = '无') OR (CYGY_DJ IS NULL AND CYGY_MC IS NULL) or (CYGY_DJ = '' AND CYGY_MC = '') or (CYGY_DJ = ' ' AND CYGY_MC = ' ')\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204252,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "草原公园等级",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"CYGY_DJ\"], \"checkName\": \"草原公园等级检查\", \"logicalSql\": \"(CYGY_DJ IN ('国家级', '省级', '其他') AND CYGY_MC IS NOT NULL) OR (CYGY_DJ = '无' AND CYGY_MC = '无') OR (CYGY_DJ IS NULL AND CYGY_MC IS NULL) or (CYGY_DJ = '' AND CYGY_MC = '') or (CYGY_DJ = ' ' AND CYGY_MC = ' ')\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204253,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "平均树高(米)",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"PINGJUN_SG\"], \"checkName\": \"平均树高(米)校验\", \"logicalSql\": \"PINGJUN_SG >= 0\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204254,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "平均胸径(厘米)",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"PINGJUN_XJ\"], \"checkName\": \"平均胸径(厘米)校验\", \"logicalSql\": \"PINGJUN_XJ >= 0\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204255,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "郁闭度",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"YU_BI_DU\"], \"checkName\": \"郁闭度校验\", \"logicalSql\": \"YU_BI_DU >= 0 and YU_BI_DU <= 1\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204256,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "经济(竹)林株数",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"JJLZS\"], \"checkName\": \"经济(竹)林株数校验\", \"logicalSql\": \"JJLZS >= 0\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204257,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "每公顷蓄积(立方米)",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"MEI_GQ_XJ\"], \"checkName\": \"每公顷蓄积(立方米)校验\", \"logicalSql\": \"MEI_GQ_XJ >= 0\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204258,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "每公顷株数",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"MEI_GQ_ZS\"], \"checkName\": \"每公顷株数校验\", \"logicalSql\": \"MEI_GQ_ZS >= 0\", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204259,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "是否为城市规划区",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"CS_GHQ\"], \"checkName\": \"是否为城市规划区校验\", \"logicalSql\": \"CS_GHQ in (0,1) \", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204260,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "是否未批先占图斑",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"SFWFTB\"], \"checkName\": \"是否未批先占图斑校验\", \"logicalSql\": \"SFWFTB in (0,1) \", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204261,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        },
+                        {
+                            "checkItemName": "未批先占面积(公顷)",
+                            "checkParam": "{\"where\": \"1=1\", \"fieldName\": [\"WFTBMJ\"], \"checkName\": \"未批先占面积(公顷)校验\", \"logicalSql\": \"(SFWFTB =1 and WFTBMJ >0) or SFWFTB = 0 \", \"logicalResult\": \"false\"}",
+                            "checkType": 2,
+                            "id": 1989154992001204262,
+                            "isApply": 0,
+                            "pId": "321321654651",
+                            "parentId": 1989154992001204235
+                        }
+                    ],
+                    "pId": "321321654651",
+                    "parentId": 1989154991997009922
+                }
+            ],
+            "pId": "321321654651",
+            "parentId": 1989154991997009921
+        }
+    ],
+    "pId": "321321654651"
+}

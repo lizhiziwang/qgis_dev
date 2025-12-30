@@ -1,0 +1,8 @@
+2025-12-30 10:47:24 - Application - 24836:26648 - ERROR - qgis._gui.QgsLayerPropertiesDialog cannot be instantiated or sub-classed
+2025-12-30 10:48:21 - Application - 27480:22872 - ERROR - qgis._gui.QgsLayerPropertiesDialog cannot be instantiated or sub-classed
+2025-12-30 10:51:45 - Application - 17580:25308 - ERROR - qgis._gui.QgsLayerPropertiesDialog cannot be instantiated or sub-classed
+2025-12-30 10:53:49 - Application - 27524:27396 - ERROR - QgsVectorLayerProperties(canvas: QgsMapCanvas|None, messageBar: QgsMessageBar|None, lyr: QgsVectorLayer|None = None, parent: QWidget|None = None, fl: Qt.WindowFlags|Qt.WindowType = QgsGuiUtils.ModalDialogFlags): argument 1 has unexpected type 'QgsVectorLayer'
+2025-12-30 10:55:05 - Application - 26328:13412 - ERROR - QgsVectorLayerProperties(canvas: QgsMapCanvas|None, messageBar: QgsMessageBar|None, lyr: QgsVectorLayer|None = None, parent: QWidget|None = None, fl: Qt.WindowFlags|Qt.WindowType = QgsGuiUtils.ModalDialogFlags): not enough arguments
+2025-12-30 10:58:03 - Application - 21344:25080 - ERROR - 'QGISMapWindow' object has no attribute 'messageBar'
+2025-12-30 10:58:23 - Application - 26388:20864 - ERROR - QgsVectorLayerProperties(canvas: QgsMapCanvas|None, messageBar: QgsMessageBar|None, lyr: QgsVectorLayer|None = None, parent: QWidget|None = None, fl: Qt.WindowFlags|Qt.WindowType = QgsGuiUtils.ModalDialogFlags): not enough arguments
+2025-12-30 10:59:19 - Application - 7112:10276 - ERROR - 'QGISMapWindow' object has no attribute 'messageBar'
