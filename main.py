@@ -32,6 +32,7 @@ from component.style import StyleSaveDia, StyleOpenDia
 from component.draw_tool import Draw
 from component.add_vec_data import *
 from component.check_dia import JsonTreeView
+import component.LogDock as ld
 
 ''' 打包时需要使用以下4行 '''
 # QGIS_PREFIX = os.path.dirname(os.path.abspath(__file__))  # 即 dist\app
@@ -82,7 +83,6 @@ class QGISMapWindow(QMainWindow):
         self.layer_tree_root = self.project.layerTreeRoot()
         self.bridge = QgsLayerTreeMapCanvasBridge(self.layer_tree_root, self.canvas)
         self.bridge.setAutoSetupOnFirstLayer(True)
-        self.draw_tool = Draw(self)
         # 坐标系注册
         self.coord_register = app.coordinateReferenceSystemRegistry()
 
@@ -91,6 +91,8 @@ class QGISMapWindow(QMainWindow):
         self.create_browser()
         # 编辑组件
         self.create_toolbar()
+        self.draw_tool = Draw(self)
+
         self.create_menu()
 
         self.statusBar().show()
@@ -109,9 +111,7 @@ class QGISMapWindow(QMainWindow):
         status_bar.addPermanentWidget(proj_selector)
 
         self.messageBar = QgsMessageBar()
-        # qgis_default_style = self.style()
 
-        self.load_file(f"D:\work\共青城市_共青城市金湖乡公益性公墓_林地审核审批数据库_20251123\共青城市_共青城市金湖乡公益性公墓_林地审核审批数据库_20251123.gdb")
 
     ''' 创建图层对象 '''
 
@@ -601,6 +601,14 @@ class QGISMapWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
+        # 视图菜单
+        view_menu = menubar.addMenu("视图(&v)")
+        log_action = QAction("日志", self)
+        log_action.triggered.connect(lambda: ld.add_log_dock(self))
+        view_menu.addAction(log_action)
+
+
+
     '''缩放全屏'''
 
     def zoom_to_full_extent(self):
@@ -750,8 +758,7 @@ class QGISMapWindow(QMainWindow):
         app.exitQgis()
         event.accept()
 
-
-if __name__ == "__main__":
+def run():
     try:
         icon = QIcon("resource/png/app_icon.png")
         app.setWindowIcon(icon)
@@ -761,3 +768,7 @@ if __name__ == "__main__":
         sys.exit(app.exec_())
     except Exception as e:
         logger.info(e)
+
+
+if __name__ == "__main__":
+    run()

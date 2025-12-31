@@ -1,5 +1,5 @@
 from abc import abstractmethod, ABC
-from qgis._core import QgsFeatureRequest
+from qgis._core import QgsFeatureRequest, QgsFeatureIterator
 from component.Logger import *
 from .CheckParam import *
 
@@ -14,7 +14,7 @@ class DataCheck(ABC):
         field_name = None
         type_name = None
 
-    def _check(self, check_dto: CheckParam) -> []:
+    def _check(self, check_dto: CheckParam) -> QgsFeatureIterator:
         requests = QgsFeatureRequest().setFilterExpression(check_dto.where)
         return check_dto.layer.getFeatures(requests)
 
@@ -29,10 +29,10 @@ class DataCheck(ABC):
             return False
 
     @abstractmethod
-    def _build_sql(self, dto: CheckParam) -> string:
+    def _build_sql(self, dto: CheckParam) -> str:
         pass
 
-    def check(self, dto: CheckParam) -> []:
+    def check(self, dto: CheckParam) -> QgsFeatureIterator:
         try:
             self._build_sql(dto)
             if self._verify_sql(dto):
@@ -43,10 +43,16 @@ class DataCheck(ABC):
             logger.error(e)
             raise ValueError(f"sql语句执行失败！请检查")
 
+    def pipe_line_execute(self, params: list) -> list:
+        result = []
+        for item in params:
+            t = check_service[item.check_type].check(item)
+            result.append(list(t))
+        return result
 
 class NullValueCheck(DataCheck):
 
-    def _build_sql(self, dto: NullValueParam) -> string:
+    def _build_sql(self, dto: NullValueParam):
         fs = dto.field_name
         var = [f"({item} is null or {item} = '' or {item} = ' ')" for item in fs]
         where = " or ".join(var)
@@ -55,14 +61,14 @@ class NullValueCheck(DataCheck):
 
 class DataValueCheck(DataCheck):
 
-    def _build_sql(self, dto: CheckParam) -> string:
+    def _build_sql(self, dto: CheckParam):
         values = dto.where.split(",")
         dto.where = "and".join([f"{item} not in ({','.join(values)})" for item in dto.field_name])
         logger.info(dto.where)
 
 
 class LogicCheck(DataCheck):
-    def _build_sql(self, dto: CheckParam) -> string:
+    def _build_sql(self, dto: CheckParam):
         pass
 
 

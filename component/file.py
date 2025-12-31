@@ -1,4 +1,7 @@
 from PyQt5.QtWidgets import QFileDialog
+from component.Logger import setup_logger
+
+logger = setup_logger(__name__)
 
 
 def open_file_dir(parent, is_dir=False, title="选择文件夹", init_path="", **kwargs):
@@ -30,6 +33,11 @@ def open_file_dir(parent, is_dir=False, title="选择文件夹", init_path="", *
 
 
 def write_data(file_path, data):
+    try:
+        with open(file_path, "w", encoding="UTF-8") as f:
+            f.write(data)
+        return True
+    except Exception as e:
+        logger.error(f"写入文件发生错误：{file_path}")
+        return False
 
-    with open(file_path, "w", encoding="UTF-8") as f:
-        f.write(data)

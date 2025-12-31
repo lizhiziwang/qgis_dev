@@ -31,7 +31,6 @@ call "%QGIS_PYTHON_LAUNCHER%" -m PyInstaller ^
     --name app ^
     --onedir ^
     --windowed ^
-    --hidden-import=rasterio._features ^
     --hidden-import=PyQt5.pylupdate ^
     --hidden-import=PyQt5.pyrcc ^
     --hidden-import=PyQt5.QAxContainer ^
@@ -73,7 +72,6 @@ call "%QGIS_PYTHON_LAUNCHER%" -m PyInstaller ^
     --hidden-import=PyQt5._QOpenGLFunctions_2_0 ^
     --hidden-import=PyQt5._QOpenGLFunctions_2_1 ^
     --hidden-import=PyQt5._QOpenGLFunctions_4_1_Core ^
-    --collect-all rasterio ^
     --collect-all setuptools ^
     --add-data "%QGIS_PYTHON_PACKAGES_PATH%\qgis;qgis" ^
     --add-data "%PROJECT_ROOT%resource;resource" ^
@@ -104,8 +102,8 @@ if exist "%DIST_PATH%" (
     echo   - Copying 'plugins' folder for data browser support
     xcopy /E /I /Y "%QGIS_INSTALL_PATH%\apps\qgis-ltr\plugins" "%DIST_PATH%\plugins\"
 
-    echo   - Copying '翻译插件'
-    xcopy /E /I /Y "%QGIS_INSTALL_PATH%\apps\qgis-ltr\i18n" "%DIST_PATH%\i18n\"
+    echo   - Copying '翻译插件 , 只需要简体中文'
+    xcopy /E /I /Y "%QGIS_INSTALL_PATH%\apps\qgis-ltr\i18n\qgis_zh-Hans.qm" "%DIST_PATH%\i18n\qgis_zh-Hans.qm"
 
     echo   - Copying 'providers' folder (optional, if exists)
     if exist "%QGIS_INSTALL_PATH%\apps\qgis-ltr\providers" (
