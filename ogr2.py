@@ -17,7 +17,7 @@ def gdb_to_postgis(gdb_path, pg_conn_str, options=None):
         gdb_path,
         '-lco', 'LAUNDER=NO',  # 保留字段名大小写
         '-lco', 'OVERWRITE=YES',  # 覆盖已存在表
-        '-lco', 'GEOMETRY_NAME=geom',  # 几何字段名
+        '-lco', 'GEOMETRY_NAME=shape',  # 几何字段名
         '-nlt', 'PROMOTE_TO_MULTI',  # 统一为 Multi 类型
         '-t_srs', 'EPSG:4490',  # 核心修改：转换为4490坐标系
         # '-s_srs', 'EPSG:4490',  # 兜底：若源数据无坐标系，默认按4490处理
@@ -53,9 +53,10 @@ def gdb_to_postgis(gdb_path, pg_conn_str, options=None):
 
 # ============ 使用示例 ============
 if __name__ == "__main__":
-    GDB_PATH = f"D:\work\湿地数据\全省湿地变化图斑202512.gdb"
+    GDB_PATH = f"D:\zsh\work\sdsj\湿地数据\全省湿地保护区.gdb"
     # 修改为目的数据库连接信息
-    PG_CONN = "host=localhost port=5432 dbname=postgis_30_sample user=postgres password=Zsh621002"
+    # PG_CONN = "host=localhost port=5432 dbname=postgis_30_sample user=postgres password=Zsh621002"
+    PG_CONN = "host=localhost port=54321 dbname=postgres user=postgres password=Aa@123456"
 
     # 执行导入
     gdb_to_postgis(GDB_PATH, PG_CONN)

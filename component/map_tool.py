@@ -79,7 +79,6 @@ class FindFeatureTool(QgsMapToolIdentify):
 
 
 class ModernFeatureInfoDialog(QDialog):
-    """现代化要素信息弹窗（支持富文本、复制功能、美化样式）"""
 
     def __init__(self, parent, layer, feature):
         super().__init__(parent)
@@ -328,11 +327,12 @@ class FeatureLoaderThread(QThread):
     features_loaded = pyqtSignal(list)
     finished = pyqtSignal()
 
-    def __init__(self, layer, filter_str, parent=None):
+    def __init__(self, layer, filter_str, parent=None, show_ids:list=None):
         super().__init__(parent)
         self.layer = layer
         self.all_ids = []
         self.filter_str = filter_str
+        self.show_ids = show_ids
 
     def run(self):
         """在后台线程中加载要素ID"""
@@ -349,9 +349,12 @@ class FeatureLoaderThread(QThread):
             request = QgsFeatureRequest().setFilterExpression(self.filter_str)
 
             for feature in self.layer.getFeatures(request):
-                all_ids.append(feature.id())
                 count += 1
-
+                if self.show_ids is not None and len(self.show_ids) > 0:
+                    if feature.id() in self.show_ids:
+                        all_ids.append(feature.id())
+                else:
+                    all_ids.append(feature.id())
                 # 更新进度
                 if count % step == 0 or count == total_features:
                     progress = int((count / total_features) * 100)
@@ -369,13 +372,14 @@ class FeatureLoaderThread(QThread):
 class PagedAttributeTableModel(QAbstractTableModel):
     """分页属性表模型 - 带进度提示"""
 
-    def __init__(self, layer, page_size=50, parent=None, filter_str='1=1'):
+    def __init__(self, layer, page_size=50, parent=None, filter_str='1=1', show_ids:list=None):
         super().__init__(parent)
         self.layer = layer
         self.page_size = page_size
         self.current_page = 0
         self.order_field = "id"
         self.filter_str = filter_str
+        self.show_ids = show_ids
 
         # 预先获取所有要素ID
         self.all_ids = None
@@ -400,7 +404,7 @@ class PagedAttributeTableModel(QAbstractTableModel):
         self.loading_progress.canceled.connect(self.on_cancel_loading)
 
         # 启动后台线程加载ID
-        self.loading_thread = FeatureLoaderThread(layer, self.filter_str)
+        self.loading_thread = FeatureLoaderThread(layer, self.filter_str, show_ids=self.show_ids)
         self.loading_thread.progress_updated.connect(self.on_progress_updated)
         self.loading_thread.features_loaded.connect(self.on_features_loaded)
         self.loading_thread.finished.connect(self.on_loading_finished)
@@ -421,6 +425,7 @@ class PagedAttributeTableModel(QAbstractTableModel):
         """要素加载完成"""
         if not self.loading_progress.wasCanceled():
             self.all_ids = all_ids
+                # [item for item in all_ids if item in self.show_ids]
             self.total_features = len(self.all_ids)
             self.total_pages = math.ceil(self.total_features / self.page_size) if self.total_features > 0 else 1
 
@@ -468,7 +473,12 @@ class PagedAttributeTableModel(QAbstractTableModel):
         if page_ids:
             request = QgsFeatureRequest()
             request.setFilterFids(page_ids)
-            request.setFilterExpression(self.filter_str)
+
+            id_list_str = ','.join(str(fid) for fid in page_ids)
+            filter_expr = f"$id IN ({id_list_str})"
+
+            request.setFilterExpression(f"{self.filter_str} and {filter_expr}")
+            print(f"要素数量{ len(list(self.layer.getFeatures(request)))}, sql{f"{self.filter_str} and {filter_expr}"}")
 
             for feature in self.layer.getFeatures(request):
                 self.features.append(feature)
@@ -621,13 +631,14 @@ class PagedAttributeTableWidget(QWidget):
 
     zoom_to_map = pyqtSignal(str, object)
 
-    def __init__(self, layer, page_size=50, parent=None, filter_str: string = "1=1"):
+    def __init__(self, layer, page_size=50, parent=None, filter_str: str = "1=1", show_ids: list = None):
         super().__init__(parent)
         self.layer = layer
         self.page_size = page_size
         self.model = None
         self.table_view = None
         self.filter_str = filter_str
+        self.show_ids = show_ids
 
         # 设置小部件的大小策略
         size_policy = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
@@ -674,7 +685,7 @@ class PagedAttributeTableWidget(QWidget):
         self.setLayout(main_layout)
 
         # 初始化模型
-        self.model = PagedAttributeTableModel(self.layer, self.page_size, filter_str=self.filter_str)
+        self.model = PagedAttributeTableModel(self.layer, self.page_size, filter_str=self.filter_str, show_ids=self.show_ids)
         self.table_view.setModel(self.model)
 
         # 连接信号
@@ -1123,17 +1134,18 @@ class PagedAttributeTableWidget(QWidget):
 class PagedAttributeDockWidget(QDockWidget):
     """可停靠的属性表停靠窗口"""
 
-    def __init__(self, layer, title="属性表", page_size=50, parent=None, filter_str: string = "1=1"):
+    def __init__(self, layer, title="属性表", page_size=50, parent=None, filter_str: str = "1=1", show_ids: list = None):
         super().__init__(title, parent)
         self.topParent = parent
         self.layer = layer
+        self.show_ids = show_ids if show_ids is not None else []
 
         # 设置停靠窗口的属性
         self.setFeatures(QDockWidget.AllDockWidgetFeatures)
         self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea | Qt.BottomDockWidgetArea)
 
         # 创建内容小部件
-        self.content_widget = PagedAttributeTableWidget(layer, page_size, self, filter_str=filter_str)
+        self.content_widget = PagedAttributeTableWidget(layer, page_size, self, filter_str=filter_str, show_ids=show_ids)
         self.setWidget(self.content_widget)
         # 连接地图事件
         self.content_widget.zoom_to_map.connect(self.zoom_to_map)
@@ -1175,19 +1187,19 @@ class PagedAttributeDockWidget(QDockWidget):
     #
     #         pass
 
-    def add_new_layer(self, layer, parent, page_size=50, title="属性表"):
-        self.content_widget = PagedAttributeTableWidget(layer, page_size, self)
+    def add_new_layer(self, layer, parent, filter_str, show_ids ,page_size=50 ,title="属性表"):
+        self.content_widget = PagedAttributeTableWidget(layer, page_size, self,filter_str=filter_str, show_ids=show_ids)
         self.setWidget(self.content_widget)
         self.setWindowTitle(title)
 
     def zoom_to_map(self, action_type, data):
         if action_type == "zoomTo":
-            self.topParent.selected_layer.selectByIds(data["id"])
+            self.layer.selectByIds(data["id"])
             self.topParent.zoom_to_layer_extent_transform(extent=data["extent"]
-                                                          , source_crs=self.topParent.selected_layer.crs())
+                                                          , source_crs=self.layer.crs())
         if action_type == "selectFeature":
-            self.topParent.selected_layer.selectByIds(data["id"])
+            self.layer.selectByIds(data["id"])
         if action_type == "zoom_to_features":
             self.topParent.canvas.setExtent(data["extent"])
-            self.topParent.selected_layer.selectByIds(data["ids"])
+            self.layer.selectByIds(data["ids"])
             self.topParent.canvas.refresh()

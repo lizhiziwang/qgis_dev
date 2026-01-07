@@ -1,8 +1,9 @@
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QToolBar, QToolButton, QMenu, QAction, QMessageBox
 from qgis._core import QgsFeature, QgsGeometry, QgsWkbTypes, QgsPointXY, QgsEditorWidgetSetup, QgsVectorLayerUtils
-from qgis._gui import QgsAttributeDialog, QgsMapTool, QgsMapToolEmitPoint, QgsRubberBand, QgsAttributeEditorContext
+from qgis._gui import QgsAttributeDialog, QgsMapTool, QgsMapToolEmitPoint, QgsRubberBand, QgsAttributeEditorContext, \
+    QgsMapToolPan
 
 from qgis.utils import iface
 
@@ -175,7 +176,7 @@ class Draw:
             QMessageBox.warning(self.parent, "警告", "绘制的几何图形无效！")
             self.clear_draw_tool()
             return
-        self.temp_points = []
+        self.temp_points.clear()
 
         # 2. 几何类型与图层匹配校验
         layer = self.parent.edit_layer
@@ -207,9 +208,28 @@ class Draw:
 
         dialog.show()
 
+class BaseDrawTool(QgsMapTool):
+    finish = pyqtSignal(QgsGeometry)
+
+    def __init__(self, canvas, parent=None):
+        super().__init__(canvas)
+        self.canvas = canvas
+        self.geom = None
+
+    def finish_draw(self):
+        try:
+            # pan_tool = QgsMapToolPan(self.canvas)
+            # self.canvas.setMapTool(pan_tool)
+            self.canvas.unsetMapTool(self)
+            self.finish.emit(self.geom)
+        except Exception as e:
+            print(e)
+
+    def clear(self):
+        pass
 
 
-class PointDrawTool(QgsMapToolEmitPoint):
+class PointDrawTool(BaseDrawTool):
     """点要素绘制工具：点击画布直接创建点"""
     def __init__(self, canvas, draw_manager):
         super().__init__(canvas)
@@ -225,12 +245,23 @@ class PointDrawTool(QgsMapToolEmitPoint):
         # 获取点击位置的地图坐标
         point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
         # 创建点几何
+        # self.rubber_band.reset(QgsWkbTypes.PointGeometry)
         geometry = QgsGeometry.fromPointXY(QgsPointXY(point.x(), point.y()))
+        self.geom = geometry
+
+        self.rubber_band.addPoint(point)
+        self.rubber_band.show()
         # 通知管理器完成绘制
-        self.draw_manager.finish_draw(geometry)
+        if self.draw_manager is not None:
+            self.draw_manager.finish_draw(geometry)
+        else:
+            self.finish_draw()
+    def clear(self):
+        self.rubber_band.hide()
+        self.rubber_band = None
 
 
-class LineDrawTool(QgsMapTool):
+class LineDrawTool(BaseDrawTool):
     """线要素绘制工具：点击添加节点，右键结束绘制"""
     def __init__(self, canvas, draw_manager):
         super().__init__(canvas)
@@ -240,49 +271,74 @@ class LineDrawTool(QgsMapTool):
         self.line_rubber_band = QgsRubberBand(self.canvas, QgsWkbTypes.LineGeometry)
         self.line_rubber_band.setColor(Qt.red)  # 橡皮筋颜色
         self.line_rubber_band.setWidth(2)  # 线宽（点/线）
-        self.line_rubber_band.setLineStyle(Qt.DashLine)
+        self.line_rubber_band.setLineStyle(Qt.SolidLine)
         self.is_over = False
+        self.temp_points = draw_manager.temp_points if draw_manager is not None else []
+
+        self.line_rubber_band2 = QgsRubberBand(self.canvas, QgsWkbTypes.LineGeometry)
+        self.line_rubber_band2.setColor(Qt.red)  # 橡皮筋颜色
+        self.line_rubber_band2.setWidth(2)  # 线宽（点/线）
+        self.line_rubber_band2.setLineStyle(Qt.DashLine)
+
+        self.geom = None
 
     def canvasMoveEvent(self, event):
         if self.is_over is False:
-            l = len(self.draw_manager.temp_points)
+            l = len(self.temp_points)
             if l == 0:
                 return
             point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
-            self.line_rubber_band.reset(QgsWkbTypes.LineGeometry)
-            self.line_rubber_band.addPoint(self.draw_manager.temp_points[l-1])
-            self.line_rubber_band.addPoint(point)
-        self.line_rubber_band.show()
+            self.line_rubber_band2.reset(QgsWkbTypes.LineGeometry)
+            self.line_rubber_band2.addPoint(self.temp_points[l-1])
+            self.line_rubber_band2.addPoint(point)
+            self.line_rubber_band2.show()
+
 
     def canvasPressEvent(self, event):
         """鼠标按压事件（添加节点）"""
-        if event.button() == Qt.LeftButton:  # 左键添加节点
-            self.is_over = False
-            point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
-            self.draw_manager.temp_points.append(QgsPointXY(point.x(), point.y()))
-            # 更新橡皮筋显示
-            self.update_rubber_band()
-        elif event.button() == Qt.RightButton:  # 右键结束绘制
-            self.is_over = True
-            self.line_rubber_band.reset(QgsWkbTypes.LineGeometry)
-            if len(self.draw_manager.temp_points) >= 2:  # 线至少需要2个点
-                geometry = QgsGeometry.fromPolylineXY(self.draw_manager.temp_points)
-                self.draw_manager.finish_draw(geometry)
-            else:
-                QMessageBox.warning(self.parent.canvas, "警告", "线要素至少需要2个节点！")
-                self.draw_manager.clear_draw_tool()
+        try:
+            if event.button() == Qt.LeftButton:  # 左键添加节点
+                self.is_over = False
+                point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
+                self.temp_points.append(QgsPointXY(point.x(), point.y()))
+                # 更新橡皮筋显示
+                self.update_rubber_band()
+            elif event.button() == Qt.RightButton:  # 右键结束绘制
+                self.is_over = True
+                self.line_rubber_band2.reset(QgsWkbTypes.LineGeometry)
+                if len(self.temp_points) >= 2:  # 线至少需要2个点
+                    geometry = QgsGeometry.fromPolylineXY(self.temp_points)
+                    self.geom = geometry
+
+                    if self.draw_manager is not None:
+                        self.draw_manager.finish_draw(geometry)
+                    else:
+                        self.temp_points.clear()
+                        self.finish_draw()
+                else:
+                    QMessageBox.warning(self.parent.canvas, "警告", "线要素至少需要2个节点！")
+                    if self.draw_manager is not None:
+                        self.draw_manager.clear_draw_tool()
+        except Exception as e:
+            print(e)
 
     def update_rubber_band(self):
         """更新橡皮筋（显示已绘制的线）"""
-        if len(self.draw_manager.temp_points) < 1:
-            return
-        self.draw_manager.rubber_band.reset(QgsWkbTypes.LineGeometry)
-        for point in self.draw_manager.temp_points:
-            self.draw_manager.rubber_band.addPoint(point)
-        self.draw_manager.rubber_band.show()
+        try:
+            if len(self.temp_points) < 2:
+                return
+            self.line_rubber_band.reset(QgsWkbTypes.LineGeometry)
+            for point in self.temp_points:
+                self.line_rubber_band.addPoint(point)
+            self.line_rubber_band.show()
+        except Exception as e:
+            print(e)
+    def clear(self):
+        self.line_rubber_band.hide()
+        self.line_rubber_band = None
 
 
-class PolygonDrawTool(QgsMapTool):
+class PolygonDrawTool(BaseDrawTool):
     """面要素绘制工具：点击添加节点，右键结束绘制"""
     def __init__(self, canvas, draw_manager):
         super().__init__(canvas)
@@ -294,18 +350,27 @@ class PolygonDrawTool(QgsMapTool):
         self.line_rubber_band.setWidth(2)  # 线宽（点/线）
         self.line_rubber_band.setLineStyle(Qt.DashLine)
         self.is_over = False
+
+        self.temp_points = draw_manager.temp_points if draw_manager is not None else []
+        self.rubber_band = draw_manager.rubber_band if draw_manager is not None else None
+        if self.rubber_band is None:
+            self.rubber_band = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
+            self.rubber_band.setColor(Qt.red)
+            self.rubber_band.setWidth(2)
+            self.rubber_band.setFillColor(QColor(255, 0, 0, 50))
         # self.rubber_band.setFillColor(QColor(255, 0, 0, 50))  # 面填充色（半透明）
+        self.geom = None
 
     def canvasMoveEvent(self, event):
         if self.is_over is False:
-            l = len(self.draw_manager.temp_points)
+            l = len(self.temp_points)
             if l == 0:
                 return
             point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
             self.line_rubber_band.reset(QgsWkbTypes.LineGeometry)
-            self.line_rubber_band.addPoint(self.draw_manager.temp_points[0])
+            self.line_rubber_band.addPoint(self.temp_points[0])
             self.line_rubber_band.addPoint(point)
-            self.line_rubber_band.addPoint(self.draw_manager.temp_points[l-1])
+            self.line_rubber_band.addPoint(self.temp_points[l-1])
         self.line_rubber_band.show()
 
     def canvasPressEvent(self, event):
@@ -313,27 +378,40 @@ class PolygonDrawTool(QgsMapTool):
         if event.button() == Qt.LeftButton:  # 左键添加节点
             self.is_over = False
             point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
-            self.draw_manager.temp_points.append(QgsPointXY(point.x(), point.y()))
+            self.temp_points.append(QgsPointXY(point.x(), point.y()))
             # 更新橡皮筋显示
             self.update_rubber_band()
         elif event.button() == Qt.RightButton:  # 右键结束绘制
             self.is_over = True
             self.line_rubber_band.reset(QgsWkbTypes.LineGeometry)
-            if len(self.draw_manager.temp_points) >= 3:  # 面至少需要3个点
+            if len(self.temp_points) >= 3:  # 面至少需要3个点
                 # 闭合面（第一个点和最后一个点重合）
-                if self.draw_manager.temp_points[0] != self.draw_manager.temp_points[-1]:
-                    self.draw_manager.temp_points.append(self.draw_manager.temp_points[0])
-                geometry = QgsGeometry.fromPolygonXY([self.draw_manager.temp_points])
-                self.draw_manager.finish_draw(geometry)
+                if self.temp_points[0] != self.temp_points[-1]:
+                    self.temp_points.append(self.temp_points[0])
+                geometry = QgsGeometry.fromPolygonXY([self.temp_points])
+                self.geom = geometry
+
+                if self.draw_manager is not None:
+                    self.draw_manager.finish_draw(geometry)
+                else:
+                    self.temp_points.clear()
+                    self.finish_draw()
+
             else:
+                # self.messageBar.pushMessage("操作成功", level=Qgis.Success, duration=3)
                 QMessageBox.warning(self.canvas, "警告", "面要素至少需要3个节点！")
-                self.draw_manager.clear_draw_tool()
+                if self.draw_manager is not None:
+                    self.draw_manager.clear_draw_tool()
 
     def update_rubber_band(self):
         """更新橡皮筋（显示已绘制的面）"""
-        if len(self.draw_manager.temp_points) < 1:
+        if len(self.temp_points) < 1:
             return
-        self.draw_manager.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
-        for point in self.draw_manager.temp_points:
-            self.draw_manager.rubber_band.addPoint(point)
-        self.draw_manager.rubber_band.show()
+        self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
+        for point in self.temp_points:
+            self.rubber_band.addPoint(point)
+        self.rubber_band.show()
+
+    def clear(self):
+        self.rubber_band.hide()
+        self.rubber_band = None

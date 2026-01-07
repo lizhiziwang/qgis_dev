@@ -1,6 +1,8 @@
 import os
 import sys
 
+from component.SpaceQuery import *
+
 current_file = os.path.abspath(__file__)
 current_dir = os.path.dirname(current_file)
 project_root = os.path.dirname(current_dir)
@@ -8,9 +10,10 @@ if project_root not in sys.path:
     sys.path.append(project_root)
 
 from PyQt5.QtCore import QTranslator
-from qgis._core import QgsCoordinateTransform, QgsCoordinateReferenceSystem
+from qgis._core import QgsCoordinateTransform, QgsCoordinateReferenceSystem, Qgis
 from qgis._gui import QgsMapLayerStyleManagerWidget, QgsBrowserGuiModel, \
-    QgsBrowserTreeView, QgsDataItemGuiContext, QgsMessageBar, QgsVectorLayerProperties
+    QgsBrowserTreeView, QgsDataItemGuiContext, QgsMessageBar, QgsVectorLayerProperties, QgsLayerPropertiesWidget, \
+    QgsLayerPropertiesDialog
 from osgeo import ogr
 
 from component.excute_sql import ExecuteSQlDialog
@@ -65,7 +68,21 @@ class QGISMapWindow(QMainWindow):
         self.setWindowIcon(QIcon("resource/png/app_icon.png"))
         # 地图画布初始化
         # 地图画布
-        self.canvas = QgsMapCanvas()
+        central_widget = QWidget(self)
+        self.setCentralWidget(central_widget)
+
+        # 创建主布局
+        main_layout = QVBoxLayout()
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        central_widget.setLayout(main_layout)
+
+        self.messageBar = QgsMessageBar()
+        self.messageBar.setSizePolicy(
+            QSizePolicy.Minimum, QSizePolicy.Fixed
+        )
+        main_layout.addWidget(self.messageBar)
+
+        self.canvas = QgsMapCanvas(self)
         self.canvas.setAcceptDrops(True)
         self.canvas.setCanvasColor(Qt.white)
         self.canvas.enableAntiAliasing(True)
@@ -75,7 +92,8 @@ class QGISMapWindow(QMainWindow):
         self.project.setCrs(crs)
         self.canvas.setDestinationCrs(crs)
 
-        self.setCentralWidget(self.canvas)
+        # self.setCentralWidget(self.canvas)
+        main_layout.addWidget(self.canvas)
         # 当前编辑图层初始化
         self.current_edit_layer = None
 
@@ -92,6 +110,7 @@ class QGISMapWindow(QMainWindow):
         # 编辑组件
         self.create_toolbar()
         self.draw_tool = Draw(self)
+        self.space_query_tools = SpaceQueryTool(self)
 
         self.create_menu()
 
@@ -110,7 +129,6 @@ class QGISMapWindow(QMainWindow):
         proj_selector.setOptionVisible(option=QgsProjectionSelectionWidget().CrsOption.ProjectCrs, visible=False)
         status_bar.addPermanentWidget(proj_selector)
 
-        self.messageBar = QgsMessageBar()
 
 
     ''' 创建图层对象 '''
@@ -131,7 +149,7 @@ class QGISMapWindow(QMainWindow):
         )
 
         # 图层树视图
-        self.layer_tree_view = QgsLayerTreeView()
+        self.layer_tree_view = QgsLayerTreeView(self)
         self.layer_tree_view.setModel(self.layer_model)
         self.layer_tree_view.clicked.connect(self.handle_layer_click)
         self.layer_tree_view.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -215,18 +233,18 @@ class QGISMapWindow(QMainWindow):
 
         open_source_ = QAction("属性", self)
 
-        open_source_.triggered.connect(lambda: self._open_attribute_dia())
+        # open_source_.triggered.connect(lambda : self._open_attribute_dia(show_layer=self.selected_layer))
+        open_source_.triggered.connect(lambda : self.messageBar.pushMessage("功能待开发", level=Qgis.Warning, duration=3))
         context_menu.addAction(open_source_)
 
         context_menu.exec_(self.layer_tree_view.mapToGlobal(pos))
-    def _open_attribute_dia(self):
+
+    """
+        打开图层属性
+    """
+    def _open_attribute_dia(self, show_layer: QgsVectorLayer=None):
         try:
-            dia = QgsVectorLayerProperties(
-                canvas=self.canvas,
-                lyr=self.selected_layer,
-                messageBar=self.messageBar,
-                parent=self
-            )
+            dia = QgsLayerPropertiesDialog(show_layer, self.canvas, self)
             dia.setWindowIcon(QIcon("resource/png/app_icon.png"))
             dia.exec_()
         except Exception as e:
@@ -507,80 +525,89 @@ class QGISMapWindow(QMainWindow):
 
     def create_toolbar(self):
         """地图工具条（确保工具实例不被垃圾回收）"""
-        self.toolbar = self.addToolBar("地图工具")
-        self.toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        try:
+            self.toolbar = self.addToolBar("地图工具")
+            self.toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
 
-        # 平移工具
-        self.pan_tool = QgsMapToolPan(self.canvas)
-        self.pan_action = QAction("平移", self)
-        self.pan_action.triggered.connect(lambda: self.canvas.setMapTool(self.pan_tool))
-        self.toolbar.addAction(self.pan_action)
-        # 查看属性信息
-        self.sx_tool = FindFeatureTool(self.canvas)
-        self.sx_action = QAction("属性", self)
-        self.sx_action.triggered.connect(lambda: self.canvas.setMapTool(self.sx_tool))
-        self.toolbar.addAction(self.sx_action)
+            # 平移工具
+            self.pan_tool = QgsMapToolPan(self.canvas)
+            self.pan_action = QAction("平移", self)
+            self.pan_action.triggered.connect(lambda: self.canvas.setMapTool(self.pan_tool))
+            self.toolbar.addAction(self.pan_action)
+            # 查看属性信息
+            self.sx_tool = FindFeatureTool(self.canvas)
+            self.sx_action = QAction("属性", self)
+            self.sx_action.triggered.connect(lambda: self.canvas.setMapTool(self.sx_tool))
+            self.toolbar.addAction(self.sx_action)
 
-        # 放大工具
-        self.zoom_in_tool = QgsMapToolZoom(self.canvas, False)
-        self.zoom_in_action = QAction("放大", self)
-        self.zoom_in_action.triggered.connect(lambda: self.canvas.setMapTool(self.zoom_in_tool))
-        self.toolbar.addAction(self.zoom_in_action)
+            # 放大工具
+            self.zoom_in_tool = QgsMapToolZoom(self.canvas, False)
+            self.zoom_in_action = QAction("放大", self)
+            self.zoom_in_action.triggered.connect(lambda: self.canvas.setMapTool(self.zoom_in_tool))
+            self.toolbar.addAction(self.zoom_in_action)
 
-        # 缩小工具
-        self.zoom_out_tool = QgsMapToolZoom(self.canvas, True)
-        self.zoom_out_action = QAction("缩小", self)
-        self.zoom_out_action.triggered.connect(lambda: self.canvas.setMapTool(self.zoom_out_tool))
-        self.toolbar.addAction(self.zoom_out_action)
-        # 质检工具
-        # self.zoom_out_tool = QgsMapToolZoom(self.canvas, True)
-        self.zoom_out_action = QAction("质检", self)
-        self.zoom_out_action.triggered.connect(lambda: JsonTreeView(self, "").show())
-        self.toolbar.addAction(self.zoom_out_action)
+            # 缩小工具
+            self.zoom_out_tool = QgsMapToolZoom(self.canvas, True)
+            self.zoom_out_action = QAction("缩小", self)
+            self.zoom_out_action.triggered.connect(lambda: self.canvas.setMapTool(self.zoom_out_tool))
+            self.toolbar.addAction(self.zoom_out_action)
+            # 质检工具
+            # self.zoom_out_tool = QgsMapToolZoom(self.canvas, True)
+            self.zoom_out_action = QAction("质检", self)
+            self.zoom_out_action.triggered.connect(lambda: JsonTreeView(self, "").show())
+            self.toolbar.addAction(self.zoom_out_action)
 
-        self.analyse = QAction("分析", self)
-        self.analyse.triggered.connect(lambda: self.fun2())
-        self.toolbar.addAction(self.analyse)
+            self.analyse = QAction("分析", self)
+            self.analyse.triggered.connect(lambda: self.fun2())
+            self.toolbar.addAction(self.analyse)
 
-        # # 编辑工具
-        # self.edit_toolbar = self.addToolBar("编辑工具")
-        # self.edit_toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        #
-        # # 点绘制工具
-        # self.point_draw_tool = PointDrawTool(self.canvas, None)
-        # self.point_draw_action = QAction("绘制点", self)
-        # self.point_draw_action.triggered.connect(self.activate_point_draw_tool)
-        # self.edit_toolbar.addAction(self.point_draw_action)
-        #
-        # # 编辑工具
-        # self.edit_tool = EditTool(self.canvas, self)  # 传递主窗口引用
-        # self.edit_tool_action = QAction("编辑工具", self)
-        # self.edit_tool_action.triggered.connect(lambda: self.canvas.setMapTool(self.edit_tool))
-        # self.edit_toolbar.addAction(self.edit_tool_action)
-        #
-        # # 保存编辑工具
-        # self.save_edit_action = QAction("保存编辑", self)
-        # self.save_edit_action.triggered.connect(self.save_edits)
-        # self.edit_toolbar.addAction(self.save_edit_action)
-        #
-        # # 取消编辑工具
-        # self.cancel_edit_action = QAction("取消编辑", self)
-        # self.cancel_edit_action.triggered.connect(self.cancel_edits)
-        # self.edit_toolbar.addAction(self.cancel_edit_action)
-        #
-        # self.toolbar.addAction(self.edit_tool_action)
-        # # 全图工具
-        self.zoom_full_action = QAction("全图", self)
-        self.zoom_full_action.triggered.connect(self.zoom_to_full_extent)
-        self.toolbar.addAction(self.zoom_full_action)
+            # # 编辑工具
+            # self.edit_toolbar = self.addToolBar("编辑工具")
+            # self.edit_toolbar.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            #
+            # # 点绘制工具
+            # self.point_draw_tool = PointDrawTool(self.canvas, None)
+            # self.point_draw_action = QAction("绘制点", self)
+            # self.point_draw_action.triggered.connect(self.activate_point_draw_tool)
+            # self.edit_toolbar.addAction(self.point_draw_action)
+            #
+            # # 编辑工具
+            # self.edit_tool = EditTool(self.canvas, self)  # 传递主窗口引用
+            # self.edit_tool_action = QAction("编辑工具", self)
+            # self.edit_tool_action.triggered.connect(lambda: self.canvas.setMapTool(self.edit_tool))
+            # self.edit_toolbar.addAction(self.edit_tool_action)
+            #
+            # # 保存编辑工具
+            # self.save_edit_action = QAction("保存编辑", self)
+            # self.save_edit_action.triggered.connect(self.save_edits)
+            # self.edit_toolbar.addAction(self.save_edit_action)
+            #
+            # # 取消编辑工具
+            # self.cancel_edit_action = QAction("取消编辑", self)
+            # self.cancel_edit_action.triggered.connect(self.cancel_edits)
+            # self.edit_toolbar.addAction(self.cancel_edit_action)
+            #
+            # self.toolbar.addAction(self.edit_tool_action)
+            # # 全图工具
+            self.zoom_full_action = QAction("全图", self)
+            self.zoom_full_action.triggered.connect(self.zoom_to_full_extent)
+            self.toolbar.addAction(self.zoom_full_action)
 
-        # 刷新工具
-        self.refresh_action = QAction("刷新", self)
-        self.refresh_action.triggered.connect(self.canvas.refresh)
-        self.toolbar.addAction(self.refresh_action)
+            # 刷新工具
+            self.refresh_action = QAction("刷新", self)
+            self.refresh_action.triggered.connect(self.canvas.refresh)
+            self.toolbar.addAction(self.refresh_action)
+            # 测试消息通知
+            self.test_action = QAction("测试", self)
+            # self.test_action.triggered.connect(
+            #     lambda: self.messageBar.pushMessage("操作成功", level=Qgis.Success, duration=3))
+            self.test_action.triggered.connect(lambda : SpaceQuery(self).show())
+            self.toolbar.addAction(self.test_action)
 
-        # 默认激活平移工具
-        self.canvas.setMapTool(self.pan_tool)
+            # 默认激活平移工具
+            self.canvas.setMapTool(self.pan_tool)
+        except Exception as e:
+            logger.error(e)
 
     ''' 创建菜单 '''
 
@@ -668,14 +695,14 @@ class QGISMapWindow(QMainWindow):
         self.current_analyse_dock = dock
         dock.show()
 
-    def open_attribute_table(self, layer=None, filter_str: string = None):
+    def open_attribute_table(self, layer=None, filter_str: str = None, show_ids:list = None):
         c_layer = self.selected_layer if not layer else layer
 
         if self.current_attribute_dock is None:
             # 创建新的停靠窗口
             dock = PagedAttributeDockWidget(c_layer,
                                             f"属性表 - {c_layer.name()}", 50, parent=self,
-                                            filter_str=filter_str if filter_str else '1=1')
+                                            filter_str=filter_str if filter_str else '1=1', show_ids=show_ids)
 
             # 添加到主窗口
             self.addDockWidget(Qt.RightDockWidgetArea, dock)
@@ -687,7 +714,7 @@ class QGISMapWindow(QMainWindow):
             dock.show()
         else:
             # 如果对话框已存在，只是显示它
-            self.current_attribute_dock.add_new_layer(c_layer, self, 50,
+            self.current_attribute_dock.add_new_layer(c_layer, self, filter_str,show_ids,50,
                                                       f"属性表 - {c_layer.name()}")
 
         # self.attribute_table_dialog.show()

@@ -1,6 +1,8 @@
 import math
 
-from qgis._core import QgsVectorLayer, QgsSpatialIndex, QgsFeatureRequest
+from PyQt5.QtQuick import QSGGeometry
+from qgis._core import QgsVectorLayer, QgsSpatialIndex, QgsFeatureRequest, QgsWkbTypes, QgsFeature, \
+    QgsCoordinateTransform, QgsProject
 from component.Logger import *
 
 logger = setup_logger(__name__)
@@ -153,8 +155,64 @@ def layer_long_surface(check_layer: QgsVectorLayer, param=None) -> SpaceCheckRes
         logger.error(e)
         return SpaceCheckResult(False, info={"message":"出现异常！"})
 
+def search_intersect_features_geom(check_layer: QgsVectorLayer,geom: QSGGeometry, param=None):
+    try:
+        layer_crs = check_layer.crs()
+        # geom_crs = geom.crs()
+
+        # 如果 CRS 不同，则转换 geom 到图层的 CRS
+        if param["crs"] != layer_crs:
+            transform = QgsCoordinateTransform(
+                param["crs"],
+                layer_crs,
+                QgsProject.instance()  # 必须提供项目上下文（用于 datum 转换）
+            )
+            geom.transform(transform)
+
+        bbox = geom.boundingBox()
+        build_space_index(check_layer)
+        index = check_layer.__index__
+        target_feature = index.intersects(bbox)
+        # 精确过滤
+        target_feature = [item for item in target_feature if check_layer.getFeature(item).geometry().intersects(geom)]
+        return target_feature
+        # return create_layer_from_features(check_layer, check_layer.getFeatures(target_feature))
+    except Exception as e:
+        logger.error(e)
 
 
+def create_layer_from_features(original_layer, feature_iterator):
+    """
+    根据 QgsFeatureIterator 创建一个新的内存 QgsVectorLayer。
+
+    :param original_layer: 原始图层，用于复制字段定义和几何类型
+    :param feature_iterator: 包含需要添加到新图层的要素迭代器
+    :return: 新的 QgsVectorLayer 对象
+    """
+    # 获取几何类型和 CRS
+    geom_type = QgsWkbTypes.displayString(original_layer.wkbType())
+    crs = original_layer.crs().authid()
+
+    # 创建内存图层
+    uri = f"{geom_type}?crs={crs}"
+    new_layer = QgsVectorLayer(uri, "filtered_layer", "memory")
+    provider = new_layer.dataProvider()
+
+    # 复制字段
+    fields = original_layer.fields()
+    provider.addAttributes(fields.toList())
+    new_layer.updateFields()
+
+    # 添加符合条件的要素
+    features_to_add = []
+    for feature in feature_iterator:
+        features_to_add.append(QgsFeature(feature))
+
+    if features_to_add:
+        provider.addFeatures(features_to_add)
+        new_layer.updateExtents()
+
+    return new_layer
 
 def build_space_index(vec_layer: QgsVectorLayer):
     """
@@ -166,6 +224,9 @@ def build_space_index(vec_layer: QgsVectorLayer):
     """
     if not vec_layer or not vec_layer.isValid():
         raise Exception("图层无效！")
+    if hasattr(vec_layer, '__index__'):
+        return
+
     index = QgsSpatialIndex()
     features = [f for f in vec_layer.getFeatures() if f.hasGeometry() and not f.geometry().isEmpty()]
     index.addFeatures(features)

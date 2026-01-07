@@ -158,7 +158,7 @@ class CustomAttrDialog(QDialog):
     def save_edit(self):
         for key, value in self.attr_values.items():
             # 处理key和value
-            self.feature.setAttribute(key, value)
+            self.feature.setAttribute(key, value.text())
         success = self.layer.addFeature(self.feature)
         if not success:
             print("要素添加失败！")
