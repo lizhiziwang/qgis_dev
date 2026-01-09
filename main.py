@@ -12,8 +12,8 @@ if project_root not in sys.path:
 from PyQt5.QtCore import QTranslator
 from qgis._core import QgsCoordinateTransform, QgsCoordinateReferenceSystem, Qgis
 from qgis._gui import QgsMapLayerStyleManagerWidget, QgsBrowserGuiModel, \
-    QgsBrowserTreeView, QgsDataItemGuiContext, QgsMessageBar, QgsVectorLayerProperties, QgsLayerPropertiesWidget, \
-    QgsLayerPropertiesDialog
+    QgsBrowserTreeView, QgsDataItemGuiContext, QgsMessageBar, \
+    QgsLayerPropertiesDialog, QgsVectorLayerProperties
 from osgeo import ogr
 
 from component.excute_sql import ExecuteSQlDialog
@@ -27,7 +27,7 @@ from qgis.core import (
     QgsLayerTreeModel,
 )
 from qgis.gui import (
-    QgsMapCanvas, QgsLayerTreeMapCanvasBridge, QgsScaleWidget, QgsProjectionSelectionWidget,
+    QgsMapCanvas, QgsLayerTreeMapCanvasBridge,
     QgsMapToolPan, QgsMapToolZoom, QgsLayerTreeView, QgsRendererPropertiesDialog
 )
 from component.analyse import AnalysePanel
@@ -41,16 +41,22 @@ import component.LogDock as ld
 # QGIS_PREFIX = os.path.dirname(os.path.abspath(__file__))  # 即 dist\app
 # os.environ['QGIS_PREFIX_PATH'] = QGIS_PREFIX
 # os.environ['PROJ_LIB'] = QGIS_PREFIX
+from setting import set_config
+urls = set_config()
 
 app = QgsApplication([], True)
-# app.setPrefixPath(QGIS_PREFIX, True)
+app.setPrefixPath(urls[1], True)
 logger.warning(f"srs路径{app.i18nPath()}")
 app.initQgis()
+
 
 translator = QTranslator()
 # 加载 QGIS 中文翻译文件（路径因系统而异 ）
 translator.load("qgis_zh-Hans.qm", app.i18nPath())
-QgsApplication.installTranslator(translator)
+app.installTranslator(translator)
+
+
+
 
 
 class QGISMapWindow(QMainWindow):
@@ -233,8 +239,8 @@ class QGISMapWindow(QMainWindow):
 
         open_source_ = QAction("属性", self)
 
-        # open_source_.triggered.connect(lambda : self._open_attribute_dia(show_layer=self.selected_layer))
-        open_source_.triggered.connect(lambda : self.messageBar.pushMessage("功能待开发", level=Qgis.Warning, duration=3))
+        open_source_.triggered.connect(lambda : self._open_attribute_dia(show_layer=self.selected_layer))
+        # open_source_.triggered.connect(lambda : self.messageBar.pushMessage("功能待开发", level=Qgis.Warning, duration=3))
         context_menu.addAction(open_source_)
 
         context_menu.exec_(self.layer_tree_view.mapToGlobal(pos))
@@ -244,7 +250,12 @@ class QGISMapWindow(QMainWindow):
     """
     def _open_attribute_dia(self, show_layer: QgsVectorLayer=None):
         try:
-            dia = QgsLayerPropertiesDialog(show_layer, self.canvas, self)
+            dia = QgsVectorLayerProperties(
+                canvas=self.canvas,
+                lyr=show_layer,
+                messageBar=self.messageBar,
+                parent=self
+            )
             dia.setWindowIcon(QIcon("resource/png/app_icon.png"))
             dia.exec_()
         except Exception as e:
@@ -599,9 +610,9 @@ class QGISMapWindow(QMainWindow):
             self.toolbar.addAction(self.refresh_action)
             # 测试消息通知
             self.test_action = QAction("测试", self)
-            # self.test_action.triggered.connect(
-            #     lambda: self.messageBar.pushMessage("操作成功", level=Qgis.Success, duration=3))
-            self.test_action.triggered.connect(lambda : SpaceQuery(self).show())
+            self.test_action.triggered.connect(
+                lambda: self.messageBar.pushMessage("操作成功", level=Qgis.Success, duration=3))
+            # self.test_action.triggered.connect(lambda : SpaceQuery(self, is_buffer=True).show())
             self.toolbar.addAction(self.test_action)
 
             # 默认激活平移工具
@@ -785,7 +796,11 @@ class QGISMapWindow(QMainWindow):
         app.exitQgis()
         event.accept()
 
-def run():
+# def run():
+
+
+
+if __name__ == "__main__":
     try:
         icon = QIcon("resource/png/app_icon.png")
         app.setWindowIcon(icon)
@@ -795,7 +810,3 @@ def run():
         sys.exit(app.exec_())
     except Exception as e:
         logger.info(e)
-
-
-if __name__ == "__main__":
-    run()

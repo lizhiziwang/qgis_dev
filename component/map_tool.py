@@ -320,6 +320,10 @@ from qgis.core import QgsFeatureRequest
 import math
 from PyQt5.QtGui import QIcon  # 添加缺失的导入
 
+from .Logger import setup_logger
+
+logger = setup_logger(__name__)
+
 
 class FeatureLoaderThread(QThread):
     """加载要素的后台线程"""
@@ -371,15 +375,15 @@ class FeatureLoaderThread(QThread):
 
 class PagedAttributeTableModel(QAbstractTableModel):
     """分页属性表模型 - 带进度提示"""
+    # finished = pyqtSignal(object)
 
     def __init__(self, layer, page_size=50, parent=None, filter_str='1=1', show_ids:list=None):
         super().__init__(parent)
         self.layer = layer
-        self.page_size = page_size
         self.current_page = 0
         self.order_field = "id"
         self.filter_str = filter_str
-        self.show_ids = show_ids
+        self.show_ids = show_ids if show_ids is not None else []
 
         # 预先获取所有要素ID
         self.all_ids = None
@@ -388,102 +392,41 @@ class PagedAttributeTableModel(QAbstractTableModel):
 
         # 初始化加载状态
         self.is_loading = True
-        self.total_features = 0
-        self.total_pages = 0
+        self.where = f"{self.filter_str} and $id in ({','.join([str(item) for item in self.show_ids])})" if len(
+            self.show_ids) > 0 else self.filter_str
+        self.request = QgsFeatureRequest().setFilterExpression(self.where)
+        self.total_features = len(list(layer.getFeatures(self.request)))
+        self.page_size = page_size if page_size<self.total_features else self.total_features
 
-        # 创建进度对话框（非模态）
-        self.loading_progress = QProgressDialog("正在加载图层数据...", "取消", 0, 100)
-        self.loading_progress.setWindowModality(Qt.NonModal)
-        self.loading_progress.setWindowTitle("加载中...")
-        self.loading_progress.setMinimumDuration(0)
-        self.loading_progress.setValue(0)
-        self.loading_progress.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.Dialog)
-        self.loading_progress.setWindowIcon(QIcon("resource/png/app_icon.png"))  # 注释掉可能缺失的图标
 
-        # 连接取消信号
-        self.loading_progress.canceled.connect(self.on_cancel_loading)
+        self.total_pages = math.ceil(self.total_features / self.page_size)
 
-        # 启动后台线程加载ID
-        self.loading_thread = FeatureLoaderThread(layer, self.filter_str, show_ids=self.show_ids)
-        self.loading_thread.progress_updated.connect(self.on_progress_updated)
-        self.loading_thread.features_loaded.connect(self.on_features_loaded)
-        self.loading_thread.finished.connect(self.on_loading_finished)
 
-        # 显示进度对话框
-        self.loading_progress.show()
+        self.load_page()
 
-        # 启动线程
-        self.loading_thread.start()
-
-    def on_progress_updated(self, progress):
-        """进度更新"""
-        if self.loading_progress:
-            self.loading_progress.setValue(progress)
-            QApplication.processEvents()
-
-    def on_features_loaded(self, all_ids):
-        """要素加载完成"""
-        if not self.loading_progress.wasCanceled():
-            self.all_ids = all_ids
-                # [item for item in all_ids if item in self.show_ids]
-            self.total_features = len(self.all_ids)
-            self.total_pages = math.ceil(self.total_features / self.page_size) if self.total_features > 0 else 1
-
-            # 加载第一页数据
-            self.load_page(0)
-
-    def on_cancel_loading(self):
-        """取消加载"""
-        self.is_loading = False
-
-    def on_loading_finished(self):
-        """加载完成"""
-        self.close_progress_dialog()
-        self.load_page(self.current_page)
-
-    def close_progress_dialog(self):
-        """关闭进度对话框"""
-        self.is_loading = False
-        if self.loading_progress:
-            self.loading_progress.close()
-            self.loading_progress = None
-
-    def load_page(self, page):
+    def load_page(self, order_column="$id"):
         """加载指定页面的数据"""
-        if self.is_loading or self.all_ids is None:
-            self.beginResetModel()
-            self.features = []
-            self.endResetModel()
+        if self.page_size>self.total_features:
             return
-
-        if page < 0 or page >= self.total_pages:
-            return
-
-        self.current_page = page
-        start_idx = page * self.page_size
-        end_idx = min(start_idx + self.page_size, self.total_features)
-
-        # 获取当前页的要素ID
-        page_ids = self.all_ids[start_idx:end_idx]
 
         # 清空现有数据
         self.beginResetModel()
         self.features = []
 
-        if page_ids:
-            request = QgsFeatureRequest()
-            request.setFilterFids(page_ids)
+        # if page_ids:
+        tmp = int(1.5 * self.page_size)
 
-            id_list_str = ','.join(str(fid) for fid in page_ids)
-            filter_expr = f"$id IN ({id_list_str})"
+        self.page_size = self.total_features if tmp > self.total_features else tmp
 
-            request.setFilterExpression(f"{self.filter_str} and {filter_expr}")
-            print(f"要素数量{ len(list(self.layer.getFeatures(request)))}, sql{f"{self.filter_str} and {filter_expr}"}")
+        order_by_clause = QgsFeatureRequest.OrderByClause(order_column, ascending=True)
+        self.request = ((QgsFeatureRequest().setLimit(self.page_size)
+                        .setOrderBy(QgsFeatureRequest.OrderBy([order_by_clause])))
+                        .setFilterExpression(self.where))
 
-            for feature in self.layer.getFeatures(request):
-                self.features.append(feature)
+        self.features = list(self.layer.getFeatures(self.request))
 
         self.endResetModel()
+        self.is_loading = False
 
     def set_page_size(self, new_page_size):
         """设置新的页大小"""
@@ -559,8 +502,8 @@ class PagedAttributeTableModel(QAbstractTableModel):
         return None
 
     def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if self.is_loading or orientation == Qt.Vertical:
-            return None
+        # if self.is_loading or orientation == Qt.Vertical:
+        #     return None
 
         if role == Qt.DisplayRole:
             if orientation == Qt.Horizontal:
@@ -648,48 +591,62 @@ class PagedAttributeTableWidget(QWidget):
         self.setup_ui()
 
     def setup_ui(self):
-        main_layout = QVBoxLayout()
-        main_layout.setContentsMargins(0, 0, 0, 0)  # 移除边距
-        main_layout.setSpacing(2)  # 减小间距
+        try:
+            main_layout = QVBoxLayout()
+            main_layout.setContentsMargins(0, 0, 0, 0)  # 移除边距
+            main_layout.setSpacing(2)  # 减小间距
 
-        # 创建表格视图
-        self.table_view = QTableView()
-        self.table_view.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table_view.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.table_view.setAlternatingRowColors(True)
-        self.table_view.setEditTriggers(QTableView.DoubleClicked)
+            # 创建表格视图
+            self.table_view = QTableView()
+            self.table_view.setSelectionBehavior(QAbstractItemView.SelectRows)
+            self.table_view.setSelectionMode(QAbstractItemView.SingleSelection)
+            self.table_view.setAlternatingRowColors(True)
+            self.table_view.setEditTriggers(QTableView.DoubleClicked)
 
-        # 设置表格大小策略
-        table_size_policy = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.table_view.setSizePolicy(table_size_policy)
+            self.table_view.verticalScrollBar().valueChanged.connect(self.whether_load)
 
-        # 设置表头
-        header = self.table_view.horizontalHeader()
-        header.setMinimumSectionSize(20)  # 设置最小列宽为20像素
-        header.setMaximumSectionSize(400)
-        header.setSectionResizeMode(QHeaderView.Interactive)
-        header.setStretchLastSection(False)
+            # 设置表格大小策略
+            table_size_policy = QSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+            self.table_view.setSizePolicy(table_size_policy)
 
-        self.table_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.table_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            # 设置表头
+            header = self.table_view.horizontalHeader()
+            header.setMinimumSectionSize(20)  # 设置最小列宽为20像素
+            header.setMaximumSectionSize(400)
+            header.setSectionResizeMode(QHeaderView.Interactive)
+            header.setStretchLastSection(False)
 
-        # 连接右键菜单事件
-        self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
-        self.table_view.customContextMenuRequested.connect(self.show_context_menu)
+            self.table_view.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            self.table_view.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
 
-        # 创建分页控件
-        pagination_widget = self.create_pagination_controls()
+            # 连接右键菜单事件
+            self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
+            self.table_view.customContextMenuRequested.connect(self.show_context_menu)
 
-        main_layout.addWidget(self.table_view)
-        main_layout.addWidget(pagination_widget)
-        self.setLayout(main_layout)
+            # 创建分页控件
+            # pagination_widget = self.create_pagination_controls()
 
-        # 初始化模型
-        self.model = PagedAttributeTableModel(self.layer, self.page_size, filter_str=self.filter_str, show_ids=self.show_ids)
-        self.table_view.setModel(self.model)
+            main_layout.addWidget(self.table_view)
+            # main_layout.addWidget(pagination_widget)
+            self.setLayout(main_layout)
 
-        # 连接信号
-        self.model.loading_thread.finished.connect(self.update_pagination_info)
+            # 初始化模型
+            self.model = PagedAttributeTableModel(self.layer, self.page_size, filter_str=self.filter_str,
+                                                  show_ids=self.show_ids)
+            # self.update_pagination_info()
+            self.table_view.setModel(self.model)
+
+            # 连接信号
+        except Exception as e:
+            print(e)
+    def whether_load(self,value):
+        try:
+            max_val = self.table_view.verticalScrollBar().maximum()
+            # 触发加载条件
+            if value / max_val > 0.9:
+                self.model.load_page()
+        except Exception as e:
+            print(e)
 
     # 表格右键菜单
     def show_context_menu(self, position):
@@ -1136,41 +1093,48 @@ class PagedAttributeDockWidget(QDockWidget):
 
     def __init__(self, layer, title="属性表", page_size=50, parent=None, filter_str: str = "1=1", show_ids: list = None):
         super().__init__(title, parent)
-        self.topParent = parent
-        self.layer = layer
-        self.show_ids = show_ids if show_ids is not None else []
+        try:
+            self.topParent = parent
+            self.layer = layer
+            self.show_ids = show_ids if show_ids is not None else []
 
-        # 设置停靠窗口的属性
-        self.setFeatures(QDockWidget.AllDockWidgetFeatures)
-        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea | Qt.BottomDockWidgetArea)
+            # 设置停靠窗口的属性
+            self.setFeatures(QDockWidget.AllDockWidgetFeatures)
+            self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea | Qt.BottomDockWidgetArea)
 
-        # 创建内容小部件
-        self.content_widget = PagedAttributeTableWidget(layer, page_size, self, filter_str=filter_str, show_ids=show_ids)
-        self.setWidget(self.content_widget)
-        # 连接地图事件
-        self.content_widget.zoom_to_map.connect(self.zoom_to_map)
+            # 创建内容小部件
+            self.content_widget = PagedAttributeTableWidget(layer, page_size, self, filter_str=filter_str,
+                                                            show_ids=show_ids)
+            self.setWidget(self.content_widget)
+            # 连接地图事件
+            self.content_widget.zoom_to_map.connect(self.zoom_to_map)
 
-        # 设置最小尺寸为较小的值
-        self.setMinimumSize(200, 100)  # 设置较小的最小尺寸
+            # 设置最小尺寸为较小的值
+            self.setMinimumSize(200, 100)  # 设置较小的最小尺寸
 
-        # 设置窗口标题
-        self.setWindowTitle(title)
+            # 设置窗口标题
+            self.setWindowTitle(title)
+        except Exception as e:
+            print(e)
 
     def closeEvent(self, event):
         """
         当组件关闭时，如果图层处于编辑状态，且还又编辑的内容未保存，则进行提示
         :return:
         """
-        if self.layer.isEditable():
-            self.topParent.draw_tool.stop_edit_fun()
-        # 用户点击了 × 关闭 dock
-        self.topParent.current_attribute_dock = None
-        # self._user_closed = True
-        self.setParent(None)  # 从父窗口解绑
-        self.deleteLater()  # 稍后自动销毁（安全）
-        event.accept()
-        # 可以在这里安全清理（如果需要）
-        super().closeEvent(event)
+        try:
+            if self.layer.isEditable():
+                self.topParent.draw_tool.stop_edit_fun()
+            # 用户点击了 × 关闭 dock
+            self.topParent.current_attribute_dock = None
+            # self._user_closed = True
+            self.setParent(None)  # 从父窗口解绑
+            # self.deleteLater()  # 稍后自动销毁（安全）
+            event.accept()
+            # 可以在这里安全清理（如果需要）
+            # super().closeEvent(event)
+        except Exception as e:
+            logger.error(e)
 
         # 连接关闭事件
 

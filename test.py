@@ -35,7 +35,16 @@ if __name__ == '__main__':
     fc_name = "昌江区_景德镇市昌江区鲇鱼山镇上徐村肉羊养殖基地项目_林地图斑_20250825"
     source = f"{file_path}|layername={fc_name}"
     layer = QgsVectorLayer(source, fc_name, "ogr")
+    order_by_clause = QgsFeatureRequest.OrderByClause('$id', ascending=False)
+
+    request = (QgsFeatureRequest().setFilterExpression("1 =1")
+               .setLimit(5)
+               .setOrderBy(QgsFeatureRequest.OrderBy([order_by_clause])))
+    data = list(layer.getFeatures(request))
+    print(len(data))
+    for item in data:
+        print(item.id())
     # c_result = layer_self_intersect(layer)
-    c_result = layer_feature_cover(layer)
-    print()
-    print(c_result)
+    # c_result = layer_feature_cover(layer)
+    # print()
+    # print(c_result)

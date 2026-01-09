@@ -1,7 +1,10 @@
+import math
+
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QToolBar, QToolButton, QMenu, QAction, QMessageBox
-from qgis._core import QgsFeature, QgsGeometry, QgsWkbTypes, QgsPointXY, QgsEditorWidgetSetup, QgsVectorLayerUtils
+from qgis._core import QgsFeature, QgsGeometry, QgsWkbTypes, QgsPointXY, QgsEditorWidgetSetup, QgsVectorLayerUtils, \
+    QgsRectangle, QgsCircle, QgsPoint
 from qgis._gui import QgsAttributeDialog, QgsMapTool, QgsMapToolEmitPoint, QgsRubberBand, QgsAttributeEditorContext, \
     QgsMapToolPan
 
@@ -258,7 +261,6 @@ class PointDrawTool(BaseDrawTool):
             self.finish_draw()
     def clear(self):
         self.rubber_band.hide()
-        self.rubber_band = None
 
 
 class LineDrawTool(BaseDrawTool):
@@ -335,7 +337,6 @@ class LineDrawTool(BaseDrawTool):
             print(e)
     def clear(self):
         self.line_rubber_band.hide()
-        self.line_rubber_band = None
 
 
 class PolygonDrawTool(BaseDrawTool):
@@ -362,7 +363,7 @@ class PolygonDrawTool(BaseDrawTool):
         self.geom = None
 
     def canvasMoveEvent(self, event):
-        if self.is_over is False:
+        if not self.is_over:
             l = len(self.temp_points)
             if l == 0:
                 return
@@ -414,4 +415,127 @@ class PolygonDrawTool(BaseDrawTool):
 
     def clear(self):
         self.rubber_band.hide()
-        self.rubber_band = None
+
+class RectangleDrawTool(BaseDrawTool):
+    """
+        绘制矩形，左键绘制
+    """
+    def __init__(self, canvas, draw_manager=None):
+        super().__init__(canvas)
+        self.canvas = canvas
+        self.draw_manager = draw_manager
+        self.rubber_band = draw_manager.rubber_band if draw_manager is not None else None
+        self.temp_points = draw_manager.temp_points if draw_manager is not None else []
+
+        self.is_over = False
+        if self.rubber_band is None:
+            self.rubber_band = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
+            self.rubber_band.setColor(Qt.red)
+            self.rubber_band.setWidth(2)
+            self.rubber_band.setFillColor(QColor(255, 0, 0, 50))
+
+
+    def canvasMoveEvent(self, event):
+        try:
+            if not self.is_over:
+                l = len(self.temp_points)
+                if l == 0:
+                    return
+                point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
+                if l > 1:
+                    self.temp_points = [self.temp_points[0]]
+                self.temp_points.append(QgsPointXY(point.x(), point.y()))
+                self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
+
+                rectangle = QgsRectangle(self.temp_points[0], self.temp_points[1])
+                geometry = QgsGeometry.fromRect(rectangle)
+                self.geom = geometry
+
+                self.update_rubber_band()
+        except Exception as e:
+            print(e)
+    def canvasPressEvent(self, event):
+        if not self.is_over:
+            if event.button() == Qt.LeftButton:  # 左键添加节点
+                self.is_over = False
+                point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
+                self.temp_points.append(QgsPointXY(point.x(), point.y()))
+            else:
+                self.is_over = True
+                if self.draw_manager is not None:
+                    self.draw_manager.finish_draw(self.geom)
+                else:
+                    self.temp_points.clear()
+                    self.finish_draw()
+
+
+
+    def update_rubber_band(self):
+        if len(self.temp_points) < 2:
+            return
+        self.rubber_band.reset(QgsWkbTypes.PolygonGeometry)
+        p1 = self.temp_points[0]
+        p2 = self.temp_points[1]
+        self.rubber_band.addPoint(p1)
+        self.rubber_band.addPoint(QgsPointXY(p2.x(), p1.y()))
+        self.rubber_band.addPoint(p2)
+        self.rubber_band.addPoint(QgsPointXY(p1.x(), p2.y()))
+        self.rubber_band.addPoint(QgsPointXY(p1.x(), p2.y()))
+        self.rubber_band.addPoint(p1)
+        self.rubber_band.show()
+
+    def clear(self):
+        self.rubber_band.hide()
+
+"""
+    圆形绘制工具
+"""
+
+class CircleDrawTool(BaseDrawTool):
+    def __init__(self, canvas, draw_manager=None):
+        super().__init__(canvas)
+        self.canvas = canvas
+        self.draw_manager = draw_manager
+        self.temp_points = draw_manager.temp_points if draw_manager is not None else []
+        self.rubber_band = draw_manager.rubber_band if draw_manager is not None else None
+        self.radius = 0
+        if self.rubber_band is None:
+            self.rubber_band = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
+            self.rubber_band.setColor(Qt.red)
+            self.rubber_band.setWidth(2)
+            self.rubber_band.setFillColor(QColor(255, 0, 0, 50))
+
+    def canvasMoveEvent(self, event):
+        try:
+            if len(self.temp_points) < 1:
+                return
+            point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
+            self.radius = math.sqrt(
+                (point.x() - self.temp_points[0].x()) ** 2 + (point.y() - self.temp_points[0].y()) ** 2)
+            circle = QgsCircle.fromCenterDiameter(QgsPoint(self.temp_points[0].x(),self.temp_points[0].y()), self.radius*2)
+            self.geom = QgsGeometry(circle.toPolygon(segments=72))
+            self.update_rubber_band()
+        except Exception as e:
+            print(e)
+    def canvasPressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
+
+            if len(self.temp_points) == 0:
+                self.temp_points.append(QgsPointXY(point.x(), point.y()))
+            else:
+                self.temp_points[0] = QgsPointXY(point.x(), point.y())
+        elif event.button() == Qt.RightButton:
+            if self.draw_manager is not None:
+                self.draw_manager.finish_draw(self.geom)
+            else:
+                self.temp_points.clear()
+                self.finish_draw()
+
+            # self.clear()
+    def update_rubber_band(self):
+        self.rubber_band.setToGeometry(QgsGeometry(self.geom), None)
+
+
+    def clear(self):
+        self.rubber_band.hide()

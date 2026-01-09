@@ -4,14 +4,13 @@
 from PyQt5.QtCore import QSize, Qt
 from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QWidget, QHBoxLayout, QComboBox, QPushButton, QVBoxLayout, QLabel, QTextEdit, \
-    QDialogButtonBox, QToolBar, QToolButton, QMenu, QAction
+    QDialogButtonBox, QToolBar, QToolButton, QMenu, QAction, QLineEdit
 from qgis._core import QgsVectorLayer, Qgis
 
 from .check_dia import BaseDialog
 
-from main import QGISMapWindow
 from .check.SpaceDataCheck import search_intersect_features_geom
-from .draw_tool import PointDrawTool, PolygonDrawTool, LineDrawTool
+from .draw_tool import PointDrawTool, PolygonDrawTool, LineDrawTool, RectangleDrawTool, CircleDrawTool
 
 from .Logger import setup_logger
 
@@ -35,6 +34,7 @@ class SpaceQueryTool:
         # 添加子操作（带图标）
         self.p_query = QAction("点击查询", self.p_menu)
         self.p_b_query = QAction("点缓冲查询", self.p_menu)
+        self.p_query.triggered.connect(lambda : SpaceQuery(self.parent, q_type="point").show())
 
         self.p_menu.addAction(self.p_query)
         self.p_menu.addAction(self.p_b_query)
@@ -47,7 +47,11 @@ class SpaceQueryTool:
 
         self.l_query = QAction("线查询", self.l_menu)
         self.l_online_query = QAction("沿线查询", self.l_menu)
+        self.l_online_query.setStatusTip("针对线图层，沿线查询最短路径")
         self.l_b_query = QAction("线缓冲查询", self.l_menu)
+
+        self.l_query.triggered.connect(lambda : SpaceQuery(self.parent, q_type="line").show())
+
         self.l_menu.addAction(self.l_query)
         self.l_menu.addAction(self.l_online_query)
         self.l_menu.addAction(self.l_b_query)
@@ -59,10 +63,19 @@ class SpaceQueryTool:
         self.p_but.setPopupMode(QToolButton.InstantPopup)
         self.po_menu = QMenu()
 
-        self.p_query = QAction("面查询", self.po_menu)
+        self.p_query2 = QAction("面查询", self.po_menu)
         self.p_b_query = QAction("面缓冲查询", self.po_menu)
-        self.po_menu.addAction(self.p_query)
+        self.k_query = QAction("框选查询", self.po_menu)
+        self.c_query = QAction("圆查询", self.po_menu)
+
+        self.p_query2.triggered.connect(lambda : SpaceQuery(self.parent, q_type="polygon").show())
+        self.k_query.triggered.connect(lambda : SpaceQuery(self.parent, q_type="rectangle").show())
+        self.c_query.triggered.connect(lambda : SpaceQuery(self.parent, q_type="circle").show())
+
+        self.po_menu.addAction(self.p_query2)
         self.po_menu.addAction(self.p_b_query)
+        self.po_menu.addAction(self.k_query)
+        self.po_menu.addAction(self.c_query)
 
         self.p_but.setMenu(self.po_menu)
         self.l_but.setMenu(self.l_menu)
@@ -73,6 +86,9 @@ class SpaceQueryTool:
         self.toolbar.addWidget(self.p_but)
 
         self.parent.addToolBar(self.toolbar)
+
+    def build(self, q_type, is_buf:bool = False):
+        pass
 
 
 
@@ -148,7 +164,6 @@ class VecLayerSelector(QWidget):
         self.layer_names = [item.name() for item in self.vec_layers if isinstance(item, QgsVectorLayer)]
         self.data_source_input.addItems(self.layer_names)
 
-
 query_type = {
     "point": "点查询",
     "line": "线查询",
@@ -156,10 +171,11 @@ query_type = {
     "circle": "圆形查询",  # 以上四个支持任意类型 相交查询
     "along_the_line": "沿线查询", # 沿线查询
     "buffer":"缓冲区查询",
+    "rectangle": "框线查询"
 }
 
 class SpaceQuery(BaseDialog):
-    def __init__(self, parent: QGISMapWindow, q_type: str = "point" ):
+    def __init__(self, parent, q_type: str = "point", is_buffer: bool = False ):
         super().__init__(parent, query_type[q_type])
         self.parent = parent
         self.layers = parent.project.mapLayers().values()
@@ -169,6 +185,15 @@ class SpaceQuery(BaseDialog):
         self.search_geom = None
         self.pt = None
         self.geom_txt = None
+        self.is_buffer = is_buffer
+
+        self.tool_classes = {
+            "point": PointDrawTool,
+            "line": LineDrawTool,
+            "polygon": PolygonDrawTool,
+            "circle": CircleDrawTool,
+            "rectangle": RectangleDrawTool,
+        }
         self.__init_ui__()
 
     def __init_ui__(self):
@@ -179,22 +204,30 @@ class SpaceQuery(BaseDialog):
             main_layout.addWidget(self.layer_input)
             self.setMinimumSize(400, 300)
 
-            if self.q_type == "point":
-                var = QHBoxLayout()
-                var1 = QLabel("操作")
-                var2 = QPushButton("选点")
-                var2.clicked.connect(self.get_point)
+            # if self.q_type == "point":
+            var = QHBoxLayout()
+            var1 = QLabel("操作")
+            var2 = QPushButton("绘制")
+            var2.clicked.connect(self.get_geom)
 
-                self.geom_txt = QTextEdit()
-                self.geom_txt.setPlaceholderText("查询点的位置")
-                self.geom_txt.setReadOnly(True)
+            self.geom_txt = QTextEdit()
+            self.geom_txt.setPlaceholderText("绘制几何的位置")
+            self.geom_txt.setReadOnly(True)
 
-                var.addWidget(var1)
-                var.addWidget(var2)
-                var.addStretch()
+            var.addWidget(var1)
+            var.addWidget(var2)
 
-                main_layout.addLayout(var)
-                main_layout.addWidget(self.geom_txt)
+            if self.is_buffer:
+                var3 = QLabel("缓冲距离：")
+                var4 = QLineEdit()
+                var5 = QLabel("米(m)")
+                var.addWidget(var3)
+                var.addWidget(var4)
+                var.addWidget(var5)
+            var.addStretch()
+
+            main_layout.addLayout(var)
+            main_layout.addWidget(self.geom_txt)
 
 
         except Exception as e:
@@ -210,22 +243,33 @@ class SpaceQuery(BaseDialog):
         self.setLayout(main_layout)
 
     def query(self):
-        if not self.layer_input.data_source_input.currentText():
-            self.parent.messageBar.pushMessage("请选择图层进行查询", level=Qgis.Warning, duration=3)
         try:
-            if self.q_type == "point":
-                layer = self.parent.project.mapLayersByName(self.layer_input.data_source_input.currentText())[0]
-                fids = search_intersect_features_geom(layer, self.search_geom,
-                                                       param={"crs": self.parent.canvas.mapSettings().destinationCrs()})
-                self.parent.open_attribute_table(layer=layer,show_ids=fids)
-            pass
+            if not self.layer_input.data_source_input.currentText():
+                self.parent.messageBar.pushMessage("请选择图层进行查询", level=Qgis.Warning, duration=3)
+                return
+            if self.search_geom is None:
+                self.hide()
+                msg_widget = self.parent.messageBar.createMessage("警告", "请绘制几何图形用于查询")
+
+                item = self.parent.messageBar.pushWidget(msg_widget, Qgis.Warning, duration=3)
+                item.destroyed.connect(lambda: self.show())
+                return
+                # if self.q_type == "point":
+            layer = self.parent.project.mapLayersByName(self.layer_input.data_source_input.currentText())[0]
+            fids = search_intersect_features_geom(layer, self.search_geom,
+                                                   param={"crs": self.parent.canvas.mapSettings().destinationCrs()})
+            self.parent.open_attribute_table(layer=layer,show_ids=fids)
+            self.parent.current_attribute_dock.zoom_to_map("selectFeature", {"id":fids})
         except Exception as e:
             logger.error(e)
-        self.close()
-    def get_point(self):
+        finally:
+            self.close()
+
+
+    def get_geom(self):
         self.hide()
         try:
-            self.pt = PointDrawTool(self.parent.canvas, None)
+            self.pt = self.tool_classes[self.q_type](self.parent.canvas, None)
             # pt = PolygonDrawTool(self.parent.canvas, None)
             # self.pt = LineDrawTool(self.parent.canvas, None)
             self.parent.canvas.setMapTool(self.pt)
@@ -237,10 +281,17 @@ class SpaceQuery(BaseDialog):
         self.geom_txt.setPlainText(geom.asWkt())
         self.show()
 
+    # def close(self):
+    #     if self.pt is not None:
+    #         self.pt.clear()
+    #     super().close()
+
     def close(self):
+        # 关键：关闭对话框时，彻底销毁工具实例，释放底层资源
         if self.pt is not None:
             self.pt.clear()
+            # 无论是否激活，都销毁工具实例，解除底层引用
+            self.pt.deleteLater()  # 销毁C++底层资源
+            self.pt = None  # 清空Python层引用
         super().close()
-
-
 
