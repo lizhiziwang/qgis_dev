@@ -1,7 +1,7 @@
 import string
 
 from qgis._core import QgsWkbTypes, QgsMapLayer, QgsRectangle
-from qgis._gui import QgsHighlight
+from qgis._gui import QgsHighlight, QgsQueryBuilder
 from qgis.gui import (
     QgsMapToolIdentify,
 )
@@ -267,43 +267,43 @@ class LayerEditTool:
         if layer and layer.type() == QgsMapLayer.VectorLayer:
             return self.start_editing_layer(layer)
         else:
-            print(f"找不到ID为 {layer.getId()} 的矢量图层")
+            logger.info(f"找不到ID为 {layer.getId()} 的矢量图层")
             return False
 
     def start_editing_layer(self, layer):
         """开始编辑图层"""
         if layer.isEditable():
-            print("图层已经在编辑模式")
+            logger.info("图层已经在编辑模式")
             return True
 
         # 开始编辑
         if layer.startEditing():
-            print(f"成功开始编辑图层: {layer.name()}")
+            logger.info(f"成功开始编辑图层: {layer.name()}")
             return True
         else:
-            print(f"无法开始编辑图层: {layer.name()}")
+            logger.info(f"无法开始编辑图层: {layer.name()}")
             return False
 
     def stop_editing_layer(self, layer, save_changes=True):
         """停止编辑图层"""
         if not layer.isEditable():
-            print("图层不在编辑模式")
+            logger.info("图层不在编辑模式")
             return True
 
         if save_changes:
             # 保存更改
             if layer.commitChanges():
-                print(f"成功保存并停止编辑: {layer.name()}")
+                logger.info(f"成功保存并停止编辑: {layer.name()}")
                 return True
             else:
-                print(f"保存失败: {layer.name()}")
+                logger.info(f"保存失败: {layer.name()}")
                 # 回滚更改
                 layer.rollBack()
                 return False
         else:
             # 不保存，回滚
             layer.rollBack()
-            print(f"已回滚并停止编辑: {layer.name()}")
+            logger.info(f"已回滚并停止编辑: {layer.name()}")
             return True
 
 
@@ -576,6 +576,7 @@ class PagedAttributeTableWidget(QWidget):
 
     def __init__(self, layer, page_size=50, parent=None, filter_str: str = "1=1", show_ids: list = None):
         super().__init__(parent)
+        self.parent = parent
         self.layer = layer
         self.page_size = page_size
         self.model = None
@@ -595,6 +596,72 @@ class PagedAttributeTableWidget(QWidget):
             main_layout = QVBoxLayout()
             main_layout.setContentsMargins(0, 0, 0, 0)  # 移除边距
             main_layout.setSpacing(2)  # 减小间距
+            tool_bar = QHBoxLayout()
+            tool_bar.setSpacing(5)
+            self.start_edit_but = QPushButton()
+            self.start_edit_but.setIcon(QIcon("resource/png/编辑.png"))
+            self.start_edit_but.setToolTip("开始编辑")
+
+            self.start_edit_but.setIconSize(QSize(22, 22))  # 图标大小
+            self.start_edit_but.setFixedSize(26, 26)  # 按钮固定大小（略大于图标，美观）
+            but_style = """
+                QPushButton {
+                    border: none;  /* 移除所有边框 */
+                    background-color: transparent;  /* 透明背景，避免按钮默认背景色 */
+                }
+                /* 可选：保留鼠标悬浮时的轻微高亮（提升交互体验） */
+                QPushButton:hover {
+                    background-color: #e8e8e8;  /* 浅灰色悬浮背景 */
+                    border-radius: 3px;  /* 圆角优化，可选 */
+                }
+                /* 可选：保留鼠标按下时的深色背景 */
+                QPushButton:pressed {
+                    background-color: #dcdcdc;  /* 稍深灰色按下背景 */
+                }
+            """
+            self.start_edit_but.setStyleSheet(but_style)
+
+
+            self.save_but = QPushButton()
+            self.save_but.setEnabled(False)
+            self.save_but.setIcon(QIcon("resource/png/保存编辑.png"))
+            self.save_but.setToolTip("保存编辑")
+            self.save_but.setIconSize(QSize(22, 22))  # 图标大小
+            self.save_but.setFixedSize(26, 26)  # 按钮固定大小（略大于图标，美观）
+            self.save_but.setStyleSheet(but_style)
+
+
+            self.stop_edit_but = QPushButton()
+            self.stop_edit_but.setEnabled(False)
+            self.stop_edit_but.setIcon(QIcon("resource/png/停止编辑.png"))
+            self.stop_edit_but.setToolTip("停止编辑")
+            self.stop_edit_but.setIconSize(QSize(22, 22))  # 图标大小
+            self.stop_edit_but.setFixedSize(26, 26)  # 按钮固定大小（略大于图标，美观）
+            self.stop_edit_but.setStyleSheet(but_style)
+
+            # 属性筛选按钮
+            self.filter_but = QPushButton()
+            self.filter_but.setIcon(QIcon("resource/png/属性筛选器.png"))
+            self.filter_but.setToolTip("属性筛选")
+            self.filter_but.setIconSize(QSize(20, 20))  # 图标大小
+            self.filter_but.setFixedSize(26, 26)  # 按钮固定大小（略大于图标，美观）
+            self.filter_but.setStyleSheet(but_style)
+
+
+            self.start_edit_but.clicked.connect(self.start_edit_layer)
+            self.stop_edit_but.clicked.connect(self.stop_edit_layer)
+            self.stop_edit_but.clicked.connect(self.save_edit_layer)
+            self.filter_but.clicked.connect(self.filter_layer)
+
+            tool_bar.addWidget(self.start_edit_but)
+            tool_bar.addWidget(self.save_but)
+            tool_bar.addWidget(self.stop_edit_but)
+            tool_bar.addWidget(self.filter_but)
+
+            tool_bar.addStretch(0)
+            main_layout.addLayout(tool_bar)
+
+
 
             # 创建表格视图
             self.table_view = QTableView()
@@ -638,7 +705,83 @@ class PagedAttributeTableWidget(QWidget):
 
             # 连接信号
         except Exception as e:
-            print(e)
+            logger.error(e)
+
+    def filter_layer(self):
+        try:
+            # dia = QgsQueryBuilder(self.layer, parent=self)
+            # dia.setWindowIcon(QIcon("resource/png/app_icon.png"))
+            #
+            # def print_all_controls(widget, indent=0):
+            #     """
+            #     递归遍历所有控件，打印按钮的对象名、文本、类型
+            #     :param widget: 起始父控件
+            #     :param indent: 缩进（用于区分控件层级，更直观）
+            #     """
+            #     # 定义缩进符（区分层级，便于查看嵌套关系）
+            #     indent_str = "  " * indent
+            #
+            #     # 1. 若是 QPushButton（按钮类型），优先打印详细信息
+            #     if isinstance(widget, QPushButton):
+            #         btn_name = widget.objectName()  # 按钮对象名（关键）
+            #         btn_text = widget.text().strip()  # 按钮显示文本
+            #         btn_class = widget.__class__.__name__  # 按钮类型
+            #         print(f"{indent_str}【按钮】对象名：{btn_name}，文本：{btn_text}，类型：{btn_class}")
+            #
+            #     # 2. 打印其他控件（可选，若只需按钮，可注释）
+            #     else:
+            #         widget_name = widget.objectName()
+            #         widget_class = widget.__class__.__name__
+            #         if hasattr(widget, "text"):
+            #             widget_text = widget.text().strip()
+            #             print(f"{indent_str}【其他控件】对象名：{widget_name}，文本：{widget_text}，类型：{widget_class}")
+            #         else:
+            #             print(f"{indent_str}【其他控件】对象名：{widget_name}，类型：{widget_class}")
+            #
+            #     # 3. 递归遍历子控件（深层嵌套）
+            #     for child in widget.children():
+            #         if isinstance(child, QWidget):  # 仅遍历控件类型，避免非控件对象
+            #             print_all_controls(child, indent + 1)
+            # print_all_controls(dia)
+            # dia.show()
+            from .QueryBuilder import QueryBuilder
+            dia = QueryBuilder(self.layer, parent=self)
+            dia.exec_()
+        except Exception as e:
+            logger.error(e)
+
+    def save_edit_layer(self):
+        try:
+            if self.layer.isEditable():
+                self.layer.commitChanges(stopEditing=False)
+        except Exception as e:
+            logger.error(e)
+
+    def start_edit_layer(self):
+        if self.layer.isEditable:
+
+            logger.info(f"{self.layer.name()},开始编辑")
+            self.layer.startEditing()
+            self.stop_edit_but.setEnabled(True)
+            self.save_but.setEnabled(True)
+    def stop_edit_layer(self):
+        logger.info(f"{self.layer.name()},停止编辑")
+        if self.layer.isModified():
+            reply = QMessageBox.warning(
+                self.parent,  # 父窗口
+                "警告",  # 弹窗标题
+                "是否保存编辑的内容！",  # 弹窗内容
+                QMessageBox.Yes | QMessageBox.No,  # 显示的按钮（是 + 否）
+                QMessageBox.Yes  # 默认选中的按钮
+            )
+            if reply == QMessageBox.Yes:
+                self.layer.commitChanges(stopEditing=True)
+            else:
+                self.layer.rollBack()
+                self.layer.commitChanges(stopEditing=True)
+        self.stop_edit_but.setEnabled(False)
+        self.save_but.setEnabled(False)
+
     def whether_load(self,value):
         try:
             max_val = self.table_view.verticalScrollBar().maximum()
@@ -646,7 +789,7 @@ class PagedAttributeTableWidget(QWidget):
             if value / max_val > 0.9:
                 self.model.load_page()
         except Exception as e:
-            print(e)
+            logger.error(e)
 
     # 表格右键菜单
     def show_context_menu(self, position):
@@ -1115,7 +1258,7 @@ class PagedAttributeDockWidget(QDockWidget):
             # 设置窗口标题
             self.setWindowTitle(title)
         except Exception as e:
-            print(e)
+            logger.error(e)
 
     def closeEvent(self, event):
         """
@@ -1124,15 +1267,12 @@ class PagedAttributeDockWidget(QDockWidget):
         """
         try:
             if self.layer.isEditable():
-                self.topParent.draw_tool.stop_edit_fun()
+                self.content_widget.stop_edit_layer()
             # 用户点击了 × 关闭 dock
             self.topParent.current_attribute_dock = None
-            # self._user_closed = True
-            self.setParent(None)  # 从父窗口解绑
-            # self.deleteLater()  # 稍后自动销毁（安全）
-            event.accept()
-            # 可以在这里安全清理（如果需要）
-            # super().closeEvent(event)
+            super().closeEvent(event)
+            if event.isAccepted() and not self.testAttribute(Qt.WA_DeleteOnClose):
+                self.deleteLater()
         except Exception as e:
             logger.error(e)
 
