@@ -3,8 +3,7 @@ from PyQt5.QtWidgets import (
     QListWidgetItem, QTextEdit, QPushButton, QLabel, QLineEdit,
     QGroupBox, QMessageBox, QSplitter, QGridLayout
 )
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QIcon
+from PyQt5.QtCore import Qt, pyqtSignal, QVariant
 from qgis.core import (
     QgsVectorLayer, QgsFeatureRequest, QgsField, QgsExpression
 )
@@ -45,18 +44,43 @@ class QueryBuilder(QDialog):
         # 字段下拉框（更友好，替代 ListWidget）
         self.field_combo = QgsFieldComboBox()
         self.field_combo.setLayer(self.layer)
+        self.field_combo.setFocusPolicy(Qt.NoFocus)
         field_layout.addWidget(QLabel("选中字段："))
+
+        self.field_combo.fieldChanged.connect(self.set_current_field)
+
         field_layout.addWidget(self.field_combo)
 
         # 字段值列表（预览选中字段的值）
         self.value_list = QListWidget()
+        self.value_list.setFocusPolicy(Qt.NoFocus)
         field_layout.addWidget(QLabel("字段值预览："))
         field_layout.addWidget(self.value_list)
+        def get_field_type(value):
+            try:
+                field_name = self.field_combo.currentText()
+                filed = [item for item in self.layer.fields() if field_name == item.name()][0]
+                f_type = filed.type()
+                if f_type == QVariant.String:
+                    return f"'{value}'"
+                elif f_type == QVariant.Int:
+                    return f'{value}'
+                elif f_type == QVariant.Double:
+                    return f'{value}'
+                else:
+                    return f'{value}'
+            except Exception as e:
+                print(e)
+
+        self.value_list.itemDoubleClicked.connect(lambda e:self.insert_text(get_field_type(e.text()) ))
 
         # 加载字段值按钮组
         value_btn_layout = QHBoxLayout()
         self.sample_btn = QPushButton("加载采样值")
         self.all_btn = QPushButton("加载全部值")
+        self.sample_btn.setFocusPolicy(Qt.NoFocus)
+        self.all_btn.setFocusPolicy(Qt.NoFocus)
+
         value_btn_layout.addWidget(self.sample_btn)
         value_btn_layout.addWidget(self.all_btn)
         field_layout.addLayout(value_btn_layout)
@@ -72,7 +96,9 @@ class QueryBuilder(QDialog):
         col_count = 5  # 每行显示 5 个按钮
         for s in operator_str:
             var = QPushButton(s)
+            var.setFocusPolicy(Qt.NoFocus)
             var.setMinimumSize(60, 30)
+            var.clicked.connect(lambda _, text=var.text(): self.insert_text(text))
             # 绑定点击事件，插入运算符到 QTextEdit
             # var.clicked.connect(lambda checked, op=s: self.insert_operator_to_sql(op))
             but_layout.addWidget(var, row, col)
@@ -96,7 +122,7 @@ class QueryBuilder(QDialog):
         # 语法提示标签
         # self.tip_label = QLabel("提示：支持 QGIS 表达式语法，字段名含特殊字符请用双引号包裹")
         # self.tip_label.setStyleSheet("color: #666; font-size: 10px;")
-        # sql_layout.addWidget(self.tip_label)
+        # sql_layout.addWidget(self.tip_label) processing.run("native:shortestpathpointtopoint", {})
 
         splitter.addWidget(self.sql_group)
 
@@ -117,6 +143,13 @@ class QueryBuilder(QDialog):
 
         # 调整拆分器比例
         splitter.setSizes([300, 420])
+    def insert_text(self, text):
+        cursor = self.sql_edit.textCursor()
+        cursor.insertText(text)
+        self.sql_edit.setTextCursor(cursor)
+
+    def set_current_field(self, event=None):
+        self.insert_text(f' "{event}" ')
 
     def init_signals(self):
         """初始化信号与槽绑定"""
@@ -174,7 +207,7 @@ class QueryBuilder(QDialog):
                 self.value_list.addItem(item)
 
         # 3. 提示加载结果
-        QMessageBox.information(self, "提示", f"成功加载 {len(self.current_values)} 个值（{'采样' if sample else '全部'}）")
+        # QMessageBox.information(self, "提示", f"成功加载 {len(self.current_values)} 个值（{'采样' if sample else '全部'}）")
 
     def on_value_item_double_clicked(self, item: QListWidgetItem):
         """双击值列表项，自动拼接 SQL 条件"""
@@ -255,6 +288,7 @@ class QueryBuilder(QDialog):
 
         # 3. 应用筛选条件到图层
         try:
+
             self.layer.setSubsetString(sql_condition)
             feature_count = self.layer.featureCount()
             self.sqlConfirmed.emit(sql_condition)
@@ -262,19 +296,3 @@ class QueryBuilder(QDialog):
             self.accept()
         except Exception as e:
             QMessageBox.critical(self, "应用失败", f"条件应用异常！\n{str(e)}")
-
-# ---------------- 调用自定义查询构建器的示例代码 ----------------
-def open_custom_query_builder(layer: QgsVectorLayer, parent=None):
-    """打开自定义查询构建器"""
-    if not (isinstance(layer, QgsVectorLayer) and layer.isValid()):
-        QMessageBox.critical(parent, "错误", "无效的矢量图层！")
-        return
-
-    # 实例化自定义对话框
-    dia = QueryBuilder(layer, parent=parent)
-    # 弹出对话框（模态）
-    dia.exec_()
-
-    # （可选）获取最终的 SQL 条件
-    final_sql = dia.sql_edit.toPlainText().strip()
-    return final_sql

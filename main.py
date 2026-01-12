@@ -102,6 +102,7 @@ class QGISMapWindow(QMainWindow):
         main_layout.addWidget(self.canvas)
         # 当前编辑图层初始化
         self.current_edit_layer = None
+        self.create_browser()
 
         # 图层树核心组件（QGIS 3.44+ 兼容）
         self.layer_tree_root = self.project.layerTreeRoot()
@@ -112,7 +113,6 @@ class QGISMapWindow(QMainWindow):
 
         # 创建UI组件
         self.create_layer_dock()
-        self.create_browser()
         # 编辑组件
         self.create_toolbar()
         self.draw_tool = Draw(self)
@@ -299,7 +299,7 @@ class QGISMapWindow(QMainWindow):
             # ✅ 启用拖拽源（允许拖出）
             self.browser_view.setDragEnabled(True)
             self.browser_dock.setWidget(self.browser_view)
-            self.addDockWidget(Qt.RightDockWidgetArea, self.browser_dock)
+            self.addDockWidget(Qt.LeftDockWidgetArea, self.browser_dock)
 
 
         except Exception as e:
@@ -704,6 +704,9 @@ class QGISMapWindow(QMainWindow):
         dock = AnalysePanel(self)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
         self.current_analyse_dock = dock
+        from component.TreeTool import PGISTools
+        self.tree_tools = PGISTools(dock)
+        dock.setWidget(self.tree_tools)
         dock.show()
 
     def open_attribute_table(self, layer=None, filter_str: str = None, show_ids:list = None):
@@ -716,7 +719,7 @@ class QGISMapWindow(QMainWindow):
                                             filter_str=filter_str if filter_str else '1=1', show_ids=show_ids)
 
             # 添加到主窗口
-            self.addDockWidget(Qt.RightDockWidgetArea, dock)
+            self.addDockWidget(Qt.BottomDockWidgetArea, dock)
 
             # 保存引用
             self.current_attribute_dock = dock
@@ -725,7 +728,8 @@ class QGISMapWindow(QMainWindow):
             dock.show()
         else:
             # 如果对话框已存在，只是显示它
-            self.current_attribute_dock.add_new_layer(c_layer, self, filter_str,show_ids,50,
+            self.current_attribute_dock.add_new_layer(c_layer, self, filter_str if filter_str is not None else "1=1"
+                                                      ,show_ids,50,
                                                       f"属性表 - {c_layer.name()}")
 
         # self.attribute_table_dialog.show()

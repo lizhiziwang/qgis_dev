@@ -1266,6 +1266,8 @@ class PagedAttributeDockWidget(QDockWidget):
         :return:
         """
         try:
+            if self.layer.subsetString() != "" and self.layer.subsetString() is not None:
+                self.layer.setSubsetString("")
             if self.layer.isEditable():
                 self.content_widget.stop_edit_layer()
             # 用户点击了 × 关闭 dock
