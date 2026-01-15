@@ -13,7 +13,7 @@ from PyQt5.QtCore import QTranslator
 from qgis._core import QgsCoordinateTransform, QgsCoordinateReferenceSystem, Qgis
 from qgis._gui import QgsMapLayerStyleManagerWidget, QgsBrowserGuiModel, \
     QgsBrowserTreeView, QgsDataItemGuiContext, QgsMessageBar, \
-    QgsLayerPropertiesDialog, QgsVectorLayerProperties
+    QgsLayerPropertiesDialog, QgsVectorLayerProperties, QgsGui
 from osgeo import ogr
 
 from component.excute_sql import ExecuteSQlDialog
@@ -41,7 +41,7 @@ import component.LogDock as ld
 # QGIS_PREFIX = os.path.dirname(os.path.abspath(__file__))  # 即 dist\app
 # os.environ['QGIS_PREFIX_PATH'] = QGIS_PREFIX
 # os.environ['PROJ_LIB'] = QGIS_PREFIX
-from setting import set_config
+from setting import set_config, init_plugs
 urls = set_config()
 
 app = QgsApplication([], True)
@@ -54,9 +54,6 @@ translator = QTranslator()
 # 加载 QGIS 中文翻译文件（路径因系统而异 ）
 translator.load("qgis_zh-Hans.qm", app.i18nPath())
 app.installTranslator(translator)
-
-
-
 
 
 class QGISMapWindow(QMainWindow):
@@ -86,6 +83,8 @@ class QGISMapWindow(QMainWindow):
         self.messageBar.setSizePolicy(
             QSizePolicy.Minimum, QSizePolicy.Fixed
         )
+        # 存放全局实例
+        QgsApplication.instance().setProperty("messageBar", self.messageBar)
         main_layout.addWidget(self.messageBar)
 
         self.canvas = QgsMapCanvas(self)
@@ -134,6 +133,9 @@ class QGISMapWindow(QMainWindow):
         proj_selector.setCrs(crs)
         proj_selector.setOptionVisible(option=QgsProjectionSelectionWidget().CrsOption.ProjectCrs, visible=False)
         status_bar.addPermanentWidget(proj_selector)
+        # 初始化算法处理
+        init_plugs()
+
 
 
 
@@ -610,8 +612,20 @@ class QGISMapWindow(QMainWindow):
             self.toolbar.addAction(self.refresh_action)
             # 测试消息通知
             self.test_action = QAction("测试", self)
-            self.test_action.triggered.connect(
-                lambda: self.messageBar.pushMessage("操作成功", level=Qgis.Success, duration=3))
+
+            def test():
+                try:
+                    from api.interface import run
+                    is_activate = run()
+                    if is_activate:
+                        self.messageBar.pushMessage("操作成功", level=Qgis.Success, duration=3)
+                    else:
+                        self.messageBar.pushMessage("操作失败", level=Qgis.Warning, duration=3)
+
+                except Exception as e:
+                    logger.error(e)
+            self.test_action.triggered.connect(lambda: test())
+
             # self.test_action.triggered.connect(lambda : SpaceQuery(self, is_buffer=True).show())
             self.toolbar.addAction(self.test_action)
 
@@ -705,7 +719,7 @@ class QGISMapWindow(QMainWindow):
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
         self.current_analyse_dock = dock
         from component.TreeTool import PGISTools
-        self.tree_tools = PGISTools(dock)
+        self.tree_tools = PGISTools(parent=dock, topParent=self)
         dock.setWidget(self.tree_tools)
         dock.show()
 
