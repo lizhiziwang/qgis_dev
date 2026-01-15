@@ -1,0 +1,8 @@
+[
+  {
+    "id": 123456,
+    "name": "测试地图",
+    "basePass": "D:\\zsh\\temp\\xyz3",
+    "format": "xyz-pbf"
+  }
+]
