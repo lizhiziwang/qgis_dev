@@ -381,6 +381,10 @@ class PGISTools(QWidget):
         # item1.setFlags(root.flags() | Qt.ItemIsTristate)
         # item1.setCheckState(0, Qt.Unchecked)
 
+        item2 = QTreeWidgetItem(root)
+        item2.setText(0, "最短路径搜索")
+        item2._code_ = "native:writevectortiles_xyz"
+
 
         root2 = QTreeWidgetItem(self.tree)
         root2.setText(0, "测试2")
@@ -397,16 +401,7 @@ class PGISTools(QWidget):
             text = item.text(column)
             # data = item.data((0, 0),Qt.UserRole)
             if item._code_ == "native:writevectortiles_xyz":
-                # param = {'OUTPUT_DIRECTORY': 'D:\\zsh\\temp\\xyz3', 'XYZ_TEMPLATE': '{z}/{x}/{y}.pbf',
-                #  'LAYERS': [
-                #      {
-                #          'layer': 'D:/Temp/2469ef2b-3423-4a22-8bce-dc808a144ace.json|layername=lcstzhjc_2023'}],
-                #  'MIN_ZOOM': 8, 'MAX_ZOOM': 13,
-                #  'EXTENT': '39277867.069399998,39304429.969099998,2899285.205500000,2914619.243800000 [EPSG:4527]'}
-                # feedback = QgsProcessingFeedback()
-                # feedback.progressChanged.connect(self.on_progress_changed)
-                #
-                # processing.run("native:writevectortiles_xyz",param,feedback=feedback)
+
                 PGISToolsDialog(parent=self.topParent, title="创建矢量瓦片", dia_type="native:writevectortiles_xyz").show()
             # dia = processing.createAlgorithmDialog("native:writevectortiles_xyz")
             # dia.show()

@@ -5,6 +5,8 @@
 D:\zsh\app\qgis_3.40\bin\python-qgis-ltr.bat -m pip install pyinstaller==5.13.2
  
  D:\zsh\app\qgis_3.40\bin\python-qgis-ltr.bat -m pip install fastapi uvicorn
+ D:\zsh\app\qgis_3.40\bin\python-qgis-ltr.bat -m pip install fastapi uvicorn
+ D:\zsh\app\qgis_3.40\bin\python-qgis-ltr.bat -m pip install networkx matplotlib
 ```
 ### 移除控制
 

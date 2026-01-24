@@ -746,6 +746,7 @@ class PagedAttributeTableWidget(QWidget):
             # dia.show()
             from .QueryBuilder import QueryBuilder
             dia = QueryBuilder(self.layer, parent=self)
+            dia.sqlConfirmed.connect(lambda : self.whether_load(0.0, is_flash=True))
             dia.exec_()
         except Exception as e:
             logger.error(e)
@@ -782,11 +783,11 @@ class PagedAttributeTableWidget(QWidget):
         self.stop_edit_but.setEnabled(False)
         self.save_but.setEnabled(False)
 
-    def whether_load(self,value):
+    def whether_load(self,value, is_flash=False):
         try:
             max_val = self.table_view.verticalScrollBar().maximum()
             # 触发加载条件
-            if value / max_val > 0.9:
+            if value / max_val or is_flash> 0.9:
                 self.model.load_page()
         except Exception as e:
             logger.error(e)

@@ -36,13 +36,18 @@ from component.draw_tool import Draw
 from component.add_vec_data import *
 from component.check_dia import JsonTreeView
 import component.LogDock as ld
-
+# 打包时需要修改到下面的prod
+current_env = 'dev'
+# current_app = 'prod'
 ''' 打包时需要使用以下4行 '''
+
 # QGIS_PREFIX = os.path.dirname(os.path.abspath(__file__))  # 即 dist\app
 # os.environ['QGIS_PREFIX_PATH'] = QGIS_PREFIX
 # os.environ['PROJ_LIB'] = QGIS_PREFIX
 from setting import set_config, init_plugs
-urls = set_config()
+urls=[]
+if current_env == "dev":
+    urls = set_config()
 
 app = QgsApplication([], True)
 app.setPrefixPath(urls[1], True)
@@ -133,11 +138,9 @@ class QGISMapWindow(QMainWindow):
         proj_selector.setCrs(crs)
         proj_selector.setOptionVisible(option=QgsProjectionSelectionWidget().CrsOption.ProjectCrs, visible=False)
         status_bar.addPermanentWidget(proj_selector)
-        # 初始化算法处理
-        init_plugs()
 
-
-
+        if current_env == "dev":
+            init_plugs()
 
     ''' 创建图层对象 '''
 
