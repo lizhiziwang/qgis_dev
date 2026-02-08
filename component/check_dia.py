@@ -8,11 +8,13 @@ from PyQt5.QtGui import QIcon
 from PyQt5.QtWidgets import QDialog, QVBoxLayout, QTableWidgetItem, QWidget, QHBoxLayout, QCheckBox, QLabel, \
     QTableWidget, QHeaderView, QAbstractItemView, QLineEdit, QPushButton, QFileDialog, QMenu, QAction, QComboBox, \
     QRadioButton, QTextEdit
+from qgis._core import QgsApplication, Qgis
 
 from .Logger import setup_logger
 from .check.CheckParam import CheckParam
 from .file import *
 from .check.DataCheck import *
+from .util.QGISUtil import *
 
 logger = setup_logger(__name__)
 check_types = [
@@ -211,7 +213,7 @@ class JsonTreeView(BaseDialog):
 
             else:
                 edit_action = QAction("新建规则")
-                edit_action.triggered.connect(lambda: self.create_check_item(True))
+                edit_action.triggered.connect(self.add_new_check_item)
                 menu.addAction(edit_action)
 
             menu.exec_(self.table.viewport().mapToGlobal(position))
@@ -221,6 +223,10 @@ class JsonTreeView(BaseDialog):
     # def edit_current(self, is_add, check_vo=None):
     #     dia = CheckConfigDialog(is_add, check_vo)
     #     dia.exec_()
+
+    def add_new_check_item(self):
+        sendMessageToTopParent(2, "功能待开发！", 5)
+        self.close()
 
     def create_check_item(self, is_add, item=None):
         logger.info(f"当前编辑元素：{item}")
