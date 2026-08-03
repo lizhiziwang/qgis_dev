@@ -1,12 +1,28 @@
+import os
+import re
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QTextCursor
-from PyQt5.QtWidgets import QDockWidget, QHBoxLayout, QTextBrowser, QWidget, QVBoxLayout, QAction, QToolBar, \
+from PyQt5.QtWidgets import QDockWidget, QHBoxLayout, QTextBrowser, QWidget, QVBoxLayout, \
     QPushButton, QSpacerItem, QSizePolicy, QLineEdit, QComboBox, QMessageBox
-from component.Logger import  *
+from component.Logger import LogConfig, get_logger, render_log_html
 from component.file import open_file_dir, write_data
 from datetime import datetime
 
-logger = setup_logger(__name__)
+logger = get_logger(__name__)
+
+_LOG_CONFIG = LogConfig.from_env()
+_ALL_LOG_PATH = os.path.join(_LOG_CONFIG.log_dir, _LOG_CONFIG.all_log_filename)
+
+# 文件里级别被 formatter 写成 ``<font color="...">LEVEL</font>`` 或
+# ``<font color="..."><b>LEVEL</b></font>``，用 ``>LEVEL<`` 模式定位；
+# 用户消息内的字符已被 renderer 替换为 ``&gt;`` / ``&lt;``，不会误命中。
+_LEVEL_TAG_RE = re.compile(r">([A-Z]+)</")
+
+
+def _line_has_level(line: str, level: str) -> bool:
+    if level == "ALL":
+        return True
+    return any(m.group(1) == level for m in _LEVEL_TAG_RE.finditer(line))
 
 
 class LogDock(QDockWidget):
@@ -130,20 +146,32 @@ class LogDock(QDockWidget):
         if not param:
             param = {
                 "size": 500,
-                "level": "ALL", # ALL INFO DEBUG ERROR WARING
-                "filter":""
+                "level": "ALL",  # ALL INFO DEBUG ERROR WARNING
+                "filter": "",
             }
-        path = "logs/app.log"
-        all_lines = []
+        path = _ALL_LOG_PATH
+        if not os.path.exists(path):
+            self.txt.setHtml("")
+            return
+        raw_lines = []
         with open(path, "r", encoding="utf-8") as f:
-            all_lines = [log_to_html(line.strip()) for line in f.readlines()
-                         if param["level"] == "ALL" or f"__{param["level"]}__" in line]
-        # 根据文本过滤
+            raw_lines = [
+                line.strip() for line in f.readlines()
+                if _line_has_level(line, param["level"])
+            ]
+        rendered = [render_log_html(line) for line in raw_lines]
+        # 文件里 renderer 已把消息标记内的 ``&<>`` 转义，整体行已是合法 HTML
+        # 片段；用 ``setHtml`` 渲染，每行外再包 ``<p>`` 做段落排版。
         if param["filter"]:
-            all_lines = [line for line in all_lines if param["filter"] in line ]
+            rendered = [line for line in rendered if param["filter"] in line]
         if param["size"] != -1:
-            all_lines = all_lines[-param["size"] if len(all_lines)>param["size"]  else -len(all_lines):]
-        self.txt.setText("\n".join(all_lines))
+            rendered = rendered[
+                -param["size"] if len(rendered) > param["size"] else -len(rendered):
+            ]
+        html = "\n".join(
+            f'<p style="line-height:1.5;margin:2px 0;">{line}</p>' for line in rendered
+        )
+        self.txt.setHtml(html)
         self.txt.moveCursor(QTextCursor.End)
 
     def clear_log(self):
@@ -156,7 +184,7 @@ class LogDock(QDockWidget):
 
         ok = m_box.exec_()
         if ok == QMessageBox.Ok:
-            write_data("logs/app.log", "")
+            write_data(_ALL_LOG_PATH, "")
             self.refresh_log()
 
     def refresh_log(self):
@@ -195,12 +223,38 @@ class LogDock(QDockWidget):
         self.refresh_log()
 
     def toggle_auto_scroll(self):
-        pass
-def add_log_dock(parent=None):
-    try:
-        log = LogDock(parent)
-        parent.addDockWidget(Qt.BottomDockWidgetArea, log)
-    except Exception as e:
-        logger.error(e)
+        self.auto_scroll_flag = self.auto_scroll_btn.isChecked()
+
+
+def add_log_dock(parent) -> "LogDock":
+    """在父窗口上挂日志面板。
+
+    幂等实现：若父窗口的 ``log_dock`` 属性已指向同一父窗口下的 dock 实例，
+    则直接显示并置前；否则关闭游离实例并新建一个。避免每次点击菜单都新建
+    一个 dock widget 导致窗口堆叠、消息视图分散。
+
+    Args:
+        parent: 主窗口，会同时作为 dock 的 parent 与归属字段存放对象。
+
+    Returns:
+        已挂载的 :class:`LogDock` 实例。
+    """
+    existing = getattr(parent, "log_dock", None)
+    if existing is not None and existing.parent() is parent:
+        existing.show()
+        existing.raise_()
+        return existing
+
+    if existing is not None:
+        try:
+            existing.close()
+            existing.deleteLater()
+        except Exception:
+            pass
+
+    log = LogDock(parent)
+    parent.log_dock = log
+    parent.addDockWidget(Qt.BottomDockWidgetArea, log)
+    return log
 
 

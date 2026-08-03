@@ -69,6 +69,7 @@ class QGISMapWindow(QMainWindow):
         self.current_attribute_dock = None
         self.attribute_table_dialog = None
         self.browser_dock = None
+        self.log_dock = None
         self.project = QgsProject.instance()
         self.browser = None
         self.setWindowTitle("default")
@@ -656,11 +657,16 @@ class QGISMapWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
-        # 视图菜单
-        view_menu = menubar.addMenu("视图(&v)")
-        log_action = QAction("日志", self)
+        # 视图菜单（保留空菜单占位，预留给后续视图相关动作）
+        menubar.addMenu("视图(&V)")
+
+        # 查看菜单：放日志面板等用于"检视系统状态"的入口
+        check_menu = menubar.addMenu("查看(&C)")
+        log_action = QAction("日志(&L)", self)
+        log_action.setShortcut("Ctrl+L")
+        log_action.setStatusTip("打开 / 唤起日志面板")
         log_action.triggered.connect(lambda: ld.add_log_dock(self))
-        view_menu.addAction(log_action)
+        check_menu.addAction(log_action)
 
 
 
