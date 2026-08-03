@@ -214,9 +214,17 @@ class Draw:
 class BaseDrawTool(QgsMapTool):
     finish = pyqtSignal(QgsGeometry)
 
-    def __init__(self, canvas, parent=None):
+    def __init__(self, canvas, parent=None, is_buffer=False, distance=0.0):
         super().__init__(canvas)
         self.canvas = canvas
+
+        self.rubber_band_buffer = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
+        self.rubber_band_buffer.setColor(Qt.red)
+        self.rubber_band_buffer.setWidth(2)
+        self.rubber_band_buffer.setLineStyle(Qt.DashLine)
+
+        self.is_buffer = is_buffer
+        self.distance = distance
         self.geom = None
 
     def finish_draw(self):
@@ -224,18 +232,23 @@ class BaseDrawTool(QgsMapTool):
             # pan_tool = QgsMapToolPan(self.canvas)
             # self.canvas.setMapTool(pan_tool)
             self.canvas.unsetMapTool(self)
+            if self.is_buffer:
+                buffer = self.geom.buffer(self.distance, 16)
+                self.rubber_band_buffer.addGeometry(buffer)
+
             self.finish.emit(self.geom)
         except Exception as e:
             print(e)
 
     def clear(self):
-        pass
+        self.rubber_band_buffer.hide()
+        # pass
 
 
 class PointDrawTool(BaseDrawTool):
     """点要素绘制工具：点击画布直接创建点"""
-    def __init__(self, canvas, draw_manager):
-        super().__init__(canvas)
+    def __init__(self, canvas, draw_manager, is_buffer=False, distance=0.0):
+        super().__init__(canvas,is_buffer=is_buffer, distance=distance)
         self.canvas = canvas
         self.draw_manager = draw_manager
 
@@ -260,13 +273,14 @@ class PointDrawTool(BaseDrawTool):
         else:
             self.finish_draw()
     def clear(self):
+        super().clear()
         self.rubber_band.hide()
 
 
 class LineDrawTool(BaseDrawTool):
     """线要素绘制工具：点击添加节点，右键结束绘制"""
-    def __init__(self, canvas, draw_manager):
-        super().__init__(canvas)
+    def __init__(self, canvas, draw_manager, is_buffer=False, distance=0.0):
+        super().__init__(canvas, is_buffer=is_buffer, distance=distance)
         self.canvas = canvas
         self.draw_manager = draw_manager
 
@@ -336,13 +350,14 @@ class LineDrawTool(BaseDrawTool):
         except Exception as e:
             print(e)
     def clear(self):
+        super().clear()
         self.line_rubber_band.hide()
 
 
 class PolygonDrawTool(BaseDrawTool):
     """面要素绘制工具：点击添加节点，右键结束绘制"""
-    def __init__(self, canvas, draw_manager):
-        super().__init__(canvas)
+    def __init__(self, canvas, draw_manager, is_buffer=False, distance=0.0):
+        super().__init__(canvas, is_buffer=is_buffer, distance=distance)
         self.canvas = canvas
         self.draw_manager = draw_manager
 
@@ -414,14 +429,15 @@ class PolygonDrawTool(BaseDrawTool):
         self.rubber_band.show()
 
     def clear(self):
+        super().clear()
         self.rubber_band.hide()
 
 class RectangleDrawTool(BaseDrawTool):
     """
         绘制矩形，左键绘制
     """
-    def __init__(self, canvas, draw_manager=None):
-        super().__init__(canvas)
+    def __init__(self, canvas, draw_manager=None, is_buffer=False, distance=0.0):
+        super().__init__(canvas, is_buffer=is_buffer, distance=distance)
         self.canvas = canvas
         self.draw_manager = draw_manager
         self.rubber_band = draw_manager.rubber_band if draw_manager is not None else None
@@ -485,6 +501,7 @@ class RectangleDrawTool(BaseDrawTool):
         self.rubber_band.show()
 
     def clear(self):
+        super().clear()
         self.rubber_band.hide()
 
 """
@@ -492,8 +509,8 @@ class RectangleDrawTool(BaseDrawTool):
 """
 
 class CircleDrawTool(BaseDrawTool):
-    def __init__(self, canvas, draw_manager=None):
-        super().__init__(canvas)
+    def __init__(self, canvas, draw_manager=None, is_buffer=False, distance=0.0):
+        super().__init__(canvas, is_buffer=is_buffer, distance=distance)
         self.canvas = canvas
         self.draw_manager = draw_manager
         self.temp_points = draw_manager.temp_points if draw_manager is not None else []
@@ -538,4 +555,5 @@ class CircleDrawTool(BaseDrawTool):
 
 
     def clear(self):
+        super().clear()
         self.rubber_band.hide()

@@ -35,6 +35,7 @@ class SpaceQueryTool:
         self.p_query = QAction("点击查询", self.p_menu)
         self.p_b_query = QAction("点缓冲查询", self.p_menu)
         self.p_query.triggered.connect(lambda : SpaceQuery(self.parent, q_type="point").show())
+        self.p_b_query.triggered.connect(lambda : SpaceQuery(self.parent, q_type="point", is_buffer=True).show())
 
         self.p_menu.addAction(self.p_query)
         self.p_menu.addAction(self.p_b_query)
@@ -50,7 +51,8 @@ class SpaceQueryTool:
         self.l_online_query.setStatusTip("针对线图层，沿线查询最短路径")
         self.l_b_query = QAction("线缓冲查询", self.l_menu)
 
-        self.l_query.triggered.connect(lambda : SpaceQuery(self.parent, q_type="line").show())
+        self.l_query.triggered.connect(lambda : SpaceQuery(self.parent, q_type="line", is_buffer=False).show())
+        self.l_b_query.triggered.connect(lambda : SpaceQuery(self.parent, q_type="line", is_buffer=True).show())
 
         self.l_menu.addAction(self.l_query)
         self.l_menu.addAction(self.l_online_query)
@@ -71,6 +73,9 @@ class SpaceQueryTool:
         self.p_query2.triggered.connect(lambda : SpaceQuery(self.parent, q_type="polygon").show())
         self.k_query.triggered.connect(lambda : SpaceQuery(self.parent, q_type="rectangle").show())
         self.c_query.triggered.connect(lambda : SpaceQuery(self.parent, q_type="circle").show())
+
+        self.p_b_query.triggered.connect(lambda : SpaceQuery(self.parent, q_type="polygon", is_buffer=True).show())
+
 
         self.po_menu.addAction(self.p_query2)
         self.po_menu.addAction(self.p_b_query)
@@ -186,6 +191,7 @@ class SpaceQuery(BaseDialog):
         self.pt = None
         self.geom_txt = None
         self.is_buffer = is_buffer
+        self.buff_value = None
 
         self.tool_classes = {
             "point": PointDrawTool,
@@ -219,10 +225,10 @@ class SpaceQuery(BaseDialog):
 
             if self.is_buffer:
                 var3 = QLabel("缓冲距离：")
-                var4 = QLineEdit()
+                self.buff_value = QLineEdit("0.0")
                 var5 = QLabel("米(m)")
                 var.addWidget(var3)
-                var.addWidget(var4)
+                var.addWidget(self.buff_value)
                 var.addWidget(var5)
             var.addStretch()
 
@@ -269,7 +275,8 @@ class SpaceQuery(BaseDialog):
     def get_geom(self):
         self.hide()
         try:
-            self.pt = self.tool_classes[self.q_type](self.parent.canvas, None)
+            self.pt = self.tool_classes[self.q_type](self.parent.canvas, None, is_buffer=self.is_buffer,
+                                                     distance=float(self.buff_value.text()) if self.buff_value is not None else 0.0)
             # pt = PolygonDrawTool(self.parent.canvas, None)
             # self.pt = LineDrawTool(self.parent.canvas, None)
             self.parent.canvas.setMapTool(self.pt)

@@ -1,5 +1,8 @@
 import os
-
+import sys
+"""
+    开发时所需要的参数
+"""
 
 def set_config():
     # ===================== 核心：QGIS 3.40 专属路径配置（务必与你的安装目录一致） =====================
@@ -8,6 +11,7 @@ def set_config():
     QGIS_GDAL_PATH = os.path.join(QGIS_BASE_PATH, 'apps', 'gdal')  # QGIS 3.40 GDAL 根目录
     QGIS_PROJ_PATH = os.path.join(QGIS_BASE_PATH, 'apps', 'proj')  # QGIS 3.40 Proj 根目录
     QGIS_BIN_PATH = os.path.join(QGIS_BASE_PATH, 'bin')  # QGIS 可执行文件/DLL 目录
+    QGIS_PLUGIN_PATH = os.path.join(QGIS_QGIS_LTR_PATH, 'python', 'plugins')
 
     # ===================== 适配QGIS 3.40 的环境变量配置（关键：修正GDAL/Proj路径） =====================
     # 1. QGIS 核心前缀路径（必须指向 apps/qgis-ltr）
@@ -27,6 +31,11 @@ def set_config():
         f"{os.path.join(QGIS_QGIS_LTR_PATH, 'plugins')};"  # QGIS 内置 Qt 插件
         f"{QGIS_BIN_PATH}"  # QGIS 根目录 bin 下的 Qt 平台插件
     )
+    sys.path.append(QGIS_QGIS_LTR_PATH)
+    sys.path.append(os.path.join(QGIS_PROJ_PATH, 'share'))
+    sys.path.append(os.path.join(QGIS_GDAL_PATH, 'data'))
+    sys.path.append(os.path.join(QGIS_GDAL_PATH, 'gdalplugins'))
+    sys.path.append(QGIS_PLUGIN_PATH)
 
     # 6. Qt 平台插件路径（兜底：避免GUI渲染崩溃，QGIS 3.40 专属）
     os.environ['QT_QPA_PLATFORM_PLUGIN_PATH'] = os.path.join(QGIS_BIN_PATH, 'platforms')
@@ -50,3 +59,8 @@ def set_config():
     ]
 
     return required_paths
+
+
+def init_plugs():
+    from processing.core.Processing import Processing
+    Processing.initialize()

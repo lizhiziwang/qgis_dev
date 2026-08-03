@@ -13,7 +13,7 @@ from PyQt5.QtCore import QTranslator
 from qgis._core import QgsCoordinateTransform, QgsCoordinateReferenceSystem, Qgis
 from qgis._gui import QgsMapLayerStyleManagerWidget, QgsBrowserGuiModel, \
     QgsBrowserTreeView, QgsDataItemGuiContext, QgsMessageBar, \
-    QgsLayerPropertiesDialog, QgsVectorLayerProperties
+    QgsLayerPropertiesDialog, QgsVectorLayerProperties, QgsGui
 from osgeo import ogr
 
 from component.excute_sql import ExecuteSQlDialog
@@ -36,13 +36,18 @@ from component.draw_tool import Draw
 from component.add_vec_data import *
 from component.check_dia import JsonTreeView
 import component.LogDock as ld
-
+# 打包时需要修改到下面的prod
+current_env = 'dev'
+# current_app = 'prod'
 ''' 打包时需要使用以下4行 '''
+
 # QGIS_PREFIX = os.path.dirname(os.path.abspath(__file__))  # 即 dist\app
 # os.environ['QGIS_PREFIX_PATH'] = QGIS_PREFIX
 # os.environ['PROJ_LIB'] = QGIS_PREFIX
-from setting import set_config
-urls = set_config()
+from setting import set_config, init_plugs
+urls=[]
+if current_env == "dev":
+    urls = set_config()
 
 app = QgsApplication([], True)
 app.setPrefixPath(urls[1], True)
@@ -56,9 +61,6 @@ translator.load("qgis_zh-Hans.qm", app.i18nPath())
 app.installTranslator(translator)
 
 
-
-
-
 class QGISMapWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -67,6 +69,7 @@ class QGISMapWindow(QMainWindow):
         self.current_attribute_dock = None
         self.attribute_table_dialog = None
         self.browser_dock = None
+        self.log_dock = None
         self.project = QgsProject.instance()
         self.browser = None
         self.setWindowTitle("default")
@@ -86,6 +89,8 @@ class QGISMapWindow(QMainWindow):
         self.messageBar.setSizePolicy(
             QSizePolicy.Minimum, QSizePolicy.Fixed
         )
+        # 存放全局实例
+        QgsApplication.instance().setProperty("messageBar", self.messageBar)
         main_layout.addWidget(self.messageBar)
 
         self.canvas = QgsMapCanvas(self)
@@ -102,6 +107,7 @@ class QGISMapWindow(QMainWindow):
         main_layout.addWidget(self.canvas)
         # 当前编辑图层初始化
         self.current_edit_layer = None
+        self.create_browser()
 
         # 图层树核心组件（QGIS 3.44+ 兼容）
         self.layer_tree_root = self.project.layerTreeRoot()
@@ -112,7 +118,6 @@ class QGISMapWindow(QMainWindow):
 
         # 创建UI组件
         self.create_layer_dock()
-        self.create_browser()
         # 编辑组件
         self.create_toolbar()
         self.draw_tool = Draw(self)
@@ -135,7 +140,8 @@ class QGISMapWindow(QMainWindow):
         proj_selector.setOptionVisible(option=QgsProjectionSelectionWidget().CrsOption.ProjectCrs, visible=False)
         status_bar.addPermanentWidget(proj_selector)
 
-
+        if current_env == "dev":
+            init_plugs()
 
     ''' 创建图层对象 '''
 
@@ -299,7 +305,7 @@ class QGISMapWindow(QMainWindow):
             # ✅ 启用拖拽源（允许拖出）
             self.browser_view.setDragEnabled(True)
             self.browser_dock.setWidget(self.browser_view)
-            self.addDockWidget(Qt.RightDockWidgetArea, self.browser_dock)
+            self.addDockWidget(Qt.LeftDockWidgetArea, self.browser_dock)
 
 
         except Exception as e:
@@ -610,8 +616,20 @@ class QGISMapWindow(QMainWindow):
             self.toolbar.addAction(self.refresh_action)
             # 测试消息通知
             self.test_action = QAction("测试", self)
-            self.test_action.triggered.connect(
-                lambda: self.messageBar.pushMessage("操作成功", level=Qgis.Success, duration=3))
+
+            def test():
+                try:
+                    from api.interface import run
+                    is_activate = run()
+                    if is_activate:
+                        self.messageBar.pushMessage("操作成功", level=Qgis.Success, duration=3)
+                    else:
+                        self.messageBar.pushMessage("操作失败", level=Qgis.Warning, duration=3)
+
+                except Exception as e:
+                    logger.error(e)
+            self.test_action.triggered.connect(lambda: test())
+
             # self.test_action.triggered.connect(lambda : SpaceQuery(self, is_buffer=True).show())
             self.toolbar.addAction(self.test_action)
 
@@ -639,11 +657,16 @@ class QGISMapWindow(QMainWindow):
         exit_action.triggered.connect(self.close)
         file_menu.addAction(exit_action)
 
-        # 视图菜单
-        view_menu = menubar.addMenu("视图(&v)")
-        log_action = QAction("日志", self)
+        # 视图菜单（保留空菜单占位，预留给后续视图相关动作）
+        menubar.addMenu("视图(&V)")
+
+        # 查看菜单：放日志面板等用于"检视系统状态"的入口
+        check_menu = menubar.addMenu("查看(&C)")
+        log_action = QAction("日志(&L)", self)
+        log_action.setShortcut("Ctrl+L")
+        log_action.setStatusTip("打开 / 唤起日志面板")
         log_action.triggered.connect(lambda: ld.add_log_dock(self))
-        view_menu.addAction(log_action)
+        check_menu.addAction(log_action)
 
 
 
@@ -704,6 +727,9 @@ class QGISMapWindow(QMainWindow):
         dock = AnalysePanel(self)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
         self.current_analyse_dock = dock
+        from component.TreeTool import PGISTools
+        self.tree_tools = PGISTools(parent=dock, topParent=self)
+        dock.setWidget(self.tree_tools)
         dock.show()
 
     def open_attribute_table(self, layer=None, filter_str: str = None, show_ids:list = None):
@@ -716,7 +742,7 @@ class QGISMapWindow(QMainWindow):
                                             filter_str=filter_str if filter_str else '1=1', show_ids=show_ids)
 
             # 添加到主窗口
-            self.addDockWidget(Qt.RightDockWidgetArea, dock)
+            self.addDockWidget(Qt.BottomDockWidgetArea, dock)
 
             # 保存引用
             self.current_attribute_dock = dock
@@ -725,7 +751,8 @@ class QGISMapWindow(QMainWindow):
             dock.show()
         else:
             # 如果对话框已存在，只是显示它
-            self.current_attribute_dock.add_new_layer(c_layer, self, filter_str,show_ids,50,
+            self.current_attribute_dock.add_new_layer(c_layer, self, filter_str if filter_str is not None else "1=1"
+                                                      ,show_ids,50,
                                                       f"属性表 - {c_layer.name()}")
 
         # self.attribute_table_dialog.show()
