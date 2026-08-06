@@ -1,0 +1,55 @@
+name: ci
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install ruff
+      - run: ruff check app/ config/ tests/
+      - run: ruff format --check app/ config/ tests/
+
+  test-no-qgis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - run: pip install -e ".[dev]"
+      - run: pip install pytest pytest-cov
+      - run: pytest tests/ -v -m "not gui" --cov=app --cov-fail-under=50
+
+  test-qgis:
+    runs-on: ubuntu-latest
+    container:
+      image: qgis/qgis:3.40.5
+    steps:
+      - uses: actions/checkout@v4
+      - run: apt-get update && apt-get install -y python3-pyqt5 python3-pytest
+      - run: pip install -e ".[dev]"
+      - run: pytest tests/ -v --cov=app --cov-fail-under=50
+      - run: python -c "from app.ui.main_window import MainWindow; print('UI import OK')"
+
+  build-linux:
+    needs: [lint, test-no-qgis, test-qgis]
+    runs-on: ubuntu-latest
+    container:
+      image: qgis/qgis:3.40.5
+    steps:
+      - uses: actions/checkout@v4
+      - run: pip install pyinstaller
+      - run: pyinstaller tools/pyinstaller.spec
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-app-linux
+          path: dist/app/

@@ -1,0 +1,277 @@
+"""应用启动流程（bootstrap）。
+
+把"读配置 → 装配路径 → 装配日志 → 装配 QGIS runtime → 登录校验 →
+启动 QGIS → 注册插件 → 显示主窗口"这一线性流程集中到一处。所有跨模块
+依赖只在这里组合一次，业务模块不需要知道 QGIS 路径从哪里来。
+
+启动流程：
+
+1. 读 :class:`app.env.config.AppConfig`
+2. 装配 :class:`app.infra.fs.paths.Paths`
+3. 装配 :class:`app.infra.logging.LogConfig` 并触发 ``_RootSink.configure``
+4. 按 ``env`` 字段选择 :class:`QgisRuntime.for_dev` / ``for_prod``，
+   调 :meth:`apply_env`（仅设环境变量，**不**初始化 QGIS）
+5. 创建 :class:`QgsApplication`（**不**调 ``initQgis``），弹出登录对话框
+6. 登录成功才调 ``initQgis``、加载翻译、初始化 processing 插件（仅 dev）
+7. 实例化主窗口、显示、``exec_``
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import sys
+from pathlib import Path
+from typing import Optional
+
+from app.env.config import AppConfig
+from app.env.qgis_runtime import QgisRuntime
+from app.infra.fs.paths import Paths
+from app.infra.logging import get_logger
+
+logger = get_logger(__name__)
+
+# 启动完成后的回调（签名 ``fn(window)``）：主窗口显示后统一执行。
+_startup_callbacks: list = []
+
+
+def register_startup_callback(fn) -> None:
+    """注册一个启动回调；``main`` 显示主窗口后依次调用。"""
+    _startup_callbacks.append(fn)
+
+
+_DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[2] / "config" / "app.yaml"
+
+
+def main(argv: Optional[list[str]] = None) -> int:
+    """应用入口。返回 ``app.exec()`` 的退出码。"""
+    # 打包后直接双击 app.exe 也能工作：自动探测便携包并设环境变量
+    _ensure_portable_env()
+    config_path = _resolve_config_path()
+    cfg = AppConfig.from_file(config_path)
+    paths = _build_paths(cfg)
+    paths.ensure()
+
+    # 注册启动完成回调：按配置加载天地图 XYZ 底图
+    register_startup_callback(_make_base_tile_callback(cfg))
+
+    _configure_logging(cfg, paths)
+
+    logger.info("应用启动 env=%s crs=%s", cfg.env, cfg.crs)
+    logger.debug("Paths: %s", paths)
+
+    qgis = _build_qgis_runtime(cfg)
+    qgis.apply_env()
+    logger.info("QGIS runtime applied: prefix=%s", qgis.qgis_ltr)
+
+    # 创建 QApplication（不 initQgis，等登录通过再做）
+    app = _ensure_qgis_application(qgis)
+
+    # 鉴权优先：本机有未过期凭证就直接跳过登录
+    from app.core.auth import load_credential
+
+    cached = load_credential()
+    if cached is not None:
+        logger.info(
+            "凭证校验通过 username=%s 剩余有效 %d 秒 (%s)",
+            cached.username,
+            cached.remaining_seconds(),
+            cached.expires_at,
+        )
+        return _run_qgis_app(cfg, qgis, app)
+
+    # 没有有效凭证 → 弹登录
+    logger.info("本地无有效凭证，弹出登录对话框")
+    username = _run_login_dialog()
+    if not username:
+        logger.info("登录取消，退出")
+        return 0
+
+    # 登录成功 → 签发 30 天凭证 + 进入主窗口
+    from app.core.auth import Credential, save_credential
+
+    new_cred = Credential.issue(username)
+    save_credential(new_cred)
+    logger.info(
+        "已签发 30 天凭证 username=%s expires_at=%s path=%s",
+        new_cred.username,
+        new_cred.expires_at,
+        save_credential.__module__,
+    )
+    return _run_qgis_app(cfg, qgis, app)
+
+
+# --------------------------------------------------------------------- 私有
+
+
+def _resolve_config_path() -> Path:
+    """优先环境变量，其次仓库内 ``config/app.yaml``。"""
+    env = os.environ.get("QGIS_DEV_CONFIG")
+    if env:
+        return Path(env)
+    return _DEFAULT_CONFIG_PATH
+
+
+def _ensure_portable_env() -> None:
+    """打包后直接双击 ``app.exe`` 也能工作。
+
+    PyInstaller 冻结态下，可执行文件所在目录即便携包根（``qgis/`` + ``proj.db``
+    + ``etc/`` 等都在根下）。这里自动探测并设置 ``QGIS_PREFIX`` /
+    ``QGIS_DEV_*``，已由 launcher 设置过则不覆盖（``setdefault``）。
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    bundle = Path(sys.executable).resolve().parent
+    # 便携包特征校验，避免误判
+    if not (bundle / "qgis").is_dir() or not (bundle / "proj.db").is_file():
+        return
+    os.environ.setdefault("QGIS_PREFIX", str(bundle))
+    os.environ.setdefault("QGIS_DEV_CONFIG", str(bundle / "config" / "app.yaml"))
+    os.environ.setdefault("QGIS_DEV_PATHS_PROJECT_ROOT", str(bundle))
+    os.environ.setdefault("QGIS_DEV_PATHS_RESOURCE", str(bundle / "resource"))
+    os.environ.setdefault("QGIS_DEV_PATHS_LOG", str(bundle / "logs"))
+    os.environ.setdefault("QGIS_DEV_PATHS_TMP", str(bundle / ".tmp"))
+    os.environ.setdefault("QGIS_DEV_PATHS_CONFIG", str(bundle / "config"))
+
+
+def _build_paths(cfg: AppConfig) -> Paths:
+    """根据配置构造 :class:`Paths``，env 变量再次覆盖。"""
+    base = Paths.default()
+    if cfg.paths.resource:
+        base = Paths(
+            project_root=base.project_root,
+            resources=cfg.paths.resource or base.resources,
+            logs=cfg.paths.log or base.logs,
+            tmp=cfg.paths.tmp or base.tmp,
+            config=base.config,
+        )
+    return Paths.from_env(base)
+
+
+def _configure_logging(cfg: AppConfig, paths: Paths) -> None:
+    """写一份新 :class:`LogConfig` 并强制装配。"""
+    from app.infra.logging.config import LogConfig
+    from app.infra.logging.sink import _RootSink
+
+    log_cfg = LogConfig(
+        log_dir=paths.logs,
+        console_level=logging.getLevelName(cfg.logging.level),
+        root_level=logging.getLevelName(cfg.logging.file_level),
+        file_max_bytes=cfg.logging.rotation_mb * 1024 * 1024,
+        file_backup_count=cfg.logging.backup_count,
+    )
+    # 强制让 sink 用新配置
+    os.environ["QGIS_DEV_LOG_DIR"] = str(paths.logs)
+    _RootSink.reset()
+    _RootSink.configure(log_cfg)
+    logger.info("日志装配完成 dir=%s", paths.logs)
+
+
+def _build_qgis_runtime(cfg: AppConfig) -> QgisRuntime:
+    # 便携打包：launcher 设置 QGIS_PREFIX 指向扁平 dist/app（或完整 QGIS 安装）
+    prefix = os.environ.get("QGIS_PREFIX")
+    if prefix:
+        base = Path(prefix)
+        if (base / "apps" / "qgis-ltr").exists():
+            return QgisRuntime.for_prod()          # 完整 QGIS 安装布局
+        return QgisRuntime.for_portable(base)      # 扁平便携包
+    if cfg.env == "prod":
+        return QgisRuntime.for_prod()
+    if cfg.qgis.install_path is None:
+        raise RuntimeError(
+            "dev 模式需要 config/app.yaml 里 qgis.install_path"
+        )
+    return QgisRuntime.for_dev(cfg.qgis.install_path)
+
+
+def _ensure_qgis_application(qgis: QgisRuntime):
+    """创建（复用） :class:`QgsApplication`，但不调 ``initQgis``。
+
+    登录阶段只需要一个能弹出 :class:`QDialog` 的 Qt 应用；QGIS 提供商
+    注册等重活在登录成功后才执行。
+    """
+    from qgis.core import QgsApplication
+
+    _argv = [a.encode("utf-8") if isinstance(a, str) else a for a in sys.argv]
+    app = QgsApplication.instance()
+    if app is None:
+        app = QgsApplication(_argv, True)
+    app.setPrefixPath(str(qgis.qgis_ltr), True)
+    return app
+
+
+def _run_login_dialog() -> Optional[str]:
+    """弹登录对话框；返回登录成功的用户名，或 ``None``（取消 / 校验失败）。"""
+    from PyQt5.QtWidgets import QDialog
+
+    from app.ui.dialogs.login import LoginDialog
+
+    dlg = LoginDialog()
+    if dlg.exec_() == QDialog.Accepted:
+        logger.info("用户登录成功 username=%s", dlg.username())
+        return dlg.username()
+    logger.info("用户取消登录")
+    return None
+
+
+def _run_qgis_app(cfg: AppConfig, qgis: QgisRuntime, app) -> int:
+    """登录成功后才真正初始化 QGIS + 主窗口 + exec_。"""
+    # 关键：initQgis 必须在登录通过之后
+    app.initQgis()
+
+    # 翻译：仅在 dev 模式装（prod 走 launcher 内置资源）
+    if cfg.env == "dev":
+        from PyQt5.QtCore import QTranslator
+
+        translator = QTranslator()
+        translator.load("qgis_zh-Hans.qm", app.i18nPath())
+        app.installTranslator(translator)
+
+    if cfg.env == "dev":
+        qgis.init_plugins()
+
+    # 4) 主窗口（阶段 4 实现新窗口；阶段 1-3 临时仍用旧类）
+    from app.bootstrap.main_window import build_window
+
+    logger.info("[probe] before build_window")
+    try:
+        window = build_window()
+        logger.info("[probe] build_window OK")
+    except Exception:
+        logger.exception("[probe] build_window raised")
+        raise
+    try:
+        window.show()
+        logger.info("[probe] window.show OK, entering exec")
+    except Exception:
+        logger.exception("[probe] window.show raised")
+        raise
+    _run_startup_callbacks(window)
+    return app.exec()
+
+
+def _make_base_tile_callback(cfg: AppConfig):
+    """构造"启动完成后加载配置底图"的回调。"""
+
+    def _cb(window) -> None:
+        from app.core.domain.basemap import add_base_tile_layer
+
+        layer = add_base_tile_layer(cfg.map)
+        if layer is None:
+            logger.warning("未加载配置底图（未启用或图层无效）")
+        else:
+            logger.info("已加载配置底图：%s", layer.name())
+
+    return _cb
+
+
+def _run_startup_callbacks(window) -> None:
+    """依次执行已注册的启动回调；单个失败不影响主流程。"""
+    for fn in _startup_callbacks:
+        try:
+            fn(window)
+        except Exception:  # noqa: BLE001
+            logger.exception("启动回调执行失败：%s", getattr(fn, "__name__", repr(fn)))
+
+
+__all__ = ["main", "register_startup_callback"]

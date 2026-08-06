@@ -1,0 +1,46 @@
+# qgis_dev 主配置
+# ---------------------------------------------------------------------------
+# env:
+#   dev  —— 本地开发，启动器用 qgis.install_path
+#   prod —— 打包后运行，路径走环境变量（QGIS_PREFIX）
+# ---------------------------------------------------------------------------
+
+env: dev
+
+app:
+  name: qgis_dev
+  language: zh-Hans       # i18n
+  crs: EPSG:4490          # 默认坐标系（中国 2000）
+
+map:
+  # 启动后自动加载的 XYZ 底图；enabled: false 则不加载
+  base_tile:
+    enabled: true
+    name: 天地图影像
+    type: xyz
+    url: "https://t0.tianditu.gov.cn/img_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=img&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILECOL={x}&TILEROW={y}&TILEMATRIX={z}&tk=cb75b0d8a671ec1acbf32c6835be5c65"
+    referer: "https://www.tianditu.gov.cn/"
+    zmin: 0
+    zmax: 18
+
+qgis:
+  # dev 模式硬编码；prod 模式不读这里
+  install_path: D:/zsh/app/qgis_3.40
+  python_path: D:/zsh/app/qgis_3.40/apps/qgis-ltr/python
+  bin_path: D:/zsh/app/qgis_3.40/bin
+
+paths:
+  resource: resource
+  log: logs
+  tmp: .tmp
+
+logging:
+  level: INFO              # 控制台
+  file_level: DEBUG        # 文件
+  rotation_mb: 10
+  backup_count: 5
+
+server:
+  host: 0.0.0.0
+  port: 8000
+  workers: 1

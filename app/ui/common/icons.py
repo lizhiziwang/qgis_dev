@@ -1,0 +1,60 @@
+"""统一图标管理。
+
+所有 ``QIcon("resource/png/...")`` 散落字符串走 :class:`Icons` 集中管理。
+路径从 :class:`app.infra.fs.paths.Paths` 解析，确保打包后仍能找到图标。
+"""
+
+from __future__ import annotations
+
+from PyQt5.QtGui import QIcon
+
+
+class Icons:
+    """图标管理（统一从 :class:`Paths` 解析）。"""
+
+    APP = ("png", "app_icon.png")
+    REMOVE = ("png", "remove.png")
+    REFRESH = ("png", "刷新.png")
+    SAVE_EDIT = ("png", "保存编辑.png")
+    STOP_EDIT = ("png", "停止编辑.png")
+    FILTER = ("png", "属性筛选器.png")
+    EDIT = ("png", "编辑.png")
+
+    @classmethod
+    def _resolve(cls, name: tuple[str, ...]) -> str:
+        from app.infra.fs.paths import Paths
+
+        return str(Paths.default().resource(*name))
+
+    @classmethod
+    def app(cls) -> QIcon:
+        return QIcon(cls._resolve(cls.APP))
+
+    @classmethod
+    def remove(cls) -> QIcon:
+        return QIcon(cls._resolve(cls.REMOVE))
+
+    @classmethod
+    def refresh(cls) -> QIcon:
+        return QIcon(cls._resolve(cls.REFRESH))
+
+    @classmethod
+    def save_edit(cls) -> QIcon:
+        return QIcon(cls._resolve(cls.SAVE_EDIT))
+
+    @classmethod
+    def stop_edit(cls) -> QIcon:
+        return QIcon(cls._resolve(cls.STOP_EDIT))
+
+    @classmethod
+    def filter(cls) -> QIcon:
+        return QIcon(cls._resolve(cls.FILTER))
+
+    @classmethod
+    def edit(cls) -> QIcon:
+        return QIcon(cls._resolve(cls.EDIT))
+
+    @classmethod
+    def custom(cls, *parts: str) -> QIcon:
+        """自定义图标。"""
+        return QIcon(cls._resolve(parts))
