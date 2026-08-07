@@ -8,7 +8,6 @@ from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtWidgets import (
     QComboBox,
     QFileDialog,
-    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -26,8 +25,12 @@ from PyQt5.QtWidgets import (
 from qgis.core import Qgis, QgsApplication, QgsProject
 
 from app.core.domain.tiles import TileJob, TileService
+from app.infra.logging import get_logger
+from app.ui.common.algo_desc import make_description_browser
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.widgets import open_file_dir
+
+logger = get_logger(__name__)
 
 
 class VectorTileDialog(BaseDialog):
@@ -51,20 +54,16 @@ class VectorTileDialog(BaseDialog):
     def _init_ui(self) -> None:
         layout = QVBoxLayout()
 
+        # ---- 左右两部分：左参数 + 右算法描述 ----
+        main = QHBoxLayout()
+
         param_panel = QWidget()
         self._init_parameters_panel(param_panel)
-        layout.addWidget(param_panel)
+        main.addWidget(param_panel, stretch=3)
 
-        desc_group = QGroupBox("矢量瓦片(XYZ)生成")
-        desc_label = QLabel(
-            "该算法导出一个或多个矢量图层到矢量瓦片格式，"
-            "为快速地图渲染和小数据量而优化的数据格式。"
-        )
-        desc_label.setWordWrap(True)
-        desc_layout = QVBoxLayout(desc_group)
-        desc_layout.addWidget(desc_label)
-        desc_layout.addStretch()
-        layout.addWidget(desc_group)
+        # 右侧算法描述（与工具树共用同一套描述逻辑，见 algo_desc）
+        main.addWidget(make_description_browser(self.dia_type), stretch=2)
+        layout.addLayout(main, stretch=1)
 
         # 进度 + 按钮
         b_l = QVBoxLayout()
@@ -201,16 +200,20 @@ class VectorTileDialog(BaseDialog):
             job = self._build_job()
             self.task = self.tile_service.submit(job)
             if self.task is not None:
-                self.task.progressChanged.connect(self.loading.setValue)
-                self.task.finished.connect(self._on_task_finished)
+                # progress_updated 在 worker 线程发出 → 跨线程 QueuedConnection 投递到主
+                # 线程。实测：queued 投递到 QObject 槽（如 self.loading.setValue）在本环境
+                # 原生崩溃（0xC0000409，无 Python 异常）；投递到普通 Python 可调用对象安全
+                # （199 个事件正常送达）。所以先接到 Python 方法，再更新控件。
+                self.task.progress_updated.connect(self._on_task_progress)
+                # QgsTask 没有 finished 信号（会 AttributeError），用生命周期信号收尾
+                self.task.taskCompleted.connect(lambda: self.loading.setValue(100))
+                self.task.taskTerminated.connect(lambda: self.loading.setValue(0))
         except Exception as e:  # noqa: BLE001
-            print(e)
+            logger.error("提交瓦片任务失败: %s", e, exc_info=True)
 
-    def _on_task_finished(self, ok: bool) -> None:
-        if ok:
-            self.loading.setValue(100)
-        else:
-            self.loading.setValue(0)
+    def _on_task_progress(self, value: int) -> None:
+        """worker 线程进度跨线程投递到这里（普通 Python 方法，投递安全）后更新进度条。"""
+        self.loading.setValue(int(value))
 
     def _build_job(self) -> TileJob:
         if self.out_extent is None:

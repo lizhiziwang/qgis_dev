@@ -19,6 +19,8 @@ class Icons:
     STOP_EDIT = ("png", "停止编辑.png")
     FILTER = ("png", "属性筛选器.png")
     EDIT = ("png", "编辑.png")
+    ZOOM_IN = ("svg", "zoom_in.svg")
+    ZOOM_OUT = ("svg", "zoom_out.svg")
 
     @classmethod
     def _resolve(cls, name: tuple[str, ...]) -> str:
@@ -53,6 +55,14 @@ class Icons:
     @classmethod
     def edit(cls) -> QIcon:
         return QIcon(cls._resolve(cls.EDIT))
+
+    @classmethod
+    def zoom_in(cls) -> QIcon:
+        return QIcon(cls._resolve(cls.ZOOM_IN))
+
+    @classmethod
+    def zoom_out(cls) -> QIcon:
+        return QIcon(cls._resolve(cls.ZOOM_OUT))
 
     @classmethod
     def custom(cls, *parts: str) -> QIcon:

@@ -24,6 +24,10 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+from app.infra.logging import get_logger
+
+logger = get_logger(__name__)
+
 
 @dataclass(frozen=True)
 class QgisRuntime:
@@ -135,13 +139,23 @@ class QgisRuntime:
             self._append_syspath(sp)
 
     def init_plugins(self) -> None:
-        """初始化 processing 插件。失败不抛（开发期不一定要装 processing）。"""
+        """初始化 processing 插件。
+
+        ``processing`` 是 Python 插件（位于 ``python/plugins/processing``），
+        打包时必须把它复制进 ``plugins/`` 目录；否则 ``qgis.processing.run``
+        始终是 stub，调用即抛 ``QgsNotSupportedException: Processing plugin
+        has not been loaded``（瓦片 / 缓冲工具不可用）。
+        失败不抛（初始化失败不影响主流程），但会记录日志以便排查。
+        """
         try:
-            from processing.core.Processing import Processing  # type: ignore[import-not-found]
+            from processing.core.Processing import Processing
 
             Processing.initialize()
-        except Exception:  # noqa: BLE001 —— 初始化失败不影响主流程
-            pass
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "Processing 插件初始化失败，瓦片 / 缓冲等依赖 processing.run 的工具将不可用",
+                exc_info=True,
+            )
 
     @staticmethod
     def _append_syspath(p: Path) -> None:

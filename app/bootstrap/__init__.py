@@ -227,8 +227,10 @@ def _run_qgis_app(cfg: AppConfig, qgis: QgisRuntime, app) -> int:
         translator.load("qgis_zh-Hans.qm", app.i18nPath())
         app.installTranslator(translator)
 
-    if cfg.env == "dev":
-        qgis.init_plugins()
+    # processing 插件：dev / prod 都需要（瓦片、缓冲等工具依赖 processing.run）。
+    # 必须在 initQgis 之后调用；打包环境漏掉会导致 run 是 stub，
+    # 报 "Processing plugin has not been loaded"。
+    qgis.init_plugins()
 
     # 4) 主窗口（阶段 4 实现新窗口；阶段 1-3 临时仍用旧类）
     from app.bootstrap.main_window import build_window

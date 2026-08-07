@@ -40,6 +40,17 @@ fi
 QGIS_PLUGIN_DIR="$QGIS_PYTHON_PKG/qgis/plugins"
 [ -d "$QGIS_PLUGIN_DIR" ] && cp -r "$QGIS_PLUGIN_DIR" "$DIST_PATH/plugins"
 
+# Python 插件 processing：C++ plugins 目录里没有它（Ubuntu 等安装在
+# /usr/share/qgis/python/plugins/processing）。缺了它 `processing.run` 是 stub，
+# 瓦片/缓冲工具会报 "Processing plugin has not been loaded"。
+mkdir -p "$DIST_PATH/plugins"
+PROCESSING_PLUGIN=$(find /usr /opt -type d -path "*/python/plugins/processing" 2>/dev/null | head -1 || true)
+if [ -n "$PROCESSING_PLUGIN" ] && [ -d "$PROCESSING_PLUGIN" ]; then
+    cp -r "$PROCESSING_PLUGIN" "$DIST_PATH/plugins/processing"
+else
+    echo "WARNING: 未找到 processing Python 插件，打包后的瓦片/缓冲工具将不可用"
+fi
+
 QGIS_I18N_DIR="$QGIS_PYTHON_PKG/qgis/i18n"
 [ -d "$QGIS_I18N_DIR" ] && cp -r "$QGIS_I18N_DIR" "$DIST_PATH/i18n"
 

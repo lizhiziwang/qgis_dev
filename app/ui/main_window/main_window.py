@@ -58,6 +58,7 @@ from qgis.gui import (
 from app.core.domain.editing import LayerEditService
 from app.core.domain.query import QueryType, SpaceQueryService
 from app.infra.fs.paths import Paths
+from app.ui.common.canvas_zoom import CanvasZoomTool
 from app.ui.common.icons import Icons
 from app.ui.docks.attribute_dock import AttributeDock
 from app.ui.docks.feature_info_dock import FeatureInfoDock
@@ -107,6 +108,9 @@ class MainWindow(QMainWindow):
         self.bridge = QgsLayerTreeMapCanvasBridge(self.tree_root, self.canvas)
         self.bridge.setAutoSetupOnFirstLayer(True)
         self._build_central_widget()
+
+        # ---- 画布左上角缩放工具（覆盖层）----
+        self.zoom_tool = CanvasZoomTool(self.canvas)
 
         # ---- service 注入 ----
         self.editing_service = LayerEditService()

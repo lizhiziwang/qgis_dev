@@ -68,6 +68,80 @@ DIALOG_BASE_QSS = """
     }
 """
 
+# ---------------------------------------------------------------------------
+# 画布左上角缩放工具（CanvasZoomTool）样式
+# ---------------------------------------------------------------------------
+
+CANVAS_ZOOM_PANEL_QSS = """
+    QFrame {
+        background-color: rgba(255, 255, 255, 0.92);
+        border: 1px solid rgba(0, 0, 0, 0.16);
+        border-radius: 8px;
+    }
+"""
+
+# 面板内图标按钮（放大/缩小）：透明底 + 蓝色悬浮反馈，与滑块主题色一致；
+# focus 去掉虚线框，disabled 置灰（按钮本身仍可用，保留未来禁用入口）
+CANVAS_ZOOM_BUTTON_QSS = """
+    QPushButton {
+        border: none;
+        background-color: transparent;
+        border-radius: 5px;
+    }
+    QPushButton:hover {
+        background-color: rgba(74, 144, 226, 0.12);
+    }
+    QPushButton:pressed {
+        background-color: rgba(74, 144, 226, 0.20);
+    }
+    QPushButton:focus {
+        outline: none;
+    }
+    QPushButton:disabled {
+        color: #b0b0b0;
+    }
+"""
+
+# 垂直滑块：宽 groove + 白色描边蓝圆点。
+# 注意：本 QGIS 环境里 QSS 的 sub-page 实际渲染成"从顶到手柄"（与标准 Qt 相反，
+# 像素实测），蓝色填充因此放在 add-page 上才能得到"从底部到手柄"（放大时蓝色上升）。
+CANVAS_ZOOM_SLIDER_QSS = """
+    QSlider::groove:vertical {
+        width: 6px;
+        background: rgba(0, 0, 0, 0.10);
+        border-radius: 3px;
+    }
+    QSlider::sub-page:vertical {
+        background: rgba(0, 0, 0, 0.10);
+        border-radius: 3px;
+    }
+    QSlider::add-page:vertical {
+        background: qlineargradient(
+            x1: 0, y1: 0, x2: 1, y2: 0,
+            stop: 0 #4A90E2, stop: 1 #6ab0f0
+        );
+        border-radius: 3px;
+    }
+    QSlider::handle:vertical {
+        width: 12px;
+        height: 12px;
+        margin: -5px 0;
+        border-radius: 6px;
+        background: #4A90E2;
+        border: 1px solid #ffffff;
+    }
+    QSlider::handle:vertical:hover {
+        background: #5b9df0;
+    }
+    QSlider::handle:vertical:pressed {
+        background: #3a80d2;
+    }
+"""
+
+CANVAS_ZOOM_QSS = (
+    CANVAS_ZOOM_PANEL_QSS + CANVAS_ZOOM_BUTTON_QSS + CANVAS_ZOOM_SLIDER_QSS
+)
+
 
 def apply_dialog_style(dialog) -> None:
     """给 dialog 应用 :data:`DIALOG_BASE_QSS`。"""

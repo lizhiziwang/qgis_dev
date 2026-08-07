@@ -43,6 +43,7 @@ datas = [
 binaries = [
     (str(QGIS_BIN / "qgis_core.dll"), "."),
     (str(QGIS_BIN / "qgis_gui.dll"), "."),
+    (str(QGIS_BIN / "qgis_analysis.dll"), "."),  # processing 插件 / qgis._analysis 需要
     (str(MAIN_BIN / "gdal311.dll"), "."),
     (str(MAIN_BIN / "geos_c.dll"), "."),
     (str(MAIN_BIN / "pdalcpp.dll"), "."),
@@ -101,6 +102,9 @@ hiddenimports = [
     "PyQt5._QOpenGLFunctions_2_0",
     "PyQt5._QOpenGLFunctions_2_1",
     "PyQt5._QOpenGLFunctions_4_1_Core",
+    # processing 插件（运行时加载，PyInstaller 分析不到它的 import）需要：
+    "PyQt5.uic",      # processing/gui 用 qgis.PyQt.uic 加载 .ui
+    "psycopg2",       # processing/algs/gdal/GdalUtils 顶层 import
 ]
 
 try:
@@ -128,7 +132,7 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=["processing"],  # 项目根的 processing/ 是 QGIS 临时目录，namespace 包会遮蔽 plugins/processing
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
