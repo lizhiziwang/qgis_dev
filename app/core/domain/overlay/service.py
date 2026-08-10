@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Dict, Optional, Tuple
 
@@ -45,6 +46,9 @@ class OverlayJob:
     operations: Tuple[str, ...] = ("intersection",)
     #: 输出图层名前缀，结果命名为 ``{前缀}_{运算中文名}``
     output_prefix: str = "叠加结果"
+    #: 输出目录。为 ``None`` 时结果写入临时 memory 图层；给定目录时每个运算写一个
+    #: ``{前缀}_{运算中文名}.gpkg`` 文件，并返回从文件加载的图层。
+    output_dir: Optional[str] = None
 
 
 class OverlayService:
@@ -84,11 +88,21 @@ class OverlayService:
                 logger.warning("未知叠加运算 %r，跳过", op)
                 continue
             label = OPERATION_NAMES.get(op, op)
-            params = {
-                "INPUT": input_layer,  # 传图层对象，不传 source()
-                "OVERLAY": overlay_layer,
-                "OUTPUT": f"memory:{job.output_prefix}_{label}",
-            }
+            output_name = f"{job.output_prefix}_{label}"
+            if job.output_dir:
+                # 目录输出：每个运算写一个独立 gpkg 文件（文件内仅一层，可按路径加载）
+                file_path = os.path.join(job.output_dir, f"{output_name}.gpkg")
+                params = {
+                    "INPUT": input_layer,
+                    "OVERLAY": overlay_layer,
+                    "OUTPUT": file_path,
+                }
+            else:
+                params = {
+                    "INPUT": input_layer,
+                    "OVERLAY": overlay_layer,
+                    "OUTPUT": f"memory:{output_name}",
+                }
             try:
                 res = processing.run(alg, params, context=context, feedback=fb)
             except Exception as exc:  # noqa: BLE001
@@ -106,7 +120,14 @@ class OverlayService:
                     exc_info=True,
                 )
                 raise
-            layer = res["OUTPUT"]
+
+            if job.output_dir:
+                # 文件输出时 results["OUTPUT"] 是路径字符串，从文件重新加载图层
+                from qgis.core import QgsVectorLayer
+
+                layer = QgsVectorLayer(res["OUTPUT"], output_name, "ogr")
+            else:
+                layer = res["OUTPUT"]
             if layer is None or not layer.isValid():
                 raise RuntimeError(f"{label} 结果图层无效")
             results[op] = layer

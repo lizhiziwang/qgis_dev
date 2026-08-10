@@ -44,6 +44,17 @@ def open_file_dir(
     return ""
 
 
+def save_file(
+    parent,
+    title: str = "保存文件",
+    init_path: str = "",
+    filter_: str = "所有文件 (*)",
+) -> str:
+    """打开文件保存对话框，返回路径（取消返回空串）。"""
+    path, _ = QFileDialog.getSaveFileName(parent, title, init_path, filter_)
+    return path
+
+
 def make_table(
     headers: list[str],
     *,
@@ -64,21 +75,18 @@ def make_table(
 
 
 def make_refresh_button(parent: Optional[QWidget] = None, tooltip: str = "刷新") -> QPushButton:
-    """构造"刷新"图标按钮。"""
+    """构造"刷新"图标按钮（透明扁平样式，hover/按下走 app_qss 的 FlatButton 规则）。"""
     btn = QPushButton(parent)
+    btn.setObjectName("FlatButton")
     btn.setIcon(Icons.refresh())
     btn.setToolTip(tooltip)
     btn.setFixedSize(26, 26)
-    btn.setStyleSheet(
-        "QPushButton { border: none; background-color: transparent; border-radius: 3px; }"
-        "QPushButton:hover { background-color: #e8e8e8; }"
-        "QPushButton:pressed { background-color: #dcdcdc; }"
-    )
     return btn
 
 
 __all__ = [
     "open_file_dir",
+    "save_file",
     "make_table",
     "make_refresh_button",
 ]

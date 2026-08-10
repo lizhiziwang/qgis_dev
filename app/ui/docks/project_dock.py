@@ -34,6 +34,8 @@ class ProjectDock(QDockWidget):
     render_requested = pyqtSignal(object)
     #: 点击"标注设置"，携带选中的图层
     label_requested = pyqtSignal(object)
+    #: 图层右键菜单请求，携带 (图层, 全局坐标)；由 MainWindow 弹 QGIS 式图层菜单
+    layer_context_menu_requested = pyqtSignal(object, object)
 
     #: 只读分组树：只列图层名 + 可见性勾选框，不显示图例/符号（避免分类/渐变
     #: 渲染的图例项如 "1"、"2" 挤进树里）
@@ -69,6 +71,8 @@ class ProjectDock(QDockWidget):
         self.data_view = QTreeView(self)
         self.data_view.setHeaderHidden(True)  # QgsLayerTreeModel 的 header 会显示 "1"
         self.data_view.clicked.connect(self._on_tree_clicked)
+        self.data_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.data_view.customContextMenuRequested.connect(self._on_view_context_menu)
         layout.addWidget(self.data_view, 3)
 
         # 3. 参考图层树
@@ -76,6 +80,8 @@ class ProjectDock(QDockWidget):
         self.ref_view = QTreeView(self)
         self.ref_view.setHeaderHidden(True)  # QgsLayerTreeModel 的 header 会显示 "1"
         self.ref_view.clicked.connect(self._on_tree_clicked)
+        self.ref_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.ref_view.customContextMenuRequested.connect(self._on_view_context_menu)
         layout.addWidget(self.ref_view, 3)
 
         # 4. 渲染与标注
@@ -108,6 +114,21 @@ class ProjectDock(QDockWidget):
         node = self._model.index2node(index)
         layer = node.layer() if node is not None and hasattr(node, "layer") else None
         self._set_selected_layer(layer)
+
+    def _on_view_context_menu(self, pos) -> None:
+        """右键图层节点 → 发信号让 MainWindow 弹 QGIS 式图层菜单。"""
+        if self._model is None:
+            return
+        view = self.sender()
+        index = view.indexAt(pos)
+        if not index.isValid():
+            return
+        node = self._model.index2node(index)
+        layer = node.layer() if node is not None and hasattr(node, "layer") else None
+        if layer is None:
+            return
+        # customContextMenuRequested 的 pos 是 viewport 坐标
+        self.layer_context_menu_requested.emit(layer, view.viewport().mapToGlobal(pos))
 
     # ------------------------------------------------------------ 对外接口
 

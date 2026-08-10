@@ -28,11 +28,7 @@ from PyQt5.QtWidgets import (
 
 from app.infra.logging import get_logger
 from app.ui.common.icons import Icons
-from app.ui.common.styles import (
-    CANVAS_ZOOM_BUTTON_QSS,
-    CANVAS_ZOOM_PANEL_QSS,
-    CANVAS_ZOOM_SLIDER_QSS,
-)
+from app.ui.common.theme import ThemeManager, canvas_zoom_qss
 
 logger = get_logger(__name__)
 
@@ -65,16 +61,21 @@ class CanvasZoomTool(QFrame):
         # 必须显式 adjustSize()，否则塌缩成 30px 高 → 按钮重叠、滑块压扁。
         self.adjustSize()
         self._wire_signals()
+        # 主题：面板 + 按钮 + 滑块配色统一走主题，切换时重绘
+        ThemeManager.instance().theme_changed.connect(self._on_theme_changed)
         self.move(_MARGIN, _MARGIN)
         self._sync_from_canvas()
         self.raise_()
+
+    def _on_theme_changed(self, theme) -> None:
+        self.setStyleSheet(canvas_zoom_qss(theme))
 
     # ===================================================== 装配
 
     def _build_ui(self) -> None:
         self.setFixedWidth(60)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.setStyleSheet(CANVAS_ZOOM_PANEL_QSS)
+        self.setStyleSheet(canvas_zoom_qss(ThemeManager.instance().current()))
         # 柔和投影，让工具浮在地图
         shadow = QGraphicsDropShadowEffect(self)
         shadow.setBlurRadius(12)
@@ -92,7 +93,6 @@ class CanvasZoomTool(QFrame):
         self.btn_in.setIconSize(QSize(20, 20))
         self.btn_in.setToolTip("放大（+）")
         self.btn_in.setFixedHeight(34)
-        self.btn_in.setStyleSheet(CANVAS_ZOOM_BUTTON_QSS)
         layout.addWidget(self.btn_in)
 
         # 垂直进度条（滑块，可拖动缩放）。水平撑满面板宽度，让轨道与按钮
@@ -104,7 +104,6 @@ class CanvasZoomTool(QFrame):
         self.slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.slider.setMinimumHeight(110)
         self.slider.setToolTip("拖动调整缩放级别")
-        self.slider.setStyleSheet(CANVAS_ZOOM_SLIDER_QSS)
         layout.addWidget(self.slider, 1)
 
         # 缩小按钮（底部）——SVG 图标（放大镜 -）
@@ -113,7 +112,6 @@ class CanvasZoomTool(QFrame):
         self.btn_out.setIconSize(QSize(20, 20))
         self.btn_out.setToolTip("缩小（−）")
         self.btn_out.setFixedHeight(34)
-        self.btn_out.setStyleSheet(CANVAS_ZOOM_BUTTON_QSS)
         layout.addWidget(self.btn_out)
 
     def _wire_signals(self) -> None:

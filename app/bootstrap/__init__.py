@@ -197,6 +197,13 @@ def _ensure_qgis_application(qgis: QgisRuntime):
     if app is None:
         app = QgsApplication(_argv, True)
     app.setPrefixPath(str(qgis.qgis_ltr), True)
+
+    # 全局控件配色：弹窗 / 右键菜单 / ToolTip 等顶层窗口只有 QApplication 级
+    # QSS 能覆盖。这里提前实例化 ThemeManager，把保存的主题设到全局，
+    # 让登录弹窗等出现在主窗口之前的顶层窗口也能用上主题。
+    from app.ui.common.theme import ThemeManager
+
+    ThemeManager.instance()
     return app
 
 

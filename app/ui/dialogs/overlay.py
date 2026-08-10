@@ -6,6 +6,7 @@ from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -112,8 +113,29 @@ class OverlayDialog(BaseDialog):
         layout.addWidget(QLabel("输出图层名前缀"))
         self.output_edit = QLineEdit("叠加结果")
         layout.addWidget(self.output_edit)
+        layout.addSpacing(6)
+
+        # 5. 输出目录（留空 = 临时 memory 图层；给出时每个运算写一个 gpkg 文件）
+        layout.addWidget(QLabel("输出目录（留空为临时图层）"))
+        dir_row = QHBoxLayout()
+        self.output_dir_edit = QLineEdit()
+        self.output_dir_edit.setPlaceholderText("留空则生成临时缓存图层")
+        dir_row.addWidget(self.output_dir_edit, stretch=1)
+        browse_btn = QPushButton("浏览…")
+        browse_btn.clicked.connect(self._browse_output_dir)
+        dir_row.addWidget(browse_btn)
+        layout.addLayout(dir_row)
 
         layout.addStretch()
+
+    def _browse_output_dir(self) -> None:
+        from PyQt5.QtWidgets import QFileDialog
+
+        path = QFileDialog.getExistingDirectory(
+            self, "选择输出目录", self.output_dir_edit.text()
+        )
+        if path:
+            self.output_dir_edit.setText(path)
 
     def _populate_layers(self, combo: QComboBox) -> None:
         """把工程里的矢量图层填充进下拉框（图层对象存 itemData）。"""
@@ -141,6 +163,7 @@ class OverlayDialog(BaseDialog):
             overlay_layer=overlay_layer,
             operations=operations,
             output_prefix=self.output_edit.text().strip() or "叠加结果",
+            output_dir=self.output_dir_edit.text().strip() or None,
         )
 
         # 不能留在 clicked 信号栈里同步跑 processing.run + addMapLayer + refresh：
@@ -173,7 +196,8 @@ class OverlayDialog(BaseDialog):
             f"{OPERATION_NAMES[op]}({layer.featureCount()}要素)"
             for op, layer in results.items()
         )
-        send("success", f"叠加分析完成：{summary}", duration=3)
+        dest = f" → {job.output_dir}" if job.output_dir else ""
+        send("success", f"叠加分析完成：{summary}{dest}", duration=3)
         QTimer.singleShot(0, self._refresh_canvas)
 
     def _refresh_canvas(self) -> None:

@@ -27,7 +27,6 @@ from PyQt5.QtWidgets import (
 )
 
 from app.ui.common.icons import Icons
-from app.ui.common.styles import DIALOG_BASE_QSS
 
 # 默认账号（dev / 占位用；生产请替换为读配置 / 调 auth 服务）
 _DEFAULT_USER = "admin"
@@ -53,16 +52,9 @@ class LoginDialog(QDialog):
     # ============================================================== UI
 
     def _build_ui(self) -> None:
-        # 与主系统对话框一致的字体 / 输入框 / 按钮；二级文字、错误提示走 object-name 规则，
-        # 这样它们仍继承 DIALOG_BASE_QSS 的字体，不会退回系统默认。
-        self.setStyleSheet(
-            DIALOG_BASE_QSS
-            + """
-              QLabel#loginSubtitle { color: #666; }
-              QLabel#loginError { color: #d33; font-weight: bold; }
-              """
-        )
-
+        # 配色统一走主题（app_qss，QApplication 级）：输入框 / 按钮 / 字体由
+        # 全局规则负责；二级文字、错误提示用 object-name 规则
+        # （QLabel#loginSubtitle / QLabel#loginError），颜色来自 Theme。
         layout = QVBoxLayout(self)
         layout.setContentsMargins(24, 24, 24, 24)
         layout.setSpacing(12)

@@ -112,3 +112,23 @@ def test_unknown_operation_is_skipped(overlay_layers, service):
     a, b = overlay_layers
     result = service.run(OverlayJob(input_layer=a, overlay_layer=b, operations=("intersection", "nope")))
     assert set(result) == {"intersection"}
+
+
+@pytest.mark.gui
+def test_output_dir_writes_gpkg_files(overlay_layers, service, tmp_path):
+    """给出输出目录时，每个运算写一个 gpkg 文件并返回从文件加载的图层。"""
+    a, b = overlay_layers
+    job = OverlayJob(
+        input_layer=a,
+        overlay_layer=b,
+        operations=("intersection", "union"),
+        output_dir=str(tmp_path),
+    )
+    result = service.run(job)
+    assert set(result) == {"intersection", "union"}
+    for op, layer in result.items():
+        assert layer.isValid(), op
+        assert layer.providerType() == "ogr", op
+        assert layer.name() == f"叠加结果_{OPERATION_NAMES[op]}"
+    written = {p.name for p in tmp_path.iterdir()}
+    assert written == {"叠加结果_交集.gpkg", "叠加结果_并集.gpkg"}

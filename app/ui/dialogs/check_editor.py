@@ -67,7 +67,7 @@ class CheckConfigDialog(BaseDialog):
         main.setContentsMargins(20, 20, 20, 20)
 
         title = QLabel("质检项配置信息")
-        title.setStyleSheet("font-size: 14px; color: #333;")
+        title.setObjectName("DialogTitle")  # 标题样式（字号/颜色）由 app_qss 提供
         main.addWidget(title)
 
         # 名称

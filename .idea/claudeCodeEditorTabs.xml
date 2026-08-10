@@ -1,23 +1,20 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
   <component name="ClaudeCodeEditorTabs">
-    <option name="activeSessionId" value="6957da7f-b44a-44a5-a15d-134057935d15" />
+    <option name="activeSessionId" value="a39f127f-3b80-4334-bbed-679962ebd146" />
     <option name="openSessionIds">
       <list>
-        <option value="d6aa9b94-1e94-4280-a948-2b6b326eabf4" />
-        <option value="6957da7f-b44a-44a5-a15d-134057935d15" />
+        <option value="a39f127f-3b80-4334-bbed-679962ebd146" />
       </list>
     </option>
     <option name="sessionPaths">
       <map>
-        <entry key="6957da7f-b44a-44a5-a15d-134057935d15" value="/sessions/b37e1dc9-bcee-4583-9eee-9b4354b4f97c" />
-        <entry key="d6aa9b94-1e94-4280-a948-2b6b326eabf4" value="/sessions/88f95ae3-43e1-47f3-abad-d983f6c73334" />
+        <entry key="a39f127f-3b80-4334-bbed-679962ebd146" value="/sessions/1e28adc8-f31e-420d-a467-c5339c59201d" />
       </map>
     </option>
     <option name="sessionTitles">
       <map>
-        <entry key="6957da7f-b44a-44a5-a15d-134057935d15" value=".proc_copy_test 这个目录是干嘛的" />
-        <entry key="d6aa9b94-1e94-4280-a948-2b6b326eabf4" value="读取下归档内容" />
+        <entry key="a39f127f-3b80-4334-bbed-679962ebd146" value="@app/ui/main_window/main_window.py 中的toolbar的edit" />
       </map>
     </option>
   </component>

@@ -25,6 +25,7 @@ from qgis.core import QgsWkbTypes
 from qgis.gui import QgsHighlight
 
 from app.core.domain.identify import IdentifyResult
+from app.ui.common.theme import ThemeManager
 
 
 class FeatureInfoDock(QDockWidget):
@@ -74,15 +75,17 @@ class FeatureInfoDock(QDockWidget):
         if self._highlight is not None:
             self._highlight.hide()
         self._highlight = highlight
+        t = ThemeManager.instance().current()
         self.title_label.setText(
             f"<h3 style='margin:0'>{self.layer.name()}</h3>"
-            f"<p style='margin:0; color:#666'>要素 ID: {self.feature.id()}</p>"
+            f"<p style='margin:0; color:{t.text_secondary}'>要素 ID: {self.feature.id()}</p>"
         )
         self._load_info()
         self.show()
         self.raise_()
 
     def _load_info(self) -> None:
+        t = ThemeManager.instance().current()
         info = "<div style='line-height:1.6; width:100%; box-sizing:border-box;'>"
         info += f"<p><strong>属性字段（共 {len(self.layer.fields())} 个）：</strong></p>"
         info += """
@@ -90,16 +93,16 @@ class FeatureInfoDock(QDockWidget):
             <colgroup><col style='width: 35%;' /><col style='width: 65%;' /></colgroup>
         """
         info += f"""
-            <tr><td style='padding:8px; border-bottom:1px solid #eee;'>几何文本</td>
-                <td style='padding:8px; border-bottom:1px solid #eee;'>{self.feature.geometry().asWkt()}</td></tr>
+            <tr><td style='padding:8px; border-bottom:1px solid {t.panel_border};'>几何文本</td>
+                <td style='padding:8px; border-bottom:1px solid {t.panel_border};'>{self.feature.geometry().asWkt()}</td></tr>
         """
         for i, (field, value) in enumerate(zip(self.layer.fields(), self.feature.attributes())):
-            bg = "#f8f9fa" if i % 2 == 0 else "#ffffff"
-            val = str(value) if value is not None else "<span style='color:#999'>无</span>"
+            bg = t.panel_bg if i % 2 == 0 else t.input_bg
+            val = str(value) if value is not None else f"<span style='color:{t.text_secondary}'>无</span>"
             info += (
                 f"<tr style='background-color:{bg}'>"
-                f"<td style='padding:8px; border-bottom:1px solid #eee;'>{field.name()}</td>"
-                f"<td style='padding:8px; border-bottom:1px solid #eee;'>{val}</td></tr>"
+                f"<td style='padding:8px; border-bottom:1px solid {t.panel_border};'>{field.name()}</td>"
+                f"<td style='padding:8px; border-bottom:1px solid {t.panel_border};'>{val}</td></tr>"
             )
         info += "</table></div>"
         self.info_text.setHtml(info)

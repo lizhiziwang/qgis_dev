@@ -1,13 +1,13 @@
-"""分页属性表 Dock。
+"""动态加载属性表 Dock。
 
 迁自 :class:`component.map_tool.PagedAttributeDockWidget` 等 5 个类。"""
 
 from __future__ import annotations
 
 import math
-from typing import Any, List, Optional
+from typing import List, Optional
 
-from PyQt5.QtCore import QAbstractTableModel, QModelIndex, Qt, QThread, QVariant, pyqtSignal
+from PyQt5.QtCore import QAbstractTableModel, QModelIndex, Qt, QThread, QTimer, QVariant, pyqtSignal
 from PyQt5.QtWidgets import (
     QAbstractItemView,
     QDockWidget,
@@ -20,17 +20,14 @@ from PyQt5.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
 from qgis.core import (
     QgsFeature,
     QgsFeatureRequest,
     QgsField,
     QgsVectorLayer,
 )
-from PyQt5.QtGui import QIcon
 
 from app.core.domain.editing import LayerEditService
-from app.core.domain.identify import FeatureIdentifyService
 from app.ui.common.icons import Icons
 
 
@@ -73,61 +70,104 @@ class FeatureLoaderThread(QThread):
 
 
 class PagedAttributeTableModel(QAbstractTableModel):
-    """分页属性表 model。"""
+    """动态加载属性表 model。
+
+    初始加载总量的 20%，``load_more()`` 逐批追加 20% 直至加载完。
+    """
 
     def __init__(self, layer: QgsVectorLayer, page_size: int = 50, filter_str: str = "1=1", show_ids: Optional[list] = None) -> None:
         super().__init__()
         self.layer = layer
-        self.page_size = page_size
+        # page_size 仅保留兼容旧调用（main_window 传 50），动态加载不再按页
+        self.page_size = max(1, int(page_size))
         self.filter_str = filter_str
         self.show_ids = list(show_ids) if show_ids else []
         self.field_names = [f.name() for f in layer.fields()]
         self.features: List[QgsFeature] = []
-        self.is_loading = True
-        where = (
+        #: 每批加载条数：总量的 20%（向上取整，至少 1 条）
+        self.batch_size = 0
+        #: 已加载条数（= features 长度；为 0 表示尚未加载）
+        self.loaded_count = 0
+        #: 加载中标志，防止滚动信号重入导致重复加载
+        self.is_loading = False
+        #: 匹配 ``where`` 的全部要素 ID（按 ``$id`` 升序），分批基于它切片。
+        #: 不用 offset/limit：本 QGIS 构建的 QgsFeatureRequest 没有 ``setOffset``。
+        self.all_ids: List[int] = []
+        self.total_features = 0
+        self.where = (
             f"{self.filter_str} and $id in ({','.join(str(i) for i in self.show_ids)})"
             if self.show_ids else self.filter_str
         )
-        self.where = where
-        request = QgsFeatureRequest().setFilterExpression(where)
-        try:
-            self.total_features = len(list(layer.getFeatures(request)))
-        except Exception:  # noqa: BLE001
-            self.total_features = 0
-        effective_size = min(self.page_size, max(self.total_features, 1)) if self.total_features else self.page_size
-        self._effective_size = effective_size
-        self.total_pages = max(1, math.ceil(self.total_features / max(self.page_size, 1))) if self.total_features else 1
-        self._load_page()
+        self._refresh_totals()
+        self.load_more()
 
-    def _load_page(self) -> None:
-        self.beginResetModel()
-        self.features = []
+    @property
+    def has_more(self) -> bool:
+        """是否还有未加载的要素。"""
+        return self.loaded_count < self.total_features
+
+    def _refresh_totals(self) -> None:
+        """重新统计匹配 ID 列表、总量与批次大小（数据/筛选变化后调用）。"""
         try:
-            tmp = max(1, int(1.5 * self.page_size))
-            size = min(self.total_features, tmp) if self.total_features else 0
-            ob = QgsFeatureRequest.OrderByClause("$id", ascending=True)
-            request = (
-                QgsFeatureRequest()
-                .setLimit(size)
-                .setOrderBy(QgsFeatureRequest.OrderBy([ob]))
-                .setFilterExpression(self.where)
-            )
-            self.features = list(self.layer.getFeatures(request))
+            request = QgsFeatureRequest().setFilterExpression(self.where)
+            self.all_ids = sorted(f.id() for f in self.layer.getFeatures(request))
+            self.total_features = len(self.all_ids)
         except Exception:  # noqa: BLE001
-            self.features = []
+            self.all_ids = []
+            self.total_features = 0
+        self.batch_size = (
+            max(1, math.ceil(self.total_features * 0.2)) if self.total_features else 0
+        )
+        self.loaded_count = 0
+        self.features = []
+
+    def load_more(self) -> None:
+        """追加加载下一批（每批总量的 20%）；已加载完或加载中则不做。"""
+        if not self.has_more or self.is_loading:
+            return
+        self.is_loading = True
+        try:
+            start = self.loaded_count
+            end = min(start + self.batch_size, self.total_features)
+            page_ids = self.all_ids[start:end]
+            new_features = []
+            if page_ids:
+                request = QgsFeatureRequest().setFilterFids(page_ids)
+                new_features = sorted(
+                    self.layer.getFeatures(request),
+                    key=lambda f: f.id(),
+                )
+            if new_features:
+                self.beginInsertRows(QModelIndex(), self.loaded_count, self.loaded_count + len(new_features) - 1)
+                self.features.extend(new_features)
+                self.endInsertRows()
+            # 按尝试加载的 ID 数推进游标：即使 provider 返回少了也不会卡在死循环
+            self.loaded_count += len(page_ids)
+        except Exception:  # noqa: BLE001
+            pass
+        finally:
+            self.is_loading = False
+
+    def set_filter(self, filter_str: str) -> None:
+        """更换筛选表达式并刷新（重新统计，回到首屏 20%）。"""
+        self.filter_str = filter_str or "1=1"
+        self.where = (
+            f"{self.filter_str} and $id in ({','.join(str(i) for i in self.show_ids)})"
+            if self.show_ids else self.filter_str
+        )
+        self.beginResetModel()
+        self._refresh_totals()
         self.endResetModel()
-        self.is_loading = False
+        self.load_more()
 
     def rowCount(self, parent=QModelIndex()) -> int:
         return len(self.features)
 
     def columnCount(self, parent=QModelIndex()) -> int:
-        if self.is_loading:
-            return 0
         return len(self.field_names) + 1
 
     def data(self, index, role=Qt.DisplayRole):
-        if not index.isValid() or self.is_loading or index.row() >= len(self.features):
+        if not index.isValid() or index.row() >= len(self.features):
             return None
         if role in (Qt.DisplayRole, Qt.EditRole):
             feature = self.features[index.row()]
@@ -252,10 +292,65 @@ class PagedAttributeTableWidget(QWidget):
         self.table_view.customContextMenuRequested.connect(self._show_context_menu)
         main_layout.addWidget(self.table_view)
 
+        # 底部动态加载条（加载状态 + 加载更多按钮）
+        self._setup_load_bar(main_layout)
+
         self.setLayout(main_layout)
 
         self.model = PagedAttributeTableModel(self.layer, self.page_size, filter_str=self.filter_str, show_ids=self.show_ids)
         self.table_view.setModel(self.model)
+        # 筛选重置后刷新加载状态；滚动到底自动加载下一批
+        self.model.modelReset.connect(self._refresh_load_state)
+        self.table_view.verticalScrollBar().valueChanged.connect(self._on_scroll)
+        self._refresh_load_state()
+
+    def _setup_load_bar(self, main_layout) -> None:
+        bar = QHBoxLayout()
+        bar.setContentsMargins(0, 0, 0, 0)
+        bar.setSpacing(4)
+
+        self.load_status_label = QLabel("加载中…")
+        bar.addWidget(self.load_status_label)
+
+        self.load_more_btn = QPushButton("加载更多")
+        self.load_more_btn.clicked.connect(self._do_load_batch)
+        bar.addWidget(self.load_more_btn)
+
+        bar.addStretch()
+        main_layout.addLayout(bar)
+
+    def _refresh_load_state(self) -> None:
+        """按模型加载进度刷新状态文本与"加载更多"按钮可用性。"""
+        if self.model is None:
+            return
+        loaded = len(self.model.features)
+        total = self.model.total_features
+        if total == 0:
+            self.load_status_label.setText("0 条")
+        elif self.model.has_more:
+            self.load_status_label.setText(f"已加载 {loaded} / {total} 条，滚动到底或点击加载更多")
+        else:
+            self.load_status_label.setText(f"共 {total} 条（已全部加载）")
+        self.load_more_btn.setEnabled(self.model.has_more)
+
+    def _on_scroll(self, value: int) -> None:
+        """滚动到接近底部时追加加载下一批。"""
+        if self.model is None or not self.model.has_more:
+            return
+        bar = self.table_view.verticalScrollBar()
+        if value >= bar.maximum() - 10:
+            self._load_batch()
+
+    def _load_batch(self) -> None:
+        # 延迟到下一事件循环再加载：endInsertRows 会同步触发滚动 valueChanged，
+        # 直接调 load_more 会重入（见 buffer 对话框的 Qt 信号重入踩坑）
+        QTimer.singleShot(0, self._do_load_batch)
+
+    def _do_load_batch(self) -> None:
+        if self.model is None:
+            return
+        self.model.load_more()
+        self._refresh_load_state()
 
     def _start_edit(self) -> None:
         ok = self.editing_service.start(self.layer)
@@ -275,15 +370,18 @@ class PagedAttributeTableWidget(QWidget):
     def _filter(self) -> None:
         from app.ui.dialogs.query_builder import QueryBuilderDialog
         dlg = QueryBuilderDialog(self.layer, parent=self)
-        dlg.sqlConfirmed.connect(lambda: self._reload_model())
+        dlg.sqlConfirmed.connect(self._apply_filter)
         dlg.exec_()
 
-    def _reload_model(self) -> None:
+    def _apply_filter(self, cond: str) -> None:
+        """筛选确认后更新模型筛选并刷新（重新统计，回到首屏 20%）。"""
         if self.model:
-            self.model._load_page()
+            self.model.set_filter(cond)
+            self.table_view.scrollToTop()
+            self._refresh_load_state()
 
     def _show_context_menu(self, position) -> None:
-        from PyQt5.QtWidgets import QMenu, QAction
+        from PyQt5.QtWidgets import QAction, QMenu
         if not self.model:
             return
         idx = self.table_view.indexAt(position)
@@ -295,7 +393,7 @@ class PagedAttributeTableWidget(QWidget):
         zoom.triggered.connect(lambda: self.zoom_to_map.emit("zoomTo", {"extent": feature.geometry().boundingBox(), "id": [feature.id()]}))
         menu.addAction(zoom)
         sel = QAction("选中要素", self)
-        sel.triggered.connect(lambda: self.layer.selectByIds([feature.id()]))
+        sel.triggered.connect(lambda: self.zoom_to_map.emit("selectFeature", {"id": [feature.id()]}))
         menu.addAction(sel)
         if self.layer.isEditable():
             delete = QAction("删除", self)
@@ -305,7 +403,7 @@ class PagedAttributeTableWidget(QWidget):
 
 
 class AttributeDock(QDockWidget):
-    """分页属性表 dock。"""
+    """动态加载属性表 dock。"""
 
     def __init__(self, layer, page_size: int = 50, parent=None, filter_str: str = "1=1", show_ids: Optional[list] = None) -> None:
         title = f"属性表 - {layer.name()}"
@@ -348,7 +446,14 @@ class AttributeDock(QDockWidget):
                 self.topParent.zoom_to_layer_extent_transform(extent=data["extent"], source_crs=self.layer.crs())
         elif action_type == "selectFeature":
             self.layer.selectByIds(data["id"])
+            self._refresh_canvas()
         elif action_type == "zoom_to_features":
             self.topParent.canvas.setExtent(data["extent"])
             self.layer.selectByIds(data["ids"])
             self.topParent.canvas.refresh()
+
+    def _refresh_canvas(self) -> None:
+        """选中要素后刷新画布，让高亮立即显示（selectByIds 不会自动刷新）。"""
+        canvas = getattr(self.topParent, "canvas", None)
+        if canvas is not None:
+            canvas.refresh()

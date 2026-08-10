@@ -15,17 +15,21 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import sys
+from ctypes import wintypes
 from typing import Optional
 
-from PyQt5.QtCore import Qt, QPoint
-from PyQt5.QtGui import QCloseEvent, QIcon
+from PyQt5.QtCore import QEvent, QPoint, QRect, Qt
+from PyQt5.QtGui import QCloseEvent, QColor, QIcon
 from PyQt5.QtWidgets import (
     QAction,
+    QApplication,
     QListWidget,
     QMainWindow,
     QMenu,
+    QMenuBar,
     QMessageBox,
     QSizePolicy,
     QTreeWidget,
@@ -38,10 +42,12 @@ from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
     QgsLayerTreeGroup,
-    QgsMapLayer,
+    QgsMapLayerStyle,
     QgsProject,
+    QgsRasterLayer,
     QgsRectangle,
     QgsVectorLayer,
+    QgsWkbTypes,
 )
 from qgis.core import QgsStyle
 from qgis.gui import (
@@ -60,6 +66,7 @@ from app.core.domain.query import QueryType, SpaceQueryService
 from app.infra.fs.paths import Paths
 from app.ui.common.canvas_zoom import CanvasZoomTool
 from app.ui.common.icons import Icons
+from app.ui.common.theme import ThemeManager, toolbar_qss, window_qss
 from app.ui.docks.attribute_dock import AttributeDock
 from app.ui.docks.feature_info_dock import FeatureInfoDock
 from app.ui.docks.log_dock import LogDock
@@ -73,6 +80,52 @@ from app.ui.main_window.tool_bar import ToolBar
 from app.ui.main_window.draw_toolbar import DigitizingToolbar
 from app.ui.main_window.qgis_digitizing_toolbar import QgisDigitizingToolbar
 
+# ---------------------------------------------------------------------------
+# Windows 无边框窗口辅助（方案 A）：
+# WM_NCHITTEST 让系统接管"标题栏拖动 + 边缘缩放"；WM_GETMINMAXINFO 修正最大化
+# 几何；WM_NCLBUTTONDOWN(HTCAPTION) 重发 SC_MOVE 触发系统移动循环以获得 Aero
+# Snap 贴边吸附；WM_NCLBUTTONDBLCLK(HTCAPTION) 双击标题栏最大化/还原。
+# 仅 Windows 平台会收到 windows_generic_MSG，其他平台这些常量/结构不会被用到。
+# ---------------------------------------------------------------------------
+
+WM_NCHITTEST = 0x0084
+WM_GETMINMAXINFO = 0x0024
+WM_NCLBUTTONDOWN = 0x00A1
+WM_NCLBUTTONDBLCLK = 0x00A3
+WM_SYSCOMMAND = 0x0112
+SC_MOVE = 0xF010
+HTCLIENT = 1
+HTCAPTION = 2
+HTLEFT = 10
+HTRIGHT = 11
+HTTOP = 12
+HTTOPLEFT = 13
+HTTOPRIGHT = 14
+HTBOTTOM = 15
+HTBOTTOMLEFT = 16
+HTBOTTOMRIGHT = 17
+MONITOR_DEFAULTTONEAREST = 2
+
+
+class _MINMAXINFO(ctypes.Structure):
+    _fields_ = [
+        ("ptReserved", wintypes.POINT),
+        ("ptMaxSize", wintypes.POINT),
+        ("ptMaxPosition", wintypes.POINT),
+        ("ptMinTrackSize", wintypes.POINT),
+        ("ptMaxTrackSize", wintypes.POINT),
+    ]
+
+
+class _MONITORINFO(ctypes.Structure):
+    _fields_ = [
+        ("cbSize", wintypes.DWORD),
+        ("rcMonitor", wintypes.RECT),
+        ("rcWork", wintypes.RECT),
+        ("dwFlags", wintypes.DWORD),
+    ]
+
+
 # 让组件行为兼容旧 `component.SpaceQuery` 等可选的 legacy 模块
 # （这些模块在阶段 4 后期会从 legacy 重新启用，或被新 service 替换）
 
@@ -82,6 +135,9 @@ class MainWindow(QMainWindow):
 
     def __init__(self, project_root: Optional[str] = None) -> None:
         super().__init__()
+        # 方案 A：无边框窗口，标题栏由 TitleBar 自绘；nativeEvent 里用
+        # WM_NCHITTEST / WM_GETMINMAXINFO 让系统接管拖动、缩放与最大化。
+        self.setWindowFlag(Qt.FramelessWindowHint, True)
         self._paths = Paths.default()
         if project_root:
             self._paths = Paths(
@@ -117,9 +173,18 @@ class MainWindow(QMainWindow):
         self.space_query_service = SpaceQueryService()
         self.draw_manager = None
         self.edit_layer: Optional[QgsVectorLayer] = None
+        #: 当前选中的图层（图层树点击 / 右键菜单选中）。必须在 __init__ 里初始化，
+        #: 否则未选中图层时直接访问会 AttributeError —— 该异常在 PyQt5 槽内未捕获
+        #: 会 native 崩溃（0xC0000409）。
+        self._selected_layer: Optional[QgsVectorLayer] = None
+        #: 样式剪贴板：复制样式时存 xmlData()，粘贴样式时读（QGIS 图层菜单习惯）
+        self._style_clipboard: Optional[str] = None
 
         # ---- dock ----
         self._build_docks()
+
+        # ---- 自定义标题栏（标题栏 + 菜单栏整体作为顶部 menuWidget）----
+        self._build_chrome()
 
         # ---- 工具 / 菜单 / 状态栏 ----
         self._build_tool_bar()
@@ -134,7 +199,8 @@ class MainWindow(QMainWindow):
     def _build_canvas(self) -> QgsMapCanvas:
         canvas = QgsMapCanvas(self)
         canvas.setAcceptDrops(True)
-        canvas.setCanvasColor(Qt.white)
+        # 画布底色跟随主题（默认浅色为白色）
+        canvas.setCanvasColor(QColor(ThemeManager.instance().current().canvas_bg))
         canvas.enableAntiAliasing(True)
         return canvas
 
@@ -234,12 +300,176 @@ class MainWindow(QMainWindow):
             "new_project": self._on_new_project,
             "show_log": self._show_log_dock,
         }
-        self.menu_bar_builder = MenuBar(self)
+        self.menu_bar_builder = MenuBar(self, self._menubar)
         self.menu_bar_builder.build(callbacks)
 
     def _build_status_bar(self) -> None:
         self.status_bar_builder = StatusBar(self)
         self.status_bar_builder.build()
+
+    # ===================================================== 自定义标题栏（方案 A）
+
+    def _build_chrome(self) -> None:
+        """顶部 chrome：自绘标题栏 + 菜单栏，整体作为 QMainWindow 菜单区。
+
+        菜单栏用 ``QMenuBar`` 手动创建 —— 不能先 ``self.menuBar()`` 再
+        ``setMenuWidget`` 换掉菜单区：实测 Qt 5.15 下该顺序会让随后任何
+        ``menuBar()`` 调用段错误（菜单栏已脱离 QMainWindow 布局仍被其持有）。
+        所以全程不调 ``menuBar()``，chrome 只做一次 ``setMenuWidget``。
+        """
+        from app.ui.main_window.title_bar import TitleBar
+
+        self.title_bar = TitleBar(self)
+        self.title_bar.minimize_requested.connect(self.showMinimized)
+        self.title_bar.maximize_requested.connect(self._toggle_maximize)
+        self.title_bar.close_requested.connect(self.close)
+        self.windowTitleChanged.connect(self.title_bar.set_title)
+        self._apply_user_info_to_titlebar()
+
+        self._menubar = QMenuBar(self)
+        chrome = QWidget(self)
+        v = QVBoxLayout(chrome)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        v.addWidget(self.title_bar)
+        v.addWidget(self._menubar)
+        self.setMenuWidget(chrome)
+
+        # 主题：跟随 ThemeManager，切换时重绘窗体 chrome + 工具条配色
+        ThemeManager.instance().theme_changed.connect(self._on_theme_changed)
+        self._apply_theme_qss()
+
+    def _toggle_maximize(self) -> None:
+        if self.isMaximized():
+            self.showNormal()
+        else:
+            self.showMaximized()
+
+    def _apply_theme_qss(self) -> None:
+        """按当前主题重绘窗体 chrome（菜单栏/状态栏/Dock）、主工具条和画布底色。"""
+        theme = ThemeManager.instance().current()
+        self.setStyleSheet(window_qss(theme))
+        tb = getattr(self, "tool_bar", None)
+        if tb is not None:
+            tb.setStyleSheet(toolbar_qss(theme))
+        # 工具条图标是 QPainter 画的，颜色固定烧在 PNG 里，切主题时需重刷
+        tbb = getattr(self, "tool_bar_builder", None)
+        if tbb is not None:
+            tbb.apply_theme(theme)
+        # 画布底色跟随主题（setCanvasColor，不走 QSS）
+        canvas = getattr(self, "canvas", None)
+        if canvas is not None:
+            canvas.setCanvasColor(QColor(theme.canvas_bg))
+            canvas.refresh()
+
+    def _on_theme_changed(self, theme) -> None:
+        self._apply_theme_qss()
+
+    def _apply_user_info_to_titlebar(self) -> None:
+        """把登录用户信息（用户名 + 凭证有效期）挂到标题栏。"""
+        from app.core.auth import load_credential
+
+        cred = load_credential()
+        if cred is not None:
+            self.title_bar.set_user(cred.username, expires_at=cred.expires_at)
+        else:
+            self.title_bar.set_user("未登录")
+
+    # ------------------------------------------------ Windows 无边框 native 事件
+
+    def nativeEvent(self, eventType, message):
+        """拦截 WM_NCHITTEST / WM_GETMINMAXINFO / WM_NCLBUTTONDOWN 等消息，
+        让无边框窗口行为接近原生（拖动 + 缩放 + 贴边吸附 + 双击最大化）。"""
+        try:
+            if bytes(eventType) == b"windows_generic_MSG":
+                msg = wintypes.MSG.from_address(int(message))
+                if msg.message == WM_NCHITTEST:
+                    return (True, self._wm_nchittest(msg))
+                if msg.message == WM_GETMINMAXINFO:
+                    self._wm_getminmaxinfo(msg)
+                    return (True, 0)
+                if msg.message == WM_NCLBUTTONDOWN and msg.wParam == HTCAPTION:
+                    # 无边框窗口下 Qt 把标题栏区当客户区处理，系统原生拖动（含
+                    # Aero Snap 贴边吸附）不会启动。ReleaseCapture + 重发
+                    # WM_SYSCOMMAND(SC_MOVE|HTCAPTION) 让系统进入原生移动循环，
+                    # 从而获得拖到屏幕边缘吸附 / 顶边最大化的能力。
+                    ctypes.windll.user32.ReleaseCapture()
+                    ctypes.windll.user32.SendMessageW(
+                        int(self.winId()), WM_SYSCOMMAND, SC_MOVE | HTCAPTION, 0
+                    )
+                    return (True, 0)
+                if msg.message == WM_NCLBUTTONDBLCLK and msg.wParam == HTCAPTION:
+                    self._toggle_maximize()
+                    return (True, 0)
+        except Exception:  # noqa: BLE001 —— 兜底走 Qt 默认，不拖垮事件循环
+            pass
+        return super().nativeEvent(eventType, message)
+
+    def _wm_nchittest(self, msg) -> int:
+        """命中测试：窗口边缘 → resize 码；标题栏空白 → HTCAPTION；其余 HTCLIENT。"""
+        lp = int(msg.lParam)
+        x = lp & 0xFFFF
+        y = (lp >> 16) & 0xFFFF
+        if x & 0x8000:
+            x -= 0x10000
+        if y & 0x8000:
+            y -= 0x10000
+
+        if self.isMaximized():
+            return HTCLIENT  # 最大化时禁止拖动 / 缩放
+
+        g = self.frameGeometry()
+        left, top, right, bottom = g.left(), g.top(), g.right(), g.bottom()
+        m = 6
+        if y <= top + m:
+            if x <= left + m:
+                return HTTOPLEFT
+            if x >= right - m:
+                return HTTOPRIGHT
+            return HTTOP
+        if y >= bottom - m:
+            if x <= left + m:
+                return HTBOTTOMLEFT
+            if x >= right - m:
+                return HTBOTTOMRIGHT
+            return HTBOTTOM
+        if x <= left + m:
+            return HTLEFT
+        if x >= right - m:
+            return HTRIGHT
+
+        # 标题栏空白区域 → 系统拖动；按钮/用户信息区域交给 Qt 正常处理
+        tb = getattr(self, "title_bar", None)
+        if tb is not None:
+            tb_tl = tb.mapTo(self, QPoint(0, 0))
+            if QRect(tb_tl, tb.size()).contains(QPoint(x - left, y - top)):
+                w = QApplication.widgetAt(QPoint(x, y))
+                if w is not None and (w is tb or tb.isAncestorOf(w)):
+                    if not tb.is_interactive_child(w):
+                        return HTCAPTION
+        return HTCLIENT
+
+    def _wm_getminmaxinfo(self, msg) -> None:
+        """修正最大化几何：无边框窗口最大化时填满工作区，不盖住任务栏。"""
+        mmi = _MINMAXINFO.from_address(int(msg.lParam))
+        monitor = ctypes.windll.user32.MonitorFromWindow(
+            int(self.winId()), MONITOR_DEFAULTTONEAREST
+        )
+        info = _MONITORINFO()
+        info.cbSize = ctypes.sizeof(_MONITORINFO)
+        ctypes.windll.user32.GetMonitorInfoW(monitor, ctypes.byref(info))
+        w = info.rcWork.right - info.rcWork.left
+        h = info.rcWork.bottom - info.rcWork.top
+        mmi.ptMaxSize.x, mmi.ptMaxSize.y = w, h
+        mmi.ptMaxPosition.x, mmi.ptMaxPosition.y = info.rcWork.left, info.rcWork.top
+        mmi.ptMaxTrackSize.x, mmi.ptMaxTrackSize.y = w, h
+
+    def changeEvent(self, event) -> None:
+        """最大化/还原状态变化 → 同步标题栏按钮图标。"""
+        if event.type() == QEvent.WindowStateChange:
+            if hasattr(self, "title_bar"):
+                self.title_bar.set_maximized(self.isMaximized())
+        super().changeEvent(event)
 
     # ===================================================== 工具回调
 
@@ -270,9 +500,12 @@ class MainWindow(QMainWindow):
         dlg.show()
 
     def _on_analyse(self) -> None:
-        dock = ToolsDock(self)
-        self.addDockWidget(Qt.RightDockWidgetArea, dock)
-        dock.show()
+        # 复用单个"分析工具"dock，避免每次点"分析"都新建一个
+        if getattr(self, "_analyse_dock", None) is None:
+            self._analyse_dock = ToolsDock(self)
+            self.addDockWidget(Qt.RightDockWidgetArea, self._analyse_dock)
+        self._analyse_dock.show()
+        self._analyse_dock.raise_()
 
     def _on_zoom_full(self) -> None:
         layers = [l for l in self.project.mapLayers().values() if l.isValid()]
@@ -319,6 +552,9 @@ class MainWindow(QMainWindow):
             self.project_dock = ProjectDock(self)
             self.project_dock.render_requested.connect(self._show_style_editor)
             self.project_dock.label_requested.connect(self._show_label_settings)
+            self.project_dock.layer_context_menu_requested.connect(
+                self._on_project_dock_context_menu
+            )
             self.addDockWidget(Qt.RightDockWidgetArea, self.project_dock)
         self._on_project_create(name)
         self.project_dock.show()
@@ -543,6 +779,7 @@ class MainWindow(QMainWindow):
     # ===================================================== 图层右键菜单
 
     def _on_layer_context_menu(self, pos: QPoint) -> None:
+        """图层树右键 → 交给共享的菜单构建器。"""
         view = self.layer_dock.view
         index = view.indexAt(pos)
         if not index.isValid():
@@ -556,18 +793,78 @@ class MainWindow(QMainWindow):
         layers = self.project.mapLayersByName(layer_name)
         if not layers:
             return
-        self._selected_layer = layers[0]
-        if not self._selected_layer:
+        self._build_layer_context_menu(layers[0], view.mapToGlobal(pos))
+
+    def _on_project_dock_context_menu(self, layer, global_pos: QPoint) -> None:
+        """工程管理 Dock 的图层右键 → 同一套 QGIS 式图层菜单。"""
+        self._build_layer_context_menu(layer, global_pos)
+
+    def _build_layer_context_menu(self, layer, global_pos: QPoint) -> None:
+        """QGIS 式图层右键菜单（图层树与工程 Dock 共用）。
+
+        菜单项统一作用在 ``self._selected_layer`` 上；各动作方法（缩放/设编辑/
+        移分组/属性表/样式/移除/导出/属性）读的都是这个字段，所以进入时先
+        把它指向当前右键的图层。
+
+        布局贴近 QGIS 原生图层面板：缩放至图层 / 放大至选中要素 → 设为编辑图层
+        → 打开属性表 / 执行SQL（仅矢量）→ 重命名 / 复制图层 → 样式（含
+        复制/粘贴样式）→ 移到分组 → 移除 / 导出 / 属性。
+        """
+        if layer is None:
             return
-        menu = QMenu(view)
+        self._selected_layer = layer
+        is_vector = isinstance(layer, QgsVectorLayer)
+        menu = QMenu(self)
         # 缩放至图层
         act_zoom = QAction("缩放至图层", self)
         act_zoom.triggered.connect(lambda: self._zoom_to_layer(self._selected_layer))
         menu.addAction(act_zoom)
+        # 放大至选中要素（有选中才显示，与 QGIS 一致）
+        if is_vector and layer.selectedFeatureCount() > 0:
+            act_sel = QAction("放大至选中要素", self)
+            act_sel.triggered.connect(lambda: self._zoom_to_selection(self._selected_layer))
+            menu.addAction(act_sel)
         # 设编辑
         act_edit = QAction("设为编辑图层", self)
         act_edit.triggered.connect(self._set_edit_layer)
         menu.addAction(act_edit)
+        # 属性表 / SQL（栅格没有要素/表，不显示）
+        if is_vector:
+            menu.addSeparator()
+            act_attr = QAction("打开属性表", self)
+            act_attr.triggered.connect(self._open_attribute_table)
+            menu.addAction(act_attr)
+            act_sql = QAction("执行SQL", self)
+            act_sql.triggered.connect(self._open_execute_sql)
+            menu.addAction(act_sql)
+        # 重命名 / 复制图层
+        menu.addSeparator()
+        act_rename = QAction("重命名", self)
+        act_rename.triggered.connect(lambda: self._rename_layer(self._selected_layer))
+        menu.addAction(act_rename)
+        act_dup = QAction("复制图层", self)
+        act_dup.triggered.connect(lambda: self._duplicate_layer(self._selected_layer))
+        menu.addAction(act_dup)
+        # 样式
+        sub_style = menu.addMenu("样式")
+        if is_vector:
+            edit_style = QAction("编辑样式", self)
+            edit_style.triggered.connect(lambda: self._show_style_editor(self._selected_layer))
+            sub_style.addAction(edit_style)
+        open_style = QAction("打开样式配置", self)
+        open_style.triggered.connect(lambda: self._open_style_file(self._selected_layer))
+        sub_style.addAction(open_style)
+        save_style = QAction("保存样式", self)
+        save_style.triggered.connect(lambda: self._save_style(self._selected_layer))
+        sub_style.addAction(save_style)
+        sub_style.addSeparator()
+        copy_style = QAction("复制样式", self)
+        copy_style.triggered.connect(lambda: self._copy_layer_style(self._selected_layer))
+        sub_style.addAction(copy_style)
+        paste_style = QAction("粘贴样式", self)
+        paste_style.setEnabled(bool(getattr(self, "_style_clipboard", None)))
+        paste_style.triggered.connect(lambda: self._paste_layer_style(self._selected_layer))
+        sub_style.addAction(paste_style)
         # 工程分组：移动图层归属（创建工程后才显示）
         if (
             getattr(self, "_data_group", None) is not None
@@ -584,39 +881,130 @@ class MainWindow(QMainWindow):
                 lambda: self._move_layer_to_group(self._selected_layer, self._data_group)
             )
             menu.addAction(act_to_data)
-        # 属性表
-        act_attr = QAction("打开属性表", self)
-        act_attr.triggered.connect(self._open_attribute_table)
-        menu.addAction(act_attr)
-        # SQL
-        act_sql = QAction("执行SQL", self)
-        act_sql.triggered.connect(self._open_execute_sql)
-        menu.addAction(act_sql)
-        # 样式
-        sub_style = menu.addMenu("样式")
-        edit_style = QAction("编辑样式", self)
-        edit_style.triggered.connect(lambda: self._show_style_editor(self._selected_layer))
-        sub_style.addAction(edit_style)
-        open_style = QAction("打开样式配置", self)
-        open_style.triggered.connect(lambda: self._open_style_file(self._selected_layer))
-        sub_style.addAction(open_style)
-        save_style = QAction("保存样式", self)
-        save_style.triggered.connect(lambda: self._save_style(self._selected_layer))
-        sub_style.addAction(save_style)
-        # 移除
+        # 移除 / 导出 / 属性
+        menu.addSeparator()
         act_remove = QAction("移除", self)
         act_remove.setIcon(Icons.remove())
         act_remove.triggered.connect(lambda: self._remove_layer(self._selected_layer))
         menu.addAction(act_remove)
-        # 导出
-        act_export = QAction("导出", self)
-        act_export.triggered.connect(lambda: self._export_layer(self._selected_layer))
-        menu.addAction(act_export)
-        # 属性
+        if is_vector:
+            # 导出走 QgsVectorLayerSaveAsDialog，仅矢量
+            act_export = QAction("导出", self)
+            act_export.triggered.connect(lambda: self._export_layer(self._selected_layer))
+            menu.addAction(act_export)
         act_props = QAction("属性", self)
         act_props.triggered.connect(lambda: self._open_layer_properties(self._selected_layer))
         menu.addAction(act_props)
-        menu.exec_(view.mapToGlobal(pos))
+        menu.exec_(global_pos)
+
+    def _zoom_to_selection(self, layer) -> None:
+        """放大至选中要素（与 QGIS 图层面板一致）。"""
+        if layer is None or layer.selectedFeatureCount() <= 0:
+            return
+        ext = QgsRectangle()
+        for feat in layer.selectedFeatures():
+            ext.combineExtentWith(feat.geometry().boundingBox())
+        if ext.isNull():
+            return
+        # 单点/零面积（点的 bbox isEmpty() 为真，但几何本身有效）：先扩一圈
+        # 再设置，避免 setExtent 拿到空范围
+        if ext.width() <= 0 or ext.height() <= 0:
+            center = ext.center()
+            half = 0.001
+            ext = QgsRectangle(
+                center.x() - half, center.y() - half,
+                center.x() + half, center.y() + half,
+            )
+        dest_crs = self.canvas.mapSettings().destinationCrs()
+        if layer.crs() != dest_crs:
+            xform = QgsCoordinateTransform(layer.crs(), dest_crs, self.project)
+            ext = xform.transformBoundingBox(ext)
+        self.canvas.setExtent(ext)
+        self.canvas.refresh()
+
+    def _rename_layer(self, layer) -> None:
+        """重命名图层：layer.setName 会同步树节点名（已实测）。"""
+        if layer is None:
+            return
+        from PyQt5.QtWidgets import QInputDialog
+
+        new_name, ok = QInputDialog.getText(self, "重命名图层", "图层名称：", text=layer.name())
+        if not ok:
+            return
+        new_name = new_name.strip()
+        if not new_name or new_name == layer.name():
+            return
+        layer.setName(new_name)
+        self.canvas.refresh()
+        self.messageBar.pushMessage(f"已重命名为：{new_name}", level=0, duration=2)
+
+    def _duplicate_layer(self, layer) -> None:
+        """复制图层（与 QGIS 图层菜单一致）。
+
+        - 矢量：内存副本（同一 provider 几何/字段/要素），挂到原图层所在分组
+        - 栅格：直接指向同一数据源的新图层
+        副本默认带上原图层的当前样式。
+        """
+        if layer is None:
+            return
+        if isinstance(layer, QgsVectorLayer):
+            geom = QgsWkbTypes.displayString(layer.wkbType())
+            copy = QgsVectorLayer(
+                f"{geom}?crs={layer.crs().authid()}", f"{layer.name()}_副本", "memory"
+            )
+            dp = copy.dataProvider()
+            dp.addAttributes(layer.fields().toList())
+            copy.updateFields()
+            dp.addFeatures(list(layer.getFeatures()))
+            copy.updateExtents()
+        elif isinstance(layer, QgsRasterLayer):
+            copy = QgsRasterLayer(layer.source(), f"{layer.name()}_副本")
+            if not copy.isValid():
+                QMessageBox.warning(self, "复制图层", "无法复制该栅格图层")
+                return
+        else:
+            return
+        # 复制当前样式
+        try:
+            sm = layer.styleManager()
+            copy_sm = copy.styleManager()
+            copy_sm.addStyle("copied", sm.style(sm.currentStyle()))
+            copy_sm.setCurrentStyle("copied")
+        except Exception:  # noqa: BLE001
+            pass
+        # 加到原图层所在分组（找不到就挂到树根，走 _add_layer_to_project）
+        node = self.project.layerTreeRoot().findLayer(layer)
+        group = node.parent() if node is not None else None
+        self.project.addMapLayer(copy, False)
+        if group is not None:
+            group.addLayer(copy)
+        else:
+            self._add_layer_to_project(copy)
+        self.canvas.refresh()
+        self.messageBar.pushMessage(f"已复制图层：{copy.name()}", level=0, duration=2)
+
+    def _copy_layer_style(self, layer) -> None:
+        """复制当前样式（xml 存到剪贴板，粘贴样式时用）。"""
+        if layer is None:
+            return
+        sm = layer.styleManager()
+        self._style_clipboard = sm.style(sm.currentStyle()).xmlData()
+        self.messageBar.pushMessage(f"已复制 {layer.name()} 的样式", level=0, duration=2)
+
+    def _paste_layer_style(self, layer) -> None:
+        """把复制的样式贴到目标图层。"""
+        if layer is None:
+            return
+        xml = getattr(self, "_style_clipboard", None)
+        if not xml:
+            QMessageBox.information(self, "粘贴样式", "请先「复制样式」")
+            return
+        sm = layer.styleManager()
+        sm.addStyle("pasted", QgsMapLayerStyle(xml))
+        sm.setCurrentStyle("pasted")
+        layer.triggerRepaint()
+        self.canvas.refresh()
+        self.messageBar.pushMessage(f"已粘贴样式到 {layer.name()}", level=0, duration=2)
 
     def _zoom_to_layer(self, layer) -> None:
         if layer is None:
@@ -628,6 +1016,17 @@ class MainWindow(QMainWindow):
         else:
             ext = layer.extent()
         self.canvas.setExtent(ext)
+        self.canvas.refresh()
+
+    def zoom_to_layer_extent_transform(self, extent, source_crs) -> None:
+        """缩放到指定范围（属性表右键"缩放到要素"用），做 CRS 变换到画布坐标系。"""
+        if extent is None or extent.isNull():
+            return
+        dest_crs = self.canvas.mapSettings().destinationCrs()
+        if source_crs is not None and source_crs.isValid() and source_crs != dest_crs:
+            xform = QgsCoordinateTransform(source_crs, dest_crs, self.project)
+            extent = xform.transformBoundingBox(extent)
+        self.canvas.setExtent(extent)
         self.canvas.refresh()
 
     def _move_layer_to_group(self, layer, group) -> None:

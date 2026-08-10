@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from qgis.core import Qgis, QgsApplication, QgsProject
+from qgis.core import QgsMapLayer, QgsProject
 
 from app.core.domain.tiles import TileJob, TileService
 from app.infra.logging import get_logger
@@ -45,6 +45,10 @@ class VectorTileDialog(BaseDialog):
             self.close()
             return
         self.project = QgsProject.instance()
+        # ToolsDock 复用同一对话框实例；工程图层变化时同步刷新列表，
+        # 否则后加入的矢量图层不会出现在输入列表里。
+        self.project.layersAdded.connect(self._on_project_layers_changed)
+        self.project.layersRemoved.connect(self._on_project_layers_changed)
         self.select_layers: list = []
         self.out_extent = None
         self.task = None
@@ -114,10 +118,7 @@ class VectorTileDialog(BaseDialog):
         self.list_widget = QListWidget()
         self.list_widget.setFixedHeight(130)
         self.list_widget.itemClicked.connect(self._on_layer_clicked)
-        for layer in self.project.mapLayers().values():
-            item = QListWidgetItem(layer.name(), self.list_widget)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Unchecked)
+        self._populate_layers()
         row.addWidget(self.list_widget)
         sl.addLayout(row)
         sl.addSpacing(15)
@@ -172,6 +173,32 @@ class VectorTileDialog(BaseDialog):
         sl.addStretch()
         scroll.setWidget(content)
         layout.addWidget(scroll)
+
+    def _populate_layers(self) -> None:
+        """把工程里的矢量图层填充进列表（勾选状态按 source 保留）。"""
+        # 记录当前勾选图层的 source（比 name 稳定，重名也安全）
+        checked_sources = {l.source() for l in self.select_layers}
+        self.list_widget.clear()
+        self.select_layers = []
+        for layer in self.project.mapLayers().values():
+            if layer.type() != QgsMapLayer.VectorLayer:
+                continue
+            item = QListWidgetItem(layer.name(), self.list_widget)
+            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            if layer.source() in checked_sources:
+                item.setCheckState(Qt.Checked)
+                self.select_layers.append(layer)
+            else:
+                item.setCheckState(Qt.Unchecked)
+
+    def showEvent(self, event) -> None:  # noqa: D401
+        """每次显示都重刷图层列表：对话框实例被复用，首次打开后再加入的图层也能选到。"""
+        super().showEvent(event)
+        self._populate_layers()
+
+    def _on_project_layers_changed(self, *_args) -> None:
+        """工程加/删图层时同步列表（对话框打开状态下加入图层也能立刻选到）。"""
+        self._populate_layers()
 
     def _on_layer_clicked(self, item) -> None:
         if item.checkState() == Qt.Checked:

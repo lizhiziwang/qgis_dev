@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import os
+
 from PyQt5.QtCore import QTimer
 from PyQt5.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -152,8 +155,33 @@ class BufferDialog(BaseDialog):
         layout.addWidget(QLabel("输出图层名"))
         self.output_edit = QLineEdit("缓冲区结果")
         layout.addWidget(self.output_edit)
+        layout.addSpacing(6)
+
+        # 8. 输出文件路径（留空 = 临时 memory 图层）
+        layout.addWidget(QLabel("输出文件路径（留空为临时图层）"))
+        path_row = QHBoxLayout()
+        self.output_path_edit = QLineEdit()
+        self.output_path_edit.setPlaceholderText("留空则生成临时缓存图层")
+        path_row.addWidget(self.output_path_edit, stretch=1)
+        browse_btn = QPushButton("浏览…")
+        browse_btn.clicked.connect(self._browse_output_path)
+        path_row.addWidget(browse_btn)
+        layout.addLayout(path_row)
 
         layout.addStretch()
+
+    def _browse_output_path(self) -> None:
+        """文件选择器；无扩展名时按选中过滤器补 .gpkg / .shp。"""
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "选择输出文件",
+            self.output_path_edit.text(),
+            "GeoPackage (*.gpkg);;Shapefile (*.shp)",
+        )
+        if path and not os.path.splitext(path)[1]:
+            path += ".gpkg"
+        if path:
+            self.output_path_edit.setText(path)
 
     def _populate_layers(self) -> None:
         """把工程里的矢量图层填充进下拉框（图层对象存 itemData）。"""
@@ -181,6 +209,7 @@ class BufferDialog(BaseDialog):
             end_cap=self.end_cap_combo.currentIndex(),
             join_style=self.join_style_combo.currentIndex(),
             output_name=self.output_edit.text().strip() or "缓冲区结果",
+            output_path=self.output_path_edit.text().strip() or None,
         )
 
         # 不能留在 clicked 信号栈里同步跑 processing.run + addMapLayer + refresh：
@@ -209,7 +238,8 @@ class BufferDialog(BaseDialog):
         # 结果加入工程（已出信号栈）；画布刷新再推迟一拍，等 layersAdded 信号链走完
         self.project.addMapLayer(result)
         self.loading.setValue(100)
-        send("success", f"缓冲区生成完成：{result.featureCount()} 个要素", duration=3)
+        dest = f" → {job.output_path}" if job.output_path else ""
+        send("success", f"缓冲区生成完成：{result.featureCount()} 个要素{dest}", duration=3)
         QTimer.singleShot(0, self._refresh_canvas)
 
     def _refresh_canvas(self) -> None:

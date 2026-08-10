@@ -30,16 +30,7 @@ class CustomAttrDialog(QDialog):
         self.layer = layer
         self.feature = feature
         self.attr_values = {}
-        self._init_style()
         self._init_ui()
-
-    def _init_style(self) -> None:
-        self.setStyleSheet("""
-            QDialog { background-color: #f0f0f0; font-family: "Microsoft YaHei", "Segoe UI", sans-serif; font-size: 12px; }
-            QLabel { color: #222; padding: 3px 0; min-width: 80px; }
-            QLineEdit { padding: 2px 4px; border: 1px solid #b9b9b9; border-radius: 1px; background: #fff; font-size: 12px; color: #333; }
-            QLineEdit:focus { border-color: #4d90fe; outline: none; }
-        """)
 
     def _init_ui(self) -> None:
         self.setWindowTitle(f"{self.layer.name()} - 要素属性")

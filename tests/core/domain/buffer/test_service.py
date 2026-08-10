@@ -108,3 +108,27 @@ def test_buffer_succeeds_on_real_gdb(gdb_layer):
         BufferJob(layer=gdb_layer, distance=0.01, output_name="回归测试")
     )
     assert result.featureCount() == gdb_layer.featureCount()
+
+
+@pytest.mark.gui
+def test_output_path_writes_gpkg(qgis_app, tmp_path):
+    """给定输出文件路径时写入 gpkg，并返回从文件加载的图层。"""
+    from PyQt5.QtCore import QVariant
+    from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsVectorLayer
+
+    layer = QgsVectorLayer("Polygon?crs=EPSG:4326", "缓冲输入", "memory")
+    layer.dataProvider().addAttributes([QgsField("name", QVariant.String)])
+    layer.updateFields()
+    feature = QgsFeature(layer.fields())
+    feature.setGeometry(QgsGeometry.fromWkt("POLYGON((0 0,10 0,10 10,0 10,0 0))"))
+    feature.setAttribute("name", "A")
+    layer.dataProvider().addFeatures([feature])
+
+    out_path = str(tmp_path / "buf.gpkg")
+    result = BufferService().run(
+        BufferJob(layer=layer, distance=1.0, output_name="缓冲区结果", output_path=out_path)
+    )
+    assert result.isValid()
+    assert result.providerType() == "ogr"
+    assert result.featureCount() == 1
+    assert Path(out_path).exists()

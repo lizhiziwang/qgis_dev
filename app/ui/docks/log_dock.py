@@ -36,7 +36,6 @@ from app.infra.logging import (
     get_logger,
     render_log_html,
 )
-from app.ui.common.styles import apply_text_browser_style
 
 
 logger = get_logger(__name__)
@@ -121,8 +120,7 @@ class LogDock(QDockWidget):
         qh = QHBoxLayout(wrapper)
         qh.setContentsMargins(0, 0, 0, 0)
         qh.setSpacing(0)
-        self.txt = QTextBrowser()
-        apply_text_browser_style(self.txt)
+        self.txt = QTextBrowser()  # 配色由主窗体 window_qss / app_qss 统一负责
         qh.addWidget(self.txt)
         return wrapper
 

@@ -27,7 +27,6 @@ from qgis.core import QgsVectorLayer
 
 from app.infra.logging import get_logger
 from app.ui.common.icons import Icons
-from app.ui.common.styles import apply_dialog_style
 
 
 logger = get_logger(__name__)
@@ -76,7 +75,6 @@ class ExecuteSqlDialog(QDialog):
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        apply_dialog_style(self)
         layout = QVBoxLayout(self)
 
         sql_frame = QFrame()

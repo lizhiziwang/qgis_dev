@@ -6,18 +6,24 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from typing import Callable, Optional
 
 from PyQt5.QtGui import QKeySequence
-from PyQt5.QtWidgets import QAction, QMainWindow, QMenu
+from PyQt5.QtWidgets import QAction, QMainWindow, QMenu, QMenuBar
 
 
 class MenuBar:
     """主菜单栏构建器。"""
 
-    def __init__(self, main_window: QMainWindow) -> None:
+    def __init__(
+        self,
+        main_window: QMainWindow,
+        menubar: Optional[QMenuBar] = None,
+    ) -> None:
         self.main_window = main_window
-        self.menubar = main_window.menuBar()
+        # 无边框标题栏（方案 A）由 MainWindow 手动创建菜单栏并传进来；
+        # 不传时退回 ``main_window.menuBar()``（旧调用方）。
+        self.menubar = menubar if menubar is not None else main_window.menuBar()
 
     def build(self, callbacks: dict[str, Callable[[], None]]) -> QMenu:
         """构建菜单。

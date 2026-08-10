@@ -36,8 +36,11 @@ class BufferJob:
     end_cap: int = 0
     #: 连接样式，对应 ``native:buffer`` 的 JOIN_STYLE：0 圆 / 1 斜接 / 2 平切
     join_style: int = 0
-    #: 输出图层名（作为 ``memory:<name>`` 的临时图层）
+    #: 输出图层名（作为 ``memory:<name>`` 的临时图层；也用作文件输出时的图层名）
     output_name: str = "缓冲区结果"
+    #: 输出文件路径（如 ``D:/xx/结果.gpkg``）。为 ``None`` 时结果写入临时 memory
+    #: 图层；给定路径时写入文件（gpkg/shp 等，由扩展名决定），并返回从文件加载的图层。
+    output_path: Optional[str] = None
 
 
 def _to_layer_units(job: BufferJob) -> float:
@@ -100,7 +103,7 @@ class BufferService:
             "END_CAP_STYLE": job.end_cap,
             "JOIN_STYLE": job.join_style,
             "DISSOLVE": job.dissolve,
-            "OUTPUT": f"memory:{job.output_name}",
+            "OUTPUT": job.output_path or f"memory:{job.output_name}",
         }
         try:
             results = processing.run("native:buffer", params, context=context, feedback=fb)
@@ -127,7 +130,13 @@ class BufferService:
                 logger.error("native:buffer 执行失败 %s: %s", job.output_name, exc, exc_info=True)
             raise
 
-        layer = results["OUTPUT"]
+        if job.output_path:
+            # 文件输出时 results["OUTPUT"] 是路径字符串，从文件重新加载图层
+            from qgis.core import QgsVectorLayer
+
+            layer = QgsVectorLayer(results["OUTPUT"], job.output_name, "ogr")
+        else:
+            layer = results["OUTPUT"]
         if layer is None or not layer.isValid():
             raise RuntimeError(f"缓冲区结果图层无效：{job.output_name}")
         return layer

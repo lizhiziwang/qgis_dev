@@ -356,6 +356,8 @@ class PGISTools(QWidget):
         super().__init__(parent, *args, **kwargs)
         self.parent = parent
         self.topParent = topParent
+        #: 算法 code → 当前对话框实例。同一算法只允许一个窗口，已打开时点击置前。
+        self._dialogs = {}
 
         self.__init_ui__()
     def __init_ui__(self):
@@ -400,14 +402,27 @@ class PGISTools(QWidget):
         try:
             text = item.text(column)
             # data = item.data((0, 0),Qt.UserRole)
-            if item._code_ == "native:writevectortiles_xyz":
-
-                PGISToolsDialog(parent=self.topParent, title="创建矢量瓦片", dia_type="native:writevectortiles_xyz").show()
+            code = getattr(item, "_code_", "")
+            if code == "native:writevectortiles_xyz":
+                dlg = self._dialogs.get(code)
+                if dlg is not None and dlg.isVisible():
+                    # 已有该算法窗口实例：置前，不新建
+                    dlg.raise_()
+                    dlg.activateWindow()
+                else:
+                    if dlg is None:
+                        dlg = PGISToolsDialog(
+                            parent=self.topParent,
+                            title="创建矢量瓦片",
+                            dia_type="native:writevectortiles_xyz",
+                        )
+                        self._dialogs[code] = dlg
+                    dlg.show()
             # dia = processing.createAlgorithmDialog("native:writevectortiles_xyz")
             # dia.show()
 
             print(f"点击了: {text}")
-            print(f"数据: {item._code_}")
+            print(f"数据: {code}")
         except Exception as e:
             print(e)
 
