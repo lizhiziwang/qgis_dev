@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 from qgis.core import QgsGeometry, QgsPointXY, QgsWkbTypes
 from qgis.gui import QgsRubberBand
-from PyQt5.QtCore import Qt
+from PyQt6.QtCore import Qt
 
 from .base import BaseDrawTool
 
@@ -22,7 +22,7 @@ class PointDrawTool(BaseDrawTool):
         super().__init__(canvas, is_buffer=is_buffer, distance=distance)
         self.draw_manager = draw_manager
         self.rubber_band = QgsRubberBand(canvas, QgsWkbTypes.PointGeometry)
-        self.rubber_band.setColor(Qt.red)
+        self.rubber_band.setColor(Qt.GlobalColor.red)
         self.rubber_band.setWidth(2)
 
     def canvasReleaseEvent(self, event) -> None:  # noqa: N802 —— QGIS 命名

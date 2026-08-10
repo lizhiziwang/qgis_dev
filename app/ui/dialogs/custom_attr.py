@@ -6,11 +6,12 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -43,7 +44,7 @@ class CustomAttrDialog(QDialog):
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QScrollArea.NoFrame)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
         main.addWidget(scroll)
 
         form_widget = QWidget()
@@ -51,9 +52,9 @@ class CustomAttrDialog(QDialog):
 
         form = QFormLayout(form_widget)
         form.setContentsMargins(0, 0, 0, 0)
-        form.setLabelAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        form.setFormAlignment(Qt.AlignLeft | Qt.AlignTop)
-        form.setRowWrapPolicy(QFormLayout.DontWrapRows)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+        form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
 
         for field in self.layer.fields():
             label = QLabel(field.name())
@@ -68,9 +69,12 @@ class CustomAttrDialog(QDialog):
         button_container.setObjectName("button_container")
         button_layout = QHBoxLayout(button_container)
         button_layout.setContentsMargins(5, 0, 0, 0)
-        button_layout.setAlignment(Qt.AlignRight)
-        bb = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, Qt.Horizontal)
-        bb.button(QDialogButtonBox.Ok).setDefault(True)
+        button_layout.setAlignment(Qt.AlignmentFlag.AlignRight)
+        bb = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            Qt.Orientation.Horizontal,
+        )
+        bb.button(QDialogButtonBox.StandardButton.Ok).setDefault(True)
         bb.accepted.connect(self._save)
         bb.rejected.connect(self.reject)
         button_layout.addWidget(bb)

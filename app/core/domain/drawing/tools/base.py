@@ -2,7 +2,7 @@
 
 设计：
 
-- 业务层不依赖 PyQt5 widget（除了 :class:`QgsMapTool`，它本身是 Qt 抽象类，
+- 业务层不依赖 PyQt6 widget（除了 :class:`QgsMapTool`，它本身是 Qt 抽象类，
   没办法）。所以允许本模块 import qgis.gui。
 - 几何采集由工具类完成，业务层通过 :class:`ActiveDraw` 拿到 :class:`QgsGeometry`。
 - 工具通过 :attr:`finished` 信号通知绘制完成；UI 层订阅后做属性编辑等后处理。
@@ -19,11 +19,11 @@ if TYPE_CHECKING:
     from qgis.core import QgsGeometry
     from qgis.gui import QgsMapCanvas, QgsMapTool
 
-from PyQt5.QtCore import pyqtSignal
+from PyQt6.QtCore import pyqtSignal
 from qgis.core import QgsWkbTypes
 from qgis.gui import QgsMapTool, QgsRubberBand
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 
 
 class BaseDrawTool(QgsMapTool):
@@ -41,9 +41,9 @@ class BaseDrawTool(QgsMapTool):
 
         # 缓冲预览（仅在 is_buffer=True 时启用）
         self.rubber_band_buffer = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
-        self.rubber_band_buffer.setColor(Qt.red)
+        self.rubber_band_buffer.setColor(Qt.GlobalColor.red)
         self.rubber_band_buffer.setWidth(2)
-        self.rubber_band_buffer.setLineStyle(Qt.DashLine)
+        self.rubber_band_buffer.setLineStyle(Qt.PenStyle.DashLine)
 
     def finish_draw(self) -> None:
         """工具内部调用：发出 finished 信号。"""

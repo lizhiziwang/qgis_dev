@@ -10,8 +10,8 @@ import os
 import uuid
 from typing import Any, Optional
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -95,13 +95,13 @@ class CheckViewerDialog(BaseDialog):
         self.table = QTableWidget()
         self.table.setColumnCount(3)
         self.table.setHorizontalHeaderLabels(["质检名称", "质检状态", "错误数"])
-        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Stretch)
-        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeToContents)
-        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
         self.table.verticalHeader().setVisible(False)
-        self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
-        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         main.addWidget(self.table)
 
@@ -131,7 +131,7 @@ class CheckViewerDialog(BaseDialog):
 
     def _open_file(self) -> None:
         fd = QFileDialog(self, "选择质检文件", os.path.dirname(self.file_path), "json(*.json)")
-        if fd.exec_() == QFileDialog.Accepted:
+        if fd.exec() == QFileDialog.DialogCode.Accepted:
             self.file_path = fd.selectedFiles()[0]
             self.file_input.setText(self.file_path)
             with open(self.file_path, "r", encoding="utf-8") as f:
@@ -197,10 +197,10 @@ class CheckViewerDialog(BaseDialog):
             self.table.setCellWidget(row, 0, name_w)
             status = "通过" if item.get("pass", True) else "不通过"
             s_item = QTableWidgetItem(status)
-            s_item.setTextAlignment(Qt.AlignCenter)
+            s_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(row, 1, s_item)
             err = QTableWidgetItem(str(item["noPassCount"]))
-            err.setTextAlignment(Qt.AlignCenter)
+            err.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(row, 2, err)
 
     def _start_check(self) -> None:
@@ -242,7 +242,7 @@ class CheckViewerDialog(BaseDialog):
     def _show_context_menu(self, pos) -> None:
         idx = self.table.indexAt(pos)
         menu = QMenu(self.table)
-        from PyQt5.QtWidgets import QAction
+        from PyQt6.QtGui import QAction
         if idx.isValid():
             row = idx.row()
             current = self.display_items[row]
@@ -259,7 +259,7 @@ class CheckViewerDialog(BaseDialog):
             new_a = QAction("新建规则", menu)
             new_a.triggered.connect(lambda: self._on_add_new())
             menu.addAction(new_a)
-        menu.exec_(self.table.viewport().mapToGlobal(pos))
+        menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _create_check_item(self, is_add: bool, item=None) -> None:
         from app.ui.dialogs.check_editor import CheckConfigDialog, CheckVo
@@ -279,7 +279,7 @@ class CheckViewerDialog(BaseDialog):
         )
         dlg = CheckConfigDialog(is_add, self.parent, columns=self._field_names(), check_vo=vo)
         dlg.save_edit.connect(self._on_save_edit)
-        dlg.exec_()
+        dlg.exec()
 
     def _field_names(self) -> list[str]:
         if not (self.parent and self.data_source_input.currentText()):

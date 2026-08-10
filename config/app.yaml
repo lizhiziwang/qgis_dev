@@ -25,9 +25,9 @@ map:
 
 qgis:
   # dev 模式硬编码；prod 模式不读这里
-  install_path: D:/zsh/app/qgis_3.40
-  python_path: D:/zsh/app/qgis_3.40/apps/qgis-ltr/python
-  bin_path: D:/zsh/app/qgis_3.40/bin
+  install_path: D:/zsh/app/qgis4.2
+  python_path: D:/zsh/app/qgis4.2/apps/qgis/python
+  bin_path: D:/zsh/app/qgis4.2/bin
 
 paths:
   resource: resource

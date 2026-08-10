@@ -15,9 +15,9 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-from PyQt5.QtCore import QSize, Qt, QTimer
-from PyQt5.QtGui import QColor
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import QSize, Qt, QTimer
+from PyQt6.QtGui import QColor
+from PyQt6.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
     QPushButton,
@@ -74,7 +74,7 @@ class CanvasZoomTool(QFrame):
 
     def _build_ui(self) -> None:
         self.setFixedWidth(60)
-        self.setAttribute(Qt.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet(canvas_zoom_qss(ThemeManager.instance().current()))
         # 柔和投影，让工具浮在地图
         shadow = QGraphicsDropShadowEffect(self)
@@ -97,11 +97,11 @@ class CanvasZoomTool(QFrame):
 
         # 垂直进度条（滑块，可拖动缩放）。水平撑满面板宽度，让轨道与按钮
         # 在同一个竖直中心线上；设最小高度让轨道足够长、好抓取。
-        self.slider = QSlider(Qt.Vertical, self)
+        self.slider = QSlider(Qt.Orientation.Vertical, self)
         self.slider.setRange(0, _STEPS)
         self.slider.setSingleStep(1)
         self.slider.setPageStep(5)
-        self.slider.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.slider.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.slider.setMinimumHeight(110)
         self.slider.setToolTip("拖动调整缩放级别")
         layout.addWidget(self.slider, 1)

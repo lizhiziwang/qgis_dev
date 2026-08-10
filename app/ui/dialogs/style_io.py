@@ -5,8 +5,8 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -96,7 +96,7 @@ class StyleOpenDialog(BaseDialog):
         main = QVBoxLayout()
         row = QHBoxLayout()
         label = QLabel("选择 QML 文件：")
-        label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.path_input = QLineEdit()
         self.path_input.setPlaceholderText("点击\"选择文件\"或手动输入 .qml 文件路径")
         sel = QPushButton("选择文件…")

@@ -30,10 +30,9 @@ if TYPE_CHECKING:
     from qgis.core import QgsVectorLayer
     from qgis.gui import QgsMapCanvas
 
-from PyQt5.QtCore import Qt, QObject, pyqtSignal
-from PyQt5.QtGui import QColor
-from PyQt5.QtWidgets import (
-    QAction,
+from PyQt6.QtCore import Qt, QObject, pyqtSignal
+from PyQt6.QtGui import QAction, QColor
+from PyQt6.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -56,7 +55,7 @@ class DigitizingToolbar(QObject):
 
     继承 :class:`QObject` 是为了挂 :pyattr:`editing_state_changed` 信号——
     :class:`pyqtSignal` 必须挂在 :class:`QObject` 派生类上才能 ``emit`` /
-    ``connect``，否则会触发 ``TypeError: cannot be converted to PyQt5.QtCore.QObject``。
+    ``connect``，否则会触发 ``TypeError: cannot be converted to PyQt6.QtCore.QObject``。
     """
 
     #: 编辑状态切换时发出：True=进入编辑态，False=退出编辑态。
@@ -95,7 +94,7 @@ class DigitizingToolbar(QObject):
         # ---- 编辑器下拉按钮 ----
         self.digitize_button = QToolButton()
         self.digitize_button.setText("编辑器")
-        self.digitize_button.setPopupMode(QToolButton.InstantPopup)
+        self.digitize_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.digitize_menu = QMenu()
 
         self.start_edit = QAction("开始编辑", self.digitize_menu)
@@ -118,7 +117,7 @@ class DigitizingToolbar(QObject):
         # ---- 添加要素下拉按钮 ----
         self.add_feature_button = QToolButton()
         self.add_feature_button.setText("添加要素")
-        self.add_feature_button.setPopupMode(QToolButton.InstantPopup)
+        self.add_feature_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.add_feature_menu = QMenu()
 
         self.add_point_action = QAction("添加点", self.add_feature_menu)
@@ -217,10 +216,10 @@ class DigitizingToolbar(QObject):
                 self.main_window,
                 "警告",
                 "是否保存编辑的内容！",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.Yes,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.Yes,
             )
-            if reply == QMessageBox.Yes:
+            if reply == QMessageBox.StandardButton.Yes:
                 layer.commitChanges(stopEditing=True)
             else:
                 layer.rollBack()
@@ -260,7 +259,7 @@ class DigitizingToolbar(QObject):
             "polygon": QgsWkbTypes.PolygonGeometry,
         }[geom_type]
         self.rubber_band = QgsRubberBand(self.canvas, rubber_band_type)
-        self.rubber_band.setColor(Qt.red)
+        self.rubber_band.setColor(Qt.GlobalColor.red)
         self.rubber_band.setWidth(2)
         self.rubber_band.setFillColor(QColor(255, 0, 0, 50))
 

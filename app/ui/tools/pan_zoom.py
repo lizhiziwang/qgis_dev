@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QAction, QMainWindow, QToolBar
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QAction
+from PyQt6.QtWidgets import QMainWindow, QToolBar
 
 from qgis.gui import QgsMapToolPan, QgsMapToolZoom
 
@@ -19,7 +20,7 @@ class PanZoomTools:
 
     def add_to_toolbar(self, main_window: QMainWindow) -> QToolBar:
         tb = main_window.addToolBar("地图工具")
-        tb.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
 
         a_pan = QAction("平移", main_window)
         a_pan.triggered.connect(lambda: self.canvas.setMapTool(self.pan))

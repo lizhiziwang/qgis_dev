@@ -27,7 +27,7 @@ from typing import Optional
 from app.env.config import AppConfig
 from app.env.qgis_runtime import QgisRuntime
 from app.infra.fs.paths import Paths
-from app.infra.logging import get_logger
+from app.infra.logging import get_logger, install_crash_logging
 
 logger = get_logger(__name__)
 
@@ -57,12 +57,17 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     _configure_logging(cfg, paths)
 
+    # 崩溃日志：装配在日志目录确定之后、QGIS 初始化之前。
+    # 之后任何未捕获 Python 异常（含 Qt 槽内）都会写 logs/crash.log，
+    # 原生崩溃由 faulthandler 写 logs/crash_faulthandler.log。
+    install_crash_logging(paths.logs)
+
     logger.info("应用启动 env=%s crs=%s", cfg.env, cfg.crs)
     logger.debug("Paths: %s", paths)
 
     qgis = _build_qgis_runtime(cfg)
     qgis.apply_env()
-    logger.info("QGIS runtime applied: prefix=%s", qgis.qgis_ltr)
+    logger.info("QGIS runtime applied: prefix=%s", qgis.qgis_prefix)
 
     # 创建 QApplication（不 initQgis，等登录通过再做）
     app = _ensure_qgis_application(qgis)
@@ -172,7 +177,7 @@ def _build_qgis_runtime(cfg: AppConfig) -> QgisRuntime:
     prefix = os.environ.get("QGIS_PREFIX")
     if prefix:
         base = Path(prefix)
-        if (base / "apps" / "qgis-ltr").exists():
+        if (base / "apps" / "qgis").exists():
             return QgisRuntime.for_prod()          # 完整 QGIS 安装布局
         return QgisRuntime.for_portable(base)      # 扁平便携包
     if cfg.env == "prod":
@@ -196,7 +201,7 @@ def _ensure_qgis_application(qgis: QgisRuntime):
     app = QgsApplication.instance()
     if app is None:
         app = QgsApplication(_argv, True)
-    app.setPrefixPath(str(qgis.qgis_ltr), True)
+    app.setPrefixPath(str(qgis.qgis_prefix), True)
 
     # 全局控件配色：弹窗 / 右键菜单 / ToolTip 等顶层窗口只有 QApplication 级
     # QSS 能覆盖。这里提前实例化 ThemeManager，把保存的主题设到全局，
@@ -209,12 +214,12 @@ def _ensure_qgis_application(qgis: QgisRuntime):
 
 def _run_login_dialog() -> Optional[str]:
     """弹登录对话框；返回登录成功的用户名，或 ``None``（取消 / 校验失败）。"""
-    from PyQt5.QtWidgets import QDialog
+    from PyQt6.QtWidgets import QDialog
 
     from app.ui.dialogs.login import LoginDialog
 
     dlg = LoginDialog()
-    if dlg.exec_() == QDialog.Accepted:
+    if dlg.exec() == QDialog.DialogCode.Accepted:
         logger.info("用户登录成功 username=%s", dlg.username())
         return dlg.username()
     logger.info("用户取消登录")
@@ -228,7 +233,7 @@ def _run_qgis_app(cfg: AppConfig, qgis: QgisRuntime, app) -> int:
 
     # 翻译：仅在 dev 模式装（prod 走 launcher 内置资源）
     if cfg.env == "dev":
-        from PyQt5.QtCore import QTranslator
+        from PyQt6.QtCore import QTranslator
 
         translator = QTranslator()
         translator.load("qgis_zh-Hans.qm", app.i18nPath())
@@ -242,19 +247,8 @@ def _run_qgis_app(cfg: AppConfig, qgis: QgisRuntime, app) -> int:
     # 4) 主窗口（阶段 4 实现新窗口；阶段 1-3 临时仍用旧类）
     from app.bootstrap.main_window import build_window
 
-    logger.info("[probe] before build_window")
-    try:
-        window = build_window()
-        logger.info("[probe] build_window OK")
-    except Exception:
-        logger.exception("[probe] build_window raised")
-        raise
-    try:
-        window.show()
-        logger.info("[probe] window.show OK, entering exec")
-    except Exception:
-        logger.exception("[probe] window.show raised")
-        raise
+    window = build_window()
+    window.show()
     _run_startup_callbacks(window)
     return app.exec()
 

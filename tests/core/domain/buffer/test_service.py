@@ -83,7 +83,7 @@ def test_widen_string_fields_when_value_exceeds_declared_length(geojson_short_st
 @pytest.mark.gui
 def test_no_change_when_string_lengths_fit(qgis_app):
     """字段声明长度足够时原样返回，不产生拷贝开销。"""
-    from PyQt5.QtCore import QVariant
+    from PyQt6.QtCore import QVariant
     from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsVectorLayer
 
     layer = QgsVectorLayer("Polygon?crs=EPSG:4490", "宽字段层", "memory")
@@ -113,7 +113,7 @@ def test_buffer_succeeds_on_real_gdb(gdb_layer):
 @pytest.mark.gui
 def test_output_path_writes_gpkg(qgis_app, tmp_path):
     """给定输出文件路径时写入 gpkg，并返回从文件加载的图层。"""
-    from PyQt5.QtCore import QVariant
+    from PyQt6.QtCore import QVariant
     from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsVectorLayer
 
     layer = QgsVectorLayer("Polygon?crs=EPSG:4326", "缓冲输入", "memory")

@@ -16,7 +16,7 @@ def network_layer(qgis_app):
 
     求 (0,0) → (20,0) 的最短路径应沿 东1+东2，总长 20（度）。
     """
-    from PyQt5.QtCore import QVariant
+    from PyQt6.QtCore import QVariant
     from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsProject, QgsVectorLayer
 
     layer = QgsVectorLayer("LineString?crs=EPSG:4326", "网络", "memory")

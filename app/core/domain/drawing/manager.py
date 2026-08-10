@@ -21,10 +21,10 @@ if TYPE_CHECKING:
 
     from .tools.qgis.base import BaseQgsDrawTool
 
-from PyQt5.QtCore import QObject, pyqtSignal
+from PyQt6.QtCore import QObject, pyqtSignal
 from qgis.core import QgsWkbTypes
 from qgis.gui import QgsRubberBand
-from PyQt5.QtCore import Qt
+from PyQt6.QtCore import Qt
 
 from .service import ActiveDraw, DrawingService
 
@@ -163,7 +163,7 @@ class DrawManager(QObject):
         """工具类访问共享 rubber_band（多边形/矩形/圆用）。"""
         if self._shared_rubber_band is None:
             self._shared_rubber_band = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
-            self._shared_rubber_band.setColor(Qt.red)
+            self._shared_rubber_band.setColor(Qt.GlobalColor.red)
             self._shared_rubber_band.setWidth(2)
-            self._shared_rubber_band.setFillColor(Qt.red)
+            self._shared_rubber_band.setFillColor(Qt.GlobalColor.red)
         return self._shared_rubber_band

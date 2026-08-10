@@ -13,9 +13,9 @@ import pytest
 
 # tools_dock 模块顶层 import PyQt5；非 GUI 环境（如纯 pytest CI）无法收集，
 # 必须先跳过整个模块，避免 collection error。
-pytest.importorskip("PyQt5")
+pytest.importorskip("PyQt6")
 
-from PyQt5.QtWidgets import QDialog  # noqa: E402
+from PyQt6.QtWidgets import QDialog  # noqa: E402
 
 from app.ui.docks import tools_dock  # noqa: E402
 from app.ui.docks.tools_dock import ToolsDock  # noqa: E402

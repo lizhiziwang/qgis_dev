@@ -87,9 +87,10 @@ def test_app_config_map_defaults_to_none():
 def test_qgis_runtime_for_dev_builds_paths():
     base = Path("D:/qgis")
     r = QgisRuntime.for_dev(base)
-    assert r.qgis_ltr == base / "apps" / "qgis-ltr"
+    assert r.qgis_prefix == base / "apps" / "qgis"
+    assert r.qt6 == base / "apps" / "qt6"
     assert r.gdal == base / "apps" / "gdal"
-    assert r.proj == base / "apps" / "proj"
+    assert r.proj == base / "share" / "proj"
     assert r.bin == base / "bin"
 
 
@@ -109,11 +110,11 @@ def test_apply_env_sets_required_vars(monkeypatch, tmp_path: Path):
     monkeypatch.delenv("PATH", raising=False)
     r = QgisRuntime.for_dev(tmp_path)
     r.apply_env()
-    assert os.environ["QGIS_PREFIX_PATH"] == str(r.qgis_ltr)
-    assert os.environ["PROJ_LIB"].endswith("share")
-    assert os.environ["GDAL_DATA"].endswith("data")
+    assert os.environ["QGIS_PREFIX_PATH"] == str(r.qgis_prefix)
+    assert os.environ["PROJ_DATA"].endswith("share" + os.sep + "proj")
+    assert os.environ["GDAL_DATA"].endswith("share" + os.sep + "gdal")
     assert os.environ["GDAL_DRIVER_PATH"].endswith("gdalplugins")
-    assert str(r.qgis_ltr / "plugins") in os.environ["QT_PLUGIN_PATH"]
+    assert str(r.qt6 / "plugins") in os.environ["QT_PLUGIN_PATH"]
 
 
 def test_apply_env_idempotent(monkeypatch, tmp_path: Path):

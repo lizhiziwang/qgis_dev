@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from qgis.core import QgsGeometry
     from qgis.gui import QgsMapCanvas
 
-from PyQt5.QtCore import Qt
+from PyQt6.QtCore import Qt
 from qgis.core import QgsGeometry
 from qgis.gui import QgsMapToolEmitPoint
 
@@ -46,7 +46,7 @@ class QGISPointDrawTool(BaseQgsDrawTool):
 
     def _on_canvas_clicked(self, point, button) -> None:  # noqa: ANN001
         # 只接受左键（QGIS 工具右键也会触发 canvasClicked）
-        if button != Qt.LeftButton:
+        if button != Qt.MouseButton.LeftButton:
             return
         # point 已是 QgsPointXY，直接 fromPointXY
         geometry = QgsGeometry.fromPointXY(point)

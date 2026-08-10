@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import os
 
-from PyQt5.QtCore import QTimer
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import QTimer
+from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -66,7 +66,7 @@ class ReprojectDialog(BaseDialog):
         b_l = QVBoxLayout()
         b_l.setContentsMargins(0, 0, 0, 0)
         self.loading = QProgressBar()
-        self.loading.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.loading.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.loading.setRange(0, 100)
         # 重要：不要 connect feedback.progressChanged → setValue（原生崩溃，
         # 见 buffer._init_ui 注释）。进度条改为手动置 0 → 完成置 100。

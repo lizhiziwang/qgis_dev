@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import os
 
-from PyQt5.QtCore import QTimer
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import QTimer
+from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDoubleSpinBox,
@@ -77,7 +77,7 @@ class BufferDialog(BaseDialog):
         b_l = QVBoxLayout()
         b_l.setContentsMargins(0, 0, 0, 0)
         self.loading = QProgressBar()
-        self.loading.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.loading.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.loading.setRange(0, 100)
         # 重要：不要 connect feedback.progressChanged → setValue。实测这套环境里
         # progressChanged 无论直连还是 QueuedConnection 路由到控件槽都会原生崩溃

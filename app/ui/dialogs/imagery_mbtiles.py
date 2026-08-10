@@ -11,8 +11,8 @@ import os
 from html import escape
 from typing import Optional
 
-from PyQt5.QtGui import QTextCursor
-from PyQt5.QtWidgets import (
+from PyQt6.QtGui import QTextCursor
+from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QHBoxLayout,
@@ -99,7 +99,7 @@ class ImageryMbtilesDialog(BaseDialog):
         b_l = QVBoxLayout()
         b_l.setContentsMargins(0, 0, 0, 0)
         self.loading = QProgressBar()
-        self.loading.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.loading.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.loading.setRange(0, 100)
         b_l.addWidget(self.loading, stretch=2)
 
@@ -249,7 +249,7 @@ class ImageryMbtilesDialog(BaseDialog):
                 f"预计生成约 {n_tiles:,} 个瓦片，耗时可能较长。\n"
                 f"当前范围为图层全幅（{min_z}-{max_z} 级）。是否继续？",
             )
-            if ret != QMessageBox.Yes:
+            if ret != QMessageBox.StandardButton.Yes:
                 return
 
         self.execute_btn.setEnabled(False)

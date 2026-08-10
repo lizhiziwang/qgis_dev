@@ -3,9 +3,10 @@
 与 ``app.core.domain.drawing.tools``（自定义实现）并存：
 
 - **自定义版**：从零实现 ``QgsMapTool`` 子类，自己管 ``temp_points`` / 橡胶线。
-- **本子包 (QGIS 版)**：直接继承 ``QgsMapToolEmitPoint`` /
-  ``QgsMapToolCapture{Line,Polygon}`` / ``QgsMapToolShape{Rectangle,Circle}``，
-  把"采集几何"完全交给 QGIS，我们只负责订阅 ``finished`` 信号并做后处理。
+- **本子包 (QGIS 版)**：点/线/面直接继承 ``QgsMapToolEmitPoint`` /
+  ``QgsMapToolCapture{Line,Polygon}``，把"采集几何"交给 QGIS，我们只负责订阅
+  ``finished`` 信号并做后处理；矩形/圆在 QGIS 4 已移除 ``QgsMapToolShape*``，
+  回退到自定义版实现（见 ``circle.py`` / ``rectangle.py``）。
 
 二者通过 :class:`app.core.domain.drawing.manager.DrawManager` 上的不同入口激活：
 ``enable_draw_tool`` 走自定义版，``enable_qgis_draw_tool`` 走本子包。

@@ -20,9 +20,9 @@ from __future__ import annotations
 import hashlib
 import time
 
-from PyQt5.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
-from PyQt5.QtWidgets import QHBoxLayout, QLabel, QMenu, QToolButton, QWidget
+from PyQt6.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
+from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from PyQt6.QtWidgets import QHBoxLayout, QLabel, QMenu, QToolButton, QWidget
 
 from app.ui.common.icons import Icons
 from app.ui.common.theme import THEMES, ThemeManager, title_bar_qss
@@ -42,11 +42,11 @@ _AVATAR_COLORS = (
 def make_avatar_pixmap(name: str, size: int = 22) -> QPixmap:
     """用用户名生成"圆形 + 首字母"占位头像（没有真实头像资源时的兜底）。"""
     pm = QPixmap(size, size)
-    pm.fill(Qt.transparent)
+    pm.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pm)
-    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     painter.setBrush(QColor(_avatar_color(name)))
-    painter.setPen(Qt.NoPen)
+    painter.setPen(Qt.PenStyle.NoPen)
     painter.drawEllipse(1, 1, size - 2, size - 2)
     letter = (name or "?").strip()[0].upper()
     font = QFont("Microsoft YaHei")
@@ -54,7 +54,7 @@ def make_avatar_pixmap(name: str, size: int = 22) -> QPixmap:
     font.setPixelSize(int(size * 0.55))
     painter.setFont(font)
     painter.setPen(QColor("white"))
-    painter.drawText(QRect(0, 0, size, size), Qt.AlignCenter, letter)
+    painter.drawText(QRect(0, 0, size, size), Qt.AlignmentFlag.AlignCenter, letter)
     painter.end()
     return pm
 
@@ -70,13 +70,13 @@ def _window_icon(kind: str, color: QColor = QColor("#5a5f66")) -> QIcon:
     """用 QPainter 绘制最小化/最大化/还原/关闭图标，避免依赖字体字形。"""
     size = 11
     pm = QPixmap(size, size)
-    pm.fill(Qt.transparent)
+    pm.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pm)
-    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     pen = QPen(color)
     pen.setWidthF(1.1)
     painter.setPen(pen)
-    painter.setBrush(Qt.NoBrush)
+    painter.setBrush(Qt.BrushStyle.NoBrush)
     if kind == "min":
         painter.drawLine(1, size // 2, size - 2, size // 2)
     elif kind == "max":
@@ -95,16 +95,16 @@ def _theme_icon() -> QIcon:
     """调色盘图标：四色圆点（主题切换按钮）。"""
     size = 12
     pm = QPixmap(size, size)
-    pm.fill(Qt.transparent)
+    pm.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pm)
-    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     colors = ("#4A90E2", "#3AA78F", "#E2725B", "#C974A8")
     radius = 2
     for i, color in enumerate(colors):
         cx = 2 + (i % 2) * 4
         cy = 2 + (i // 2) * 4
         painter.setBrush(QColor(color))
-        painter.setPen(Qt.NoPen)
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(cx, cy, radius * 2, radius * 2)
     painter.end()
     return QIcon(pm)
@@ -119,8 +119,8 @@ class _TitleButton(QToolButton):
         self._hover_icon = hover_icon or icon
         self.setIcon(icon)
         self.setFixedSize(46, TITLE_BAR_HEIGHT)
-        self.setCursor(Qt.ArrowCursor)
-        self.setFocusPolicy(Qt.NoFocus)
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setAutoRaise(True)
 
     def set_icons(self, normal: QIcon, hover: QIcon = None) -> None:
@@ -154,7 +154,7 @@ class TitleBar(QWidget):
         super().__init__(parent)
         self.setObjectName("TitleBar")
         self.setFixedHeight(TITLE_BAR_HEIGHT)
-        self.setAttribute(Qt.WA_StyledBackground, True)  # 让 QSS 背景色生效
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)  # 让 QSS 背景色生效
 
         self._maximized = False
         self._drag_offset = None
@@ -179,10 +179,10 @@ class TitleBar(QWidget):
 
         # 用户信息（头像 + 用户名），点击弹出账号菜单
         self._user_btn = QToolButton(self)
-        self._user_btn.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        self._user_btn.setPopupMode(QToolButton.InstantPopup)
+        self._user_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+        self._user_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._user_btn.setIconSize(QSize(22, 22))
-        self._user_btn.setCursor(Qt.PointingHandCursor)
+        self._user_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._user_menu = QMenu(self._user_btn)
         self._user_btn.setMenu(self._user_menu)
         self.set_user("未登录")
@@ -191,7 +191,7 @@ class TitleBar(QWidget):
         # 主题切换按钮（调色盘图标，弹出主题菜单）
         self._btn_theme = _TitleButton(_theme_icon(), parent=self)
         self._btn_theme.setToolTip("切换主题")
-        self._btn_theme.setPopupMode(QToolButton.InstantPopup)
+        self._btn_theme.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self._theme_menu = QMenu(self._btn_theme)
         self._btn_theme.setMenu(self._theme_menu)
         layout.addWidget(self._btn_theme)
@@ -309,7 +309,7 @@ class TitleBar(QWidget):
     # ---------------------------------------------------------- 非 Windows 拖动兜底
 
     def mousePressEvent(self, event) -> None:
-        if event.button() == Qt.LeftButton and not self._is_interactive_pos(event.pos()):
+        if event.button() == Qt.MouseButton.LeftButton and not self._is_interactive_pos(event.pos()):
             frame = self.window().frameGeometry() if self.window() else None
             if frame is not None:
                 self._drag_offset = event.globalPos() - frame.topLeft()
@@ -318,7 +318,7 @@ class TitleBar(QWidget):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event) -> None:
-        if self._drag_offset is not None and (event.buttons() & Qt.LeftButton):
+        if self._drag_offset is not None and (event.buttons() & Qt.MouseButton.LeftButton):
             handle = self.window().windowHandle()
             if handle is not None and hasattr(handle, "startSystemMove"):
                 handle.startSystemMove()  # Qt 5.15+ 原生拖动（含贴边吸附）
@@ -332,7 +332,7 @@ class TitleBar(QWidget):
         super().mouseReleaseEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
-        if event.button() == Qt.LeftButton and not self._is_interactive_pos(event.pos()):
+        if event.button() == Qt.MouseButton.LeftButton and not self._is_interactive_pos(event.pos()):
             self.maximize_requested.emit()
             return
         super().mouseDoubleClickEvent(event)

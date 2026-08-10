@@ -2,7 +2,11 @@
 
 修复前（bug）：分页依赖 ``QgsFeatureRequest.setOffset``，而本 QGIS 构建没有该
 方法（``AttributeError`` 被吞掉），页面永远返回 0 行 —— 属性表数据"不全"。
-现在：不分页，初始加载总量的 20%，``load_more()`` 逐批追加 20% 直至加载完。
+现在：总量 > ``DYNAMIC_LOAD_THRESHOLD``（默认 1000）才分批动态加载（初始 20%，
+``load_more()`` 逐批追加 20% 直至加载完）；≤ 阈值一次性全量加载。
+
+分页机制测试用 monkeypatch 把阈值调小，让 120 条的小图层也走分页路径；另设
+两个阈值行为测试覆盖"小图层全量 / 大图层分页"。
 
 需要真实 QGIS（PyQt5 + QgsApplication）；CI 默认 ``-m 'not gui'`` 跳过。
 """
@@ -11,7 +15,7 @@ from __future__ import annotations
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("PyQt6")
 
 from app.ui.docks.attribute_dock import PagedAttributeTableModel  # noqa: E402
 
@@ -31,13 +35,19 @@ def layer(qgis_app):
     return lyr
 
 
+def _patch_threshold(monkeypatch, value: int) -> None:
+    """把动态加载阈值调小，让 120 条图层也走分页路径。"""
+    monkeypatch.setattr("app.ui.docks.attribute_dock.DYNAMIC_LOAD_THRESHOLD", value)
+
+
 def _ids(model):
     return [f.id() for f in model.features]
 
 
 @pytest.mark.gui
-def test_batch_size_is_20_percent(layer):
-    """每批加载总量的 20%（向上取整，至少 1 条），初始即加载首批。"""
+def test_batch_size_is_20_percent(layer, monkeypatch):
+    """总量 > 阈值：每批加载总量的 20%（向上取整，至少 1 条），初始即加载首批。"""
+    _patch_threshold(monkeypatch, 10)
     model = PagedAttributeTableModel(layer, page_size=50)
 
     assert model.total_features == 120
@@ -48,8 +58,9 @@ def test_batch_size_is_20_percent(layer):
 
 
 @pytest.mark.gui
-def test_incremental_load_until_all_rows(layer):
+def test_incremental_load_until_all_rows(layer, monkeypatch):
     """120 条 / 批 24：load_more 逐批追加 24/48/72/96/120，ID 连续覆盖。"""
+    _patch_threshold(monkeypatch, 10)
     model = PagedAttributeTableModel(layer, page_size=50)
 
     expected_counts = [24, 48, 72, 96, 120]
@@ -67,7 +78,7 @@ def test_incremental_load_until_all_rows(layer):
 
 
 @pytest.mark.gui
-def test_small_layer_batch_at_least_one(qgis_app):
+def test_small_layer_batch_at_least_one(qgis_app, monkeypatch):
     """小数据量：批次至少 1 条，且逐批加载完不超过总量。"""
     from qgis.core import QgsFeature, QgsGeometry, QgsVectorLayer
 
@@ -79,6 +90,7 @@ def test_small_layer_batch_at_least_one(qgis_app):
         feats.append(f)
     lyr.dataProvider().addFeatures(feats)
 
+    _patch_threshold(monkeypatch, 1)  # 3 > 1 → 仍走分页
     model = PagedAttributeTableModel(lyr, page_size=50)
     assert model.batch_size == 1  # ceil(3 * 0.2) = 1
     assert model.rowCount() == 1
@@ -90,8 +102,55 @@ def test_small_layer_batch_at_least_one(qgis_app):
 
 
 @pytest.mark.gui
-def test_filter_resets_to_first_batch(layer):
-    """筛选后重新统计，回到首屏 20%。"""
+def test_small_layer_loads_all_at_once(qgis_app):
+    """≤ 阈值（默认 1000）：一次性全量加载，不出现分页。"""
+    from qgis.core import QgsFeature, QgsGeometry, QgsVectorLayer
+
+    lyr = QgsVectorLayer("Point?crs=EPSG:4326", "小", "memory")
+    feats = []
+    for i in range(3):
+        f = QgsFeature()
+        f.setGeometry(QgsGeometry.fromWkt(f"POINT({i} {i})"))
+        feats.append(f)
+    lyr.dataProvider().addFeatures(feats)
+
+    model = PagedAttributeTableModel(lyr, page_size=50)
+    assert model.batch_size == 3  # 总量本身
+    assert model.rowCount() == 3
+    assert _ids(model) == [1, 2, 3]
+    assert model.has_more is False
+
+
+@pytest.mark.gui
+def test_layer_over_threshold_pages(qgis_app):
+    """> 阈值（1000）：按 20% 分批动态加载。"""
+    from qgis.core import QgsFeature, QgsGeometry, QgsVectorLayer
+
+    lyr = QgsVectorLayer("Point?crs=EPSG:4326", "大", "memory")
+    feats = []
+    for i in range(1001):
+        f = QgsFeature()
+        f.setGeometry(QgsGeometry.fromWkt(f"POINT({i} {i})"))
+        feats.append(f)
+    lyr.dataProvider().addFeatures(feats)
+
+    model = PagedAttributeTableModel(lyr, page_size=50)
+    assert model.total_features == 1001
+    assert model.batch_size == 201  # ceil(1001 * 0.2)
+    assert model.rowCount() == 201
+    assert model.has_more is True
+
+    # 分批加载到完
+    while model.has_more:
+        model.load_more()
+    assert model.rowCount() == 1001
+    assert model.has_more is False
+
+
+@pytest.mark.gui
+def test_filter_resets_to_first_batch(layer, monkeypatch):
+    """筛选后重新统计，回到首屏首批。"""
+    _patch_threshold(monkeypatch, 10)
     model = PagedAttributeTableModel(layer, page_size=50)
     model.load_more()
     model.load_more()
@@ -108,8 +167,9 @@ def test_filter_resets_to_first_batch(layer):
 
 
 @pytest.mark.gui
-def test_show_ids_subset(layer):
+def test_show_ids_subset(layer, monkeypatch):
     """show_ids 限制为指定要素子集，动态加载只在这些 ID 内进行。"""
+    _patch_threshold(monkeypatch, 4)
     wanted = [5, 6, 7, 8, 9, 10, 11, 12]
     model = PagedAttributeTableModel(layer, page_size=10, show_ids=wanted)
 
@@ -139,10 +199,11 @@ def test_empty_layer_no_crash(qgis_app):
 
 
 @pytest.mark.gui
-def test_widget_loads_more_on_button(layer):
-    """widget 初始显示 20%，点"加载更多"逐批追加，状态文本随进度更新。"""
+def test_widget_loads_more_on_button(layer, monkeypatch):
+    """widget 初始显示首批，点"加载更多"逐批追加，状态文本随进度更新。"""
     from app.ui.docks.attribute_dock import PagedAttributeTableWidget
 
+    _patch_threshold(monkeypatch, 10)
     w = PagedAttributeTableWidget(layer, page_size=50)
     assert w.model.rowCount() == 24
     assert "24 / 120" in w.load_status_label.text()
@@ -161,11 +222,32 @@ def test_widget_loads_more_on_button(layer):
 
 
 @pytest.mark.gui
+def test_widget_small_layer_no_load_button(qgis_app):
+    """≤ 阈值：widget 一次性全量加载，"加载更多"按钮默认禁用、状态显示已全部。"""
+    from qgis.core import QgsFeature, QgsGeometry, QgsVectorLayer
+
+    from app.ui.docks.attribute_dock import PagedAttributeTableWidget
+
+    lyr = QgsVectorLayer("Point?crs=EPSG:4326", "小", "memory")
+    feats = []
+    for i in range(5):
+        f = QgsFeature()
+        f.setGeometry(QgsGeometry.fromWkt(f"POINT({i} {i})"))
+        feats.append(f)
+    lyr.dataProvider().addFeatures(feats)
+
+    w = PagedAttributeTableWidget(lyr, page_size=50)
+    assert w.model.rowCount() == 5
+    assert not w.load_more_btn.isEnabled()
+    assert "已全部加载" in w.load_status_label.text()
+
+
+@pytest.mark.gui
 def test_context_menu_select_feature_selects_and_refreshes(layer):
     """右键"选中要素"：经 zoom_to_map 信号选中要素并刷新画布（修复前无刷新）。"""
     from types import SimpleNamespace
 
-    from PyQt5.QtWidgets import QMainWindow
+    from PyQt6.QtWidgets import QMainWindow
 
     from app.ui.docks.attribute_dock import AttributeDock
 
@@ -188,7 +270,7 @@ def test_context_menu_zoom_to_feature_zooms_and_selects(layer):
 
     修复前 MainWindow 没有该方法，dock handler 的 hasattr 检查为 False，缩放被静默跳过。
     """
-    from PyQt5.QtWidgets import QMainWindow
+    from PyQt6.QtWidgets import QMainWindow
 
     from app.ui.docks.attribute_dock import AttributeDock
 

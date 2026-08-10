@@ -26,17 +26,17 @@ try:
 except Exception:
     cfg = {}
 
-QGIS_INSTALL = cfg.get("qgis", {}).get("install_path", "D:/zsh/app/qgis_3.40")
-QGIS_PYTHON = Path(QGIS_INSTALL) / "apps" / "qgis-ltr" / "python"
-QGIS_BIN = Path(QGIS_INSTALL) / "apps" / "qgis-ltr" / "bin"
+QGIS_INSTALL = cfg.get("qgis", {}).get("install_path", "D:/zsh/app/qgis4.2")
+QGIS_PYTHON = Path(QGIS_INSTALL) / "apps" / "qgis" / "python"
+QGIS_BIN = Path(QGIS_INSTALL) / "apps" / "qgis" / "bin"
 MAIN_BIN = Path(QGIS_INSTALL) / "bin"
-QT5_BIN = Path(QGIS_INSTALL) / "apps" / "Qt5" / "bin"
+QT6_BIN = Path(QGIS_INSTALL) / "apps" / "qt6" / "bin"
 
 datas = [
     (str(QGIS_PYTHON / "qgis"), "qgis"),
     (str(PROJECT_ROOT / "resource"), "resource"),
     (str(PROJECT_ROOT / "config"), "config"),
-    (str(Path(QGIS_INSTALL) / "apps" / "qgis-ltr" / "resources" / "srs.db"), "resources"),
+    (str(Path(QGIS_INSTALL) / "apps" / "qgis" / "resources" / "srs.db"), "resources"),
     (str(Path(QGIS_INSTALL) / "share" / "proj" / "proj.db"), "."),
 ]
 
@@ -44,66 +44,61 @@ binaries = [
     (str(QGIS_BIN / "qgis_core.dll"), "."),
     (str(QGIS_BIN / "qgis_gui.dll"), "."),
     (str(QGIS_BIN / "qgis_analysis.dll"), "."),  # processing 插件 / qgis._analysis 需要
-    (str(MAIN_BIN / "gdal311.dll"), "."),
+    (str(QGIS_BIN / "qgis_native.dll"), "."),    # qgis_core 依赖
+    (str(QGIS_BIN / "qgispython.dll"), "."),     # python 集成
+    (str(MAIN_BIN / "gdal313.dll"), "."),
     (str(MAIN_BIN / "geos_c.dll"), "."),
     (str(MAIN_BIN / "pdalcpp.dll"), "."),
     (str(MAIN_BIN / "proj_9.dll"), "proj"),
-    (str(QT5_BIN / "Qt5Core.dll"), "."),
-    (str(QT5_BIN / "Qt5Gui.dll"), "."),
-    (str(QT5_BIN / "Qt5Widgets.dll"), "."),
-    (str(QT5_BIN / "Qt5Network.dll"), "."),
-    (str(QT5_BIN / "Qt5Xml.dll"), "."),
-    # Qt 平台插件（GUI 显示必需）：apps/Qt5/plugins/platforms/qwindows.dll → dist/app/platforms/
-    (str(QT5_BIN.parent / "plugins" / "platforms"), "platforms"),
+    (str(QT6_BIN / "Qt6Core.dll"), "."),
+    (str(QT6_BIN / "Qt6Gui.dll"), "."),
+    (str(QT6_BIN / "Qt6Widgets.dll"), "."),
+    (str(QT6_BIN / "Qt6Network.dll"), "."),
+    (str(QT6_BIN / "Qt6Xml.dll"), "."),
+    (str(QT6_BIN / "Qt6Svg.dll"), "."),
+    (str(QT6_BIN / "Qt6Concurrent.dll"), "."),
+    # Qt 平台插件（GUI 显示必需）：apps/qt6/plugins/platforms/qwindows.dll → dist/app/platforms/
+    (str(QT6_BIN.parent / "plugins" / "platforms"), "platforms"),
 ]
 
 hiddenimports = [
     "qgis.core",
     "qgis.gui",
     "qgis.utils",
-    "PyQt5.pylupdate",
-    "PyQt5.pyrcc",
-    "PyQt5.QAxContainer",
-    "PyQt5.Qsci",
-    "PyQt5.Qt",
-    "PyQt5.QtBluetooth",
-    "PyQt5.QtCore",
-    "PyQt5.QtDBus",
-    "PyQt5.QtDesigner",
-    "PyQt5.QtGui",
-    "PyQt5.QtHelp",
-    "PyQt5.QtLocation",
-    "PyQt5.QtMultimedia",
-    "PyQt5.QtMultimediaWidgets",
-    "PyQt5.QtNetwork",
-    "PyQt5.QtOpenGL",
-    "PyQt5.QtPositioning",
-    "PyQt5.QtPrintSupport",
-    "PyQt5.QtQml",
-    "PyQt5.QtQuick",
-    "PyQt5.QtQuick3D",
-    "PyQt5.QtQuickWidgets",
-    "PyQt5.QtRemoteObjects",
-    "PyQt5.QtSensors",
-    "PyQt5.QtSerialPort",
-    "PyQt5.QtSql",
-    "PyQt5.QtSvg",
-    "PyQt5.QtTest",
-    "PyQt5.QtTextToSpeech",
-    "PyQt5.QtWebChannel",
-    "PyQt5.QtWebKit",
-    "PyQt5.QtWebKitWidgets",
-    "PyQt5.QtWebSockets",
-    "PyQt5.QtWidgets",
-    "PyQt5.QtWinExtras",
-    "PyQt5.QtXml",
-    "PyQt5.QtXmlPatterns",
-    "PyQt5.sip",
-    "PyQt5._QOpenGLFunctions_2_0",
-    "PyQt5._QOpenGLFunctions_2_1",
-    "PyQt5._QOpenGLFunctions_4_1_Core",
+    "PyQt6.pylupdate",
+    "PyQt6.pyrcc",
+    "PyQt6.Qt",
+    "PyQt6.QtBluetooth",
+    "PyQt6.QtCore",
+    "PyQt6.QtDBus",
+    "PyQt6.QtDesigner",
+    "PyQt6.QtGui",
+    "PyQt6.QtHelp",
+    "PyQt6.QtMultimedia",
+    "PyQt6.QtMultimediaWidgets",
+    "PyQt6.QtNetwork",
+    "PyQt6.QtOpenGL",
+    "PyQt6.QtOpenGLWidgets",
+    "PyQt6.QtPositioning",
+    "PyQt6.QtPrintSupport",
+    "PyQt6.QtQml",
+    "PyQt6.QtQuick",
+    "PyQt6.QtQuickWidgets",
+    "PyQt6.QtRemoteObjects",
+    "PyQt6.QtSensors",
+    "PyQt6.QtSerialPort",
+    "PyQt6.QtSql",
+    "PyQt6.QtSvg",
+    "PyQt6.QtSvgWidgets",
+    "PyQt6.QtTest",
+    "PyQt6.QtTextToSpeech",
+    "PyQt6.QtWebChannel",
+    "PyQt6.QtWebSockets",
+    "PyQt6.QtWidgets",
+    "PyQt6.QtXml",
+    "PyQt6.sip",
     # processing 插件（运行时加载，PyInstaller 分析不到它的 import）需要：
-    "PyQt5.uic",      # processing/gui 用 qgis.PyQt.uic 加载 .ui
+    "PyQt6.uic",      # processing/gui 用 qgis.PyQt.uic 加载 .ui
     "psycopg2",       # processing/algs/gdal/GdalUtils 顶层 import
 ]
 

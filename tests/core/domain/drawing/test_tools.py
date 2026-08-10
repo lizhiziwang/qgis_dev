@@ -32,7 +32,7 @@ def test_active_draw_finished_signal_forward():
     """
     from unittest.mock import MagicMock
 
-    from PyQt5.QtCore import QCoreApplication
+    from PyQt6.QtCore import QCoreApplication
 
     from app.core.domain.drawing.service import ActiveDraw
 
@@ -52,7 +52,7 @@ def test_active_draw_finished_signal_forward():
 def test_active_draw_cancel_calls_cleanup():
     from unittest.mock import MagicMock
 
-    from PyQt5.QtCore import QCoreApplication
+    from PyQt6.QtCore import QCoreApplication
 
     from app.core.domain.drawing.service import ActiveDraw
 

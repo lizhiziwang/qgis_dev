@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import QVariant, Qt, pyqtSignal
+from PyQt6.QtWidgets import (
     QDialog,
     QGridLayout,
     QGroupBox,
@@ -26,7 +26,6 @@ from PyQt5.QtWidgets import (
 from qgis.core import (
     QgsExpression,
     QgsFeatureRequest,
-    QgsField,
     QgsVectorLayer,
 )
 from qgis.gui import QgsFieldComboBox
@@ -51,7 +50,7 @@ class QueryBuilderDialog(QDialog):
 
     def _init_ui(self) -> None:
         main = QVBoxLayout(self)
-        splitter = QSplitter(Qt.Horizontal)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
         main.addWidget(splitter)
 
         # 左：字段 + 值预览
@@ -60,17 +59,17 @@ class QueryBuilderDialog(QDialog):
         f_layout.addWidget(QLabel("选中字段："))
         self.field_combo = QgsFieldComboBox()
         self.field_combo.setLayer(self.layer)
-        self.field_combo.setFocusPolicy(Qt.NoFocus)
+        self.field_combo.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         f_layout.addWidget(self.field_combo)
         f_layout.addWidget(QLabel("字段值预览："))
         self.value_list = QListWidget()
-        self.value_list.setFocusPolicy(Qt.NoFocus)
+        self.value_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         f_layout.addWidget(self.value_list)
         btn_layout = QHBoxLayout()
         self.sample_btn = QPushButton("加载采样值")
-        self.sample_btn.setFocusPolicy(Qt.NoFocus)
+        self.sample_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.all_btn = QPushButton("加载全部值")
-        self.all_btn.setFocusPolicy(Qt.NoFocus)
+        self.all_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         btn_layout.addWidget(self.sample_btn)
         btn_layout.addWidget(self.all_btn)
         f_layout.addLayout(btn_layout)
@@ -83,14 +82,14 @@ class QueryBuilderDialog(QDialog):
         for i, op in enumerate(_OPERATORS):
             r, c = divmod(i, 5)
             b = QPushButton(op)
-            b.setFocusPolicy(Qt.NoFocus)
+            b.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             b.setMinimumSize(60, 30)
             b.clicked.connect(lambda _, t=op: self._insert_text(t))
             grid.addWidget(b, r, c)
         sql_layout.addLayout(grid)
         self.sql_edit = QTextEdit()
         self.sql_edit.setPlaceholderText("请输入 SQL 筛选条件（如：县代码 = '360202'）")
-        self.sql_edit.setFocusPolicy(Qt.StrongFocus)
+        self.sql_edit.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.sql_edit.setFocus()
         sql_layout.addWidget(self.sql_edit)
         splitter.addWidget(sql_group)
@@ -140,7 +139,8 @@ class QueryBuilderDialog(QDialog):
         field = self.layer.fields().field(field_name)
         if field is None:
             return
-        if field.type() in (QgsField.String, getattr(QgsField, "Text", None)):
+        # QGIS 4.x：QgsField.String 已移除，字段类型用 QVariant.Type 判断
+        if field.type() == QVariant.String:
             val = f"'{item.text().replace(chr(39), chr(39)*2)}'"
         else:
             val = item.text()
@@ -162,7 +162,7 @@ class QueryBuilderDialog(QDialog):
                 continue
             seen.add(v)
             item = QListWidgetItem(str(v))
-            item.setData(Qt.UserRole, v)
+            item.setData(Qt.ItemDataRole.UserRole, v)
             self.value_list.addItem(item)
 
     def _test_sql(self) -> None:

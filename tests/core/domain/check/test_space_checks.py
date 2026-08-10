@@ -11,7 +11,7 @@ pytestmark = pytest.mark.gui
 
 def _make_layer(qgis_app, wkt_list, crs="EPSG:4490"):
     from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsVectorLayer
-    from PyQt5.QtCore import QVariant
+    from PyQt6.QtCore import QVariant
 
     layer = QgsVectorLayer(f"Polygon?crs={crs}", "t", "memory")
     pr = layer.dataProvider()

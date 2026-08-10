@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("PyQt6")
 
-from PyQt5.QtWidgets import QMainWindow  # noqa: E402
+from PyQt6.QtWidgets import QMainWindow  # noqa: E402
 
 from app.ui.dialogs.shortest_path import ShortestPathDialog  # noqa: E402
 
@@ -78,7 +78,7 @@ def test_network_combo_excludes_polygon_layers(dialog):
 @pytest.mark.gui
 def test_point_markers_show_and_hide():
     """起点/终点输入变化时画布标记显示/隐藏；关闭对话框隐藏、重开恢复。"""
-    from PyQt5.QtWidgets import QMainWindow
+    from PyQt6.QtWidgets import QMainWindow
     from qgis.gui import QgsMapCanvas
 
     parent = QMainWindow()

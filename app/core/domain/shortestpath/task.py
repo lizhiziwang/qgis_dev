@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from PyQt5.QtCore import pyqtSignal
+from PyQt6.QtCore import pyqtSignal
 from qgis.core import QgsProcessingAlgRunnerTask, QgsProcessingFeedback
 
 if TYPE_CHECKING:

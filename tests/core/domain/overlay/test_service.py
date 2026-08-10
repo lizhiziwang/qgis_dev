@@ -15,7 +15,7 @@ def overlay_layers(qgis_app):
     """构造两个相交的矩形 memory 图层：
     A 为 [0,0]-[10,10]，B 为 [5,5]-[15,15]，重叠区 [5,5]-[10,10]。
     """
-    from PyQt5.QtCore import QVariant
+    from PyQt6.QtCore import QVariant
     from qgis.core import (
         QgsFeature,
         QgsField,

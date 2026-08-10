@@ -23,27 +23,33 @@ def test_send_unknown_level_raises():
 
 
 def test_send_returns_false_when_no_bar(monkeypatch):
-    from app.infra import messagebar
+    from app.infra.messagebar import qgis_bar
 
-    monkeypatch.setattr(messagebar, "_get_bar", lambda: None)
-    assert messagebar.send("warning", "x") is False
+    monkeypatch.setattr(qgis_bar, "_get_bar", lambda: None)
+    from app.infra.messagebar import send
+
+    assert send("warning", "x") is False
 
 
 def test_send_pushes_message(monkeypatch):
-    from app.infra import messagebar
+    from app.infra.messagebar import qgis_bar
     from qgis._core import Qgis
 
     bar = _FakeBar()
-    monkeypatch.setattr(messagebar, "_get_bar", lambda: bar)
-    assert messagebar.send("warning", "操作失败", duration=5) is True
+    monkeypatch.setattr(qgis_bar, "_get_bar", lambda: bar)
+    from app.infra.messagebar import send
+
+    assert send("warning", "操作失败", duration=5) is True
     assert bar.calls == [("操作失败", Qgis.Warning, 5)]
 
 
 def test_legacy_send_message_to_top_parent_maps_numbers(monkeypatch):
-    from app.infra import messagebar
+    from app.infra.messagebar import qgis_bar
     from qgis._core import Qgis
 
     bar = _FakeBar()
-    monkeypatch.setattr(messagebar, "_get_bar", lambda: bar)
-    messagebar.sendMessageToTopParent(2, "msg", 7)
+    monkeypatch.setattr(qgis_bar, "_get_bar", lambda: bar)
+    from app.infra.messagebar import sendMessageToTopParent
+
+    sendMessageToTopParent(2, "msg", 7)
     assert bar.calls == [("msg", Qgis.Warning, 7)]

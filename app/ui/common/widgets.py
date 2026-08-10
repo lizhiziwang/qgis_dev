@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
+from PyQt6.QtWidgets import (
     QAbstractItemView,
     QComboBox,
     QFileDialog,
@@ -33,12 +33,12 @@ def open_file_dir(
     """打开文件/目录选择对话框。"""
     if is_dir:
         return QFileDialog.getExistingDirectory(
-            parent, title, init_path, QFileDialog.ShowDirsOnly
+            parent, title, init_path, QFileDialog.Option.ShowDirsOnly
         )
     file_dia = QFileDialog(parent, title, init_path, filter_)
     file_dia.setModal(True)
-    file_dia.setFileMode(QFileDialog.ExistingFile)
-    if file_dia.exec_() == QFileDialog.Accepted:
+    file_dia.setFileMode(QFileDialog.FileMode.ExistingFile)
+    if file_dia.exec() == QFileDialog.DialogCode.Accepted:
         files = file_dia.selectedFiles()
         return files[0] if files else ""
     return ""
@@ -67,8 +67,8 @@ def make_table(
     table.setColumnCount(len(headers))
     table.setHorizontalHeaderLabels(headers)
     if select_rows:
-        table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
     if stretch_last:
         table.horizontalHeader().setStretchLastSection(True)
     return table

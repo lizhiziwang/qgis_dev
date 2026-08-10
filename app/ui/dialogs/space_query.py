@@ -7,9 +7,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt5.QtCore import QSize, Qt
-from PyQt5.QtGui import QIcon
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import QSize, Qt
+from PyQt6.QtGui import QIcon
+from PyQt6.QtWidgets import (
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -72,7 +72,7 @@ class SpaceQueryDialog(BaseDialog):
 
         # 图层选择
         from app.ui.docks.attribute_dock import PagedAttributeTableWidget  # noqa
-        from PyQt5.QtWidgets import QComboBox, QHBoxLayout
+        from PyQt6.QtWidgets import QComboBox, QHBoxLayout
         layer_layout = QHBoxLayout()
         layer_layout.addWidget(QLabel("查询图层:"))
         self.layer_input = QComboBox()

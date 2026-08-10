@@ -23,6 +23,17 @@ from app.core.domain.check.types import CheckStatus
 def _clean_registry():
     registry.reset_registry()
 
+    # reset 只清空注册表，不会让 ``from ... import builtin`` 重新执行子模块
+    # （已在 sys.modules 缓存，重 import 是 no-op）。要恢复内置 6 个 check，
+    # 必须 reload 每个 builtin 子模块，让模块级 ``@register`` 重新跑一遍。
+    import importlib
+
+    import app.core.domain.check.builtin as builtin_pkg
+
+    for _name in builtin_pkg.__all__:
+        importlib.reload(getattr(builtin_pkg, _name))
+    importlib.reload(builtin_pkg)
+
     @registry.register("demo_value")
     class _DemoValue(registry.BaseCheck):
         def build_where(self, p: CheckParam) -> str:

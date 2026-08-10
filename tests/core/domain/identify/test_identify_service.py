@@ -16,7 +16,7 @@ def _make_real_canvas():
     """构造一个真实但轻量的 :class:`QgsMapCanvas`，并把引用挂到模块级
     全局列表避免被 GC。"""
     from qgis.gui import QgsMapCanvas
-    from PyQt5.QtWidgets import QWidget, QApplication
+    from PyQt6.QtWidgets import QWidget, QApplication
 
     QApplication.instance() or QApplication([])
     parent = QWidget()

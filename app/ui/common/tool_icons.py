@@ -15,8 +15,8 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import QRect, Qt
-from PyQt5.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPixmap
+from PyQt6.QtCore import QRect, Qt
+from PyQt6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPixmap
 
 _LOGICAL = 36        # 逻辑像素边长（与工具条 iconSize 一致）
 _DPR = 2.0           # 2x 渲染，高 DPI 下图标不发虚
@@ -66,23 +66,23 @@ def _ensure_font() -> bool:
 def _glyph_font() -> QFont:
     f = QFont(_FONT_FAMILY, 100)  # pixelSize 精确定位，字号 100 只是占位
     f.setPixelSize(_GLYPH_PX)
-    f.setWeight(QFont.Bold)       # FA Solid 是 weight 900
+    f.setWeight(QFont.Weight.Bold)       # FA Solid 是 weight 900
     return f
 
 
 def _render(glyph: str, color: QColor) -> QIcon:
     pm = QPixmap(int(_LOGICAL * _DPR), int(_LOGICAL * _DPR))
     pm.setDevicePixelRatio(_DPR)
-    pm.fill(Qt.transparent)
+    pm.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pm)
-    painter.setRenderHint(QPainter.Antialiasing, True)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
     if _ensure_font():
         painter.setPen(color)
         painter.setFont(_glyph_font())
-        painter.drawText(QRect(0, 0, _LOGICAL, _LOGICAL), Qt.AlignCenter, glyph)
+        painter.drawText(QRect(0, 0, _LOGICAL, _LOGICAL), Qt.AlignmentFlag.AlignCenter, glyph)
     else:
         # 兜底：字体缺失时画一个实心圆点，避免空白按钮
-        painter.setPen(Qt.NoPen)
+        painter.setPen(Qt.PenStyle.NoPen)
         painter.setBrush(color)
         painter.drawEllipse(QRect(int(_LOGICAL * 0.3), int(_LOGICAL * 0.3),
                                   int(_LOGICAL * 0.4), int(_LOGICAL * 0.4)))

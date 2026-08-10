@@ -37,6 +37,7 @@ def qgis_app():
     prefix = os.environ.get("QGIS_PREFIX")
     if not prefix:
         candidates = [
+            Path("D:/zsh/app/qgis4.2/apps/qgis"),
             Path("D:/zsh/app/qgis_3.40/apps/qgis-ltr"),
             Path("C:/Program Files/QGIS 3.40/apps/qgis-ltr"),
             Path("C:/OSGeo4W64/apps/qgis-ltr"),
@@ -49,8 +50,15 @@ def qgis_app():
     if not prefix:
         pytest.skip("未设置 QGIS_PREFIX，也未探测到默认安装路径", allow_module_level=False)
 
-    app = QgsApplication.instance() or QgsApplication(sys.argv, True)
+    app = QgsApplication.instance() or QgsApplication(
+        [bytes(a, sys.getfilesystemencoding()) for a in sys.argv], True
+    )
     app.setPrefixPath(prefix, True)
+    # QGIS 4.2 不再把 python/plugins 自动加进 sys.path；processing 等
+    # Python 插件需要显式加入（与 app.env.qgis_runtime.apply_env 一致）
+    _plugins = Path(prefix) / "python" / "plugins"
+    if str(_plugins) not in sys.path:
+        sys.path.insert(0, str(_plugins))
     if not app.allWidgets():   # 已被 init 过则不再 init
         app.initQgis()
     yield app

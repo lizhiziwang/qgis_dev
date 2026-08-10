@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import (
     QComboBox,
     QFileDialog,
     QHBoxLayout,
@@ -73,7 +73,7 @@ class VectorTileDialog(BaseDialog):
         b_l = QVBoxLayout()
         b_l.setContentsMargins(0, 0, 0, 0)
         self.loading = QProgressBar()
-        self.loading.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.loading.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.loading.setRange(0, 100)
         b_l.addWidget(self.loading, stretch=2)
 
@@ -184,12 +184,12 @@ class VectorTileDialog(BaseDialog):
             if layer.type() != QgsMapLayer.VectorLayer:
                 continue
             item = QListWidgetItem(layer.name(), self.list_widget)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
             if layer.source() in checked_sources:
-                item.setCheckState(Qt.Checked)
+                item.setCheckState(Qt.CheckState.Checked)
                 self.select_layers.append(layer)
             else:
-                item.setCheckState(Qt.Unchecked)
+                item.setCheckState(Qt.CheckState.Unchecked)
 
     def showEvent(self, event) -> None:  # noqa: D401
         """每次显示都重刷图层列表：对话框实例被复用，首次打开后再加入的图层也能选到。"""
@@ -201,7 +201,7 @@ class VectorTileDialog(BaseDialog):
         self._populate_layers()
 
     def _on_layer_clicked(self, item) -> None:
-        if item.checkState() == Qt.Checked:
+        if item.checkState() == Qt.CheckState.Checked:
             self.select_layers.append(self.project.mapLayersByName(item.text())[0])
         else:
             self.select_layers = [l for l in self.select_layers if l.name() != item.text()]

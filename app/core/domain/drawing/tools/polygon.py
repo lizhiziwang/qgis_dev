@@ -10,8 +10,8 @@ if TYPE_CHECKING:
 
 from qgis.core import QgsGeometry, QgsPointXY, QgsWkbTypes
 from qgis.gui import QgsRubberBand
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QMessageBox
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QMessageBox
 
 from .base import BaseDrawTool
 
@@ -29,15 +29,15 @@ class PolygonDrawTool(BaseDrawTool):
         self.rubber_band = draw_manager.rubber_band if draw_manager is not None else None
         if self.rubber_band is None:
             self.rubber_band = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
-            self.rubber_band.setColor(Qt.red)
+            self.rubber_band.setColor(Qt.GlobalColor.red)
             self.rubber_band.setWidth(2)
             self.rubber_band.setFillColor(QColor(255, 0, 0, 50))
 
         # 鼠标移动的临时轨迹
         self.line_rubber_band = QgsRubberBand(canvas, QgsWkbTypes.LineGeometry)
-        self.line_rubber_band.setColor(Qt.red)
+        self.line_rubber_band.setColor(Qt.GlobalColor.red)
         self.line_rubber_band.setWidth(2)
-        self.line_rubber_band.setLineStyle(Qt.DashLine)
+        self.line_rubber_band.setLineStyle(Qt.PenStyle.DashLine)
 
     def canvasMoveEvent(self, event) -> None:  # noqa: N802
         if self.is_over:
@@ -52,12 +52,12 @@ class PolygonDrawTool(BaseDrawTool):
         self.line_rubber_band.show()
 
     def canvasPressEvent(self, event) -> None:  # noqa: N802
-        if event.button() == Qt.LeftButton:
+        if event.button() == Qt.MouseButton.LeftButton:
             self.is_over = False
             point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
             self.temp_points.append(QgsPointXY(point.x(), point.y()))
             self._update_rubber_band()
-        elif event.button() == Qt.RightButton:
+        elif event.button() == Qt.MouseButton.RightButton:
             self.is_over = True
             self.line_rubber_band.reset(QgsWkbTypes.LineGeometry)
             if len(self.temp_points) >= 3:

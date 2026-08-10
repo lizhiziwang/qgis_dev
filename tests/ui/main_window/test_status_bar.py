@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("PyQt6")
 
-from PyQt5.QtWidgets import QMainWindow  # noqa: E402
+from PyQt6.QtWidgets import QMainWindow  # noqa: E402
 from qgis.core import (  # noqa: E402
     QgsCoordinateReferenceSystem,
     QgsPointXY,

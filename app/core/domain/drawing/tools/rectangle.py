@@ -10,8 +10,8 @@ if TYPE_CHECKING:
 
 from qgis.core import QgsGeometry, QgsPointXY, QgsRectangle, QgsWkbTypes
 from qgis.gui import QgsRubberBand
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QColor
 
 from .base import BaseDrawTool
 
@@ -28,7 +28,7 @@ class RectangleDrawTool(BaseDrawTool):
         self.rubber_band = draw_manager.rubber_band if draw_manager is not None else None
         if self.rubber_band is None:
             self.rubber_band = QgsRubberBand(canvas, QgsWkbTypes.PolygonGeometry)
-            self.rubber_band.setColor(Qt.red)
+            self.rubber_band.setColor(Qt.GlobalColor.red)
             self.rubber_band.setWidth(2)
             self.rubber_band.setFillColor(QColor(255, 0, 0, 50))
 
@@ -51,7 +51,7 @@ class RectangleDrawTool(BaseDrawTool):
 
     def canvasPressEvent(self, event) -> None:  # noqa: N802
         if not self.is_over:
-            if event.button() == Qt.LeftButton:
+            if event.button() == Qt.MouseButton.LeftButton:
                 self.is_over = False
                 point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
                 self.temp_points.append(QgsPointXY(point.x(), point.y()))

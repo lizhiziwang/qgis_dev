@@ -18,7 +18,7 @@ pytestmark = pytest.mark.gui
 def _make_polygon_layer(qgis_app, polygons, crs_authid="EPSG:4490"):
     """构造一个内存 polygon layer。"""
     from qgis.core import QgsFeature, QgsField, QgsFields, QgsGeometry, QgsVectorLayer
-    from PyQt5.QtCore import QVariant
+    from PyQt6.QtCore import QVariant
 
     uri = f"Polygon?crs={crs_authid}"
     layer = QgsVectorLayer(uri, "test_polys", "memory")

@@ -13,8 +13,7 @@ authors = [{ name = "zsh" }]
 
 dependencies = [
     # GUI
-    "PyQt5>=5.15",
-    "PyQt5-Qt5",
+    "PyQt6>=6.7",
     # QGIS 由宿主机或 conda 提供，不在这里锁
     # GIS 数据
     "gdal>=3.6",
@@ -91,7 +90,7 @@ module = [
     "qgis._gui",
     "qgis.utils",
     "qgis.PyQt",
-    "PyQt5.*",
+    "PyQt6.*",
     "osgeo.*",
     "processing",
     "fastapi",

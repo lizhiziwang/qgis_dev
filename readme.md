@@ -73,10 +73,10 @@ qgis_dev/
 
 ```bash
 # 一次性：把项目装进 QGIS Python 的 site-packages（在 QGIS Python 里执行）
-"D:/zsh/app/qgis_3.40/bin/python-qgis-ltr.bat" -m pip install -e "D:/zsh/code/py/qgis_dev"
+"D:/zsh/app/qgis4.2/bin/python-qgis.bat" -m pip install -e "D:/zsh/code/py/qgis_dev"
 
 # 桌面端（dev）
-"D:/zsh/app/qgis_3.40/bin/python-qgis-ltr.bat" -m app.main
+"D:/zsh/app/qgis4.2/bin/python-qgis.bat" -m app.main
 # 或
 python scripts/run_dev.py
 
@@ -127,19 +127,19 @@ bash tools/build_linux.sh                                            rem Linux
 
 ### 免装 QGIS 的关键设计
 
-1. **扁平便携布局**：QGIS 运行时直接铺在 `dist/app/` 根下（`proj.db`、`qgis/`、`etc/`、`plugins/`、`i18n/`、DLL），而非 QGIS 安装的 `apps/qgis-ltr` 结构。
+1. **扁平便携布局**：QGIS 运行时直接铺在 `dist/app/` 根下（`proj.db`、`qgis/`、`etc/`、`plugins/`、`i18n/`、DLL），而非 QGIS 安装的 `apps/qgis` 结构。
 2. **`QgisRuntime.for_portable`**（`app/env/qgis_runtime.py`）：把 `QGIS_PREFIX_PATH`、`PROJ_LIB`、`GDAL_DATA`、`QT_PLUGIN_PATH` 等环境变量全部指向 `dist/app`，PROJ 能在包内找到 `proj.db`。
-3. **`_build_qgis_runtime` 优先 `QGIS_PREFIX`**（`app/bootstrap/__init__.py`）：launcher 设 `QGIS_PREFIX=dist/app` → 走 `for_portable`；若指向完整 QGIS 安装（有 `apps/qgis-ltr`）→ 走 `for_prod`。
+3. **`_build_qgis_runtime` 优先 `QGIS_PREFIX`**（`app/bootstrap/__init__.py`）：launcher 设 `QGIS_PREFIX=dist/app` → 走 `for_portable`；若指向完整 QGIS 安装（有 `apps/qgis`）→ 走 `for_prod`。
 4. **`_ensure_portable_env` 自动探测**：PyInstaller 冻结态下，`app.exe` 所在目录若含 `qgis/` + `proj.db` 即识别为便携包，自动设置全部环境变量——所以**直接双击 app.exe 也能跑**。
 5. **config 打包 + `QGIS_DEV_*` 环境变量**：打包后 `__file__` 指向 `_internal/`，而 `config/`、`resource/` 在顶层，靠 launcher/自动探测把路径指回去。
-6. **Qt 平台插件**：spec 里额外打包 `apps/Qt5/plugins/platforms/` → `dist/app/platforms/`（GUI 显示必需）。
+6. **Qt 平台插件**：spec 里额外打包 `apps/qt6/plugins/platforms/` → `dist/app/platforms/`（GUI 显示必需）。
 
 ### spec 要点（`tools/pyinstaller.spec`）
 
 - 入口 `scripts/entry.py`，`pathex` 为项目根；用 `SPECPATH`（而非 `__file__`）推导项目根（spec 命名空间没有 `__file__`）。
 - `datas`：`qgis` python 包、`resource/`、`config/`、`srs.db`、`proj.db`。
-- `binaries`：`qgis_core.dll`、`qgis_gui.dll`、`gdal311.dll`、`geos_c.dll`、`pdalcpp.dll`、`proj_9.dll`、Qt5 核心 DLL、Qt 平台插件。
-- `hiddenimports`：qgis.core/gui/utils + 全部 PyQt5 子模块。
+- `binaries`：`qgis_core.dll`、`qgis_gui.dll`、`gdal313.dll`、`geos_c.dll`、`pdalcpp.dll`、`proj_9.dll`、Qt6 核心 DLL、Qt 平台插件。
+- `hiddenimports`：qgis.core/gui/utils + 全部 PyQt6 子模块。
 
 ---
 

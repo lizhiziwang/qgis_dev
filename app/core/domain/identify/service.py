@@ -33,21 +33,25 @@ class IdentifyResult:
 class FeatureIdentifyService:
     """点击识别服务。"""
 
-    #: 默认用 QGIS 自带的 :class:`QgsMapToolIdentify`，模式 ``TopDownAll``
-    DEFAULT_MODE = 1   # TopDownAll
-
     def identify(
         self,
         canvas: "QgsMapCanvas",
         x: float,
         y: float,
-        mode: int = 1,
+        mode: Optional["QgsMapToolIdentify.IdentifyMode"] = None,
     ) -> List[IdentifyResult]:
-        """点击画布坐标 ``(x, y)`` 识别要素。"""
+        """点击画布坐标 ``(x, y)`` 识别要素。
+
+        ``mode`` 默认 ``TopDownAll``（所有图层里所有可识别要素）。
+        """
         from qgis.gui import QgsMapToolIdentify
 
+        if mode is None:
+            mode = QgsMapToolIdentify.IdentifyMode.TopDownAll
         tool = QgsMapToolIdentify(canvas)
-        results = tool.identify(x, y, mode)
+        # QGIS 4.x 的 identify(x, y, mode) 要求 int 坐标 + IdentifyMode 枚举，
+        # 传 float / int 都会 TypeError（int 在 PyQt6 不再自动转枚举）
+        results = tool.identify(int(x), int(y), mode)
         out: List[IdentifyResult] = []
         for r in results:
             layer = r.mLayer
@@ -70,8 +74,8 @@ class FeatureIdentifyService:
         feature: "QgsFeature",
     ) -> "QgsHighlight":
         """创建高亮对象（红色边框），调用方负责 ``deleteLater()``。"""
-        from PyQt5.QtCore import Qt
-        from PyQt5.QtGui import QColor
+        from PyQt6.QtCore import Qt
+        from PyQt6.QtGui import QColor
         from qgis.gui import QgsHighlight
 
         h = QgsHighlight(canvas, feature, layer)

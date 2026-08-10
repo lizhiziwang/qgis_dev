@@ -11,9 +11,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
-from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QColor
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QColor
+from PyQt6.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QFileDialog,
@@ -99,7 +99,7 @@ class ShortestPathDialog(BaseDialog):
         b_l = QVBoxLayout()
         b_l.setContentsMargins(0, 0, 0, 0)
         self.loading = QProgressBar()
-        self.loading.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.loading.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.loading.setRange(0, 100)
         # 进度条手动置 0 → 完成置 100（feedback.progressChanged 接控件槽在本环境会
         # 原生崩溃 0xC0000409，见 buffer._init_ui 注释）
@@ -300,7 +300,7 @@ class ShortestPathDialog(BaseDialog):
         send("info", f"在地图上点击选择{key}点（左键确认）", duration=3)
 
     def _on_canvas_clicked(self, point, button) -> None:
-        if button != Qt.LeftButton:
+        if button != Qt.MouseButton.LeftButton:
             return
         edit = self.start_edit if self._pick_key == "start" else self.end_edit
         edit.setText(point.toString(6))

@@ -5,8 +5,9 @@ from __future__ import annotations
 import json
 from typing import List, Optional
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QHBoxLayout,
     QHeaderView,
@@ -152,21 +153,21 @@ class CheckConfigDialog(BaseDialog):
         self.table.setRowCount(len(self.columns))
         self.table.setColumnCount(2)
         self.table.setHorizontalHeaderLabels(["是否应用", "质检字段"])
-        self.table.setSelectionMode(QTableWidget.ExtendedSelection)
-        self.table.setSelectionBehavior(QTableWidget.SelectRows)
-        self.table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         try:
             j = json.loads(self.check_vo.checkParam) if self.check_vo.checkParam else {"fieldName": []}
         except Exception:  # noqa: BLE001
             j = {"fieldName": []}
         for r, col in enumerate(self.columns):
             check_item = QTableWidgetItem()
-            check_item.setCheckState(Qt.Checked if col in j.get("fieldName", []) else Qt.Unchecked)
-            check_item.setTextAlignment(Qt.AlignCenter)
+            check_item.setCheckState(Qt.CheckState.Checked if col in j.get("fieldName", []) else Qt.CheckState.Unchecked)
+            check_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(r, 0, check_item)
             name_item = QTableWidgetItem(col)
             self.table.setItem(r, 1, name_item)
-        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+        self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.ResizeToContents)
         self.table.cellClicked.connect(self._on_field_clicked)
         self.table.horizontalHeader().setStretchLastSection(True)
         self.table.setFixedHeight(300)
@@ -184,7 +185,7 @@ class CheckConfigDialog(BaseDialog):
                 j = {"fieldName": []}
             check_item = self.table.item(row, 0)
             field_item = self.table.item(row, 1)
-            if check_item.checkState() == Qt.Checked:
+            if check_item.checkState() == Qt.CheckState.Checked:
                 j["fieldName"].append(field_item.text())
             else:
                 j["fieldName"].remove(field_item.text())

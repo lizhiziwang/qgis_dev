@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import QSize, Qt
-from PyQt5.QtGui import QFont, QIcon
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import QSize, Qt
+from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
     QHBoxLayout,
@@ -88,9 +88,9 @@ class FeatureInfoDialog(QDialog):
             )
         info += "</table></div>"
         self.info_text.setHtml(info)
-        self.info_text.setLineWrapMode(QTextEdit.NoWrap)
-        self.info_text.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.info_text.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.info_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.info_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.info_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
     def _copy(self) -> None:
         plain = f"图层: {self.layer.name()}\n要素ID: {self.feature.id()}\n"

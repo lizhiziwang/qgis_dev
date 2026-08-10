@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont, QIcon
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFont, QIcon
+from PyQt6.QtWidgets import (
     QApplication,
     QDockWidget,
     QHBoxLayout,
@@ -33,8 +33,8 @@ class FeatureInfoDock(QDockWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__("要素详情", parent)
-        self.setFeatures(QDockWidget.AllDockWidgetFeatures)
-        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea | Qt.BottomDockWidgetArea)
+        self.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable | QDockWidget.DockWidgetFeature.DockWidgetMovable | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
+        self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.BottomDockWidgetArea)
         self.setMinimumSize(320, 200)
         self._highlight: Optional[QgsHighlight] = None
         self._init_ui()
@@ -106,9 +106,9 @@ class FeatureInfoDock(QDockWidget):
             )
         info += "</table></div>"
         self.info_text.setHtml(info)
-        self.info_text.setLineWrapMode(QTextEdit.NoWrap)
-        self.info_text.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.info_text.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.info_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.info_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.info_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
     def _copy(self) -> None:
         if not hasattr(self, "layer"):

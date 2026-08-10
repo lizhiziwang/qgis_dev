@@ -7,8 +7,8 @@ from __future__ import annotations
 import math
 from typing import List, Optional
 
-from PyQt5.QtCore import QAbstractTableModel, QModelIndex, Qt, QThread, QTimer, QVariant, pyqtSignal
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt, QThread, QTimer, QVariant, pyqtSignal
+from PyQt6.QtWidgets import (
     QAbstractItemView,
     QDockWidget,
     QHBoxLayout,
@@ -29,6 +29,9 @@ from qgis.core import (
 
 from app.core.domain.editing import LayerEditService
 from app.ui.common.icons import Icons
+
+#: 超过该数量才启用分批动态加载；≤ 阈值时一次性全量加载（避免小图层分页闪烁）
+DYNAMIC_LOAD_THRESHOLD = 1000
 
 
 class FeatureLoaderThread(QThread):
@@ -72,7 +75,9 @@ class FeatureLoaderThread(QThread):
 class PagedAttributeTableModel(QAbstractTableModel):
     """动态加载属性表 model。
 
+    总量 **大于** ``DYNAMIC_LOAD_THRESHOLD``（默认 1000）时才分批动态加载：
     初始加载总量的 20%，``load_more()`` 逐批追加 20% 直至加载完。
+    总量 ≤ 阈值时一次性全量加载（``batch_size`` = 总量）。
     """
 
     def __init__(self, layer: QgsVectorLayer, page_size: int = 50, filter_str: str = "1=1", show_ids: Optional[list] = None) -> None:
@@ -84,7 +89,7 @@ class PagedAttributeTableModel(QAbstractTableModel):
         self.show_ids = list(show_ids) if show_ids else []
         self.field_names = [f.name() for f in layer.fields()]
         self.features: List[QgsFeature] = []
-        #: 每批加载条数：总量的 20%（向上取整，至少 1 条）
+        #: 每批加载条数：总量 > 阈值时取 20%（向上取整，至少 1 条）；否则一次加载全部
         self.batch_size = 0
         #: 已加载条数（= features 长度；为 0 表示尚未加载）
         self.loaded_count = 0
@@ -107,7 +112,10 @@ class PagedAttributeTableModel(QAbstractTableModel):
         return self.loaded_count < self.total_features
 
     def _refresh_totals(self) -> None:
-        """重新统计匹配 ID 列表、总量与批次大小（数据/筛选变化后调用）。"""
+        """重新统计匹配 ID 列表、总量与批次大小（数据/筛选变化后调用）。
+
+        总量 > ``DYNAMIC_LOAD_THRESHOLD`` 时分批（每批 20%）；否则一次全量加载。
+        """
         try:
             request = QgsFeatureRequest().setFilterExpression(self.where)
             self.all_ids = sorted(f.id() for f in self.layer.getFeatures(request))
@@ -116,7 +124,9 @@ class PagedAttributeTableModel(QAbstractTableModel):
             self.all_ids = []
             self.total_features = 0
         self.batch_size = (
-            max(1, math.ceil(self.total_features * 0.2)) if self.total_features else 0
+            max(1, math.ceil(self.total_features * 0.2))
+            if self.total_features > DYNAMIC_LOAD_THRESHOLD
+            else self.total_features
         )
         self.loaded_count = 0
         self.features = []
@@ -166,10 +176,10 @@ class PagedAttributeTableModel(QAbstractTableModel):
     def columnCount(self, parent=QModelIndex()) -> int:
         return len(self.field_names) + 1
 
-    def data(self, index, role=Qt.DisplayRole):
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or index.row() >= len(self.features):
             return None
-        if role in (Qt.DisplayRole, Qt.EditRole):
+        if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
             feature = self.features[index.row()]
             if index.column() == 0:
                 return feature.id()
@@ -178,8 +188,8 @@ class PagedAttributeTableModel(QAbstractTableModel):
                 return feature.attribute(field_idx)
         return None
 
-    def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
             if section == 0:
                 return "ID"
             if section - 1 < len(self.field_names):
@@ -188,15 +198,15 @@ class PagedAttributeTableModel(QAbstractTableModel):
 
     def flags(self, index):
         if not index.isValid():
-            return Qt.ItemIsEnabled
+            return Qt.ItemFlag.ItemIsEnabled
         if index.column() == 0:
-            return Qt.ItemIsEnabled | Qt.ItemIsSelectable
+            return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
         if self.layer.isEditable():
-            return Qt.ItemIsEnabled | Qt.ItemIsSelectable | Qt.ItemIsEditable
-        return Qt.ItemIsEnabled | Qt.ItemIsSelectable
+            return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEditable
+        return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
 
-    def setData(self, index, value, role=Qt.EditRole):
-        if not index.isValid() or role != Qt.EditRole:
+    def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
+        if not index.isValid() or role != Qt.ItemDataRole.EditRole:
             return False
         if index.column() == 0:
             return False
@@ -278,17 +288,17 @@ class PagedAttributeTableWidget(QWidget):
 
         # 表格
         self.table_view = QTableView()
-        self.table_view.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table_view.setSelectionMode(QAbstractItemView.SingleSelection)
+        self.table_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table_view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.table_view.setAlternatingRowColors(True)
-        self.table_view.setEditTriggers(QTableView.DoubleClicked)
-        self.table_view.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.table_view.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
+        self.table_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         header = self.table_view.horizontalHeader()
         header.setMinimumSectionSize(20)
         header.setMaximumSectionSize(400)
-        header.setSectionResizeMode(QHeaderView.Interactive)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setStretchLastSection(False)
-        self.table_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table_view.customContextMenuRequested.connect(self._show_context_menu)
         main_layout.addWidget(self.table_view)
 
@@ -371,17 +381,18 @@ class PagedAttributeTableWidget(QWidget):
         from app.ui.dialogs.query_builder import QueryBuilderDialog
         dlg = QueryBuilderDialog(self.layer, parent=self)
         dlg.sqlConfirmed.connect(self._apply_filter)
-        dlg.exec_()
+        dlg.exec()
 
     def _apply_filter(self, cond: str) -> None:
-        """筛选确认后更新模型筛选并刷新（重新统计，回到首屏 20%）。"""
+        """筛选确认后更新模型筛选并刷新（重新统计，回到首屏首批）。"""
         if self.model:
             self.model.set_filter(cond)
             self.table_view.scrollToTop()
             self._refresh_load_state()
 
     def _show_context_menu(self, position) -> None:
-        from PyQt5.QtWidgets import QAction, QMenu
+        from PyQt6.QtGui import QAction
+        from PyQt6.QtWidgets import QMenu
         if not self.model:
             return
         idx = self.table_view.indexAt(position)
@@ -399,7 +410,7 @@ class PagedAttributeTableWidget(QWidget):
             delete = QAction("删除", self)
             delete.triggered.connect(lambda: self.layer.deleteFeature(fid=feature.id()))
             menu.addAction(delete)
-        menu.exec_(self.table_view.viewport().mapToGlobal(position))
+        menu.exec(self.table_view.viewport().mapToGlobal(position))
 
 
 class AttributeDock(QDockWidget):
@@ -408,8 +419,8 @@ class AttributeDock(QDockWidget):
     def __init__(self, layer, page_size: int = 50, parent=None, filter_str: str = "1=1", show_ids: Optional[list] = None) -> None:
         title = f"属性表 - {layer.name()}"
         super().__init__(title, parent)
-        self.setFeatures(QDockWidget.AllDockWidgetFeatures)
-        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea | Qt.BottomDockWidgetArea)
+        self.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable | QDockWidget.DockWidgetFeature.DockWidgetMovable | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
+        self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.BottomDockWidgetArea)
         self.topParent = parent
         self.layer = layer
         self.show_ids = list(show_ids) if show_ids else []

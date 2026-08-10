@@ -4,7 +4,7 @@
 
     python scripts/run_dev.py
     # 或
-    set PYTHONPATH=D:\zsh\code\py\qgis_dev & python -m app.main
+    set PYTHONPATH=D:/zsh/code/py/qgis_dev & python -m app.main
 """
 
 from __future__ import annotations

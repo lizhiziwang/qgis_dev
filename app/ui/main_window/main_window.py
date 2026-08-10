@@ -21,10 +21,9 @@ import sys
 from ctypes import wintypes
 from typing import Optional
 
-from PyQt5.QtCore import QEvent, QPoint, QRect, Qt
-from PyQt5.QtGui import QCloseEvent, QColor, QIcon
-from PyQt5.QtWidgets import (
-    QAction,
+from PyQt6.QtCore import QEvent, QPoint, QRect, Qt
+from PyQt6.QtGui import QAction, QCloseEvent, QColor, QIcon
+from PyQt6.QtWidgets import (
     QApplication,
     QListWidget,
     QMainWindow,
@@ -38,6 +37,7 @@ from PyQt5.QtWidgets import (
 )
 
 from qgis.core import (
+    Qgis,
     QgsApplication,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
@@ -137,7 +137,7 @@ class MainWindow(QMainWindow):
         super().__init__()
         # 方案 A：无边框窗口，标题栏由 TitleBar 自绘；nativeEvent 里用
         # WM_NCHITTEST / WM_GETMINMAXINFO 让系统接管拖动、缩放与最大化。
-        self.setWindowFlag(Qt.FramelessWindowHint, True)
+        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self._paths = Paths.default()
         if project_root:
             self._paths = Paths(
@@ -174,7 +174,7 @@ class MainWindow(QMainWindow):
         self.draw_manager = None
         self.edit_layer: Optional[QgsVectorLayer] = None
         #: 当前选中的图层（图层树点击 / 右键菜单选中）。必须在 __init__ 里初始化，
-        #: 否则未选中图层时直接访问会 AttributeError —— 该异常在 PyQt5 槽内未捕获
+        #: 否则未选中图层时直接访问会 AttributeError —— 该异常在 Qt 槽内未捕获
         #: 会 native 崩溃（0xC0000409）。
         self._selected_layer: Optional[QgsVectorLayer] = None
         #: 样式剪贴板：复制样式时存 xmlData()，粘贴样式时读（QGIS 图层菜单习惯）
@@ -199,6 +199,9 @@ class MainWindow(QMainWindow):
     def _build_canvas(self) -> QgsMapCanvas:
         canvas = QgsMapCanvas(self)
         canvas.setAcceptDrops(True)
+        # 拦截浏览器拖出的图层 URI，走与双击一致的添加路径（原生 drop 会把图层
+        # 直接挂到工程根节点，不进"数据图层"分组、也不设 path_c）
+        canvas.installEventFilter(self)
         # 画布底色跟随主题（默认浅色为白色）
         canvas.setCanvasColor(QColor(ThemeManager.instance().current().canvas_bg))
         canvas.enableAntiAliasing(True)
@@ -212,7 +215,7 @@ class MainWindow(QMainWindow):
 
         # 消息栏
         self.messageBar = QgsMessageBar()
-        self.messageBar.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        self.messageBar.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         # 把 messageBar 放到全局属性（兼容旧 sendMessageToTopParent）
         qgis_app = QgsApplication.instance()
         if qgis_app is not None:
@@ -233,13 +236,13 @@ class MainWindow(QMainWindow):
         # 点击图层树即自动设为编辑目标（与 QGIS 桌面一致）：
         # 用户期望点完一层就能在工具条点"开始编辑"
         self.layer_dock.layer_clicked.connect(self._on_layer_clicked_in_dock)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.layer_dock)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.layer_dock)
 
         # 2. 数据浏览器
         self.browser_dock = BrowserDock(self)
         self.browser_dock.double_clicked.connect(self._on_browser_double_clicked)
         self.browser_dock.context_menu_requested.connect(self._on_browser_context_menu)
-        self.addDockWidget(Qt.LeftDockWidgetArea, self.browser_dock)
+        self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.browser_dock)
 
         # 3. 日志（默认隐藏，由菜单唤起）
         self.log_dock = None  # 懒加载
@@ -259,30 +262,23 @@ class MainWindow(QMainWindow):
         self.tool_bar_builder = ToolBar(self)
         self.tool_bar = self.tool_bar_builder.build(callbacks)
 
-        from app.infra.logging import get_logger
-        _log = get_logger(__name__)
-        _log.info("[probe] before DigitizingToolbar")
         # 追加绘图 / 编辑工具条（2 个下拉按钮，与旧 component.draw_tool.Draw 一致）
         self.digitizing_toolbar = DigitizingToolbar(
             self,
             self.canvas,
             editing_layer_getter=lambda: self.edit_layer,
         )
-        _log.info("[probe] DigitizingToolbar OK")
 
         # DigitizingToolbar 编辑态切换 → 同步给 QGIS 复用版工具条
         self.digitizing_toolbar.editing_state_changed.connect(self._on_editing_state_changed)
 
-        _log.info("[probe] before QgisDigitizingToolbar")
-        # === 临时注释掉（验证 QgisDigitizingToolbar 是否为崩点）===
-        # self.qgis_digitizing_toolbar = QgisDigitizingToolbar(
-        #     self,
-        #     self.canvas,
-        #     editing_layer_getter=lambda: self.edit_layer,
-        #     on_finished=self._on_qgis_draw_finished,
-        # )
-        self.qgis_digitizing_toolbar = None  # 占位，避免后续引用炸
-        _log.info("[probe] QgisDigitizingToolbar SKIPPED")
+        # QGIS 复用版数字化工具条（点/线/面/矩形/圆，与自定义版平行）
+        self.qgis_digitizing_toolbar = QgisDigitizingToolbar(
+            self,
+            self.canvas,
+            editing_layer_getter=lambda: self.edit_layer,
+            on_finished=self._on_qgis_draw_finished,
+        )
 
         # 创建平移工具（保留引用避免被 GC）
         self._pan_tool = QgsMapToolPan(self.canvas)
@@ -403,7 +399,12 @@ class MainWindow(QMainWindow):
                     return (True, 0)
         except Exception:  # noqa: BLE001 —— 兜底走 Qt 默认，不拖垮事件循环
             pass
-        return super().nativeEvent(eventType, message)
+        # PyQt6 下 super().nativeEvent 对未处理的消息返回 (False, None)；把这个
+        # None 直接透传回 Qt 时，sip 无法把 None 转成 qintptr 结果参数，抛出的
+        # TypeError 会穿进 C++ 事件分发，导致原生访问冲突（进程无 traceback 退出）。
+        # 必须把结果强转成 int。
+        ok, res = super().nativeEvent(eventType, message)
+        return (ok, res if isinstance(res, int) else 0)
 
     def _wm_nchittest(self, msg) -> int:
         """命中测试：窗口边缘 → resize 码；标题栏空白 → HTCAPTION；其余 HTCLIENT。"""
@@ -466,7 +467,7 @@ class MainWindow(QMainWindow):
 
     def changeEvent(self, event) -> None:
         """最大化/还原状态变化 → 同步标题栏按钮图标。"""
-        if event.type() == QEvent.WindowStateChange:
+        if event.type() == QEvent.Type.WindowStateChange:
             if hasattr(self, "title_bar"):
                 self.title_bar.set_maximized(self.isMaximized())
         super().changeEvent(event)
@@ -485,7 +486,7 @@ class MainWindow(QMainWindow):
         """点击识别后把要素详情显示到右侧 Dock（懒创建，内容就地刷新）。"""
         if not hasattr(self, "_feature_info_dock") or self._feature_info_dock is None:
             self._feature_info_dock = FeatureInfoDock(self)
-            self.addDockWidget(Qt.RightDockWidgetArea, self._feature_info_dock)
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._feature_info_dock)
         self._feature_info_dock.show_feature(result, highlight=highlight)
 
     def _on_zoom_in(self) -> None:
@@ -503,7 +504,7 @@ class MainWindow(QMainWindow):
         # 复用单个"分析工具"dock，避免每次点"分析"都新建一个
         if getattr(self, "_analyse_dock", None) is None:
             self._analyse_dock = ToolsDock(self)
-            self.addDockWidget(Qt.RightDockWidgetArea, self._analyse_dock)
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._analyse_dock)
         self._analyse_dock.show()
         self._analyse_dock.raise_()
 
@@ -527,7 +528,7 @@ class MainWindow(QMainWindow):
             from app.server.cli import main as server_main
             import threading
             threading.Thread(target=server_main, daemon=True).start()
-            self.messageBar.pushMessage("已启动服务（8000）", level=0, duration=3)
+            self.messageBar.pushMessage("已启动服务（8000）", level=Qgis.MessageLevel.Info, duration=3)
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "失败", str(e))
 
@@ -539,10 +540,10 @@ class MainWindow(QMainWindow):
                 self,
                 "新建工程",
                 "将清空当前所有图层并新建工程，是否继续？",
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
             )
-            if ret != QMessageBox.Yes:
+            if ret != QMessageBox.StandardButton.Yes:
                 return
         name = self._ask_project_name()
         if name is None:
@@ -555,14 +556,14 @@ class MainWindow(QMainWindow):
             self.project_dock.layer_context_menu_requested.connect(
                 self._on_project_dock_context_menu
             )
-            self.addDockWidget(Qt.RightDockWidgetArea, self.project_dock)
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.project_dock)
         self._on_project_create(name)
         self.project_dock.show()
         self.project_dock.raise_()
 
     def _ask_project_name(self):
         """弹窗输入工程名；返回工程名，取消或为空则返回 ``None``。"""
-        from PyQt5.QtWidgets import QInputDialog
+        from PyQt6.QtWidgets import QInputDialog
 
         while True:
             name, ok = QInputDialog.getText(self, "新建工程", "请输入工程名：")
@@ -599,7 +600,7 @@ class MainWindow(QMainWindow):
 
         self.project_dock.set_project(name, self._data_group, self._ref_group)
         self.canvas.refreshAllLayers()
-        self.messageBar.pushMessage(f"已创建工程：{name}", level=0, duration=3)
+        self.messageBar.pushMessage(f"已创建工程：{name}", level=Qgis.MessageLevel.Info, duration=3)
 
     def _add_layer_to_project(self, layer) -> None:
         """把图层加进项目：默认路由到"数据图层"分组（未创建工程时平铺挂根）。"""
@@ -647,7 +648,7 @@ class MainWindow(QMainWindow):
                     )
                 else:
                     self.project_dock.reset()
-            self.messageBar.pushMessage(f"已打开工程：{path}", level=0, duration=3)
+            self.messageBar.pushMessage(f"已打开工程：{path}", level=Qgis.MessageLevel.Info, duration=3)
         else:
             QMessageBox.warning(self, "打开失败", f"无法打开工程：{path}")
 
@@ -669,11 +670,11 @@ class MainWindow(QMainWindow):
             layer = add_base_tile_layer(cfg.map, project=self.project)
             if layer is not None:
                 self.messageBar.pushMessage(
-                    f"已加载底图：{layer.name()}", level=0, duration=2
+                    f"已加载底图：{layer.name()}", level=Qgis.MessageLevel.Info, duration=2
                 )
             return layer
         except Exception as exc:  # noqa: BLE001
-            self.messageBar.pushMessage(f"底图加载失败：{exc}", level=2, duration=5)
+            self.messageBar.pushMessage(f"底图加载失败：{exc}", level=Qgis.MessageLevel.Critical, duration=5)
             return None
 
     def _on_open_file(self) -> None:
@@ -742,7 +743,7 @@ class MainWindow(QMainWindow):
             self._add_layer_to_project(rlayer)
 
     def _on_browser_context_menu(self, pos) -> None:
-        from qgis.PyQt.QtWidgets import QMenu
+        from PyQt6.QtWidgets import QMenu
 
         index = self.browser_dock.view.indexAt(pos)
         if not index.isValid():
@@ -752,7 +753,7 @@ class MainWindow(QMainWindow):
             return
         menu = QMenu(self)
         # QGIS 3.40 起 QgsDataItemGuiContext 持有的是浏览器 view + 消息栏
-        # （没有 setProviderRegistry，调它会 AttributeError → PyQt5 槽内未捕获 → 崩溃）。
+        # （没有 setProviderRegistry，调它会 AttributeError → Qt 槽内未捕获 → 崩溃）。
         # 包一层防御：任何异常只回退到"刷新"，不让菜单构建失败拖垮应用。
         try:
             from qgis.gui import QgsDataItemGuiContext, QgsGui
@@ -774,7 +775,55 @@ class MainWindow(QMainWindow):
             get_logger(__name__).exception("构建数据浏览器右键菜单失败，仅保留「刷新」")
         refresh = menu.addAction("刷新")
         refresh.triggered.connect(lambda: item.refresh())
-        menu.exec_(self.browser_dock.view.viewport().mapToGlobal(pos))
+        menu.exec(self.browser_dock.view.viewport().mapToGlobal(pos))
+
+    # ---- 画布拖拽添加图层（数据浏览器拖出 → 画布 drop）----
+
+    def eventFilter(self, watched, event) -> bool:
+        """画布拖拽拦截：把浏览器拖出的图层 URI 转给 :meth:`_on_canvas_drop`。
+
+        原生 :class:`QgsMapCanvas` 的 drop 会把图层直接加进工程根节点，不进
+        "数据图层"分组、也不设 ``path_c``，与双击行为不一致；这里拦下来复用
+        同一套 ``_add_layer_to_project`` 路径。非图层 URI 的拖拽（如外部文件）
+        放行给原生处理。
+        """
+        if getattr(self, "canvas", None) is watched and event.type() in (
+            QEvent.Type.DragEnter,
+            QEvent.Type.DragMove,
+            QEvent.Type.Drop,
+        ):
+            from qgis.core import QgsMimeDataUtils
+
+            if QgsMimeDataUtils.isUriList(event.mimeData()):
+                if event.type() == QEvent.Type.Drop:
+                    self._on_canvas_drop(event)
+                else:
+                    event.acceptProposedAction()
+                return True
+        return super().eventFilter(watched, event)
+
+    def _on_canvas_drop(self, event) -> None:
+        """解析 drop 的图层 URI 列表，逐个按类型添加（矢量/栅格）。
+
+        与 :meth:`_on_browser_double_clicked` 一致：provider 为 ``ogr`` 时把
+        URI 存到 ``path_c``（供"执行SQL"按文件路径打开），再走
+        ``_add_layer_to_project`` 挂进"数据图层"分组。
+        """
+        from qgis.core import QgsMimeDataUtils, QgsRasterLayer, QgsVectorLayer
+
+        for u in QgsMimeDataUtils.decodeUriList(event.mimeData()):
+            if u.layerType == "vector":
+                layer = QgsVectorLayer(u.uri, u.name, u.providerKey)
+            elif u.layerType == "raster":
+                layer = QgsRasterLayer(u.uri, u.name, u.providerKey)
+            else:
+                continue
+            if not layer.isValid():
+                continue
+            if u.providerKey == "ogr":
+                layer.path_c = u.uri
+            self._add_layer_to_project(layer)
+        event.acceptProposedAction()
 
     # ===================================================== 图层右键菜单
 
@@ -787,7 +836,7 @@ class MainWindow(QMainWindow):
         model = index.model()
         source_index = model.mapToSource(index)
         source_model = source_index.model()
-        layer_name = source_model.data(source_index, Qt.DisplayRole)
+        layer_name = source_model.data(source_index, Qt.ItemDataRole.DisplayRole)
         if not layer_name:
             return
         layers = self.project.mapLayersByName(layer_name)
@@ -895,7 +944,7 @@ class MainWindow(QMainWindow):
         act_props = QAction("属性", self)
         act_props.triggered.connect(lambda: self._open_layer_properties(self._selected_layer))
         menu.addAction(act_props)
-        menu.exec_(global_pos)
+        menu.exec(global_pos)
 
     def _zoom_to_selection(self, layer) -> None:
         """放大至选中要素（与 QGIS 图层面板一致）。"""
@@ -926,7 +975,7 @@ class MainWindow(QMainWindow):
         """重命名图层：layer.setName 会同步树节点名（已实测）。"""
         if layer is None:
             return
-        from PyQt5.QtWidgets import QInputDialog
+        from PyQt6.QtWidgets import QInputDialog
 
         new_name, ok = QInputDialog.getText(self, "重命名图层", "图层名称：", text=layer.name())
         if not ok:
@@ -936,7 +985,7 @@ class MainWindow(QMainWindow):
             return
         layer.setName(new_name)
         self.canvas.refresh()
-        self.messageBar.pushMessage(f"已重命名为：{new_name}", level=0, duration=2)
+        self.messageBar.pushMessage(f"已重命名为：{new_name}", level=Qgis.MessageLevel.Info, duration=2)
 
     def _duplicate_layer(self, layer) -> None:
         """复制图层（与 QGIS 图层菜单一致）。
@@ -981,7 +1030,7 @@ class MainWindow(QMainWindow):
         else:
             self._add_layer_to_project(copy)
         self.canvas.refresh()
-        self.messageBar.pushMessage(f"已复制图层：{copy.name()}", level=0, duration=2)
+        self.messageBar.pushMessage(f"已复制图层：{copy.name()}", level=Qgis.MessageLevel.Info, duration=2)
 
     def _copy_layer_style(self, layer) -> None:
         """复制当前样式（xml 存到剪贴板，粘贴样式时用）。"""
@@ -989,7 +1038,7 @@ class MainWindow(QMainWindow):
             return
         sm = layer.styleManager()
         self._style_clipboard = sm.style(sm.currentStyle()).xmlData()
-        self.messageBar.pushMessage(f"已复制 {layer.name()} 的样式", level=0, duration=2)
+        self.messageBar.pushMessage(f"已复制 {layer.name()} 的样式", level=Qgis.MessageLevel.Info, duration=2)
 
     def _paste_layer_style(self, layer) -> None:
         """把复制的样式贴到目标图层。"""
@@ -1004,7 +1053,7 @@ class MainWindow(QMainWindow):
         sm.setCurrentStyle("pasted")
         layer.triggerRepaint()
         self.canvas.refresh()
-        self.messageBar.pushMessage(f"已粘贴样式到 {layer.name()}", level=0, duration=2)
+        self.messageBar.pushMessage(f"已粘贴样式到 {layer.name()}", level=Qgis.MessageLevel.Info, duration=2)
 
     def _zoom_to_layer(self, layer) -> None:
         if layer is None:
@@ -1044,7 +1093,7 @@ class MainWindow(QMainWindow):
             group.addLayer(layer)          # 先挂新节点，保证图层仍在树里
             node.parent().takeChild(node)  # 再摘原节点（bridge 不会删图层）
             self.messageBar.pushMessage(
-                f"已把 {layer.name()} 移到「{group.name()}」", level=0, duration=2
+                f"已把 {layer.name()} 移到「{group.name()}」", level=Qgis.MessageLevel.Info, duration=2
             )
 
     def _remove_layer(self, layer) -> None:
@@ -1060,7 +1109,7 @@ class MainWindow(QMainWindow):
         用 :class:`QTimer.singleShot` 推到下一个事件循环 tick，等
         ``layersRemoved`` 信号链彻底走完再画。
         """
-        from PyQt5.QtCore import QTimer
+        from PyQt6.QtCore import QTimer
 
         if layer is None:
             return
@@ -1092,7 +1141,7 @@ class MainWindow(QMainWindow):
         self.project.removeMapLayer(layer_id)
         # 延迟刷新画布到下一个事件循环 tick，让 layersRemoved 信号链走完
         QTimer.singleShot(0, self._deferred_refresh_after_remove)
-        self.messageBar.pushMessage(f"已移除图层：{layer_name}", level=0, duration=3)
+        self.messageBar.pushMessage(f"已移除图层：{layer_name}", level=Qgis.MessageLevel.Info, duration=3)
 
     def _deferred_refresh_after_remove(self) -> None:
         """延迟到事件循环下一拍才刷新画布（避免半移除状态 native 崩溃）。"""
@@ -1123,7 +1172,7 @@ class MainWindow(QMainWindow):
             qgis_tb = getattr(self, "qgis_digitizing_toolbar", None)
             if qgis_tb is not None:
                 qgis_tb.set_layer(self.edit_layer)  # 仅记录图层，不开按钮
-            self.messageBar.pushMessage(f"已设 {self._selected_layer.name()} 为编辑图层，点击「开始编辑」生效", level=0, duration=3)
+            self.messageBar.pushMessage(f"已设 {self._selected_layer.name()} 为编辑图层，点击「开始编辑」生效", level=Qgis.MessageLevel.Info, duration=3)
 
     def _on_layer_clicked_in_dock(self, index) -> None:
         """用户在图层树点击一层：自动同步 ``_selected_layer`` / ``edit_layer``。
@@ -1198,7 +1247,7 @@ class MainWindow(QMainWindow):
     def _show_style_editor(self, layer) -> None:
         dlg = QgsRendererPropertiesDialog(layer=layer, style=QgsStyle.defaultStyle(), embedded=False, parent=self)
         dlg.setWindowTitle(f"图层样式 - {layer.name()}")
-        if dlg.exec_():
+        if dlg.exec():
             layer.triggerRepaint()
             self.canvas.refresh()
 
@@ -1219,7 +1268,7 @@ class MainWindow(QMainWindow):
             dlg.setWindowIcon(Icons.app())
             dlg.setWindowTitle(f"标注设置 - {layer.name()}")
             self._select_properties_page(dlg, ("标注", "Labels"))
-            dlg.exec_()
+            dlg.exec()
             layer.triggerRepaint()
             self.canvas.refresh()
         except Exception as e:  # noqa: BLE001
@@ -1252,7 +1301,7 @@ class MainWindow(QMainWindow):
     def _save_style(self, layer) -> None:
         from app.ui.dialogs.style_io import StyleSaveDialog
         dlg = StyleSaveDialog(layer, self)
-        dlg.exec_()
+        dlg.exec()
 
     def _export_layer(self, layer) -> None:
         dlg = QgsVectorLayerSaveAsDialog(layer)
@@ -1264,28 +1313,28 @@ class MainWindow(QMainWindow):
                 btn.setText("取消")
             elif t in ("help", "帮助"):
                 btn.hide()
-        dlg.exec_()
+        dlg.exec()
 
     def _open_layer_properties(self, layer) -> None:
         try:
             from qgis._gui import QgsVectorLayerProperties
             dlg = QgsVectorLayerProperties(canvas=self.canvas, lyr=layer, messageBar=self.messageBar, parent=self)
             dlg.setWindowIcon(Icons.app())
-            dlg.exec_()
+            dlg.exec()
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "失败", str(e))
 
     def _show_log_dock(self) -> None:
         if self.log_dock is None:
             self.log_dock = LogDock(self)
-            self.addDockWidget(Qt.BottomDockWidgetArea, self.log_dock)
+            self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.log_dock)
         self.log_dock.show()
         self.log_dock.raise_()
 
     def _show_attribute_dock(self, layer, filter_str: str = "1=1", show_ids: list = None) -> None:
         if not hasattr(self, "current_attribute_dock") or self.current_attribute_dock is None:
             self.current_attribute_dock = AttributeDock(layer, page_size=50, parent=self, filter_str=filter_str, show_ids=show_ids)
-            self.addDockWidget(Qt.BottomDockWidgetArea, self.current_attribute_dock)
+            self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.current_attribute_dock)
             self.current_attribute_dock.show()
         else:
             self.current_attribute_dock.add_new_layer(layer, self, filter_str, show_ids, 50, f"属性表 - {layer.name()}")

@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QAction, QMainWindow, QMenu, QToolBar, QToolButton
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QAction
+from PyQt6.QtWidgets import QMainWindow, QMenu, QToolBar, QToolButton
 
 from app.core.domain.drawing import DrawManager
 
@@ -34,7 +35,7 @@ class DrawManagerToolbar:
         ]:
             btn = QToolButton()
             btn.setText(label)
-            btn.setPopupMode(QToolButton.InstantPopup)
+            btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
             tb.addWidget(btn)
         return tb
 

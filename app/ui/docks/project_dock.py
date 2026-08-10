@@ -12,9 +12,9 @@ UI 只负责发信号，真正清空/创建工程由 :class:`MainWindow` 处理
 
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QFont
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QFont
+from PyQt6.QtWidgets import (
     QDockWidget,
     QHBoxLayout,
     QLabel,
@@ -43,7 +43,7 @@ class ProjectDock(QDockWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__("工程", parent)
-        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
         self.setMinimumSize(320, 480)
 
         self._selected_layer = None
@@ -71,7 +71,7 @@ class ProjectDock(QDockWidget):
         self.data_view = QTreeView(self)
         self.data_view.setHeaderHidden(True)  # QgsLayerTreeModel 的 header 会显示 "1"
         self.data_view.clicked.connect(self._on_tree_clicked)
-        self.data_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.data_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.data_view.customContextMenuRequested.connect(self._on_view_context_menu)
         layout.addWidget(self.data_view, 3)
 
@@ -80,7 +80,7 @@ class ProjectDock(QDockWidget):
         self.ref_view = QTreeView(self)
         self.ref_view.setHeaderHidden(True)  # QgsLayerTreeModel 的 header 会显示 "1"
         self.ref_view.clicked.connect(self._on_tree_clicked)
-        self.ref_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.ref_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.ref_view.customContextMenuRequested.connect(self._on_view_context_menu)
         layout.addWidget(self.ref_view, 3)
 

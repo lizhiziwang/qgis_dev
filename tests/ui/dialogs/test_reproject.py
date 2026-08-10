@@ -12,9 +12,9 @@ from __future__ import annotations
 
 import pytest
 
-pytest.importorskip("PyQt5")
+pytest.importorskip("PyQt6")
 
-from PyQt5.QtWidgets import QMainWindow  # noqa: E402
+from PyQt6.QtWidgets import QMainWindow  # noqa: E402
 
 from app.ui.dialogs.reproject import ReprojectDialog  # noqa: E402
 
@@ -31,7 +31,7 @@ def dialog(qgis_app):
 
 def _pump_until(predicate, timeout_ms: int = 5000) -> None:
     """泵事件循环直到 predicate() 为真或超时。"""
-    from PyQt5.QtCore import QEventLoop, QTimer
+    from PyQt6.QtCore import QEventLoop, QTimer
 
     loop = QEventLoop()
     t = QTimer()

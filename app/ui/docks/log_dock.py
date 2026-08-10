@@ -11,9 +11,9 @@ import re
 from datetime import datetime
 from typing import Optional
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QTextCursor
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QTextCursor
+from PyQt6.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -60,7 +60,7 @@ class LogDock(QDockWidget):
         self.param = {"size": 500, "level": "ALL", "filter": ""}
         self.txt: Optional[QTextBrowser] = None
         self.auto_scroll = True
-        self.setAllowedAreas(Qt.BottomDockWidgetArea)
+        self.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
         self._init_ui()
         self._load_log_file()
 
@@ -94,7 +94,7 @@ class LogDock(QDockWidget):
         query.clicked.connect(self._on_search)
         h.addWidget(query)
 
-        h.addSpacerItem(QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum))
+        h.addSpacerItem(QSpacerItem(40, 20, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
 
         clear = QPushButton("清空日志")
         clear.clicked.connect(self._on_clear)
@@ -156,10 +156,10 @@ class LogDock(QDockWidget):
         mb = QMessageBox(self)
         mb.setWindowTitle("日志")
         mb.setText("是否清除当前日志信息")
-        mb.setIcon(QMessageBox.Warning)
-        mb.addButton(QMessageBox.Ok)
-        mb.addButton(QMessageBox.Cancel)
-        if mb.exec_() == QMessageBox.Ok:
+        mb.setIcon(QMessageBox.Icon.Warning)
+        mb.addButton(QMessageBox.StandardButton.Ok)
+        mb.addButton(QMessageBox.StandardButton.Cancel)
+        if mb.exec() == QMessageBox.StandardButton.Ok:
             write_text(_ALL_LOG_PATH, "")
             self._on_refresh()
 
@@ -189,5 +189,5 @@ def add_log_dock(parent) -> LogDock:
     if not hasattr(parent, "_docks"):
         parent._docks = {}
     parent._docks["log"] = log
-    parent.addDockWidget(Qt.BottomDockWidgetArea, log)
+    parent.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, log)
     return log

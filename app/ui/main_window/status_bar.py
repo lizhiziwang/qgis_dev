@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtWidgets import QLabel, QMainWindow
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QLabel, QMainWindow
 
 
 class StatusBar:
@@ -50,7 +50,7 @@ class StatusBar:
     def _build_coordinate_label(self) -> QLabel:
         """鼠标位置坐标标签：跟随画布 xyCoordinates 信号更新。"""
         label = QLabel("—, —")
-        label.setAlignment(Qt.AlignCenter)
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         label.setMinimumWidth(150)
         label.setToolTip("当前鼠标位置坐标")
         canvas = self.main_window.canvas

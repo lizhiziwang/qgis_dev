@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import QDockWidget, QWidget
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import QDockWidget, QWidget
 
 from qgis.core import QgsLayerTreeModel, QgsProject
 from qgis.gui import QgsLayerTreeView
@@ -20,7 +20,7 @@ class LayerDock(QDockWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__("图层列表", parent)
-        self.setAllowedAreas(Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea)
+        self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
 
         self.project: QgsProject = QgsProject.instance()
         self.tree_root = self.project.layerTreeRoot()
@@ -36,7 +36,7 @@ class LayerDock(QDockWidget):
         self.view = QgsLayerTreeView(self)
         self.view.setModel(self.model)
         self.view.clicked.connect(self.layer_clicked.emit)
-        self.view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self.context_menu_requested.emit)
 
         self.setWidget(self.view)

@@ -67,7 +67,7 @@ class ImageryTileJob:
 
     def to_native_params(self) -> dict:
         """转成 ``processing.run('native:tilesxyzdirectory', ...)`` 接受的 dict。"""
-        from PyQt5.QtGui import QColor
+        from PyQt6.QtGui import QColor
 
         ext = self.layer.extent()
         crs = self.layer.crs().authid() or "EPSG:4326"

@@ -11,7 +11,7 @@
 
 | 文件 | 作用 |
 |---|---|
-| `app/ui/dialogs/login.py` | `LoginDialog`：启动时弹出的登录对话框（PyQt5-only） |
+| `app/ui/dialogs/login.py` | `LoginDialog`：启动时弹出的登录对话框（PyQt6-only） |
 | `app/core/auth/credential.py` | `Credential` 数据类 + HMAC 签名 + 加载/保存/清除 |
 | `app/core/auth/__init__.py` | 模块导出 |
 | `app/bootstrap/__init__.py` | 启动流程：先 `load_credential`，有就跳过登录；没有就弹 `LoginDialog`，登录成功后 `Credential.issue` + `save_credential` |

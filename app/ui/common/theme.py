@@ -16,9 +16,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PyQt5.QtCore import QCoreApplication, QObject, QSettings, pyqtSignal
-from PyQt5.QtGui import QColor, QPalette
-from PyQt5.QtWidgets import QApplication, QToolTip
+from PyQt6.QtCore import QCoreApplication, QObject, QSettings, pyqtSignal
+from PyQt6.QtGui import QColor, QPalette
+from PyQt6.QtWidgets import QApplication, QToolTip
 
 
 @dataclass(frozen=True)
@@ -407,13 +407,13 @@ def _arrow_url(color: str, up: bool = False) -> str:
     import tempfile
     from pathlib import Path
 
-    from PyQt5.QtCore import QPoint, Qt
-    from PyQt5.QtGui import QColor, QPainter, QPixmap
+    from PyQt6.QtCore import QPoint, Qt
+    from PyQt6.QtGui import QColor, QPainter, QPixmap
 
     pm = QPixmap(10, 8)
-    pm.fill(Qt.transparent)
+    pm.fill(Qt.GlobalColor.transparent)
     painter = QPainter(pm)
-    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
     arrow_color = QColor(color)
     painter.setPen(arrow_color)
     painter.setBrush(arrow_color)
@@ -731,8 +731,8 @@ def apply_app_theme(theme: Theme) -> None:
     # 工具条图标化后 Tooltip 是高频交互，必须额外用 QToolTip palette 兜底主题色。
     # QToolTip.setPalette 是设 "QTipLabel" 类的应用级 palette，随主题切换刷新。
     pal = QToolTip.palette()
-    pal.setColor(QPalette.ToolTipBase, QColor(theme.tooltip_bg))
-    pal.setColor(QPalette.ToolTipText, QColor(theme.tooltip_text))
+    pal.setColor(QPalette.ColorRole.ToolTipBase, QColor(theme.tooltip_bg))
+    pal.setColor(QPalette.ColorRole.ToolTipText, QColor(theme.tooltip_text))
     QToolTip.setPalette(pal)
 
 

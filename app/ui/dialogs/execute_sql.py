@@ -5,8 +5,8 @@ from __future__ import annotations
 import time
 from typing import Any, List, Optional
 
-from PyQt5.QtCore import QAbstractTableModel, QModelIndex, Qt
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt
+from PyQt6.QtWidgets import (
     QDialog,
     QFileDialog,
     QFormLayout,
@@ -44,16 +44,16 @@ class VectorLayerTableModel(QAbstractTableModel):
     def columnCount(self, parent=QModelIndex()) -> int:
         return len(self._header) if self._data else 0
 
-    def data(self, index, role=Qt.DisplayRole):
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid():
             return None
-        if role == Qt.DisplayRole:
+        if role == Qt.ItemDataRole.DisplayRole:
             v = self._data[index.row()][index.column()]
             return str(v) if v is not None else ""
         return None
 
-    def headerData(self, section, orientation, role=Qt.DisplayRole):
-        if role == Qt.DisplayRole and orientation == Qt.Horizontal:
+    def headerData(self, section, orientation, role=Qt.ItemDataRole.DisplayRole):
+        if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
             return self._header[section]
         return None
 
@@ -98,8 +98,8 @@ class ExecuteSqlDialog(QDialog):
 
         self.result_table = QTableView()
         self.result_table.setAlternatingRowColors(True)
-        self.result_table.setEditTriggers(QTableView.NoEditTriggers)
-        self.result_table.setSelectionBehavior(QTableView.SelectRows)
+        self.result_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.result_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.result_table.horizontalHeader().setStretchLastSection(True)
         layout.addWidget(self.result_table)
 
@@ -107,7 +107,7 @@ class ExecuteSqlDialog(QDialog):
         load_layout = QVBoxLayout(load_group)
         form = QFormLayout()
         form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
-        form.setLabelAlignment(Qt.AlignLeft)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
         self.subset_filter_input = QLineEdit()
         self.subset_filter_input.setPlaceholderText("Enter the optional SQL filter or click on the button to open the query builder tool")
         self.subset_filter_btn = QPushButton("...")
@@ -171,7 +171,7 @@ class ExecuteSqlDialog(QDialog):
     def _on_open_query_builder(self) -> None:
         from app.ui.dialogs.query_builder import QueryBuilderDialog
         dlg = QueryBuilderDialog(self.layer, parent=self)
-        dlg.exec_()
+        dlg.exec()
 
     def sizeHint(self):  # noqa: D401
         return self.minimumSizeHint()

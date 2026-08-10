@@ -14,6 +14,8 @@
 - :mod:`app.infra.logging.styles` —— 颜色 / 加粗映射
 - :mod:`app.infra.logging.formatter` —— ``HtmlLogFormatter``
 - :mod:`app.infra.logging.sink` —— ``_RootSink`` 单例装配
+- :mod:`app.infra.logging.crash` —— 崩溃日志（``sys.excepthook`` +
+  ``faulthandler``），启动早期调 :func:`install_crash_logging`
 - :mod:`app.infra.logging.renderer` —— ``render_log_html``
 
 设计要点：
@@ -32,6 +34,7 @@
 from __future__ import annotations
 
 from .config import LogConfig
+from .crash import install as install_crash_logging
 from .formatter import HtmlLogFormatter
 from .logger import get_logger, setup_logger
 from .renderer import log_to_html, render_log_html
@@ -44,6 +47,7 @@ __all__ = [
     "LogStyle",
     "_RootSink",
     "get_logger",
+    "install_crash_logging",
     "log_to_html",
     "render_log_html",
     "setup_logger",

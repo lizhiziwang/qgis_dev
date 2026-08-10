@@ -39,7 +39,7 @@ class FindFeatureTool(QgsMapToolIdentify):
         self._show_info(result)
 
     def _show_highlight(self, result: IdentifyResult) -> None:
-        from PyQt5.QtGui import QColor
+        from PyQt6.QtGui import QColor
         if self.highlight is not None:
             self.canvas.scene().removeItem(self.highlight)
         self.highlight = self.identify_service.highlight(self.canvas, result.layer, result.feature)

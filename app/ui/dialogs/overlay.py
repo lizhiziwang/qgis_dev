@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import QTimer
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import QTimer
+from PyQt6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -61,7 +61,7 @@ class OverlayDialog(BaseDialog):
         b_l = QVBoxLayout()
         b_l.setContentsMargins(0, 0, 0, 0)
         self.loading = QProgressBar()
-        self.loading.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.loading.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.loading.setRange(0, 100)
         # 重要：不要 connect feedback.progressChanged → setValue。实测这套环境里
         # progressChanged 无论直连还是 QueuedConnection 路由到控件槽都会原生崩溃
@@ -129,7 +129,7 @@ class OverlayDialog(BaseDialog):
         layout.addStretch()
 
     def _browse_output_dir(self) -> None:
-        from PyQt5.QtWidgets import QFileDialog
+        from PyQt6.QtWidgets import QFileDialog
 
         path = QFileDialog.getExistingDirectory(
             self, "选择输出目录", self.output_dir_edit.text()

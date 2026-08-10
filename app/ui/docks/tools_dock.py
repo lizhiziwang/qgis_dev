@@ -10,8 +10,8 @@
 
 from __future__ import annotations
 
-from PyQt5.QtCore import QSize, Qt
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import QSize, Qt
+from PyQt6.QtWidgets import (
     QAbstractItemView,
     QDockWidget,
     QHBoxLayout,
@@ -121,9 +121,9 @@ class ToolsDock(QDockWidget):
     def __init__(self, parent=None) -> None:
         super().__init__("分析工具", parent)
         self.topParent = parent
-        self.setFeatures(QDockWidget.AllDockWidgetFeatures)
+        self.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable | QDockWidget.DockWidgetFeature.DockWidgetMovable | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
         self.setAllowedAreas(
-            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea | Qt.BottomDockWidgetArea
+            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.BottomDockWidgetArea
         )
         #: 算法 code → 当前对话框实例。同一算法只允许一个窗口，已打开时点击置前。
         self._dialogs: dict = {}
@@ -165,8 +165,8 @@ class ToolsDock(QDockWidget):
         self.tree.setAnimated(True)
         self.tree.setIndentation(18)
         self.tree.setUniformRowHeights(True)
-        self.tree.setSelectionMode(QAbstractItemView.SingleSelection)
-        self.tree.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.tree.itemClicked.connect(self._on_item_clicked)
         # 双击 / 回车同样打开（对话框复用逻辑天然幂等）
         self.tree.itemActivated.connect(self._on_item_clicked)
@@ -240,7 +240,7 @@ class ToolsDock(QDockWidget):
             act_text = "折叠" if item.isExpanded() else "展开"
             act = menu.addAction(act_text)
             act.triggered.connect(lambda: item.setExpanded(not item.isExpanded()))
-        menu.exec_(self.tree.viewport().mapToGlobal(pos))
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
 
     def _on_item_clicked(self, item, column) -> None:
         code = getattr(item, "_code_", "")

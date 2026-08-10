@@ -5,7 +5,7 @@
 
 设计：
 
-- 只依赖 PyQt5，不引入 ``qgis.*``，避免登录阶段拖 QGIS 启动开销。
+- 只依赖 PyQt6，不引入 ``qgis.*``，避免登录阶段拖 QGIS 启动开销。
 - 默认账号 ``admin / admin``（生产环境请接真实 auth 服务 / 配置文件）。
 - 取消 → :meth:`reject`，外层 :func:`bootstrap.main` 据此 ``return 0`` 退出。
 """
@@ -14,9 +14,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QFont
-from PyQt5.QtWidgets import (
+from PyQt6.QtCore import Qt
+from PyQt6.QtGui import QFont
+from PyQt6.QtWidgets import (
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -43,7 +43,7 @@ class LoginDialog(QDialog):
         self.setModal(True)
         self.setMinimumWidth(400)
         # 不显示问号按钮
-        self.setWindowFlags(self.windowFlags() & ~Qt.WindowContextHelpButtonHint)
+        self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
 
         self._username: str = ""
 
@@ -65,19 +65,19 @@ class LoginDialog(QDialog):
         title_font.setPointSize(18)
         title_font.setBold(True)
         title.setFont(title_font)
-        title.setAlignment(Qt.AlignCenter)
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
 
         subtitle = QLabel("矢量数据处理工具")
         subtitle.setObjectName("loginSubtitle")
-        subtitle.setAlignment(Qt.AlignCenter)
+        subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(subtitle)
 
         layout.addSpacing(8)
 
         # 表单
         form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignRight)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
         form.setSpacing(8)
 
         self.username_edit = QLineEdit()
@@ -87,7 +87,7 @@ class LoginDialog(QDialog):
 
         self.password_edit = QLineEdit()
         self.password_edit.setPlaceholderText("请输入密码")
-        self.password_edit.setEchoMode(QLineEdit.Password)
+        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
         self.password_edit.setText(_DEFAULT_PASSWORD)  # dev 模式默认填上
         form.addRow("密  码：", self.password_edit)
 
@@ -96,19 +96,21 @@ class LoginDialog(QDialog):
         # 错误标签（初始隐藏）
         self.error_label = QLabel("")
         self.error_label.setObjectName("loginError")
-        self.error_label.setAlignment(Qt.AlignCenter)
+        self.error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.error_label.setMinimumHeight(20)
         layout.addWidget(self.error_label)
 
         layout.addStretch(1)
 
         # 按钮
-        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        buttons.button(QDialogButtonBox.Ok).setText("登录")
-        buttons.button(QDialogButtonBox.Cancel).setText("取消")
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("登录")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         # 默认焦点在"登录"按钮上，回车直接登录
-        buttons.button(QDialogButtonBox.Ok).setDefault(True)
-        buttons.button(QDialogButtonBox.Ok).setAutoDefault(True)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setDefault(True)
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setAutoDefault(True)
         buttons.accepted.connect(self._on_accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)

@@ -1,12 +1,15 @@
 """数据浏览器 Dock。
 
 封装 :class:`QgsBrowserGuiModel` + :class:`QgsBrowserTreeView`。
+
+图层项支持拖出到画布添加（:meth:`BrowserDock` 开启视图拖拽，画布侧在
+``MainWindow`` 拦截 drop 走与双击一致的 ``_add_layer_to_project`` 路径）。
 """
 
 from __future__ import annotations
 
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtWidgets import QDockWidget
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtWidgets import QAbstractItemView, QDockWidget
 
 from qgis.gui import QgsBrowserGuiModel, QgsBrowserTreeView
 
@@ -19,11 +22,11 @@ class BrowserDock(QDockWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__("数据浏览器", parent)
-        self.setAllowedAreas(Qt.RightDockWidgetArea)
+        self.setAllowedAreas(Qt.DockWidgetArea.RightDockWidgetArea)
         self.setFeatures(
-            QDockWidget.DockWidgetClosable
-            | QDockWidget.DockWidgetMovable
-            | QDockWidget.DockWidgetFloatable
+            QDockWidget.DockWidgetFeature.DockWidgetClosable
+            | QDockWidget.DockWidgetFeature.DockWidgetMovable
+            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
         )
 
         self.model = QgsBrowserGuiModel(self)
@@ -33,7 +36,10 @@ class BrowserDock(QDockWidget):
         self.view = QgsBrowserTreeView(self)
         self.view.setModel(self.model)
         self.view.setHeaderHidden(True)
-        self.view.setContextMenuPolicy(Qt.CustomContextMenu)
+        # 允许把图层项拖出（拖到画布上添加图层）；只拖出不接收
+        self.view.setDragEnabled(True)
+        self.view.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+        self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self.context_menu_requested.emit)
         self.view.doubleClicked.connect(self.double_clicked.emit)
 

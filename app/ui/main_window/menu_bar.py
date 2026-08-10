@@ -8,8 +8,9 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from PyQt5.QtGui import QKeySequence
-from PyQt5.QtWidgets import QAction, QMainWindow, QMenu, QMenuBar
+from PyQt6.QtGui import QKeySequence
+from PyQt6.QtGui import QAction
+from PyQt6.QtWidgets import QMainWindow, QMenu, QMenuBar
 
 
 class MenuBar:
@@ -53,7 +54,7 @@ class MenuBar:
         menu.addSeparator()
 
         act_open = QAction("打开文件(&O)", self.main_window)
-        act_open.setShortcut(QKeySequence.Open)
+        act_open.setShortcut(QKeySequence.StandardKey.Open)
         act_open.triggered.connect(callbacks.get("open_file", lambda: None))
         menu.addAction(act_open)
 

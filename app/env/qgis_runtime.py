@@ -2,9 +2,9 @@
 
 负责：
 
-1. 把 QGIS 3.x 所需的 ``QGIS_PREFIX_PATH`` / ``PROJ_LIB`` / ``GDAL_DATA`` /
+1. 把 QGIS 4.2 所需的 ``QGIS_PREFIX_PATH`` / ``PROJ_DATA`` / ``GDAL_DATA`` /
    ``GDAL_DRIVER_PATH`` / ``QT_PLUGIN_PATH`` / ``PATH`` 等环境变量设置好。
-2. 把 ``apps/qgis-ltr/python`` 加进 ``sys.path``，使得 ``import qgis._core``
+2. 把 ``apps/qgis/python`` 加进 ``sys.path``，使得 ``import qgis._core``
    不会 ImportError。
 3. 可选地初始化 ``processing`` 插件（迁自旧 ``setting.py:init_plugs``）。
 
@@ -13,8 +13,16 @@
 - :class:`QgisRuntime` 数据类承载路径集合，配置来源是 :class:`AppConfig`
   （``config/app.yaml``）。
 - :meth:`apply_env` 幂等，重复调用只生效一次。
-- :class:`for_dev` 用本地 ``D:\\zsh\\app\\qgis_3.40`` 安装；:class:`for_prod`
+- :class:`for_dev` 用本地 ``D:\\zsh\\app\\qgis4.2`` 安装；:class:`for_prod`
   走 ``QGIS_PREFIX`` 环境变量（PyInstaller 打包后由 launcher 注入）。
+
+QGIS 4.2 目录布局（OSGeo4W）：
+
+- ``apps/qgis`` —— QGIS 主程序 + python 绑定（``apps/qgis/python``）
+- ``apps/qt6``  —— Qt6 运行时（``plugins`` / ``bin``）
+- ``apps/gdal`` —— GDAL 数据（``share/gdal``）与驱动（``lib/gdalplugins``）
+- ``share/proj`` —— PROJ 数据（``proj.db``）
+- ``bin``       —— 依赖 DLL（gdal313.dll / proj_9.dll / Qt6 依赖等）
 """
 
 from __future__ import annotations
@@ -33,12 +41,13 @@ logger = get_logger(__name__)
 class QgisRuntime:
     """QGIS 运行时路径集合。"""
 
-    qgis_base: Path        # 根目录，例如 D:/zsh/app/qgis_3.40
-    qgis_ltr: Path         # apps/qgis-ltr
+    qgis_base: Path        # 根目录，例如 D:/zsh/app/qgis4.2
+    qgis_prefix: Path      # apps/qgis（QGIS 主目录，含 python 绑定）
+    qt6: Path              # apps/qt6
     gdal: Path             # apps/gdal
-    proj: Path             # apps/proj
-    bin: Path              # bin
-    plugins: Path          # apps/qgis-ltr/python/plugins
+    proj: Path             # share/proj（proj.db 所在）
+    bin: Path              # bin（依赖 DLL）
+    plugins: Path          # apps/qgis/python/plugins
     #: True = 便携扁平布局（QGIS 运行时打进 dist/app，前缀即 dist/app）
     portable: bool = False
 
@@ -50,11 +59,12 @@ class QgisRuntime:
         qgis_base = Path(qgis_base)
         return cls(
             qgis_base=qgis_base,
-            qgis_ltr=qgis_base / "apps" / "qgis-ltr",
+            qgis_prefix=qgis_base / "apps" / "qgis",
+            qt6=qgis_base / "apps" / "qt6",
             gdal=qgis_base / "apps" / "gdal",
-            proj=qgis_base / "apps" / "proj",
+            proj=qgis_base / "share" / "proj",
             bin=qgis_base / "bin",
-            plugins=qgis_base / "apps" / "qgis-ltr" / "python" / "plugins",
+            plugins=qgis_base / "apps" / "qgis" / "python" / "plugins",
         )
 
     @classmethod
@@ -78,7 +88,8 @@ class QgisRuntime:
         prefix = Path(prefix)
         return cls(
             qgis_base=prefix,
-            qgis_ltr=prefix,
+            qgis_prefix=prefix,
+            qt6=prefix,
             gdal=prefix,
             proj=prefix,
             bin=prefix,
@@ -99,28 +110,31 @@ class QgisRuntime:
             return
 
         # 1) 环境变量
-        os.environ["QGIS_PREFIX_PATH"] = str(self.qgis_ltr)
-        os.environ["PROJ_LIB"] = str(self.proj / "share")
-        os.environ["GDAL_DATA"] = str(self.gdal / "data")
-        os.environ["GDAL_DRIVER_PATH"] = str(self.gdal / "gdalplugins")
+        os.environ["QGIS_PREFIX_PATH"] = str(self.qgis_prefix)
+        os.environ["PROJ_DATA"] = str(self.proj)
+        os.environ["PROJ_LIB"] = str(self.proj)  # PROJ 9+ 兼容写法
+        os.environ["GDAL_DATA"] = str(self.gdal / "share" / "gdal")
+        os.environ["GDAL_DRIVER_PATH"] = str(self.gdal / "lib" / "gdalplugins")
         os.environ["QT_PLUGIN_PATH"] = (
-            f"{self.qgis_ltr / 'plugins'}{os.pathsep}{self.bin}"
+            f"{self.qgis_prefix / 'qtplugins'}{os.pathsep}{self.qt6 / 'plugins'}"
         )
-        os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = str(self.bin / "platforms")
+        os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = str(
+            self.qt6 / "plugins" / "platforms"
+        )
         # PATH 优先 QGIS 自带 dll，避免系统 dll 冲突
         os.environ["PATH"] = (
             f"{self.bin}{os.pathsep}"
-            f"{self.qgis_ltr / 'bin'}{os.pathsep}"
-            f"{self.gdal / 'bin'}{os.pathsep}"
+            f"{self.qgis_prefix / 'bin'}{os.pathsep}"
+            f"{self.qt6 / 'bin'}{os.pathsep}"
             f"{os.environ.get('PATH', '')}"
         )
 
         # 2) sys.path：QGIS 自身
         for p in (
-            self.qgis_ltr,
-            self.proj / "share",
-            self.gdal / "data",
-            self.gdal / "gdalplugins",
+            self.qgis_prefix / "python",
+            self.proj,
+            self.gdal / "share" / "gdal",
+            self.gdal / "lib" / "gdalplugins",
             self.plugins,
         ):
             self._append_syspath(p)
@@ -129,7 +143,8 @@ class QgisRuntime:
         """便携布局：proj.db / qgis / etc / plugins / i18n / DLL 都在前缀根目录。"""
         p = self.qgis_base  # 即 dist/app
         os.environ["QGIS_PREFIX_PATH"] = str(p)
-        os.environ["PROJ_LIB"] = str(p)                     # proj.db 在根
+        os.environ["PROJ_DATA"] = str(p)                     # proj.db 在根
+        os.environ["PROJ_LIB"] = str(p)
         os.environ["GDAL_DATA"] = str(p / "gdal_data")
         os.environ["GDAL_DRIVER_PATH"] = str(p / "gdalplugins")
         os.environ["QT_PLUGIN_PATH"] = f"{p}{os.pathsep}{p / 'plugins'}"

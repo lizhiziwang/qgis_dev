@@ -16,7 +16,7 @@ pytestmark = pytest.mark.gui
 
 def test_build_index_caches_on_layer(qgis_app):
     from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsVectorLayer
-    from PyQt5.QtCore import QVariant
+    from PyQt6.QtCore import QVariant
 
     layer = QgsVectorLayer("Polygon?crs=EPSG:4490", "t", "memory")
     pr = layer.dataProvider()

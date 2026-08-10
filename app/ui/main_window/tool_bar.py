@@ -7,8 +7,9 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from PyQt5.QtCore import QSize, Qt
-from PyQt5.QtWidgets import QAction, QMainWindow, QToolBar, QToolButton
+from PyQt6.QtCore import QSize, Qt
+from PyQt6.QtGui import QAction
+from PyQt6.QtWidgets import QMainWindow, QToolBar, QToolButton
 
 from app.ui.common import tool_icons
 from app.ui.common.theme import ThemeManager, Theme, toolbar_qss
@@ -37,7 +38,7 @@ class ToolBar:
         """
         tb = QMainWindow.addToolBar(self.main_window, "地图工具")
         # 图标优先展示，文字不出现在按钮上；悬浮时以 Tooltip 提示文本
-        tb.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
         tb.setIconSize(QSize(25, 25))
         self.toolbar = tb
 
@@ -89,10 +90,10 @@ class ToolBar:
             btn = QToolButton()
             btn.setIcon(tool_icons.icon(key, color))
             btn.setIconSize(self.toolbar.iconSize())
-            btn.setToolButtonStyle(Qt.ToolButtonIconOnly)
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
             btn.setText(label)
             btn.setToolTip(label)
-            btn.setPopupMode(QToolButton.InstantPopup)
+            btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
             btn.clicked.connect(callbacks.get(f"space_query_{q_type}", lambda: None))
             self.toolbar.addWidget(btn)
             self._icon_items.append((btn, key))
