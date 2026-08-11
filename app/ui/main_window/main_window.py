@@ -273,12 +273,12 @@ class MainWindow(QMainWindow):
         self.digitizing_toolbar.editing_state_changed.connect(self._on_editing_state_changed)
 
         # QGIS 复用版数字化工具条（点/线/面/矩形/圆，与自定义版平行）
-        self.qgis_digitizing_toolbar = QgisDigitizingToolbar(
-            self,
-            self.canvas,
-            editing_layer_getter=lambda: self.edit_layer,
-            on_finished=self._on_qgis_draw_finished,
-        )
+        # self.qgis_digitizing_toolbar = QgisDigitizingToolbar(
+        #     self,
+        #     self.canvas,
+        #     editing_layer_getter=lambda: self.edit_layer,
+        #     on_finished=self._on_qgis_draw_finished,
+        # )
 
         # 创建平移工具（保留引用避免被 GC）
         self._pan_tool = QgsMapToolPan(self.canvas)
