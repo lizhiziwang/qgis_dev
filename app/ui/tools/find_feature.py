@@ -25,7 +25,9 @@ class FindFeatureTool(QgsMapToolIdentify):
         self.last_dialog = None
 
     def canvasReleaseEvent(self, event) -> None:  # noqa: N802 —— QGIS 命名
-        results = self.identify(event.x(), event.y(), self.IdentifyMode.TopDownAll)
+        # Qt6 下 QgsMapMouseEvent 不再有 x()/y()，用 pixelPoint() 取画布像素坐标
+        point = event.pixelPoint()
+        results = self.identify(point.x(), point.y(), self.IdentifyMode.TopDownAll)
         if not results:
             return
         from app.core.domain.identify.service import IdentifyResult as _Result

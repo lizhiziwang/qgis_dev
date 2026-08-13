@@ -71,6 +71,13 @@ def _make_imagery_mbtiles_dialog(parent):
     return ImageryMbtilesDialog(parent, title="影像切片（MBTiles）")
 
 
+def _make_flow_editor(parent):
+    """流程节点编排工具：打开主窗口内的流程编辑器（懒建单实例）。"""
+    opener = getattr(parent, "_open_flow_editor", None)
+    if opener is not None:
+        opener()
+
+
 #: 工具节点 code → 对话框工厂（懒 import，避免 dock 构造时拉进全部 dialog）
 _DIALOG_FACTORIES = {
     "native:writevectortiles_xyz": _make_vector_tile_dialog,
@@ -82,6 +89,11 @@ _DIALOG_FACTORIES = {
     "native:tilesxyzmbtiles": _make_imagery_mbtiles_dialog,
 }
 
+#: 工具节点 code → 一次性动作（打开非对话框窗口，无需实例缓存）
+_SIMPLE_ACTIONS = {
+    "flow:editor": _make_flow_editor,
+}
+
 #: 工具节点 code → 一行说明（树节点 tooltip）
 _TOOL_TIPS = {
     "native:writevectortiles_xyz": "按 XYZ 模板把矢量图层导出为矢量瓦片",
@@ -91,6 +103,7 @@ _TOOL_TIPS = {
     "native:reprojectlayer": "把图层重投影到目标坐标系",
     "native:tilesxyzdirectory": "把当前地图画布切片为 XYZ 瓦片目录",
     "native:tilesxyzmbtiles": "把当前地图画布切片为 MBTiles 文件",
+    "flow:editor": "可视化流程节点编排：拖节点建流程、连线、运行与导出",
 }
 
 #: 树分组：(分组名, [(工具名, 算法 code), ...])
@@ -110,6 +123,12 @@ _TOOL_GROUPS = [
             ("生成矢量瓦片（XYZ）", "native:writevectortiles_xyz"),
             ("影像切片（XYZ）", "native:tilesxyzdirectory"),
             ("影像切片（MBTiles）", "native:tilesxyzmbtiles"),
+        ],
+    ),
+    (
+        "流程编排",
+        [
+            ("节点式流程编排", "flow:editor"),
         ],
     ),
 ]
@@ -233,7 +252,7 @@ class ToolsDock(QDockWidget):
             return
         menu = QMenu(self.tree)
         code = getattr(item, "_code_", "")
-        if code in _DIALOG_FACTORIES:
+        if code in _DIALOG_FACTORIES or code in _SIMPLE_ACTIONS:
             act = menu.addAction("打开工具")
             act.triggered.connect(lambda: self._on_item_clicked(item, 0))
         else:
@@ -245,6 +264,11 @@ class ToolsDock(QDockWidget):
     def _on_item_clicked(self, item, column) -> None:
         code = getattr(item, "_code_", "")
         try:
+            # 一次性动作（打开非对话框窗口，如流程编辑器）
+            simple = _SIMPLE_ACTIONS.get(code)
+            if simple is not None:
+                simple(self.topParent)
+                return
             factory = _DIALOG_FACTORIES.get(code)
             if factory is None:
                 return

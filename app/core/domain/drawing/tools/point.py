@@ -26,7 +26,7 @@ class PointDrawTool(BaseDrawTool):
         self.rubber_band.setWidth(2)
 
     def canvasReleaseEvent(self, event) -> None:  # noqa: N802 —— QGIS 命名
-        point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
+        point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pixelPoint())
         geometry = QgsGeometry.fromPointXY(QgsPointXY(point.x(), point.y()))
         self.geom = geometry
         self.rubber_band.addPoint(point)

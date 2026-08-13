@@ -34,9 +34,22 @@ class MenuBar:
         """
         file_menu = self._build_file_menu(callbacks)
         check_menu = self._build_check_menu(callbacks)
+        flow_menu = self._build_flow_menu(callbacks)
         return file_menu
 
     # ---------------------------------------------------------- 各菜单
+
+    def _build_flow_menu(self, callbacks: dict[str, Callable[[], None]]) -> QMenu:
+        """「流程」菜单：可视化流程节点编辑器入口。"""
+        menu = self.menubar.addMenu("流程(&W)")
+
+        act_flow = QAction("流程节点编辑器(&E)", self.main_window)
+        act_flow.setShortcut("Ctrl+Shift+F")
+        act_flow.setStatusTip("打开可视化流程节点编排工具（拖节点建流程、连线、运行）")
+        act_flow.triggered.connect(callbacks.get("open_flow_editor", lambda: None))
+        menu.addAction(act_flow)
+
+        return menu
 
     def _build_file_menu(self, callbacks: dict[str, Callable[[], None]]) -> QMenu:
         menu = self.menubar.addMenu("文件(&F)")

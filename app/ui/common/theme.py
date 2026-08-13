@@ -717,6 +717,122 @@ def canvas_zoom_qss(t: Theme) -> str:
     """
 
 
+def flow_panel_qss(t: Theme) -> str:
+    """流程编辑器节点参数面板 QSS（作用于 dock 内容容器）。
+
+    现代风格：卡片式通用区（:class:`QFrame` ``ParamCard``）、下划线式
+    ``QTabBar``、胶囊算法快捷按钮（``ChipButton``）、虚线「新增」（``AddButton``）、
+    危险删除按钮（``DangerButton``）、次要文字表头（``panelHeader`` 属性）。
+
+    只套在参数面板的内容控件上，不触碰 QDockWidget 标题栏（标题栏仍由
+    ``window_qss`` 负责，避免自设样式把 dock 标题压掉）。
+    """
+    danger_glow = _with_alpha(t.text_error, 26)  # 删除按钮 hover 半透明底
+    return f"""
+    QScrollArea {{ background-color: {t.window_bg}; border: none; }}
+    QScrollArea > QWidget > QWidget {{ background-color: transparent; }}
+    QWidget#ParamRoot {{ background-color: transparent; }}
+
+    QLabel#CardTitle {{
+        color: {t.menu_text};
+        font-size: 12px;
+        font-weight: 600;
+    }}
+    QLabel[panelHeader="true"] {{
+        color: {t.text_secondary};
+        font-size: 11px;
+        font-weight: 600;
+    }}
+
+    QFrame#ParamCard {{
+        background-color: {t.panel_bg};
+        border: 1px solid {t.border};
+        border-radius: 6px;
+    }}
+
+    QTabWidget::pane {{
+        border: none;
+        border-top: 1px solid {t.border};
+        background-color: transparent;
+        top: -1px;
+    }}
+    QTabBar::tab {{
+        background: transparent;
+        color: {t.text_secondary};
+        border: none;
+        border-bottom: 2px solid transparent;
+        padding: 6px 10px;
+        margin-right: 4px;
+        font-size: 12px;
+    }}
+    QTabBar::tab:selected {{
+        color: {t.menu_text};
+        font-weight: 600;
+        border-bottom: 2px solid {t.input_focus};
+    }}
+    QTabBar::tab:hover:!selected {{ color: {t.menu_text}; }}
+
+    QPushButton {{
+        background-color: {t.btn_bg};
+        color: {t.menu_text};
+        border: 1px solid {t.input_border};
+        border-radius: 4px;
+        padding: 5px 12px;
+    }}
+    QPushButton:hover {{ background-color: {t.btn_hover}; border-color: {t.border}; }}
+    QPushButton:pressed {{ background-color: {t.btn_pressed}; }}
+
+    QPushButton#ChipButton {{
+        background-color: {t.input_bg};
+        border: 1px solid {t.input_border};
+        border-radius: 12px;
+        padding: 3px 10px;
+        font-size: 11px;
+    }}
+    QPushButton#ChipButton:hover {{
+        background-color: {t.btn_hover};
+        border-color: {t.input_focus};
+        color: {t.input_focus};
+    }}
+
+    QPushButton#AddButton {{
+        background-color: transparent;
+        color: {t.input_focus};
+        border: 1px dashed {t.input_border};
+        border-radius: 4px;
+        padding: 5px;
+    }}
+    QPushButton#AddButton:hover {{
+        background-color: {t.btn_hover};
+        border-color: {t.input_focus};
+    }}
+
+    QPushButton#DangerButton {{
+        background-color: transparent;
+        color: {t.text_error};
+        border: 1px solid {t.border};
+        border-radius: 4px;
+    }}
+    QPushButton#DangerButton:hover {{
+        background-color: {danger_glow};
+        border-color: {t.text_error};
+    }}
+
+    QToolButton#RowDel {{
+        border: none;
+        background-color: transparent;
+        color: {t.text_secondary};
+        border-radius: 3px;
+        padding: 2px 6px;
+        font-weight: 600;
+    }}
+    QToolButton#RowDel:hover {{
+        color: {t.text_error};
+        background-color: {danger_glow};
+    }}
+    """
+
+
 def apply_app_theme(theme: Theme) -> None:
     """把全局控件配色设到 QApplication（弹窗 / 右键菜单 / ToolTip 等顶层窗口）。
 
@@ -749,6 +865,7 @@ __all__ = [
     "window_qss",
     "app_qss",
     "canvas_zoom_qss",
+    "flow_panel_qss",
     "apply_app_theme",
     "apply_app_tooltip_style",
 ]

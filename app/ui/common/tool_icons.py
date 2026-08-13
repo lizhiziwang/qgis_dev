@@ -38,6 +38,20 @@ _GLYPHS: dict[str, str] = {
     "space_query_point": "",   # map-marker 定位大头针
     "space_query_line": "",    # route 路线（线查询）
     "space_query_polygon": "", # draw-polygon 多边形（面查询）
+    # ---- 流程节点编排工具（app/ui/flow_editor）----
+    "play": "",           # play 运行全部
+    "step": "",           # step-forward 单步执行
+    "undo": "",           # undo 重置参数
+    "sitemap": "",        # sitemap 拓扑校验（依赖关系图）
+    "link": "",           # link 高亮依赖链
+    "chevron_up": "",     # chevron-up 上一级
+    "chevron_down": "",   # chevron-down 下一级
+    "trash": "",          # trash 删除选中
+    "file": "",           # file 新建流程
+    "folder_open": "",    # folder-open 打开流程
+    "save": "",           # save 保存
+    "archive": "",        # archive 另存为
+    "expand": "",         # expand-arrows-alt 适应窗口
 }
 
 _CACHE: dict[tuple[str, str], QIcon] = {}

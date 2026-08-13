@@ -143,7 +143,7 @@ class LogDock(QDockWidget):
         )
         self.txt.setHtml(html)
         if self.auto_scroll:
-            self.txt.moveCursor(QTextCursor.End)
+            self.txt.moveCursor(QTextCursor.MoveOperation.End)
 
     def _on_search(self) -> None:
         self.param["level"] = self.level_combo.currentText()

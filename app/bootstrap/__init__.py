@@ -72,38 +72,45 @@ def main(argv: Optional[list[str]] = None) -> int:
     # 创建 QApplication（不 initQgis，等登录通过再做）
     app = _ensure_qgis_application(qgis)
 
-    # 鉴权优先：本机有未过期凭证就直接跳过登录
-    from app.core.auth import load_credential
+    # 启动初始化状态页：QgsApplication 创建后立刻弹出，覆盖登录 → initQgis →
+    # 插件注册 → 主窗口构建等耗时阶段，主窗口显示时由 _run_qgis_app 关闭。
+    splash = _start_splash()
+    try:
+        # 鉴权优先：本机有未过期凭证就直接跳过登录
+        from app.core.auth import load_credential
 
-    cached = load_credential()
-    if cached is not None:
+        cached = load_credential()
+        if cached is not None:
+            logger.info(
+                "凭证校验通过 username=%s 剩余有效 %d 秒 (%s)",
+                cached.username,
+                cached.remaining_seconds(),
+                cached.expires_at,
+            )
+            return _run_qgis_app(cfg, qgis, app, splash)
+
+        # 没有有效凭证 → 弹登录
+        logger.info("本地无有效凭证，弹出登录对话框")
+        username = _run_login_dialog()
+        if not username:
+            logger.info("登录取消，退出")
+            return 0
+
+        # 登录成功 → 签发 30 天凭证 + 进入主窗口
+        from app.core.auth import Credential, save_credential
+
+        new_cred = Credential.issue(username)
+        save_credential(new_cred)
         logger.info(
-            "凭证校验通过 username=%s 剩余有效 %d 秒 (%s)",
-            cached.username,
-            cached.remaining_seconds(),
-            cached.expires_at,
+            "已签发 30 天凭证 username=%s expires_at=%s path=%s",
+            new_cred.username,
+            new_cred.expires_at,
+            save_credential.__module__,
         )
-        return _run_qgis_app(cfg, qgis, app)
-
-    # 没有有效凭证 → 弹登录
-    logger.info("本地无有效凭证，弹出登录对话框")
-    username = _run_login_dialog()
-    if not username:
-        logger.info("登录取消，退出")
-        return 0
-
-    # 登录成功 → 签发 30 天凭证 + 进入主窗口
-    from app.core.auth import Credential, save_credential
-
-    new_cred = Credential.issue(username)
-    save_credential(new_cred)
-    logger.info(
-        "已签发 30 天凭证 username=%s expires_at=%s path=%s",
-        new_cred.username,
-        new_cred.expires_at,
-        save_credential.__module__,
-    )
-    return _run_qgis_app(cfg, qgis, app)
+        return _run_qgis_app(cfg, qgis, app, splash)
+    finally:
+        # 所有出口（含异常）都关掉初始化状态页，避免残留
+        splash.close()
 
 
 # --------------------------------------------------------------------- 私有
@@ -226,28 +233,62 @@ def _run_login_dialog() -> Optional[str]:
     return None
 
 
-def _run_qgis_app(cfg: AppConfig, qgis: QgisRuntime, app) -> int:
+def _start_splash():
+    """创建并显示启动初始化状态页，返回实例。
+
+    QgsApplication 已存在（见 :func:`_ensure_qgis_application`），此时可以弹
+    顶层浮窗；各初始化阶段由调用方用 ``splash.set_status(...)`` 驱动刷新。
+    """
+    from app.ui.common.splash import StartupSplash
+
+    splash = StartupSplash()
+    splash.center_on_screen()
+    splash.show()
+    return splash
+
+
+def _run_qgis_app(cfg: AppConfig, qgis: QgisRuntime, app, splash=None) -> int:
     """登录成功后才真正初始化 QGIS + 主窗口 + exec_。"""
     # 关键：initQgis 必须在登录通过之后
+    if splash is not None:
+        splash.set_status("正在初始化 QGIS 核心")
     app.initQgis()
 
     # 翻译：仅在 dev 模式装（prod 走 launcher 内置资源）
     if cfg.env == "dev":
-        from PyQt6.QtCore import QTranslator
+        if splash is not None:
+            splash.set_status("正在加载语言")
+        from PyQt6.QtCore import QLibraryInfo, QTranslator
 
         translator = QTranslator()
         translator.load("qgis_zh-Hans.qm", app.i18nPath())
         app.installTranslator(translator)
 
+        # Qt 内置标准按钮（保存/丢弃/取消/是/否/确定…）走 qtbase 翻译；
+        # qgis_zh-Hans 只管 QGIS 自带文案，不翻译这些按钮，不装的话弹窗里
+        # 全是英文（如流程窗口关闭时的 Save / Discard / Cancel）。
+        qt_translator = QTranslator()
+        qt_path = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+        if qt_translator.load("qtbase_zh_CN.qm", qt_path):
+            app.installTranslator(qt_translator)
+
     # processing 插件：dev / prod 都需要（瓦片、缓冲等工具依赖 processing.run）。
     # 必须在 initQgis 之后调用；打包环境漏掉会导致 run 是 stub，
     # 报 "Processing plugin has not been loaded"。
+    if splash is not None:
+        splash.set_status("正在加载处理工具箱")
     qgis.init_plugins()
 
     # 4) 主窗口（阶段 4 实现新窗口；阶段 1-3 临时仍用旧类）
     from app.bootstrap.main_window import build_window
 
+    if splash is not None:
+        splash.set_status("正在构建主窗口")
     window = build_window()
+
+    # 主窗口就绪：先关掉初始化状态页再显示，避免浮窗盖在主窗口上
+    if splash is not None:
+        splash.close()
     window.show()
     _run_startup_callbacks(window)
     return app.exec()

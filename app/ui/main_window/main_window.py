@@ -166,7 +166,7 @@ class MainWindow(QMainWindow):
         self._build_central_widget()
 
         # ---- 画布左上角缩放工具（覆盖层）----
-        self.zoom_tool = CanvasZoomTool(self.canvas)
+        # self.zoom_tool = CanvasZoomTool(self.canvas)
 
         # ---- service 注入 ----
         self.editing_service = LayerEditService()
@@ -179,6 +179,8 @@ class MainWindow(QMainWindow):
         self._selected_layer: Optional[QgsVectorLayer] = None
         #: 样式剪贴板：复制样式时存 xmlData()，粘贴样式时读（QGIS 图层菜单习惯）
         self._style_clipboard: Optional[str] = None
+        #: 流程节点编辑器窗口（懒建单实例，见 _open_flow_editor）
+        self._flow_editor_window = None
 
         # ---- dock ----
         self._build_docks()
@@ -295,6 +297,7 @@ class MainWindow(QMainWindow):
             "open_project": self._on_open_project,
             "new_project": self._on_new_project,
             "show_log": self._show_log_dock,
+            "open_flow_editor": self._open_flow_editor,
         }
         self.menu_bar_builder = MenuBar(self, self._menubar)
         self.menu_bar_builder.build(callbacks)
@@ -603,10 +606,14 @@ class MainWindow(QMainWindow):
         self.messageBar.pushMessage(f"已创建工程：{name}", level=Qgis.MessageLevel.Info, duration=3)
 
     def _add_layer_to_project(self, layer) -> None:
-        """把图层加进项目：默认路由到"数据图层"分组（未创建工程时平铺挂根）。"""
+        """把图层加进项目：默认路由到"数据图层"分组（未创建工程时平铺挂根）。
+
+        用 ``insertLayer(0, ...)`` 把新图层插到分组最顶层——QGIS 面板顶部即渲染
+        最上层，后加的图层直接盖在最上面。
+        """
         self.project.addMapLayer(layer, False)
         group = getattr(self, "_data_group", None) or self.project.layerTreeRoot()
-        group.addLayer(layer)
+        group.insertLayer(0, layer)
 
     def _load_config_base_tile_into_ref_group(self) -> None:
         """加载配置底图并移入"参考图层"分组（底图已平铺挂根，需移动）。"""
@@ -1330,6 +1337,26 @@ class MainWindow(QMainWindow):
             self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.log_dock)
         self.log_dock.show()
         self.log_dock.raise_()
+
+    def _open_flow_editor(self) -> None:
+        """打开流程节点编辑器（懒建单实例，重复调用只置前）。"""
+        try:
+            if self._flow_editor_window is None:
+                from app.ui.flow_editor import FlowEditorWindow
+
+                self._flow_editor_window = FlowEditorWindow()
+            win = self._flow_editor_window
+            win.show()
+            win.raise_()
+            win.activateWindow()
+        except Exception as exc:  # noqa: BLE001
+            # 槽内异常会 native 崩溃，务必兜住（见 qgis-ui-integration-gotchas）
+            from app.infra.logging import get_logger
+
+            get_logger(__name__).error("打开流程编辑器失败：%s", exc, exc_info=True)
+            if hasattr(self, "messageBar"):
+                self.messageBar.pushWarning("流程编辑器", f"打开失败：{exc}")
+
 
     def _show_attribute_dock(self, layer, filter_str: str = "1=1", show_ids: list = None) -> None:
         if not hasattr(self, "current_attribute_dock") or self.current_attribute_dock is None:

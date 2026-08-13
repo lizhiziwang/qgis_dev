@@ -41,7 +41,7 @@ class LineDrawTool(BaseDrawTool):
             return
         if not self.temp_points:
             return
-        point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
+        point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pixelPoint())
         self.line_rubber_band2.reset(QgsWkbTypes.LineGeometry)
         self.line_rubber_band2.addPoint(self.temp_points[-1])
         self.line_rubber_band2.addPoint(point)
@@ -51,7 +51,7 @@ class LineDrawTool(BaseDrawTool):
         try:
             if event.button() == Qt.MouseButton.LeftButton:
                 self.is_over = False
-                point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
+                point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pixelPoint())
                 self.temp_points.append(QgsPointXY(point.x(), point.y()))
                 self._update_rubber_band()
             elif event.button() == Qt.MouseButton.RightButton:

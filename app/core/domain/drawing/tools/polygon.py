@@ -44,7 +44,7 @@ class PolygonDrawTool(BaseDrawTool):
             return
         if not self.temp_points:
             return
-        point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
+        point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pixelPoint())
         self.line_rubber_band.reset(QgsWkbTypes.LineGeometry)
         self.line_rubber_band.addPoint(self.temp_points[0])
         self.line_rubber_band.addPoint(point)
@@ -54,7 +54,7 @@ class PolygonDrawTool(BaseDrawTool):
     def canvasPressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
             self.is_over = False
-            point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
+            point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pixelPoint())
             self.temp_points.append(QgsPointXY(point.x(), point.y()))
             self._update_rubber_band()
         elif event.button() == Qt.MouseButton.RightButton:

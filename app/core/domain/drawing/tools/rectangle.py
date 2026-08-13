@@ -38,7 +38,7 @@ class RectangleDrawTool(BaseDrawTool):
                 return
             if not self.temp_points:
                 return
-            point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
+            point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pixelPoint())
             if len(self.temp_points) > 1:
                 self.temp_points = [self.temp_points[0]]
             self.temp_points.append(QgsPointXY(point.x(), point.y()))
@@ -53,7 +53,7 @@ class RectangleDrawTool(BaseDrawTool):
         if not self.is_over:
             if event.button() == Qt.MouseButton.LeftButton:
                 self.is_over = False
-                point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
+                point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pixelPoint())
                 self.temp_points.append(QgsPointXY(point.x(), point.y()))
             else:
                 self.is_over = True

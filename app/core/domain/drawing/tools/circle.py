@@ -43,7 +43,7 @@ class CircleDrawTool(BaseDrawTool):
         try:
             if not self.temp_points:
                 return
-            point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
+            point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pixelPoint())
             center = self.temp_points[0]
             self.radius = math.hypot(point.x() - center.x(), point.y() - center.y())
             circle = QgsCircle.fromCenterDiameter(
@@ -56,7 +56,7 @@ class CircleDrawTool(BaseDrawTool):
             pass
 
     def canvasPressEvent(self, event) -> None:  # noqa: N802
-        point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pos())
+        point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pixelPoint())
         if event.button() == Qt.MouseButton.LeftButton:
             if not self.temp_points:
                 self.temp_points.append(QgsPointXY(point.x(), point.y()))

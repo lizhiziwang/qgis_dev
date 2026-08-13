@@ -312,7 +312,7 @@ class TitleBar(QWidget):
         if event.button() == Qt.MouseButton.LeftButton and not self._is_interactive_pos(event.pos()):
             frame = self.window().frameGeometry() if self.window() else None
             if frame is not None:
-                self._drag_offset = event.globalPos() - frame.topLeft()
+                self._drag_offset = event.globalPosition().toPoint() - frame.topLeft()
                 event.accept()
                 return
         super().mousePressEvent(event)
@@ -323,7 +323,7 @@ class TitleBar(QWidget):
             if handle is not None and hasattr(handle, "startSystemMove"):
                 handle.startSystemMove()  # Qt 5.15+ 原生拖动（含贴边吸附）
             else:
-                self.window().move(event.globalPos() - self._drag_offset)
+                self.window().move(event.globalPosition().toPoint() - self._drag_offset)
             return
         super().mouseMoveEvent(event)
 

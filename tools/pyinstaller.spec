@@ -152,6 +152,11 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    # PyInstaller 6.x 默认把 bundled 文件放进 `_internal/`；这里关掉 contents
+    # 目录，恢复旧 onedir 布局（datas/binaries 落在 dist/app 根下），否则
+    # build_windows.ps1 的 STAGE 4 校验与运行时便携探测（app.exe 旁找
+    # `qgis/`+`proj.db`）都会因路径变化而失败。
+    contents_directory=".",
 )
 
 coll = COLLECT(

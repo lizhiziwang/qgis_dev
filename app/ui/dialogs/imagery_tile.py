@@ -280,7 +280,7 @@ class ImageryTileDialog(BaseDialog):
             f'<p style="margin:0;color:{_LOG_COLORS.get(level, "#9a9a9a")};">'
             f"{escape(message)}</p>"
         )
-        self.log_browser.moveCursor(QTextCursor.End)
+        self.log_browser.moveCursor(QTextCursor.MoveOperation.End)
 
     def _on_task_completed(self) -> None:
         """任务成功结束（主线程回调）。"""
