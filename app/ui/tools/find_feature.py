@@ -27,23 +27,33 @@ class FindFeatureTool(QgsMapToolIdentify):
     def canvasReleaseEvent(self, event) -> None:  # noqa: N802 —— QGIS 命名
         # Qt6 下 QgsMapMouseEvent 不再有 x()/y()，用 pixelPoint() 取画布像素坐标
         point = event.pixelPoint()
-        results = self.identify(point.x(), point.y(), self.IdentifyMode.TopDownAll)
+        results = self.identify_service.identify(
+            self.canvas, point.x(), point.y(), self.IdentifyMode.TopDownAll
+        )
         if not results:
             return
-        from app.core.domain.identify.service import IdentifyResult as _Result
-
-        r = results[0]
-        result = IdentifyResult(
-            layer=r.mLayer,
-            feature=r.mFeature,
-        )
+        result = results[0]
         self._show_highlight(result)
         self._show_info(result)
 
     def _show_highlight(self, result: IdentifyResult) -> None:
         from PyQt6.QtGui import QColor
+        from qgis.gui import QgsHighlight
+
         if self.highlight is not None:
             self.canvas.scene().removeItem(self.highlight)
+            self.highlight = None
+        if result.is_raster:
+            # 栅格没有「要素高亮」API：用像元几何 + 图层几何重载，高亮点击的格子
+            geom = result.feature.geometry() if result.feature is not None else None
+            if geom is None or geom.isEmpty():
+                return
+            self.highlight = QgsHighlight(self.canvas, geom, result.layer)
+            self.highlight.setColor(QColor(255, 0, 0))
+            self.highlight.setFillColor(QColor(255, 0, 0, 50))
+            self.highlight.setWidth(1)
+            self.highlight.show()
+            return
         self.highlight = self.identify_service.highlight(self.canvas, result.layer, result.feature)
 
     def _show_info(self, result: IdentifyResult) -> None:

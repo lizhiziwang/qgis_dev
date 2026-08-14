@@ -34,6 +34,7 @@ from app.core.domain.flow.model import FlowGraph, unbound_inputs
 from app.core.domain.flow.serialization import FlowCodec
 from app.core.domain.flow.topo import FlowCycleError, topo_sort
 from app.ui.common import tool_icons
+from app.ui.common.frameless import FramelessMixin
 from app.ui.common.icons import Icons
 from app.ui.common.theme import ThemeManager, toolbar_qss, window_qss
 
@@ -45,7 +46,7 @@ from .scene import FlowScene
 from .view import FlowView
 
 
-class FlowEditorWindow(QMainWindow):
+class FlowEditorWindow(FramelessMixin, QMainWindow):
     """流程节点编辑器主窗口。"""
 
     def __init__(self, parent=None) -> None:
@@ -53,6 +54,8 @@ class FlowEditorWindow(QMainWindow):
         self.setWindowTitle("流程节点编辑器")
         self.setWindowIcon(Icons.app())  # 与主窗口同款应用图标
         self.resize(1280, 820)
+        # 无边框窗口 + 自绘标题栏（与主窗口一致；流程编辑器没有菜单栏）
+        self.title_bar = self.enable_frameless()
         self._dirty = False
         self._current_file = ""
 
@@ -60,6 +63,9 @@ class FlowEditorWindow(QMainWindow):
         self.scene = FlowScene()
         self.view = FlowView(self.scene, self)
         self.setCentralWidget(self.view)
+        # Linux/X11 边缘缩放：FlowView 覆盖整个窗口，注册为缩放监控目标
+        self.view.installEventFilter(self)
+        self.monitor_resize_edges(self.view)
 
         # ---- 执行器（QObject，信号驱动 UI）
         self.executor = FlowExecutor(self)

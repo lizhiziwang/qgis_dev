@@ -2,7 +2,7 @@
 
 布局：应用图标 | 窗口标题 …… | 用户信息(头像+用户名) | 主题切换 | 最小化 | 最大化/还原 | 关闭
 
-拖动 / 缩放不在本组件内实现：由 :class:`MainWindow.nativeEvent` 拦截
+拖动 / 缩放不在本组件内实现：由 :class:`FramelessMixin.nativeEvent` 拦截
 ``WM_NCHITTEST``，标题栏空白区返回 ``HTCAPTION``（系统负责拖动/贴边/双击最大化），
 窗口边缘返回对应 resize 码（系统负责缩放）。本组件只负责：
 
@@ -142,7 +142,7 @@ class _TitleButton(QToolButton):
 class TitleBar(QWidget):
     """自绘标题栏。
 
-    空白区域可拖动：Windows 由 :class:`MainWindow.nativeEvent` 的 ``WM_NCHITTEST``
+    空白区域可拖动：Windows 由 :class:`FramelessMixin.nativeEvent` 的 ``WM_NCHITTEST``
     接管（返回 ``HTCAPTION``），其他平台走本组件的鼠标兜底。
     """
 
@@ -150,7 +150,12 @@ class TitleBar(QWidget):
     maximize_requested = pyqtSignal()
     close_requested = pyqtSignal()
 
-    def __init__(self, parent: QWidget = None) -> None:
+    def __init__(
+        self,
+        parent: QWidget = None,
+        show_min_button: bool = True,
+        show_max_button: bool = True,
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("TitleBar")
         self.setFixedHeight(TITLE_BAR_HEIGHT)
@@ -214,13 +219,23 @@ class TitleBar(QWidget):
         layout.addWidget(self._btn_max)
         layout.addWidget(self._btn_close)
 
+        # 对话框等场景隐藏不必要的窗口按钮（隐藏的按钮不参与命中测试）
+        if not show_min_button:
+            self._btn_min.hide()
+        if not show_max_button:
+            self._btn_max.hide()
+
         # 可交互子控件（WM_NCHITTEST 判定是否返回 HTCLIENT 用）
         self._interactive = [
-            self._user_btn,
-            self._btn_theme,
-            self._btn_min,
-            self._btn_max,
-            self._btn_close,
+            b
+            for b in (
+                self._user_btn,
+                self._btn_theme,
+                self._btn_min,
+                self._btn_max,
+                self._btn_close,
+            )
+            if not b.isHidden()
         ]
 
         # 主题：跟随 ThemeManager，切换时重绘自身配色（连接放最后，避免初始化期回调）
@@ -302,6 +317,16 @@ class TitleBar(QWidget):
             if widget is child or child.isAncestorOf(widget):
                 return True
         return False
+
+    def is_interactive_pos(self, pos: QPoint) -> bool:
+        """``pos``（标题栏本地坐标）是否落在任一可交互控件几何内。
+
+        供 :class:`FramelessMixin._wm_nchittest` 做命中判定：按钮/用户信息区返回
+        True（→ ``HTCLIENT``，Qt 正常处理点击），空白区返回 False（→ ``HTCAPTION``
+        系统拖动）。直接用子控件几何命中，不依赖 ``QApplication.widgetAt`` 全局查询
+        （后者在 Win11 / HiDPI 下可能返回错位控件，导致按钮区被误判为拖动区）。
+        """
+        return any(child.geometry().contains(pos) for child in self._interactive)
 
     def _is_interactive_pos(self, pos: QPoint) -> bool:
         return any(child.geometry().contains(pos) for child in self._interactive)

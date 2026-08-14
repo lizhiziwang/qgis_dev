@@ -30,6 +30,7 @@ class FeatureInfoDialog(QDialog):
         self.setWindowIcon(Icons.app())
         self.layer = result.layer
         self.feature = result.feature
+        self.result = result
         self.highlight = highlight
         self.setWindowTitle("要素详情")
         self.setMinimumSize(500, 400)
@@ -43,9 +44,13 @@ class FeatureInfoDialog(QDialog):
         icon_lbl = QLabel()
         icon_lbl.setPixmap(QIcon.fromTheme("layer-vector-point").pixmap(QSize(32, 32)))
         title.addWidget(icon_lbl)
+        if self.result.is_raster:
+            subtitle = "栅格像元识别"
+        else:
+            subtitle = f"要素 ID: {self.feature.id()}"
         title.addWidget(QLabel(
             f"<h3 style='margin:0'>{self.layer.name()}</h3>"
-            f"<p style='margin:0; color:{t.text_secondary}'>要素 ID: {self.feature.id()}</p>"
+            f"<p style='margin:0; color:{t.text_secondary}'>{subtitle}</p>"
         ))
         title.addStretch()
         layout.addLayout(title)
@@ -67,6 +72,9 @@ class FeatureInfoDialog(QDialog):
         self.setLayout(main_layout := layout)
 
     def _load_info(self) -> None:
+        if self.result.is_raster:
+            self._load_raster_info()
+            return
         t = ThemeManager.instance().current()
         info = "<div style='line-height:1.6; width:100%; box-sizing:border-box;'>"
         info += f"<p><strong>属性字段（共 {len(self.layer.fields())} 个）：</strong></p>"
@@ -92,10 +100,53 @@ class FeatureInfoDialog(QDialog):
         self.info_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.info_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
+    def _load_raster_info(self) -> None:
+        """栅格识别：显示点击坐标与该像元各波段的取值（与 Dock 同款展示）。"""
+        t = ThemeManager.instance().current()
+        result = self.result
+        coord = ""
+        if result.feature is not None and not result.feature.geometry().isEmpty():
+            try:
+                p = result.feature.geometry().centroid().asPoint()  # QGIS4: asPointXY 已移除
+                coord = f"X: {p.x():.6f}　Y: {p.y():.6f}"
+            except Exception:  # noqa: BLE001
+                coord = ""
+        rows = list(result.raster_values.items())
+        if coord:
+            rows.insert(0, ("点击坐标", coord))
+        info = "<div style='line-height:1.6; width:100%; box-sizing:border-box;'>"
+        info += "<p><strong>波段值（栅格像元）：</strong></p>"
+        info += """
+        <table style='width:100%; border-collapse:collapse; table-layout:auto;'>
+            <colgroup><col style='width: 35%;' /><col style='width: 65%;' /></colgroup>
+        """
+        if not rows:
+            rows = [("（无数据）", "")]
+        for i, (name, value) in enumerate(rows):
+            bg = t.panel_bg if i % 2 == 0 else t.input_bg
+            val = str(value) if value not in (None, "") else f"<span style='color:{t.text_secondary}'>无数据</span>"
+            info += (
+                f"<tr style='background-color:{bg}'>"
+                f"<td style='padding:8px; border-bottom:1px solid {t.panel_border};'>{name}</td>"
+                f"<td style='padding:8px; border-bottom:1px solid {t.panel_border};'>{val}</td></tr>"
+            )
+        info += "</table></div>"
+        self.info_text.setHtml(info)
+        self.info_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.info_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.info_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+
     def _copy(self) -> None:
+        result = self.result
+        if result.is_raster:
+            plain = f"图层: {result.layer.name()}\n"
+            for name, value in result.raster_values.items():
+                plain += f"  {name}: {value}\n"
+            QApplication.clipboard().setText(plain)
+            return
         plain = f"图层: {self.layer.name()}\n要素ID: {self.feature.id()}\n"
         if self.feature.geometry().type() == QgsWkbTypes.PointGeometry:
-            p = self.feature.geometry().asPointXY()
+            p = self.feature.geometry().asPoint()  # QGIS4: asPointXY 已移除
             plain += f"  X: {p.x():.6f}\n  Y: {p.y():.6f}\n"
         plain += "\n属性信息:\n"
         for f, v in zip(self.layer.fields(), self.feature.attributes()):

@@ -140,8 +140,11 @@ class FlowScene(QGraphicsScene):
             return
         item = self._node_items.pop(node_id, None)
         if item is not None:
+            # 先隐藏再移除：直接 removeItem 时场景 BSP 索引可能残留该节点所在区域，
+            # 导致删除后画布上仍绘制出这个节点；hide() 会立即停止绘制并清理索引。
+            # 延迟释放（墓碑）逻辑不变，见 __init__ 里 _deleted_items 的注释。
+            item.hide()
             self.removeItem(item)
-            # 延迟释放：见 __init__ 里 _deleted_items 的注释（下次 rebuild() 再销毁）
             self._deleted_items.append(item)
         # 正在拖线的端口 / 临时线挂在被删节点上 → 一并取消，避免悬空引用
         if self._drag_port is not None and self._drag_port.node_id == node_id:

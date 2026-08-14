@@ -15,20 +15,16 @@
 
 from __future__ import annotations
 
-import ctypes
 import os
 import sys
-from ctypes import wintypes
 from typing import Optional
 
-from PyQt6.QtCore import QEvent, QPoint, QRect, Qt
-from PyQt6.QtGui import QAction, QCloseEvent, QColor, QIcon
+from PyQt6.QtCore import QEvent, QPoint, Qt
+from PyQt6.QtGui import QAction, QCloseEvent, QColor
 from PyQt6.QtWidgets import (
-    QApplication,
     QListWidget,
     QMainWindow,
     QMenu,
-    QMenuBar,
     QMessageBox,
     QSizePolicy,
     QTreeWidget,
@@ -65,6 +61,7 @@ from app.core.domain.editing import LayerEditService
 from app.core.domain.query import QueryType, SpaceQueryService
 from app.infra.fs.paths import Paths
 from app.ui.common.canvas_zoom import CanvasZoomTool
+from app.ui.common.frameless import FramelessMixin
 from app.ui.common.icons import Icons
 from app.ui.common.theme import ThemeManager, toolbar_qss, window_qss
 from app.ui.docks.attribute_dock import AttributeDock
@@ -80,64 +77,17 @@ from app.ui.main_window.tool_bar import ToolBar
 from app.ui.main_window.draw_toolbar import DigitizingToolbar
 from app.ui.main_window.qgis_digitizing_toolbar import QgisDigitizingToolbar
 
-# ---------------------------------------------------------------------------
-# Windows 无边框窗口辅助（方案 A）：
-# WM_NCHITTEST 让系统接管"标题栏拖动 + 边缘缩放"；WM_GETMINMAXINFO 修正最大化
-# 几何；WM_NCLBUTTONDOWN(HTCAPTION) 重发 SC_MOVE 触发系统移动循环以获得 Aero
-# Snap 贴边吸附；WM_NCLBUTTONDBLCLK(HTCAPTION) 双击标题栏最大化/还原。
-# 仅 Windows 平台会收到 windows_generic_MSG，其他平台这些常量/结构不会被用到。
-# ---------------------------------------------------------------------------
-
-WM_NCHITTEST = 0x0084
-WM_GETMINMAXINFO = 0x0024
-WM_NCLBUTTONDOWN = 0x00A1
-WM_NCLBUTTONDBLCLK = 0x00A3
-WM_SYSCOMMAND = 0x0112
-SC_MOVE = 0xF010
-HTCLIENT = 1
-HTCAPTION = 2
-HTLEFT = 10
-HTRIGHT = 11
-HTTOP = 12
-HTTOPLEFT = 13
-HTTOPRIGHT = 14
-HTBOTTOM = 15
-HTBOTTOMLEFT = 16
-HTBOTTOMRIGHT = 17
-MONITOR_DEFAULTTONEAREST = 2
-
-
-class _MINMAXINFO(ctypes.Structure):
-    _fields_ = [
-        ("ptReserved", wintypes.POINT),
-        ("ptMaxSize", wintypes.POINT),
-        ("ptMaxPosition", wintypes.POINT),
-        ("ptMinTrackSize", wintypes.POINT),
-        ("ptMaxTrackSize", wintypes.POINT),
-    ]
-
-
-class _MONITORINFO(ctypes.Structure):
-    _fields_ = [
-        ("cbSize", wintypes.DWORD),
-        ("rcMonitor", wintypes.RECT),
-        ("rcWork", wintypes.RECT),
-        ("dwFlags", wintypes.DWORD),
-    ]
-
-
 # 让组件行为兼容旧 `component.SpaceQuery` 等可选的 legacy 模块
 # （这些模块在阶段 4 后期会从 legacy 重新启用，或被新 service 替换）
 
 
-class MainWindow(QMainWindow):
+class MainWindow(FramelessMixin, QMainWindow):
     """主窗口。"""
 
     def __init__(self, project_root: Optional[str] = None) -> None:
         super().__init__()
-        # 方案 A：无边框窗口，标题栏由 TitleBar 自绘；nativeEvent 里用
-        # WM_NCHITTEST / WM_GETMINMAXINFO 让系统接管拖动、缩放与最大化。
-        self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
+        # 无边框窗口：标题栏 / 拖动 / 缩放 / 最大化统一由 FramelessMixin 装配。
+        self.title_bar = self.enable_frameless(with_menu_bar=True)
         self._paths = Paths.default()
         if project_root:
             self._paths = Paths(
@@ -204,6 +154,9 @@ class MainWindow(QMainWindow):
         # 拦截浏览器拖出的图层 URI，走与双击一致的添加路径（原生 drop 会把图层
         # 直接挂到工程根节点，不进"数据图层"分组、也不设 path_c）
         canvas.installEventFilter(self)
+        # Linux/X11 边缘缩放：canvas 覆盖窗口主要边缘，注册为缩放监控目标
+        # （canvas 已 installEventFilter(self)，monitor 只记录 + 开鼠标追踪）
+        self.monitor_resize_edges(canvas)
         # 画布底色跟随主题（默认浅色为白色）
         canvas.setCanvasColor(QColor(ThemeManager.instance().current().canvas_bg))
         canvas.enableAntiAliasing(True)
@@ -309,40 +262,14 @@ class MainWindow(QMainWindow):
     # ===================================================== 自定义标题栏（方案 A）
 
     def _build_chrome(self) -> None:
-        """顶部 chrome：自绘标题栏 + 菜单栏，整体作为 QMainWindow 菜单区。
+        """顶部 chrome 主题装配。
 
-        菜单栏用 ``QMenuBar`` 手动创建 —— 不能先 ``self.menuBar()`` 再
-        ``setMenuWidget`` 换掉菜单区：实测 Qt 5.15 下该顺序会让随后任何
-        ``menuBar()`` 调用段错误（菜单栏已脱离 QMainWindow 布局仍被其持有）。
-        所以全程不调 ``menuBar()``，chrome 只做一次 ``setMenuWidget``。
+        无边框标题栏 + 菜单栏的装配已由 :meth:`FramelessMixin.enable_frameless`
+        完成（__init__ 开头调用）；这里只负责窗口级主题：用户信息 + 主题连接 + QSS。
         """
-        from app.ui.main_window.title_bar import TitleBar
-
-        self.title_bar = TitleBar(self)
-        self.title_bar.minimize_requested.connect(self.showMinimized)
-        self.title_bar.maximize_requested.connect(self._toggle_maximize)
-        self.title_bar.close_requested.connect(self.close)
-        self.windowTitleChanged.connect(self.title_bar.set_title)
         self._apply_user_info_to_titlebar()
-
-        self._menubar = QMenuBar(self)
-        chrome = QWidget(self)
-        v = QVBoxLayout(chrome)
-        v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
-        v.addWidget(self.title_bar)
-        v.addWidget(self._menubar)
-        self.setMenuWidget(chrome)
-
-        # 主题：跟随 ThemeManager，切换时重绘窗体 chrome + 工具条配色
         ThemeManager.instance().theme_changed.connect(self._on_theme_changed)
         self._apply_theme_qss()
-
-    def _toggle_maximize(self) -> None:
-        if self.isMaximized():
-            self.showNormal()
-        else:
-            self.showMaximized()
 
     def _apply_theme_qss(self) -> None:
         """按当前主题重绘窗体 chrome（菜单栏/状态栏/Dock）、主工具条和画布底色。"""
@@ -373,107 +300,6 @@ class MainWindow(QMainWindow):
             self.title_bar.set_user(cred.username, expires_at=cred.expires_at)
         else:
             self.title_bar.set_user("未登录")
-
-    # ------------------------------------------------ Windows 无边框 native 事件
-
-    def nativeEvent(self, eventType, message):
-        """拦截 WM_NCHITTEST / WM_GETMINMAXINFO / WM_NCLBUTTONDOWN 等消息，
-        让无边框窗口行为接近原生（拖动 + 缩放 + 贴边吸附 + 双击最大化）。"""
-        try:
-            if bytes(eventType) == b"windows_generic_MSG":
-                msg = wintypes.MSG.from_address(int(message))
-                if msg.message == WM_NCHITTEST:
-                    return (True, self._wm_nchittest(msg))
-                if msg.message == WM_GETMINMAXINFO:
-                    self._wm_getminmaxinfo(msg)
-                    return (True, 0)
-                if msg.message == WM_NCLBUTTONDOWN and msg.wParam == HTCAPTION:
-                    # 无边框窗口下 Qt 把标题栏区当客户区处理，系统原生拖动（含
-                    # Aero Snap 贴边吸附）不会启动。ReleaseCapture + 重发
-                    # WM_SYSCOMMAND(SC_MOVE|HTCAPTION) 让系统进入原生移动循环，
-                    # 从而获得拖到屏幕边缘吸附 / 顶边最大化的能力。
-                    ctypes.windll.user32.ReleaseCapture()
-                    ctypes.windll.user32.SendMessageW(
-                        int(self.winId()), WM_SYSCOMMAND, SC_MOVE | HTCAPTION, 0
-                    )
-                    return (True, 0)
-                if msg.message == WM_NCLBUTTONDBLCLK and msg.wParam == HTCAPTION:
-                    self._toggle_maximize()
-                    return (True, 0)
-        except Exception:  # noqa: BLE001 —— 兜底走 Qt 默认，不拖垮事件循环
-            pass
-        # PyQt6 下 super().nativeEvent 对未处理的消息返回 (False, None)；把这个
-        # None 直接透传回 Qt 时，sip 无法把 None 转成 qintptr 结果参数，抛出的
-        # TypeError 会穿进 C++ 事件分发，导致原生访问冲突（进程无 traceback 退出）。
-        # 必须把结果强转成 int。
-        ok, res = super().nativeEvent(eventType, message)
-        return (ok, res if isinstance(res, int) else 0)
-
-    def _wm_nchittest(self, msg) -> int:
-        """命中测试：窗口边缘 → resize 码；标题栏空白 → HTCAPTION；其余 HTCLIENT。"""
-        lp = int(msg.lParam)
-        x = lp & 0xFFFF
-        y = (lp >> 16) & 0xFFFF
-        if x & 0x8000:
-            x -= 0x10000
-        if y & 0x8000:
-            y -= 0x10000
-
-        if self.isMaximized():
-            return HTCLIENT  # 最大化时禁止拖动 / 缩放
-
-        g = self.frameGeometry()
-        left, top, right, bottom = g.left(), g.top(), g.right(), g.bottom()
-        m = 6
-        if y <= top + m:
-            if x <= left + m:
-                return HTTOPLEFT
-            if x >= right - m:
-                return HTTOPRIGHT
-            return HTTOP
-        if y >= bottom - m:
-            if x <= left + m:
-                return HTBOTTOMLEFT
-            if x >= right - m:
-                return HTBOTTOMRIGHT
-            return HTBOTTOM
-        if x <= left + m:
-            return HTLEFT
-        if x >= right - m:
-            return HTRIGHT
-
-        # 标题栏空白区域 → 系统拖动；按钮/用户信息区域交给 Qt 正常处理
-        tb = getattr(self, "title_bar", None)
-        if tb is not None:
-            tb_tl = tb.mapTo(self, QPoint(0, 0))
-            if QRect(tb_tl, tb.size()).contains(QPoint(x - left, y - top)):
-                w = QApplication.widgetAt(QPoint(x, y))
-                if w is not None and (w is tb or tb.isAncestorOf(w)):
-                    if not tb.is_interactive_child(w):
-                        return HTCAPTION
-        return HTCLIENT
-
-    def _wm_getminmaxinfo(self, msg) -> None:
-        """修正最大化几何：无边框窗口最大化时填满工作区，不盖住任务栏。"""
-        mmi = _MINMAXINFO.from_address(int(msg.lParam))
-        monitor = ctypes.windll.user32.MonitorFromWindow(
-            int(self.winId()), MONITOR_DEFAULTTONEAREST
-        )
-        info = _MONITORINFO()
-        info.cbSize = ctypes.sizeof(_MONITORINFO)
-        ctypes.windll.user32.GetMonitorInfoW(monitor, ctypes.byref(info))
-        w = info.rcWork.right - info.rcWork.left
-        h = info.rcWork.bottom - info.rcWork.top
-        mmi.ptMaxSize.x, mmi.ptMaxSize.y = w, h
-        mmi.ptMaxPosition.x, mmi.ptMaxPosition.y = info.rcWork.left, info.rcWork.top
-        mmi.ptMaxTrackSize.x, mmi.ptMaxTrackSize.y = w, h
-
-    def changeEvent(self, event) -> None:
-        """最大化/还原状态变化 → 同步标题栏按钮图标。"""
-        if event.type() == QEvent.Type.WindowStateChange:
-            if hasattr(self, "title_bar"):
-                self.title_bar.set_maximized(self.isMaximized())
-        super().changeEvent(event)
 
     # ===================================================== 工具回调
 

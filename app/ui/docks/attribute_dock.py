@@ -4,10 +4,9 @@
 
 from __future__ import annotations
 
-import math
 from typing import List, Optional
 
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt, QThread, QTimer, QVariant, pyqtSignal
+from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt, QTimer, QVariant, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QDockWidget,
@@ -32,52 +31,21 @@ from app.ui.common.icons import Icons
 
 #: 超过该数量才启用分批动态加载；≤ 阈值时一次性全量加载（避免小图层分页闪烁）
 DYNAMIC_LOAD_THRESHOLD = 1000
-
-
-class FeatureLoaderThread(QThread):
-    """后台加载要素 ID（用于大量数据时的进度条）。"""
-
-    progress_updated = pyqtSignal(int)
-    features_loaded = pyqtSignal(list)
-    finished = pyqtSignal()
-
-    def __init__(self, layer, filter_str: str, show_ids: Optional[list] = None, parent=None) -> None:
-        super().__init__(parent)
-        self.layer = layer
-        self.filter_str = filter_str
-        self.show_ids = show_ids
-
-    def run(self) -> None:
-        try:
-            total = self.layer.featureCount()
-            if total == 0:
-                self.features_loaded.emit([])
-                return
-            step = max(1, total // 100)
-            ids: List[int] = []
-            request = QgsFeatureRequest().setFilterExpression(self.filter_str)
-            for i, feature in enumerate(self.layer.getFeatures(request), 1):
-                if self.show_ids is not None and len(self.show_ids) > 0:
-                    if feature.id() in self.show_ids:
-                        ids.append(feature.id())
-                else:
-                    ids.append(feature.id())
-                if i % step == 0 or i == total:
-                    self.progress_updated.emit(int(i / total * 100))
-            ids.sort()
-            self.features_loaded.emit(ids)
-        except Exception:  # noqa: BLE001
-            pass
-        finally:
-            self.finished.emit()
+#: 大图层每批固定加载条数（首屏即 2000，滚动/「加载更多」后续批同量）。
+#: 用固定值而不是总量的百分比：500w 级图层按 20% 算首屏就是 100w 条，一样卡死。
+STREAM_BATCH = 2000
 
 
 class PagedAttributeTableModel(QAbstractTableModel):
-    """动态加载属性表 model。
+    """动态加载属性表 model（流式迭代器实现）。
 
-    总量 **大于** ``DYNAMIC_LOAD_THRESHOLD``（默认 1000）时才分批动态加载：
-    初始加载总量的 20%，``load_more()`` 逐批追加 20% 直至加载完。
-    总量 ≤ 阈值时一次性全量加载（``batch_size`` = 总量）。
+    总量 **大于** ``DYNAMIC_LOAD_THRESHOLD``（默认 1000）时分批动态加载：
+    持有 ``QgsFeatureIterator``，每次从迭代器断点续取 ``STREAM_BATCH`` 条
+    （首屏即 2000）。总量 ≤ 阈值时一次性全量加载（``batch_size`` = 总量）。
+
+    关键点：**不再为分页预收集全部要素 ID**。旧实现把全部匹配 ID 一次性塞进
+    ``all_ids``（5w 级图层同步遍历几百毫秒，500w 级直接卡死 UI），这里改为
+    持有一个流式迭代器，``load_more()`` 按需续取，内存只保留已加载的行。
     """
 
     def __init__(self, layer: QgsVectorLayer, page_size: int = 50, filter_str: str = "1=1", show_ids: Optional[list] = None) -> None:
@@ -85,86 +53,129 @@ class PagedAttributeTableModel(QAbstractTableModel):
         self.layer = layer
         # page_size 仅保留兼容旧调用（main_window 传 50），动态加载不再按页
         self.page_size = max(1, int(page_size))
-        self.filter_str = filter_str
+        self.filter_str = filter_str or "1=1"
         self.show_ids = list(show_ids) if show_ids else []
         self.field_names = [f.name() for f in layer.fields()]
         self.features: List[QgsFeature] = []
-        #: 每批加载条数：总量 > 阈值时取 20%（向上取整，至少 1 条）；否则一次加载全部
+        #: 每批加载条数：≤ 阈值时 = 总量（一次全量）；否则固定 STREAM_BATCH
         self.batch_size = 0
         #: 已加载条数（= features 长度；为 0 表示尚未加载）
         self.loaded_count = 0
         #: 加载中标志，防止滚动信号重入导致重复加载
         self.is_loading = False
-        #: 匹配 ``where`` 的全部要素 ID（按 ``$id`` 升序），分批基于它切片。
-        #: 不用 offset/limit：本 QGIS 构建的 QgsFeatureRequest 没有 ``setOffset``。
-        self.all_ids: List[int] = []
+        #: 流式迭代器；None 表示未打开/已耗尽
+        self._iterator = None
+        #: 恰好拉满一整批时探测出来的下一条（属于下一批），避免边界漏判耗尽
+        self._lookahead: Optional[QgsFeature] = None
+        self._exhausted = False
+        #: 总数是否已确知。无过滤（1=1）时 featureCount() 直接给出；
+        #: 带过滤/show_ids 时无法免遍历获知，流式结束（迭代器耗尽）后补齐
+        self.total_known = False
         self.total_features = 0
-        self.where = (
-            f"{self.filter_str} and $id in ({','.join(str(i) for i in self.show_ids)})"
-            if self.show_ids else self.filter_str
-        )
+        self.where = self._build_where()
         self._refresh_totals()
         self.load_more()
 
+    def _build_where(self) -> str:
+        """组合筛选表达式：show_ids 子集时叠加 ``$id in (...)`。"""
+        if self.show_ids:
+            return f"{self.filter_str} and $id in ({','.join(str(i) for i in self.show_ids)})"
+        return self.filter_str
+
     @property
     def has_more(self) -> bool:
-        """是否还有未加载的要素。"""
-        return self.loaded_count < self.total_features
+        """是否还有未加载的要素（迭代器未耗尽即视为有）。"""
+        return not self._exhausted
+
+    def _fast_total(self):
+        """总数快路径：无过滤表达式时 ``featureCount()``（O(1)）；否则返回未知。
+
+        :return: ``(total, known)``。带过滤/show_ids 时总量必须流式结束后才知道。
+        """
+        if self.where.strip() in ("", "1=1"):
+            try:
+                return int(self.layer.featureCount()), True
+            except Exception:  # noqa: BLE001
+                pass
+        return 0, False
 
     def _refresh_totals(self) -> None:
-        """重新统计匹配 ID 列表、总量与批次大小（数据/筛选变化后调用）。
-
-        总量 > ``DYNAMIC_LOAD_THRESHOLD`` 时分批（每批 20%）；否则一次全量加载。
-        """
-        try:
-            request = QgsFeatureRequest().setFilterExpression(self.where)
-            self.all_ids = sorted(f.id() for f in self.layer.getFeatures(request))
-            self.total_features = len(self.all_ids)
-        except Exception:  # noqa: BLE001
-            self.all_ids = []
-            self.total_features = 0
-        self.batch_size = (
-            max(1, math.ceil(self.total_features * 0.2))
-            if self.total_features > DYNAMIC_LOAD_THRESHOLD
-            else self.total_features
-        )
+        """重置流式状态（数据/筛选变化后调用）：快路径总数 + 重新打开迭代器。"""
+        self.total_features, self.total_known = self._fast_total()
         self.loaded_count = 0
         self.features = []
+        # 小图层一次全量，避免分页闪烁；大图层/未知总数用固定批次
+        self.batch_size = (
+            self.total_features
+            if self.total_known and self.total_features <= DYNAMIC_LOAD_THRESHOLD
+            else STREAM_BATCH
+        )
+        self._start_iteration()
+
+    def _start_iteration(self) -> None:
+        """打开匹配 ``where`` 的流式迭代器。已知空图层直接标记耗尽。"""
+        self._exhausted = False
+        self._iterator = None
+        self._lookahead = None
+        if self.total_known and self.total_features == 0:
+            self._exhausted = True
+            return
+        try:
+            request = QgsFeatureRequest().setFilterExpression(self.where)
+            self._iterator = self.layer.getFeatures(request)
+        except Exception:  # noqa: BLE001
+            self._exhausted = True
 
     def load_more(self) -> None:
-        """追加加载下一批（每批总量的 20%）；已加载完或加载中则不做。"""
-        if not self.has_more or self.is_loading:
+        """从流式迭代器续取下一批（每批 ``batch_size`` 条）；已加载完或加载中则不做。
+
+        总量恰好是 ``batch_size`` 整数倍时，迭代器恰好在批次边界耗尽——若只在拉满
+        ``batch_size`` 后就停止，永远探测不到末尾。因此批次拉满后再 ``next()`` 一次
+        判断是否还有下一条（探测出的要素暂存到 ``_lookahead``，属于下一批）。
+        """
+        if self._exhausted or self.is_loading:
             return
         self.is_loading = True
         try:
-            start = self.loaded_count
-            end = min(start + self.batch_size, self.total_features)
-            page_ids = self.all_ids[start:end]
-            new_features = []
-            if page_ids:
-                request = QgsFeatureRequest().setFilterFids(page_ids)
-                new_features = sorted(
-                    self.layer.getFeatures(request),
-                    key=lambda f: f.id(),
-                )
-            if new_features:
-                self.beginInsertRows(QModelIndex(), self.loaded_count, self.loaded_count + len(new_features) - 1)
-                self.features.extend(new_features)
+            chunk = []
+            if self._lookahead is not None:
+                chunk.append(self._lookahead)
+                self._lookahead = None
+            while self._iterator is not None and len(chunk) < self.batch_size:
+                try:
+                    chunk.append(next(self._iterator))
+                except StopIteration:
+                    self._iterator = None
+                    self._exhausted = True
+                    break
+            # 恰好拉满一整批：探测下一条判断是否已到末尾（StopIteration → 耗尽）
+            if self._iterator is not None and not self._exhausted:
+                try:
+                    self._lookahead = next(self._iterator)
+                except StopIteration:
+                    self._iterator = None
+                    self._exhausted = True
+            if chunk:
+                self.beginInsertRows(QModelIndex(), self.loaded_count, self.loaded_count + len(chunk) - 1)
+                self.features.extend(chunk)
                 self.endInsertRows()
-            # 按尝试加载的 ID 数推进游标：即使 provider 返回少了也不会卡在死循环
-            self.loaded_count += len(page_ids)
+                self.loaded_count += len(chunk)
+            # 流式结束：补齐真实总数（过滤/show_ids 路径此前 unknown，或 provider
+            # 返回数与 featureCount() 不一致时校正）
+            if self._exhausted and (not self.total_known or self.loaded_count != self.total_features):
+                self.total_features = self.loaded_count
+                self.total_known = True
         except Exception:  # noqa: BLE001
-            pass
+            # 迭代中异常（如图层被外部改动使游标失效）：放弃本批并标记耗尽，避免死循环
+            self._iterator = None
+            self._exhausted = True
         finally:
             self.is_loading = False
 
     def set_filter(self, filter_str: str) -> None:
-        """更换筛选表达式并刷新（重新统计，回到首屏 20%）。"""
+        """更换筛选表达式并刷新（重开迭代器，回到首屏首批）。"""
         self.filter_str = filter_str or "1=1"
-        self.where = (
-            f"{self.filter_str} and $id in ({','.join(str(i) for i in self.show_ids)})"
-            if self.show_ids else self.filter_str
-        )
+        self.where = self._build_where()
         self.beginResetModel()
         self._refresh_totals()
         self.endResetModel()
@@ -335,7 +346,13 @@ class PagedAttributeTableWidget(QWidget):
             return
         loaded = len(self.model.features)
         total = self.model.total_features
-        if total == 0:
+        if not self.model.total_known:
+            # 带过滤/show_ids：总数流式结束前未知，先显示已加载条数
+            if self.model.has_more:
+                self.load_status_label.setText(f"已加载 {loaded} 条，滚动到底或点击加载更多")
+            else:
+                self.load_status_label.setText(f"共 {loaded} 条（已全部加载）")
+        elif total == 0:
             self.load_status_label.setText("0 条")
         elif self.model.has_more:
             self.load_status_label.setText(f"已加载 {loaded} / {total} 条，滚动到底或点击加载更多")

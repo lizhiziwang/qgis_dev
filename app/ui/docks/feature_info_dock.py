@@ -72,17 +72,61 @@ class FeatureInfoDock(QDockWidget):
         """刷新为指定要素的信息并显示 Dock（用户移动过的停靠位置保持不变）。"""
         self.layer = result.layer
         self.feature = result.feature
+        self.result = result
         if self._highlight is not None:
             self._highlight.hide()
         self._highlight = highlight
         t = ThemeManager.instance().current()
-        self.title_label.setText(
-            f"<h3 style='margin:0'>{self.layer.name()}</h3>"
-            f"<p style='margin:0; color:{t.text_secondary}'>要素 ID: {self.feature.id()}</p>"
-        )
-        self._load_info()
+        if result.is_raster:
+            self.title_label.setText(
+                f"<h3 style='margin:0'>{self.layer.name()}</h3>"
+                f"<p style='margin:0; color:{t.text_secondary}'>栅格像元识别</p>"
+            )
+            self._load_raster_info()
+        else:
+            self.title_label.setText(
+                f"<h3 style='margin:0'>{self.layer.name()}</h3>"
+                f"<p style='margin:0; color:{t.text_secondary}'>要素 ID: {self.feature.id()}</p>"
+            )
+            self._load_info()
         self.show()
         self.raise_()
+
+    def _load_raster_info(self) -> None:
+        """栅格识别：显示点击坐标与该像元各波段的取值。"""
+        t = ThemeManager.instance().current()
+        result = self.result
+        coord = ""
+        if result.feature is not None and not result.feature.geometry().isEmpty():
+            try:
+                p = result.feature.geometry().centroid().asPoint()  # QGIS4: asPointXY 已移除
+                coord = f"X: {p.x():.6f}　Y: {p.y():.6f}"
+            except Exception:  # noqa: BLE001
+                coord = ""
+        rows = list(result.raster_values.items())
+        if coord:
+            rows.insert(0, ("点击坐标", coord))
+        info = "<div style='line-height:1.6; width:100%; box-sizing:border-box;'>"
+        info += "<p><strong>波段值（栅格像元）：</strong></p>"
+        info += """
+        <table style='width:100%; border-collapse:collapse; table-layout:auto;'>
+            <colgroup><col style='width: 35%;' /><col style='width: 65%;' /></colgroup>
+        """
+        if not rows:
+            rows = [("（无数据）", "")]
+        for i, (name, value) in enumerate(rows):
+            bg = t.panel_bg if i % 2 == 0 else t.input_bg
+            val = str(value) if value not in (None, "") else f"<span style='color:{t.text_secondary}'>无数据</span>"
+            info += (
+                f"<tr style='background-color:{bg}'>"
+                f"<td style='padding:8px; border-bottom:1px solid {t.panel_border};'>{name}</td>"
+                f"<td style='padding:8px; border-bottom:1px solid {t.panel_border};'>{val}</td></tr>"
+            )
+        info += "</table></div>"
+        self.info_text.setHtml(info)
+        self.info_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+        self.info_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.info_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
     def _load_info(self) -> None:
         t = ThemeManager.instance().current()
@@ -113,9 +157,16 @@ class FeatureInfoDock(QDockWidget):
     def _copy(self) -> None:
         if not hasattr(self, "layer"):
             return
+        result = getattr(self, "result", None)
+        if result is not None and result.is_raster:
+            plain = f"图层: {result.layer.name()}\n"
+            for name, value in result.raster_values.items():
+                plain += f"  {name}: {value}\n"
+            QApplication.clipboard().setText(plain)
+            return
         plain = f"图层: {self.layer.name()}\n要素ID: {self.feature.id()}\n"
         if self.feature.geometry().type() == QgsWkbTypes.PointGeometry:
-            p = self.feature.geometry().asPointXY()
+            p = self.feature.geometry().asPoint()  # QGIS4: asPointXY 已移除
             plain += f"  X: {p.x():.6f}\n  Y: {p.y():.6f}\n"
         plain += "\n属性信息:\n"
         for f, v in zip(self.layer.fields(), self.feature.attributes()):

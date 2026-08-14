@@ -1,12 +1,17 @@
 """动态加载属性表 model 回归测试。
 
-修复前（bug）：分页依赖 ``QgsFeatureRequest.setOffset``，而本 QGIS 构建没有该
+修复前（bug1）：分页依赖 ``QgsFeatureRequest.setOffset``，而本 QGIS 构建没有该
 方法（``AttributeError`` 被吞掉），页面永远返回 0 行 —— 属性表数据"不全"。
-现在：总量 > ``DYNAMIC_LOAD_THRESHOLD``（默认 1000）才分批动态加载（初始 20%，
-``load_more()`` 逐批追加 20% 直至加载完）；≤ 阈值一次性全量加载。
+修复后：总量 > ``DYNAMIC_LOAD_THRESHOLD``（默认 1000）才分批动态加载（每批
+``STREAM_BATCH``，默认 2000）；≤ 阈值一次性全量加载。
 
-分页机制测试用 monkeypatch 把阈值调小，让 120 条的小图层也走分页路径；另设
-两个阈值行为测试覆盖"小图层全量 / 大图层分页"。
+修复前（bug2，本文件主测对象）：为分页在 UI 线程**预收集全部要素 ID** 并取
+总量的 20% 作批次，500w 级图层直接卡死。现改为持有一个 ``QgsFeatureIterator``
+流式续取，不预收集任何 ID；总数在无过滤时用 ``featureCount()`` 快路径，
+带过滤/show_ids 时流式结束（迭代器耗尽）后补齐（期间 ``total_known`` 为 False）。
+
+分页机制测试用 monkeypatch 把 ``STREAM_BATCH`` 调小，让 120 条的小图层也走
+分页路径；阈值行为测试覆盖"小图层全量 / 大图层分批"。
 
 需要真实 QGIS（PyQt5 + QgsApplication）；CI 默认 ``-m 'not gui'`` 跳过。
 """
@@ -35,9 +40,10 @@ def layer(qgis_app):
     return lyr
 
 
-def _patch_threshold(monkeypatch, value: int) -> None:
-    """把动态加载阈值调小，让 120 条图层也走分页路径。"""
-    monkeypatch.setattr("app.ui.docks.attribute_dock.DYNAMIC_LOAD_THRESHOLD", value)
+def _patch_stream(monkeypatch, threshold: int, batch: int) -> None:
+    """调小动态加载阈值与批次，让 120 条的小图层也走分批路径。"""
+    monkeypatch.setattr("app.ui.docks.attribute_dock.DYNAMIC_LOAD_THRESHOLD", threshold)
+    monkeypatch.setattr("app.ui.docks.attribute_dock.STREAM_BATCH", batch)
 
 
 def _ids(model):
@@ -45,13 +51,14 @@ def _ids(model):
 
 
 @pytest.mark.gui
-def test_batch_size_is_20_percent(layer, monkeypatch):
-    """总量 > 阈值：每批加载总量的 20%（向上取整，至少 1 条），初始即加载首批。"""
-    _patch_threshold(monkeypatch, 10)
+def test_large_layer_first_batch_uses_stream_batch(layer, monkeypatch):
+    """总量 > 阈值：每批固定 ``STREAM_BATCH`` 条，初始即加载首批。"""
+    _patch_stream(monkeypatch, 10, 24)
     model = PagedAttributeTableModel(layer, page_size=50)
 
     assert model.total_features == 120
-    assert model.batch_size == 24  # ceil(120 * 0.2)
+    assert model.total_known is True
+    assert model.batch_size == 24
     assert model.rowCount() == 24
     assert model.loaded_count == 24
     assert model.has_more is True
@@ -60,7 +67,7 @@ def test_batch_size_is_20_percent(layer, monkeypatch):
 @pytest.mark.gui
 def test_incremental_load_until_all_rows(layer, monkeypatch):
     """120 条 / 批 24：load_more 逐批追加 24/48/72/96/120，ID 连续覆盖。"""
-    _patch_threshold(monkeypatch, 10)
+    _patch_stream(monkeypatch, 10, 24)
     model = PagedAttributeTableModel(layer, page_size=50)
 
     expected_counts = [24, 48, 72, 96, 120]
@@ -90,9 +97,9 @@ def test_small_layer_batch_at_least_one(qgis_app, monkeypatch):
         feats.append(f)
     lyr.dataProvider().addFeatures(feats)
 
-    _patch_threshold(monkeypatch, 1)  # 3 > 1 → 仍走分页
+    _patch_stream(monkeypatch, 1, 1)  # 3 > 1 → 仍走分页
     model = PagedAttributeTableModel(lyr, page_size=50)
-    assert model.batch_size == 1  # ceil(3 * 0.2) = 1
+    assert model.batch_size == 1
     assert model.rowCount() == 1
     model.load_more()
     assert model.rowCount() == 2
@@ -122,8 +129,8 @@ def test_small_layer_loads_all_at_once(qgis_app):
 
 
 @pytest.mark.gui
-def test_layer_over_threshold_pages(qgis_app):
-    """> 阈值（1000）：按 20% 分批动态加载。"""
+def test_layer_over_threshold_pages(qgis_app, monkeypatch):
+    """> 阈值（1000）：按 ``STREAM_BATCH`` 分批动态加载。"""
     from qgis.core import QgsFeature, QgsGeometry, QgsVectorLayer
 
     lyr = QgsVectorLayer("Point?crs=EPSG:4326", "大", "memory")
@@ -134,9 +141,10 @@ def test_layer_over_threshold_pages(qgis_app):
         feats.append(f)
     lyr.dataProvider().addFeatures(feats)
 
+    _patch_stream(monkeypatch, 1000, 201)
     model = PagedAttributeTableModel(lyr, page_size=50)
     assert model.total_features == 1001
-    assert model.batch_size == 201  # ceil(1001 * 0.2)
+    assert model.batch_size == 201
     assert model.rowCount() == 201
     assert model.has_more is True
 
@@ -149,37 +157,45 @@ def test_layer_over_threshold_pages(qgis_app):
 
 @pytest.mark.gui
 def test_filter_resets_to_first_batch(layer, monkeypatch):
-    """筛选后重新统计，回到首屏首批。"""
-    _patch_threshold(monkeypatch, 10)
+    """筛选后重开迭代器，回到首屏首批；过滤路径总数流式结束补齐。"""
+    _patch_stream(monkeypatch, 10, 6)
     model = PagedAttributeTableModel(layer, page_size=50)
     model.load_more()
     model.load_more()
-    assert model.rowCount() == 72
+    assert model.rowCount() == 18
 
     model.set_filter("$id <= 30")
-    assert model.total_features == 30
-    assert model.batch_size == 6  # ceil(30 * 0.2)
+    # 过滤后无法免遍历获知总数：未知，流式逐批追加
+    assert model.total_known is False
+    assert model.batch_size == 6
     assert model.rowCount() == 6
     assert _ids(model) == list(range(1, 7))
 
-    model.load_more()
-    assert _ids(model) == list(range(1, 13))
+    while model.has_more:
+        model.load_more()
+    assert _ids(model) == list(range(1, 31))
+    assert model.total_features == 30
+    assert model.total_known is True
+    assert model.has_more is False
 
 
 @pytest.mark.gui
 def test_show_ids_subset(layer, monkeypatch):
     """show_ids 限制为指定要素子集，动态加载只在这些 ID 内进行。"""
-    _patch_threshold(monkeypatch, 4)
+    _patch_stream(monkeypatch, 4, 2)
     wanted = [5, 6, 7, 8, 9, 10, 11, 12]
     model = PagedAttributeTableModel(layer, page_size=10, show_ids=wanted)
 
-    assert model.total_features == len(wanted)
-    assert model.batch_size == 2  # ceil(8 * 0.2)
+    # show_ids 走过滤路径：总数未知，流式结束后补齐
+    assert model.total_known is False
+    assert model.batch_size == 2
     assert _ids(model) == wanted[:2]
 
     while model.has_more:
         model.load_more()
     assert _ids(model) == wanted
+    assert model.total_features == len(wanted)
+    assert model.total_known is True
 
 
 @pytest.mark.gui
@@ -203,7 +219,7 @@ def test_widget_loads_more_on_button(layer, monkeypatch):
     """widget 初始显示首批，点"加载更多"逐批追加，状态文本随进度更新。"""
     from app.ui.docks.attribute_dock import PagedAttributeTableWidget
 
-    _patch_threshold(monkeypatch, 10)
+    _patch_stream(monkeypatch, 10, 24)
     w = PagedAttributeTableWidget(layer, page_size=50)
     assert w.model.rowCount() == 24
     assert "24 / 120" in w.load_status_label.text()
@@ -240,6 +256,28 @@ def test_widget_small_layer_no_load_button(qgis_app):
     assert w.model.rowCount() == 5
     assert not w.load_more_btn.isEnabled()
     assert "已全部加载" in w.load_status_label.text()
+
+
+@pytest.mark.gui
+def test_widget_filter_status_unknown_total(layer, monkeypatch):
+    """过滤后总数未知：状态栏先显示"已加载 X 条"，流式结束补齐总数。"""
+    from app.ui.docks.attribute_dock import PagedAttributeTableWidget
+
+    _patch_stream(monkeypatch, 10, 6)
+    w = PagedAttributeTableWidget(layer, page_size=50)
+    w.model.set_filter("$id <= 30")
+
+    assert w.model.total_known is False
+    assert w.model.rowCount() == 6
+    assert "已加载 6 条" in w.load_status_label.text()
+    assert w.load_more_btn.isEnabled()
+
+    while w.model.has_more:
+        w.load_more_btn.click()
+    assert w.model.total_features == 30
+    assert w.model.total_known is True
+    assert not w.load_more_btn.isEnabled()
+    assert "共 30 条" in w.load_status_label.text()
 
 
 @pytest.mark.gui

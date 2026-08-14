@@ -18,16 +18,24 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class IdentifyResult:
-    """点击识别的结果（单条要素）。"""
+    """点击识别的结果：单条矢量要素，或栅格图层某像元的波段值。"""
 
-    layer: "QgsVectorLayer"
-    feature: "QgsFeature"
+    layer: "QgsMapLayer"
+    feature: Optional["QgsFeature"] = None
     geometry_wkt: str = ""
     attributes: dict = field(default_factory=dict)
+    #: 栅格图层时有效：波段名 → 该像元值（如 {"Band 1": "137"}）
+    raster_values: dict = field(default_factory=dict)
+
+    @property
+    def is_raster(self) -> bool:
+        from qgis.core import QgsRasterLayer
+
+        return isinstance(self.layer, QgsRasterLayer)
 
     @property
     def fid(self) -> int:
-        return int(self.feature.id())
+        return int(self.feature.id()) if self.feature is not None else -1
 
 
 class FeatureIdentifyService:
@@ -45,6 +53,7 @@ class FeatureIdentifyService:
         ``mode`` 默认 ``TopDownAll``（所有图层里所有可识别要素）。
         """
         from qgis.gui import QgsMapToolIdentify
+        from qgis.core import QgsRasterLayer
 
         if mode is None:
             mode = QgsMapToolIdentify.IdentifyMode.TopDownAll
@@ -56,7 +65,25 @@ class FeatureIdentifyService:
         for r in results:
             layer = r.mLayer
             feature = r.mFeature
-            if feature is None or not hasattr(layer, "fields"):
+            if isinstance(layer, QgsRasterLayer):
+                # 栅格像元：波段值在 QgsMapToolIdentify 结果的 mAttributes
+                # （如 {"Band 1": "137"}），要素几何是点击处的像元格子
+                geom_wkt = ""
+                try:
+                    if feature is not None:
+                        geom_wkt = feature.geometry().asWkt()
+                except Exception:  # noqa: BLE001
+                    pass
+                out.append(
+                    IdentifyResult(
+                        layer=layer,
+                        feature=feature,
+                        geometry_wkt=geom_wkt,
+                        raster_values={k: str(v) for k, v in r.mAttributes.items()},
+                    )
+                )
+                continue
+            if feature is None:
                 continue
             attrs = {f.name(): feature.attribute(f.name()) for f in layer.fields()}
             geom_wkt = ""
