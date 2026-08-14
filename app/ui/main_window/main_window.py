@@ -80,6 +80,18 @@ from app.ui.main_window.qgis_digitizing_toolbar import QgisDigitizingToolbar
 # 让组件行为兼容旧 `component.SpaceQuery` 等可选的 legacy 模块
 # （这些模块在阶段 4 后期会从 legacy 重新启用，或被新 service 替换）
 
+#: 浏览器目录右键"新建"子菜单支持的矢量格式：(显示名, 扩展名, OGR 驱动)
+_NEW_VECTOR_FORMATS = (
+    ("Shapefile 文件（点/线/面）", "shp", "ESRI Shapefile"),
+    ("GeoPackage 数据库", "gpkg", "GPKG"),
+    ("File Geodatabase 数据库", "gdb", "OpenFileGDB"),
+    ("GeoJSON 文件", "geojson", "GeoJSON"),
+    ("GML 文件", "gml", "GML"),
+    ("KML 文件", "kml", "KML"),
+    ("SQLite 数据库", "sqlite", "SQLite"),
+    ("CSV 表格", "csv", "CSV"),
+)
+
 
 class MainWindow(FramelessMixin, QMainWindow):
     """主窗口。"""
@@ -606,9 +618,115 @@ class MainWindow(FramelessMixin, QMainWindow):
             from app.infra.logging import get_logger
 
             get_logger(__name__).exception("构建数据浏览器右键菜单失败，仅保留「刷新」")
+        # 目录项：提供"新建"子菜单（各类矢量格式）
+        try:
+            from qgis.core import QgsDataCollectionItem, QgsDirectoryItem
+
+            # QGIS 4 浏览器里普通文件夹是 QgsDirectoryItem，而 .gdb 等 OGR 数据集
+            # 目录是 QgsDataCollectionItem（无 dirPath），统一取磁盘路径判定
+            dir_path = getattr(item, "dirPath", None) or item.path()
+            is_dir = isinstance(item, QgsDirectoryItem) or (
+                isinstance(item, QgsDataCollectionItem) and os.path.isdir(dir_path)
+            )
+            if is_dir:
+                is_gdb = str(dir_path).lower().endswith(".gdb")
+                # .gdb 是数据集目录：只在库里新增图层，不在目录里塞零散文件
+                if is_gdb:
+                    act = menu.addAction("新增图层")
+                    act.triggered.connect(
+                        lambda checked=False: self._on_browser_add_gdb_layer(item)
+                    )
+                else:
+                    new_menu = menu.addMenu("新建")
+                    for name, ext, driver in _NEW_VECTOR_FORMATS:
+                        act = new_menu.addAction(name)
+                        act.triggered.connect(
+                            lambda checked=False, nm=name, ex=ext, dr=driver: (
+                                self._on_browser_create_vector(item, nm, ex, dr)
+                            )
+                        )
+                menu.addSeparator()
+        except Exception:  # noqa: BLE001
+            pass
         refresh = menu.addAction("刷新")
         refresh.triggered.connect(lambda: item.refresh())
         menu.exec(self.browser_dock.view.viewport().mapToGlobal(pos))
+
+    def _on_browser_create_vector(self, item, name: str, ext: str, driver: str) -> None:
+        """在浏览器目录项下新建空矢量数据文件（"新建"子菜单入口）。"""
+        from PyQt6.QtWidgets import QFileDialog
+        from qgis.core import (
+            QgsCoordinateTransformContext,
+            QgsCoordinateReferenceSystem,
+            QgsVectorFileWriter,
+            QgsVectorLayer,
+        )
+
+        dir_path = getattr(item, "dirPath", None) or item.path()
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            f"新建 {name}",
+            os.path.join(dir_path, f"新建矢量.{ext}"),
+            f"{name} (*.{ext})",
+        )
+        if not path:
+            return
+        crs = self.project.crs()
+        if not crs.isValid():
+            crs = QgsCoordinateReferenceSystem("EPSG:4490")
+        layer = QgsVectorLayer(f"Point?crs={crs.authid()}", "new_layer", "memory")
+        opts = QgsVectorFileWriter.SaveVectorOptions()
+        opts.driverName = driver
+        error, errmsg, _newfile, _saved = QgsVectorFileWriter.writeAsVectorFormatV3(
+            layer, path, QgsCoordinateTransformContext(), opts
+        )
+        if error != QgsVectorFileWriter.WriterError.NoError:
+            self.messageBar.pushCritical("新建图层", f"创建失败：{errmsg}")
+            return
+        item.refresh()
+        self.messageBar.pushSuccess(
+            "新建图层", f"已创建 {os.path.basename(path)}"
+        )
+
+    def _on_browser_add_gdb_layer(self, item) -> None:
+        """向已存在的 File Geodatabase（.gdb）中新增一个空图层。"""
+        from PyQt6.QtWidgets import QInputDialog
+        from qgis.core import (
+            QgsCoordinateTransformContext,
+            QgsCoordinateReferenceSystem,
+            QgsVectorFileWriter,
+            QgsVectorLayer,
+        )
+
+        gdb = getattr(item, "dirPath", None) or item.path()
+        layer_name, ok = QInputDialog.getText(self, "新增图层", "图层名称：")
+        if not ok or not layer_name.strip():
+            return
+        layer_name = layer_name.strip()
+        geom_names = ("点", "线", "面")
+        geom_defs = {"点": "Point", "线": "LineString", "面": "Polygon"}
+        geom_text, ok = QInputDialog.getItem(
+            self, "新增图层", "几何类型：", geom_names, 0, False
+        )
+        if not ok:
+            return
+        crs = self.project.crs()
+        if not crs.isValid():
+            crs = QgsCoordinateReferenceSystem("EPSG:4490")
+        layer = QgsVectorLayer(
+            f"{geom_defs[geom_text]}?crs={crs.authid()}", layer_name, "memory"
+        )
+        opts = QgsVectorFileWriter.SaveVectorOptions()
+        opts.driverName = "OpenFileGDB"
+        opts.layerName = layer_name
+        error, errmsg, _newfile, _saved = QgsVectorFileWriter.writeAsVectorFormatV3(
+            layer, gdb, QgsCoordinateTransformContext(), opts
+        )
+        if error != QgsVectorFileWriter.WriterError.NoError:
+            self.messageBar.pushCritical("新增图层", f"创建失败：{errmsg}")
+            return
+        item.refresh()
+        self.messageBar.pushSuccess("新增图层", f"已创建 {layer_name}")
 
     # ---- 画布拖拽添加图层（数据浏览器拖出 → 画布 drop）----
 

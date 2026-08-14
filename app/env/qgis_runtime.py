@@ -13,7 +13,7 @@
 - :class:`QgisRuntime` 数据类承载路径集合，配置来源是 :class:`AppConfig`
   （``config/app.yaml``）。
 - :meth:`apply_env` 幂等，重复调用只生效一次。
-- :class:`for_dev` 用本地 ``D:\\zsh\\app\\qgis4.2`` 安装；:class:`for_prod`
+- :class:`for_dev` 用本地 ``D:\\pf\\qgis4.2`` 安装；:class:`for_prod`
   走 ``QGIS_PREFIX`` 环境变量（PyInstaller 打包后由 launcher 注入）。
 
 QGIS 4.2 目录布局（OSGeo4W）：

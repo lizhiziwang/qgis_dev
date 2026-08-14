@@ -190,7 +190,7 @@ class TitleBar(QWidget):
         self._user_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._user_menu = QMenu(self._user_btn)
         self._user_btn.setMenu(self._user_menu)
-        self.set_user("未登录")
+        self._sync_login_state()
         layout.addWidget(self._user_btn)
 
         # 主题切换按钮（调色盘图标，弹出主题菜单）
@@ -268,6 +268,16 @@ class TitleBar(QWidget):
             days = max(0, remaining // 86400)
             exp_act = self._user_menu.addAction(f"凭证剩余：{days} 天")
             exp_act.setEnabled(False)
+
+    def _sync_login_state(self) -> None:
+        """与主窗口一致：构造时从本地凭证加载登录状态（未登录显示"未登录"）。"""
+        from app.core.auth import load_credential
+
+        cred = load_credential()
+        if cred is not None:
+            self.set_user(cred.username, expires_at=cred.expires_at)
+        else:
+            self.set_user("未登录")
 
     # ---------------------------------------------------------- 主题切换
 
