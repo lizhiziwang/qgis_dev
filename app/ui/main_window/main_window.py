@@ -2,12 +2,11 @@
 
 旧 :class:`main.QGISMapWindow` 700+ 行，拆成 6 个子组件 + 业务回调：
 
-- :class:`MenuBar`     - 菜单
-- :class:`ToolBar`     - 工具条
-- :class:`StatusBar`   - 状态栏
-- :class:`LayerDock`   - 图层树
-- :class:`BrowserDock` - 数据浏览器
-- :class:`LogDock`     - 日志面板
+- :class:`ToolBar`      - 工具条（顶部 chrome 用 Tab 切换器切换各功能工具条）
+- :class:`StatusBar`    - 状态栏
+- :class:`LayerDock`    - 图层树
+- :class:`BrowserDock`  - 数据浏览器
+- :class:`LogDock`      - 日志面板
 
 业务逻辑（打开文件、空间查询、质检等）通过 callback 注入；窗口本身只负责
 "装配 + 事件分发"。
@@ -20,18 +19,18 @@ import sys
 from typing import Optional
 
 from PyQt6.QtCore import QEvent, QPoint, Qt
-from PyQt6.QtGui import QAction, QCloseEvent, QColor
+from PyQt6.QtGui import QAction, QCloseEvent, QColor, QKeySequence
 from PyQt6.QtWidgets import (
     QListWidget,
     QMainWindow,
     QMenu,
     QMessageBox,
     QSizePolicy,
+    QToolBar,
     QTreeWidget,
     QVBoxLayout,
     QWidget,
 )
-
 from qgis.core import (
     Qgis,
     QgsApplication,
@@ -42,10 +41,10 @@ from qgis.core import (
     QgsProject,
     QgsRasterLayer,
     QgsRectangle,
+    QgsStyle,
     QgsVectorLayer,
     QgsWkbTypes,
 )
-from qgis.core import QgsStyle
 from qgis.gui import (
     QgsLayerTreeMapCanvasBridge,
     QgsMapCanvas,
@@ -53,29 +52,25 @@ from qgis.gui import (
     QgsMapToolZoom,
     QgsMessageBar,
     QgsRendererPropertiesDialog,
-    QgsVectorLayerProperties,
     QgsVectorLayerSaveAsDialog,
 )
 
 from app.core.domain.editing import LayerEditService
-from app.core.domain.query import QueryType, SpaceQueryService
+from app.core.domain.query import SpaceQueryService
 from app.infra.fs.paths import Paths
-from app.ui.common.canvas_zoom import CanvasZoomTool
 from app.ui.common.frameless import FramelessMixin
 from app.ui.common.icons import Icons
 from app.ui.common.theme import ThemeManager, toolbar_qss, window_qss
 from app.ui.docks.attribute_dock import AttributeDock
 from app.ui.docks.feature_info_dock import FeatureInfoDock
 from app.ui.docks.log_dock import LogDock
+from app.ui.docks.project_dock import ProjectDock
 from app.ui.docks.tools_dock import ToolsDock
 from app.ui.main_window.browser_dock import BrowserDock
-from app.ui.docks.project_dock import ProjectDock
+from app.ui.main_window.draw_toolbar import DigitizingToolbar
 from app.ui.main_window.layer_dock import LayerDock
-from app.ui.main_window.menu_bar import MenuBar
 from app.ui.main_window.status_bar import StatusBar
 from app.ui.main_window.tool_bar import ToolBar
-from app.ui.main_window.draw_toolbar import DigitizingToolbar
-from app.ui.main_window.qgis_digitizing_toolbar import QgisDigitizingToolbar
 
 # 让组件行为兼容旧 `component.SpaceQuery` 等可选的 legacy 模块
 # （这些模块在阶段 4 后期会从 legacy 重新启用，或被新 service 替换）
@@ -96,10 +91,12 @@ _NEW_VECTOR_FORMATS = (
 class MainWindow(FramelessMixin, QMainWindow):
     """主窗口。"""
 
-    def __init__(self, project_root: Optional[str] = None) -> None:
+    def __init__(self, project_root: Optional[str] = None, app_name: str = "qgis_dev") -> None:
         super().__init__()
         # 无边框窗口：标题栏 / 拖动 / 缩放 / 最大化统一由 FramelessMixin 装配。
-        self.title_bar = self.enable_frameless(with_menu_bar=True)
+        # 顶部 chrome 用 QTabBar 取代菜单栏（点 tab 切换下方工具条）。
+        self.title_bar = self.enable_frameless(with_tab_bar=True)
+        self._app_name = app_name
         self._paths = Paths.default()
         if project_root:
             self._paths = Paths(
@@ -113,7 +110,7 @@ class MainWindow(FramelessMixin, QMainWindow):
         if str(self._paths.project_root) not in sys.path:
             sys.path.insert(0, str(self._paths.project_root))
 
-        self.setWindowTitle("qgis_dev")
+        self.setWindowTitle(self._app_name)
         self.setGeometry(100, 100, 1200, 800)
         self.setWindowIcon(Icons.app())
 
@@ -150,9 +147,9 @@ class MainWindow(FramelessMixin, QMainWindow):
         # ---- 自定义标题栏（标题栏 + 菜单栏整体作为顶部 menuWidget）----
         self._build_chrome()
 
-        # ---- 工具 / 菜单 / 状态栏 ----
+        # ---- 工具 / Tab 切换器 / 状态栏 ----
         self._build_tool_bar()
-        self._build_menu_bar()
+        self._build_tabs()
         self._build_status_bar()
 
         # ---- 默认激活平移 ----
@@ -256,16 +253,89 @@ class MainWindow(FramelessMixin, QMainWindow):
         """兼容旧接口（占位）：由 :class:`DigitizingToolbar` 直接接管。"""
         return
 
-    def _build_menu_bar(self) -> None:
-        callbacks = {
-            "open_file": self._on_open_file,
-            "open_project": self._on_open_project,
-            "new_project": self._on_new_project,
-            "show_log": self._show_log_dock,
-            "open_flow_editor": self._open_flow_editor,
-        }
-        self.menu_bar_builder = MenuBar(self, self._menubar)
-        self.menu_bar_builder.build(callbacks)
+    def _build_tabs(self) -> None:
+        """把菜单栏改造为顶部 Tab 切换器：点不同 tab，下方工具条跟着切换。
+
+        原菜单栏的「文件 / 查看 / 流程」功能拆成独立工具条挂到对应 tab；
+        默认的「地图工具」工具条放进新增的「通用」tab。菜单项的快捷键保留在
+        对应 QAction 上（Ctrl+N / Ctrl+O / Ctrl+L 等仍生效）。
+        """
+        tab_bar = self._tab_bar
+        tab_bar.setDrawBase(False)
+        tab_bar.setExpanding(False)
+
+        self._file_toolbar = self._build_file_toolbar()
+        self._view_toolbar = self._build_view_toolbar()
+
+        #: tab 索引 → 该 tab 下应显示的工具条列表（切换时互斥显示）
+        self._tab_toolbars: dict[int, list] = {}
+        for label, toolbars in (
+            ("文件", [self._file_toolbar]),
+            ("查看", [self._view_toolbar]),
+            ("编辑", [self.digitizing_toolbar.digitizing_toolbar]),
+            ("通用", [self.tool_bar]),
+        ):
+            self._tab_toolbars[tab_bar.addTab(label)] = toolbars
+
+        tab_bar.currentChanged.connect(self._on_tab_changed)
+        self._on_tab_changed(tab_bar.currentIndex())
+
+    def _build_file_toolbar(self) -> QToolBar:
+        """「文件」tab 工具条：新建工程 / 打开工程 / 打开文件 / 退出（原文件菜单）。"""
+        tb = QToolBar("文件", self)
+        tb.setObjectName("FileTabToolbar")
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+
+        act_new = QAction("新建工程", self)
+        act_new.setShortcut("Ctrl+N")
+        act_new.triggered.connect(self._on_new_project)
+        tb.addAction(act_new)
+
+        act_open_proj = QAction("打开工程", self)
+        act_open_proj.setShortcut("Ctrl+Shift+O")
+        act_open_proj.triggered.connect(self._on_open_project)
+        tb.addAction(act_open_proj)
+
+        act_open = QAction("打开文件", self)
+        act_open.setShortcut(QKeySequence.StandardKey.Open)
+        act_open.triggered.connect(self._on_open_file)
+        tb.addAction(act_open)
+
+        tb.addSeparator()
+
+        act_exit = QAction("退出", self)
+        act_exit.setShortcut("Ctrl+Q")
+        act_exit.triggered.connect(self.close)
+        tb.addAction(act_exit)
+
+        self.addToolBar(tb)
+        return tb
+
+    def _build_view_toolbar(self) -> QToolBar:
+        """「查看」tab 工具条：日志、流程节点编辑器（原查看 / 流程菜单）。"""
+        tb = QToolBar("查看", self)
+        tb.setObjectName("ViewTabToolbar")
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+
+        act_log = QAction("日志", self)
+        act_log.setShortcut("Ctrl+L")
+        act_log.triggered.connect(self._show_log_dock)
+        tb.addAction(act_log)
+
+        act_flow = QAction("流程节点编辑器", self)
+        act_flow.setShortcut("Ctrl+Shift+F")
+        act_flow.triggered.connect(self._open_flow_editor)
+        tb.addAction(act_flow)
+
+        self.addToolBar(tb)
+        return tb
+
+    def _on_tab_changed(self, index: int) -> None:
+        """tab 切换：只显示当前 tab 对应的工具条，其余隐藏（模拟"换工具栏"）。"""
+        for idx, toolbars in self._tab_toolbars.items():
+            visible = idx == index
+            for tb in toolbars:
+                tb.setVisible(visible)
 
     def _build_status_bar(self) -> None:
         self.status_bar_builder = StatusBar(self)
@@ -366,8 +436,9 @@ class MainWindow(FramelessMixin, QMainWindow):
     def _on_test(self) -> None:
         """测试按钮：启动独立 FastAPI 服务（在新进程中）。"""
         try:
-            from app.server.cli import main as server_main
             import threading
+
+            from app.server.cli import main as server_main
             threading.Thread(target=server_main, daemon=True).start()
             self.messageBar.pushMessage("已启动服务（8000）", level=Qgis.MessageLevel.Info, duration=3)
         except Exception as e:  # noqa: BLE001
@@ -433,7 +504,7 @@ class MainWindow(FramelessMixin, QMainWindow):
 
         # 工程名 + 坐标系（project.clear() 会把 CRS 重置回默认）
         self.project.setTitle(name)
-        self.setWindowTitle(f"qgis_dev - {name}")
+        self.setWindowTitle(f"{self._app_name} - {name}")
         self.project.setCrs(QgsCoordinateReferenceSystem("EPSG:4490"))
 
         # 底图进参考分组
@@ -474,7 +545,7 @@ class MainWindow(FramelessMixin, QMainWindow):
         if self.project.read(path):
             self.canvas.setDestinationCrs(self.project.crs())
             self.canvas.refreshAllLayers()
-            self.setWindowTitle(f"qgis_dev - {self.project.title()}")
+            self.setWindowTitle(f"{self._app_name} - {self.project.title()}")
             # 打开的工程里若带"数据图层/参考图层"分组则重绑 Dock，否则复位
             # （只匹配真正的分组，避免把同名图层节点误当分组）
             self._data_group = None
@@ -569,7 +640,7 @@ class MainWindow(FramelessMixin, QMainWindow):
     # ===================================================== 浏览器事件
 
     def _on_browser_double_clicked(self, index) -> None:
-        from qgis.core import QgsLayerItem, QgsVectorLayer, QgsRasterLayer
+        from qgis.core import QgsLayerItem, QgsRasterLayer, QgsVectorLayer
 
         if not index.isValid():
             return
@@ -656,8 +727,8 @@ class MainWindow(FramelessMixin, QMainWindow):
         """在浏览器目录项下新建空矢量数据文件（"新建"子菜单入口）。"""
         from PyQt6.QtWidgets import QFileDialog
         from qgis.core import (
-            QgsCoordinateTransformContext,
             QgsCoordinateReferenceSystem,
+            QgsCoordinateTransformContext,
             QgsVectorFileWriter,
             QgsVectorLayer,
         )
@@ -692,8 +763,8 @@ class MainWindow(FramelessMixin, QMainWindow):
         """向已存在的 File Geodatabase（.gdb）中新增一个空图层。"""
         from PyQt6.QtWidgets import QInputDialog
         from qgis.core import (
-            QgsCoordinateTransformContext,
             QgsCoordinateReferenceSystem,
+            QgsCoordinateTransformContext,
             QgsVectorFileWriter,
             QgsVectorLayer,
         )

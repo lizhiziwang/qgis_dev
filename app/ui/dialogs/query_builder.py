@@ -4,16 +4,16 @@
 
 from __future__ import annotations
 
+import threading
 from typing import Optional
 
-from PyQt6.QtCore import QVariant, Qt, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, QVariant, pyqtSignal
 from PyQt6.QtWidgets import (
     QDialog,
     QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QLabel,
-    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
@@ -22,7 +22,6 @@ from PyQt6.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
 )
-
 from qgis.core import (
     QgsExpression,
     QgsFeatureRequest,
@@ -30,8 +29,46 @@ from qgis.core import (
 )
 from qgis.gui import QgsFieldComboBox
 
-
 _OPERATORS = ["=", "<", ">", "LIKE", "%", "IN", "NOT IN", "<=", ">=", "!=", "ILIKE", "AND", "OR", "NOT"]
+
+
+class _SqlCountWorker(QObject):
+    """后台统计匹配要素数（"测试条件"全表扫描不阻塞主线程）。"""
+
+    counted = pyqtSignal(int)
+    failed = pyqtSignal(str)
+
+    def __init__(self, layer: QgsVectorLayer, cond: str) -> None:
+        super().__init__()
+        self.layer = layer
+        self.cond = cond
+        self._cancel = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, name="sql-count", daemon=True)
+        self._thread.start()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    def _run(self) -> None:
+        try:
+            req = QgsFeatureRequest().setFilterExpression(self.cond)
+            n = 0
+            it = self.layer.getFeatures(req)
+            for _ in it:
+                if self._cancel.is_set():
+                    break
+                n += 1
+            try:
+                it.close()
+            except Exception:  # noqa: BLE001
+                pass
+            if not self._cancel.is_set():
+                self.counted.emit(n)
+        except Exception as e:  # noqa: BLE001
+            self.failed.emit(str(e))
 
 
 class QueryBuilderDialog(QDialog):
@@ -45,6 +82,7 @@ class QueryBuilderDialog(QDialog):
         self.setMinimumSize(720, 500)
         self.layer = layer
         self.valid_fields = [f.name() for f in layer.fields()]
+        self._test_worker: Optional[_SqlCountWorker] = None
         self._init_ui()
         self._init_signals()
 
@@ -178,12 +216,34 @@ class QueryBuilderDialog(QDialog):
             if col not in self.valid_fields:
                 QMessageBox.critical(self, "测试失败", f"无效字段：{col}")
                 return
-        try:
-            req = QgsFeatureRequest().setFilterExpression(cond)
-            count = sum(1 for _ in self.layer.getFeatures(req))
-            QMessageBox.information(self, "测试成功", f"SQL 合法！\n匹配要素：{count}")
-        except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "测试失败", f"查询执行异常！\n{e}")
+        # 匹配计数走后台线程：大图层全表扫描不再卡死 UI（按钮禁用直到完成）
+        self.test_btn.setEnabled(False)
+        self.test_btn.setText("查询中…")
+        worker = _SqlCountWorker(self.layer, cond)
+        worker.counted.connect(self._on_sql_counted)
+        worker.failed.connect(self._on_sql_count_failed)
+        self._test_worker = worker
+        worker.start()
+
+    def _reset_test_btn(self) -> None:
+        self._test_worker = None
+        self.test_btn.setEnabled(True)
+        self.test_btn.setText("测试条件")
+
+    def _on_sql_counted(self, n: int) -> None:
+        self._reset_test_btn()
+        QMessageBox.information(self, "测试成功", f"SQL 合法！\n匹配要素：{n}")
+
+    def _on_sql_count_failed(self, msg: str) -> None:
+        self._reset_test_btn()
+        QMessageBox.critical(self, "测试失败", f"查询执行异常！\n{msg}")
+
+    def closeEvent(self, event) -> None:
+        """关闭对话框时取消仍在后台扫描的计数线程（避免滞留读锁）。"""
+        if self._test_worker is not None:
+            self._test_worker.cancel()
+            self._test_worker = None
+        super().closeEvent(event)
 
     def _clear_sql(self) -> None:
         self.sql_edit.clear()

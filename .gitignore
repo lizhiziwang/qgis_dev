@@ -9,4 +9,9 @@ dist/
 # 本地探针/临时测试目录
 .tmp/
 
+# Python 字节码 / 缓存
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyc
 

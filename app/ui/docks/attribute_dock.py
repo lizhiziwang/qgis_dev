@@ -4,9 +4,11 @@
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import List, Optional
 
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex, Qt, QTimer, QVariant, pyqtSignal
+from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, QTimer, QVariant, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
     QDockWidget,
@@ -20,6 +22,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 from qgis.core import (
+    QgsExpression,
+    QgsExpressionContext,
+    QgsExpressionContextUtils,
     QgsFeature,
     QgsFeatureRequest,
     QgsField,
@@ -34,19 +39,197 @@ DYNAMIC_LOAD_THRESHOLD = 1000
 #: 大图层每批固定加载条数（首屏即 2000，滚动/「加载更多」后续批同量）。
 #: 用固定值而不是总量的百分比：500w 级图层按 20% 算首屏就是 100w 条，一样卡死。
 STREAM_BATCH = 2000
+#: 后台工作线程每攒够这么多条就冲刷一批信号（保证过滤时 UI 渐进显示）
+CHUNK_FLUSH = 500
+#: 冲刷时间下限（秒）：匹配密集但单条 ``next()`` 慢时仍能按时刷新
+FLUSH_INTERVAL = 0.1
+#: 结果要素 **fid 列表** 的上限。模型只存 fid 不存要素（2M 条 ≈ 70MB，
+#: 见 :meth:`PagedAttributeTableModel.feature_at` 的可视窗口缓存）。超过即
+#: 截断加载，仅作防失控兜底（正常 2M+ 图层不会触发）。
+MAX_MODEL_FIDS = 5_000_000
+#: 按需取要素的 LRU 缓存上限。QTableView 只渲染可视行（几百行），缓存
+#: 2000 个要素 ≈ 几 MB，随滚动窗口淘汰，内存不随结果总量增长。
+MAX_FEATURE_CACHE = 2000
+
+
+class FeatureStreamWorker(QObject):
+    """后台流式迭代要素的工作器（一个线程 = 一段流式会话）。
+
+    在主线程创建，用普通 :class:`threading.Thread` 执行——不用
+    :class:`QgsTask`，见 ``app/core/domain/imagery_tiles/task.py`` 的踩坑：
+    QgsTask 后台线程跑会原生崩溃（退出码 127）。
+
+    - 迭代器在**工作线程内**打开/消费/关闭，不在线程间传递（最安全）。
+    - 结果只回传 **fid 列表**（``chunk_ready``），不存要素：模型按需再取
+      可视窗口里的要素（见 :meth:`PagedAttributeTableModel.feature_at`）。
+    - 到达当前 ``target`` 暂停，等下一次 :meth:`request_more` 唤醒；迭代器
+      耗尽发 :attr:`finished`；:meth:`cancel` 快速退出并 close 迭代器
+      （释放 QGIS 读锁）。
+    - ``epoch`` 供主线程丢弃过期信号（重置/换筛选后旧 worker 的在途信号）。
+    """
+
+    chunk_ready = pyqtSignal(object, object)  #: (worker, list[int] fid)
+    finished = pyqtSignal(object, int)  #: (worker, 真实总数)
+    #: 到达当前目标后暂停（等待下一次 request_more），供主线程退出"正在加载"态
+    paused = pyqtSignal(object)
+
+    def __init__(self, layer: QgsVectorLayer, where: str, show_ids: Optional[list], epoch: int) -> None:
+        super().__init__()
+        self.layer = layer
+        self.where = where or "1=1"
+        self.show_ids = list(show_ids) if show_ids else []
+        self.epoch = epoch
+        self._target = 0
+        self._sent = 0
+        self._cancel = threading.Event()
+        self._go = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+        #: 批次边界探测暂存的 1 条要素（多取 1 条用于判断是否已耗尽）
+        self._stashed: Optional[QgsFeature] = None
+        #: show_ids + 表达式组合时，表达式在 python 侧逐条求值（见 _prepare_filter）
+        self._expr: Optional[QgsExpression] = None
+        self._expr_ctx: Optional[QgsExpressionContext] = None
+
+    # -------------------------------------------------------- 主线程 API
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, name="attr-stream", daemon=True)
+        self._thread.start()
+
+    def request_more(self, target: int) -> None:
+        """把加载目标抬高到 ``target`` 并唤醒工作线程（无操作安全）。"""
+        self._target = max(self._target, target)
+        self._go.set()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+        self._go.set()
+
+    # -------------------------------------------------------- 工作线程
+
+    def _prepare_filter(self) -> QgsFeatureRequest:
+        """构造请求。
+
+        本构建（QGIS 4.2）里 ``setFilterFids`` 与 ``setFilterExpression``
+        **不能组合**：``setFilterExpression`` 会清空已设的 fids，fids 快路径
+        也会忽略已设的表达式（探针实测，两种顺序都只有最后一个生效）。
+        因此 show_ids + 表达式组合时，以 fids 为主过滤（范围受 show_ids 大小
+        约束，非全表扫描），表达式在 :meth:`_next_accepted` 里逐条求值。
+        """
+        request = QgsFeatureRequest()
+        has_expr = self.where.strip() not in ("", "1=1")
+        if self.show_ids and has_expr:
+            request.setFilterFids(self.show_ids)
+            self._expr = QgsExpression(self.where)
+            self._expr_ctx = QgsExpressionContext()
+            self._expr_ctx.appendScopes(
+                QgsExpressionContextUtils.globalProjectLayerScopes(self.layer)
+            )
+            self._expr.prepare(self._expr_ctx)
+        else:
+            if has_expr:
+                request.setFilterExpression(self.where)
+            if self.show_ids:
+                # show_ids 用 setFilterFids 快路径，不走 $id in (...) 巨表达式
+                request.setFilterFids(self.show_ids)
+            # 非组合路径：QGIS 内部完成过滤，我们只取 fid → 裁掉几何与属性，
+            # 迭代快得多（不构造 geometry/不物化属性值），每要素几字节。
+            request.setFlags(QgsFeatureRequest.Flag.NoGeometry)
+            request.setNoAttributes()
+        return request
+
+    def _next_accepted(self, iterator):
+        """拉取下一条通过表达式过滤的要素；耗尽抛 StopIteration。
+
+        无 python 过滤时直接返回迭代器的下一条（零开销快路径）。
+        """
+        while True:
+            feat = next(iterator)
+            if self._expr is None:
+                return feat
+            self._expr_ctx.setFeature(feat)
+            if bool(self._expr.evaluate(self._expr_ctx)):
+                return feat
+
+    def _run(self) -> None:
+        iterator = None
+        exhausted = False
+        pending: List[int] = []
+        try:
+            request = self._prepare_filter()
+            iterator = self.layer.getFeatures(request)
+            last_flush = time.monotonic()
+            while not self._cancel.is_set():
+                self._go.wait()
+                if self._cancel.is_set():
+                    break
+                self._go.clear()
+                # 上一轮暂停时暂存了 1 条"探测"要素，先入队（只取 fid）
+                if self._stashed is not None:
+                    pending.append(self._stashed.id())
+                    self._stashed = None
+                while self._sent + len(pending) < self._target and not self._cancel.is_set():
+                    try:
+                        pending.append(self._next_accepted(iterator).id())
+                    except StopIteration:
+                        exhausted = True
+                        break
+                    if len(pending) >= CHUNK_FLUSH or time.monotonic() - last_flush >= FLUSH_INTERVAL:
+                        self._flush(pending)
+                        pending = []
+                        last_flush = time.monotonic()
+                # 批次边界探测：多取 1 条判断是否已耗尽。停在整批倍数（如
+                # 120 条/批 24）的图层若不探测，暂停处永远不知道已加载完，
+                # has_more 会一直为 True。探测到的要素暂存到下一轮。
+                if not exhausted and not self._cancel.is_set():
+                    try:
+                        self._stashed = self._next_accepted(iterator)
+                    except StopIteration:
+                        exhausted = True
+                self._flush(pending)
+                pending = []
+                if exhausted or self._cancel.is_set():
+                    break
+                self.paused.emit(self)
+        except Exception:  # noqa: BLE001
+            # 迭代中异常（图层被外部改动使游标失效）：按耗尽收尾，避免死循环
+            exhausted = True
+        finally:
+            if iterator is not None:
+                try:
+                    iterator.close()
+                except Exception:  # noqa: BLE001
+                    pass
+        if exhausted and not self._cancel.is_set():
+            self.finished.emit(self, self._sent)
+
+    def _flush(self, pending: List[int]) -> None:
+        if not pending:
+            return
+        self._sent += len(pending)
+        self.chunk_ready.emit(self, list(pending))
 
 
 class PagedAttributeTableModel(QAbstractTableModel):
-    """动态加载属性表 model（流式迭代器实现）。
+    """动态加载属性表 model（后台线程流式实现）。
 
     总量 **大于** ``DYNAMIC_LOAD_THRESHOLD``（默认 1000）时分批动态加载：
-    持有 ``QgsFeatureIterator``，每次从迭代器断点续取 ``STREAM_BATCH`` 条
-    （首屏即 2000）。总量 ≤ 阈值时一次性全量加载（``batch_size`` = 总量）。
+    :class:`FeatureStreamWorker` 在工作线程从迭代器续取，每批冲刷
+    ``CHUNK_FLUSH`` 条经信号投递回主线程（首屏即 ``STREAM_BATCH``）。总量
+    ≤ 阈值时一次性同步全量加载（避免小图层线程抖动）。
 
-    关键点：**不再为分页预收集全部要素 ID**。旧实现把全部匹配 ID 一次性塞进
-    ``all_ids``（5w 级图层同步遍历几百毫秒，500w 级直接卡死 UI），这里改为
-    持有一个流式迭代器，``load_more()`` 按需续取，内存只保留已加载的行。
+    过滤/show_ids 查询的总数在流式结束前未知（``total_known=False``），迭代器
+    耗尽后由 ``finished`` 信号补齐。``show_ids`` 子集改用 ``setFilterFids``
+    快路径——实测 ``$id in (N 个 id)`` 表达式是 O(要素数 × N)：30 万图层 +
+    1000 个 fids 要 40 秒，直接卡死。
+
+    内存策略：模型**只存结果 fid 列表**（2M 条 ≈ 70MB），不驻留要素对象；
+    表格渲染按需经 :meth:`feature_at` 取可视行对应的要素，用 LRU 缓存
+    （``MAX_FEATURE_CACHE``，几 MB）按滚动窗口淘汰——内存不随结果总量增长，
+    200w+ 也能完整浏览全部结果，不会溢出。
     """
+
+    state_changed = pyqtSignal()
 
     def __init__(self, layer: QgsVectorLayer, page_size: int = 50, filter_str: str = "1=1", show_ids: Optional[list] = None) -> None:
         super().__init__()
@@ -56,42 +239,46 @@ class PagedAttributeTableModel(QAbstractTableModel):
         self.filter_str = filter_str or "1=1"
         self.show_ids = list(show_ids) if show_ids else []
         self.field_names = [f.name() for f in layer.fields()]
-        self.features: List[QgsFeature] = []
+        #: 结果 **fid 列表**（内存主驻留物；要素按需取，见 ``feature_at``）
+        self._fids: List[int] = []
+        #: 按需取要素的 LRU 缓存（可视窗口内的要素，滚动淘汰，见 ``_cache_feature``）
+        self._feature_cache: dict[int, QgsFeature] = {}
         #: 每批加载条数：≤ 阈值时 = 总量（一次全量）；否则固定 STREAM_BATCH
         self.batch_size = 0
-        #: 已加载条数（= features 长度；为 0 表示尚未加载）
+        #: 已加载条数（= _fids 长度；为 0 表示尚未加载）
         self.loaded_count = 0
-        #: 加载中标志，防止滚动信号重入导致重复加载
-        self.is_loading = False
-        #: 流式迭代器；None 表示未打开/已耗尽
-        self._iterator = None
-        #: 恰好拉满一整批时探测出来的下一条（属于下一批），避免边界漏判耗尽
-        self._lookahead: Optional[QgsFeature] = None
-        self._exhausted = False
         #: 总数是否已确知。无过滤（1=1）时 featureCount() 直接给出；
-        #: 带过滤/show_ids 时无法免遍历获知，流式结束（迭代器耗尽）后补齐
+        #: show_ids 仅自身时 len() 直接给出；带过滤时需流式结束后补齐
         self.total_known = False
         self.total_features = 0
+        #: 后台线程正在扫描中（供状态栏显示"正在加载"）
+        self.scanning = False
+        self._worker: Optional[FeatureStreamWorker] = None
+        #: 世代号：set_filter/取消时递增，用于丢弃过期 worker 的在途信号
+        self._epoch = 0
+        self._exhausted = False
+        #: 结果超过 ``MAX_MODEL_FIDS`` 已截断（停止加载更多，状态栏提示）
+        self.truncated = False
         self.where = self._build_where()
         self._refresh_totals()
-        self.load_more()
+        self._start_stream()
 
     def _build_where(self) -> str:
-        """组合筛选表达式：show_ids 子集时叠加 ``$id in (...)`。"""
-        if self.show_ids:
-            return f"{self.filter_str} and $id in ({','.join(str(i) for i in self.show_ids)})"
-        return self.filter_str
+        """筛选表达式（show_ids 走 setFilterFids，不拼进表达式）。"""
+        return self.filter_str or "1=1"
 
     @property
     def has_more(self) -> bool:
-        """是否还有未加载的要素（迭代器未耗尽即视为有）。"""
+        """是否还有未加载的要素（流式未结束即视为有）。"""
         return not self._exhausted
 
     def _fast_total(self):
-        """总数快路径：无过滤表达式时 ``featureCount()``（O(1)）；否则返回未知。
+        """总数快路径：show_ids 仅自身 → len；无过滤表达式 → featureCount()。
 
-        :return: ``(total, known)``。带过滤/show_ids 时总量必须流式结束后才知道。
+        :return: ``(total, known)``。带过滤/show_ids 组合时总量必须流式结束后才知道。
         """
+        if self.show_ids and self.filter_str.strip() in ("", "1=1"):
+            return len(self.show_ids), True
         if self.where.strip() in ("", "1=1"):
             try:
                 return int(self.layer.featureCount()), True
@@ -100,77 +287,96 @@ class PagedAttributeTableModel(QAbstractTableModel):
         return 0, False
 
     def _refresh_totals(self) -> None:
-        """重置流式状态（数据/筛选变化后调用）：快路径总数 + 重新打开迭代器。"""
+        """重置流式状态（数据/筛选变化后调用）：快路径总数 + 批次大小。"""
         self.total_features, self.total_known = self._fast_total()
         self.loaded_count = 0
-        self.features = []
-        # 小图层一次全量，避免分页闪烁；大图层/未知总数用固定批次
+        self._fids = []
+        self._feature_cache.clear()
+        self.truncated = False
+        # 小图层一次全量，避免线程抖动；大图层/未知总数用固定批次
         self.batch_size = (
             self.total_features
             if self.total_known and self.total_features <= DYNAMIC_LOAD_THRESHOLD
             else STREAM_BATCH
         )
-        self._start_iteration()
 
-    def _start_iteration(self) -> None:
-        """打开匹配 ``where`` 的流式迭代器。已知空图层直接标记耗尽。"""
-        self._exhausted = False
-        self._iterator = None
-        self._lookahead = None
+    def _start_stream(self) -> None:
+        """同步/流式加载决策：已知空图层标记耗尽；小图层同步全量；否则后台 worker。"""
+        self._epoch += 1
+        self.scanning = False
+        if self._worker is not None:
+            self._worker.cancel()
+            self._worker = None
         if self.total_known and self.total_features == 0:
             self._exhausted = True
+            self.state_changed.emit()
             return
-        try:
-            request = QgsFeatureRequest().setFilterExpression(self.where)
-            self._iterator = self.layer.getFeatures(request)
-        except Exception:  # noqa: BLE001
+        if self.total_known and self.total_features <= DYNAMIC_LOAD_THRESHOLD:
+            self._exhausted = False
+            self._sync_load_all()
             self._exhausted = True
+            self.state_changed.emit()
+            return
+        # 流式路径：后台线程分批加载
+        self._exhausted = False
+        worker = FeatureStreamWorker(self.layer, self.where, self.show_ids, epoch=self._epoch)
+        worker.chunk_ready.connect(self._on_chunk)
+        worker.finished.connect(self._on_finished)
+        worker.paused.connect(self._on_paused)
+        worker.start()
+        self._worker = worker
+        self.scanning = True
+        self.state_changed.emit()
+        worker.request_more(self.batch_size)
+
+    def _sync_load_all(self) -> None:
+        """小图层一次全量加载（同步，只取 fid）。失败（如游标失效）按空处理。"""
+        try:
+            request = QgsFeatureRequest()
+            if self.where.strip() not in ("", "1=1"):
+                # 顺序：表达式先、fids 后（setFilterExpression 会清空 fids）
+                request.setFilterExpression(self.where)
+            if self.show_ids:
+                request.setFilterFids(self.show_ids)
+            # 同步路径只可能是无过滤或纯 show_ids（带过滤组合总数未知会走流式），
+            # 不需要属性/几何，裁掉以加速
+            request.setFlags(QgsFeatureRequest.Flag.NoGeometry)
+            request.setNoAttributes()
+            self._insert_fids([f.id() for f in self.layer.getFeatures(request)])
+        except Exception:  # noqa: BLE001
+            pass
 
     def load_more(self) -> None:
-        """从流式迭代器续取下一批（每批 ``batch_size`` 条）；已加载完或加载中则不做。
-
-        总量恰好是 ``batch_size`` 整数倍时，迭代器恰好在批次边界耗尽——若只在拉满
-        ``batch_size`` 后就停止，永远探测不到末尾。因此批次拉满后再 ``next()`` 一次
-        判断是否还有下一条（探测出的要素暂存到 ``_lookahead``，属于下一批）。
-        """
-        if self._exhausted or self.is_loading:
+        """追加加载下一批：流式路径异步（抬高 worker 目标）；同步路径已全量。"""
+        if self._exhausted:
             return
-        self.is_loading = True
-        try:
-            chunk = []
-            if self._lookahead is not None:
-                chunk.append(self._lookahead)
-                self._lookahead = None
-            while self._iterator is not None and len(chunk) < self.batch_size:
-                try:
-                    chunk.append(next(self._iterator))
-                except StopIteration:
-                    self._iterator = None
-                    self._exhausted = True
-                    break
-            # 恰好拉满一整批：探测下一条判断是否已到末尾（StopIteration → 耗尽）
-            if self._iterator is not None and not self._exhausted:
-                try:
-                    self._lookahead = next(self._iterator)
-                except StopIteration:
-                    self._iterator = None
-                    self._exhausted = True
-            if chunk:
-                self.beginInsertRows(QModelIndex(), self.loaded_count, self.loaded_count + len(chunk) - 1)
-                self.features.extend(chunk)
-                self.endInsertRows()
-                self.loaded_count += len(chunk)
-            # 流式结束：补齐真实总数（过滤/show_ids 路径此前 unknown，或 provider
-            # 返回数与 featureCount() 不一致时校正）
-            if self._exhausted and (not self.total_known or self.loaded_count != self.total_features):
-                self.total_features = self.loaded_count
-                self.total_known = True
-        except Exception:  # noqa: BLE001
-            # 迭代中异常（如图层被外部改动使游标失效）：放弃本批并标记耗尽，避免死循环
-            self._iterator = None
-            self._exhausted = True
-        finally:
-            self.is_loading = False
+        if self.loaded_count >= MAX_MODEL_FIDS:
+            self._truncate()
+            return
+        if self._worker is not None:
+            self.scanning = True
+            self.state_changed.emit()
+            self._worker.request_more(self.loaded_count + self.batch_size)
+
+    def _truncate(self) -> None:
+        """结果过多：取消后台流式并标记截断（状态栏提示，不再加载更多）。"""
+        if self.truncated:
+            return
+        self.truncated = True
+        self.cancel_stream()
+        self.state_changed.emit()
+
+    def cancel_stream(self) -> None:
+        """取消后台流式加载（编辑开始 / dock 关闭 / 换图层时调用）。
+
+        取消后不再自动续取：编辑态下 QGIS 写锁会被后台读锁阻塞。
+        """
+        self._epoch += 1
+        if self._worker is not None:
+            self._worker.cancel()
+            self._worker = None
+        self.scanning = False
+        self._exhausted = True
 
     def set_filter(self, filter_str: str) -> None:
         """更换筛选表达式并刷新（重开迭代器，回到首屏首批）。"""
@@ -179,21 +385,97 @@ class PagedAttributeTableModel(QAbstractTableModel):
         self.beginResetModel()
         self._refresh_totals()
         self.endResetModel()
-        self.load_more()
+        self._start_stream()
+
+    # ------------------------------------------------- worker 信号槽（主线程）
+
+    def _on_chunk(self, worker, fids: List[int]) -> None:
+        if worker is not self._worker:
+            return  # 过期会话的在途信号，丢弃
+        self._insert_fids(fids)
+        self.state_changed.emit()
+
+    def _on_paused(self, worker) -> None:
+        if worker is not self._worker:
+            return
+        self.scanning = False
+        self.state_changed.emit()
+
+    def _on_finished(self, worker, total: int) -> None:
+        if worker is not self._worker:
+            return
+        self.total_features = total
+        self.total_known = True
+        self._exhausted = True
+        self.scanning = False
+        self.state_changed.emit()
+
+    def _insert_fids(self, chunk: List[int]) -> None:
+        if not chunk:
+            return
+        # 兜底上限：fid 列表超预算时截断插入，随后取消后台流式
+        room = MAX_MODEL_FIDS - len(self._fids)
+        if room <= 0:
+            self._truncate()
+            return
+        if len(chunk) > room:
+            chunk = chunk[:room]
+        self.beginInsertRows(QModelIndex(), self.loaded_count, self.loaded_count + len(chunk) - 1)
+        self._fids.extend(chunk)
+        self.endInsertRows()
+        self.loaded_count += len(chunk)
+        if len(self._fids) >= MAX_MODEL_FIDS:
+            self._truncate()
+
+    @property
+    def fids(self) -> List[int]:
+        """已加载结果的 fid 列表（外部/测试只读）。"""
+        return self._fids
 
     def rowCount(self, parent=QModelIndex()) -> int:
-        return len(self.features)
+        return len(self._fids)
 
     def columnCount(self, parent=QModelIndex()) -> int:
         return len(self.field_names) + 1
 
+    def _cache_feature(self, fid: int, feat: QgsFeature) -> None:
+        """写入 LRU 缓存，超出 ``MAX_FEATURE_CACHE`` 淘汰最久未用的要素。
+
+        可视窗口几百行、缓存 2000 个要素 ≈ 几 MB：滚动时旧窗口要素被淘汰，
+        内存不随结果总量增长（QGIS 自带属性表同样用这种按需缓存）。
+        """
+        self._feature_cache.pop(fid, None)
+        self._feature_cache[fid] = feat
+        while len(self._feature_cache) > MAX_FEATURE_CACHE:
+            self._feature_cache.pop(next(iter(self._feature_cache)))
+
+    def feature_at(self, row: int) -> Optional[QgsFeature]:
+        """取第 ``row`` 行的要素：按 fid 从图层按需取回，LRU 缓存可视窗口。
+
+        QTableView 渲染只调可视行，滚动出窗口的要素被淘汰——2M+ 结果内存恒定。
+        要素在图层里被删除时返回 None。
+        """
+        if row < 0 or row >= len(self._fids):
+            return None
+        fid = self._fids[row]
+        feat = self._feature_cache.get(fid)
+        if feat is not None:
+            return feat
+        feat = self.layer.getFeature(fid)
+        if feat is None or not feat.isValid():
+            return None
+        self._cache_feature(fid, feat)
+        return feat
+
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
-        if not index.isValid() or index.row() >= len(self.features):
+        if not index.isValid() or index.row() >= len(self._fids):
             return None
         if role in (Qt.ItemDataRole.DisplayRole, Qt.ItemDataRole.EditRole):
-            feature = self.features[index.row()]
             if index.column() == 0:
-                return feature.id()
+                return self._fids[index.row()]
+            feature = self.feature_at(index.row())
+            if feature is None:
+                return None
             field_idx = index.column() - 1
             if field_idx < len(feature.fields()):
                 return feature.attribute(field_idx)
@@ -221,9 +503,12 @@ class PagedAttributeTableModel(QAbstractTableModel):
             return False
         if index.column() == 0:
             return False
-        if index.row() >= len(self.features):
+        if index.row() >= len(self._fids):
             return False
-        feature = self.features[index.row()]
+        fid = self._fids[index.row()]
+        feature = self.feature_at(index.row())
+        if feature is None:
+            return False
         col = index.column() - 1
         if col >= len(feature.fields()):
             return False
@@ -238,9 +523,10 @@ class PagedAttributeTableModel(QAbstractTableModel):
                 value = float(value)
             except (ValueError, TypeError):
                 return False
-        success = self.layer.changeAttributeValue(feature.id(), col, value)
+        success = self.layer.changeAttributeValue(fid, col, value)
         if success:
-            self.features[index.row()].setAttribute(col, value)
+            # 缓存里的旧要素失效：弹出，下次渲染按需重取新值
+            self._feature_cache.pop(fid, None)
             self.dataChanged.emit(index, index, [role])
             return True
         return False
@@ -306,8 +592,9 @@ class PagedAttributeTableWidget(QWidget):
         self.table_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         header = self.table_view.horizontalHeader()
         header.setMinimumSectionSize(20)
-        header.setMaximumSectionSize(400)
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        # Stretch：列宽默认均分填满容器，不留右侧空白（用户无法拖拽改宽，
+        # 若想保留手动调宽可改回 Interactive + setStretchLastSection(True)）
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
         header.setStretchLastSection(False)
         self.table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table_view.customContextMenuRequested.connect(self._show_context_menu)
@@ -320,8 +607,9 @@ class PagedAttributeTableWidget(QWidget):
 
         self.model = PagedAttributeTableModel(self.layer, self.page_size, filter_str=self.filter_str, show_ids=self.show_ids)
         self.table_view.setModel(self.model)
-        # 筛选重置后刷新加载状态；滚动到底自动加载下一批
+        # 筛选重置后刷新加载状态；流式 chunk/结束也自动刷新；滚动到底自动加载下一批
         self.model.modelReset.connect(self._refresh_load_state)
+        self.model.state_changed.connect(self._refresh_load_state)
         self.table_view.verticalScrollBar().valueChanged.connect(self._on_scroll)
         self._refresh_load_state()
 
@@ -344,8 +632,18 @@ class PagedAttributeTableWidget(QWidget):
         """按模型加载进度刷新状态文本与"加载更多"按钮可用性。"""
         if self.model is None:
             return
-        loaded = len(self.model.features)
+        loaded = self.model.rowCount()
         total = self.model.total_features
+        if self.model.scanning:
+            self.load_status_label.setText(f"正在加载，已获取 {loaded} 条…")
+            self.load_more_btn.setEnabled(self.model.has_more)
+            return
+        if self.model.truncated:
+            self.load_status_label.setText(
+                f"已显示前 {loaded} 条（结果过多，仅加载前 {MAX_MODEL_FIDS} 条，请缩小筛选范围）"
+            )
+            self.load_more_btn.setEnabled(False)
+            return
         if not self.model.total_known:
             # 带过滤/show_ids：总数流式结束前未知，先显示已加载条数
             if self.model.has_more:
@@ -356,6 +654,9 @@ class PagedAttributeTableWidget(QWidget):
             self.load_status_label.setText("0 条")
         elif self.model.has_more:
             self.load_status_label.setText(f"已加载 {loaded} / {total} 条，滚动到底或点击加载更多")
+        elif loaded < total:
+            # 取消流式（如进入编辑）后的停止态
+            self.load_status_label.setText(f"已加载 {loaded} / {total} 条（已停止加载）")
         else:
             self.load_status_label.setText(f"共 {total} 条（已全部加载）")
         self.load_more_btn.setEnabled(self.model.has_more)
@@ -380,6 +681,9 @@ class PagedAttributeTableWidget(QWidget):
         self._refresh_load_state()
 
     def _start_edit(self) -> None:
+        # 编辑会拿 QGIS 写锁，后台流式读锁会阻塞编辑：先取消流式
+        if self.model is not None:
+            self.model.cancel_stream()
         ok = self.editing_service.start(self.layer)
         if ok:
             self.save_btn.setEnabled(True)
@@ -415,7 +719,9 @@ class PagedAttributeTableWidget(QWidget):
         idx = self.table_view.indexAt(position)
         if not idx.isValid():
             return
-        feature = self.model.features[idx.row()]
+        feature = self.model.feature_at(idx.row())
+        if feature is None:
+            return  # 要素已被删除
         menu = QMenu(self)
         zoom = QAction("缩放到要素", self)
         zoom.triggered.connect(lambda: self.zoom_to_map.emit("zoomTo", {"extent": feature.geometry().boundingBox(), "id": [feature.id()]}))
@@ -447,6 +753,9 @@ class AttributeDock(QDockWidget):
         self.setMinimumSize(200, 100)
 
     def add_new_layer(self, layer, parent, filter_str: str, show_ids, page_size: int = 50, title: str = "属性表") -> None:
+        # 先取消旧 widget 的后台流式线程（避免滞留持有图层读锁）
+        if self.content_widget is not None and self.content_widget.model is not None:
+            self.content_widget.model.cancel_stream()
         self.layer = layer
         self.show_ids = list(show_ids) if show_ids else []
         self.content_widget = PagedAttributeTableWidget(layer, page_size, self, filter_str=filter_str, show_ids=show_ids)
@@ -455,6 +764,8 @@ class AttributeDock(QDockWidget):
 
     def closeEvent(self, event) -> None:
         try:
+            if self.content_widget is not None and self.content_widget.model is not None:
+                self.content_widget.model.cancel_stream()
             if self.layer.subsetString():
                 self.layer.setSubsetString("")
             if self.layer.isEditable():

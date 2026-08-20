@@ -338,6 +338,23 @@ def window_qss(t: Theme) -> str:
     QMenuBar::item {{ background: transparent; padding: 4px 10px; }}
     QMenuBar::item:selected {{ background-color: {t.menu_hover}; }}
     QMenuBar::item:pressed {{ background-color: {t.menu_hover}; }}
+    QTabBar#ChromeTabBar {{
+        background-color: {t.menu_bg};
+        border-bottom: 1px solid {t.border};
+    }}
+    QTabBar#ChromeTabBar::tab {{
+        background-color: transparent;
+        color: {t.menu_text};
+        border: none;
+        padding: 6px 18px;
+        font-size: 12px;
+    }}
+    QTabBar#ChromeTabBar::tab:hover:!selected {{ background-color: {t.menu_hover}; }}
+    QTabBar#ChromeTabBar::tab:selected {{
+        color: {t.menu_text};
+        font-weight: 600;
+        border-bottom: 2px solid {t.input_focus};
+    }}
     QMenu {{
         background-color: {t.menu_bg};
         color: {t.menu_text};

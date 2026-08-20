@@ -34,7 +34,12 @@ class StatusBar:
         self._update_scale()
         self.status_bar.addPermanentWidget(self.scale_widget)
 
-        # 投影选择器
+        # 投影选择器：构造后 crs() 默认无效（authid 空），需显式 setCrs 到当前工程
+        # 才能显示正确的 CRS；否则控件永久停留在"无效投影"状态。
+        # 同时把 ProjectCrs 选项隐藏（占用空间大、不需要），并绑定 crsChanged 信号
+        # 在工程 CRS 变更时同步。
+        from qgis.core import QgsProject
+
         proj_selector = QgsProjectionSelectionWidget(self.main_window)
         # 限制下拉最大宽度，避免占用过多状态栏空间
         proj_selector.setMaximumWidth(200)
@@ -45,6 +50,22 @@ class StatusBar:
             )
         except Exception:  # noqa: BLE001
             pass
+        # 拿当前工程 CRS：MainWindow 装配顺序在 _build_status_bar 之前已
+        # 把 ``self.project = QgsProject.instance()`` 绑好。若宿主未挂
+        # ``project`` 属性（裸 QMainWindow 测试），退回到全局单例。
+        project = getattr(self.main_window, "project", None) or QgsProject.instance()
+        proj_selector.setCrs(project.crs())
+
+        # crsChanged 是无参信号，setCrs 需要 CRS 参数 → 包一层 lambda。
+        # 控件被销毁后单例 project 仍可能发信号 → 闭包访问已死的 sip 对象会
+        # 抛 RuntimeError，所以再 try 一层（见 qgis-ui-integration-gotchas）。
+        def _sync_proj_selector() -> None:
+            try:
+                proj_selector.setCrs(project.crs())
+            except RuntimeError:
+                pass
+
+        project.crsChanged.connect(_sync_proj_selector)
         self.status_bar.addPermanentWidget(proj_selector)
 
     def _build_coordinate_label(self) -> QLabel:

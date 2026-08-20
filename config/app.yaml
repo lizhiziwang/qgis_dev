@@ -8,7 +8,7 @@
 env: dev
 
 app:
-  name: qgis_dev
+  name: 图斑核实平台 V1.0
   language: zh-Hans       # i18n
   crs: EPSG:4490          # 默认坐标系（中国 2000）
 

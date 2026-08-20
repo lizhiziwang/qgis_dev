@@ -31,7 +31,7 @@ class StartupSplash(QWidget):
     #: 状态文字动画后缀（循环步进）
     _DOT_STEPS = ("", "·", "··", "···")
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, app_name: str = "qgis_dev", parent: QWidget | None = None) -> None:
         super().__init__(
             parent,
             Qt.WindowType.FramelessWindowHint | Qt.WindowType.Tool,
@@ -48,13 +48,13 @@ class StartupSplash(QWidget):
         self._dot_timer.timeout.connect(self._tick_dots)
         self._dot_timer.start()
 
-        self._build_ui()
+        self._build_ui(app_name)
         self._apply_theme()
         self.set_status("正在初始化")
 
     # ------------------------------------------------------------ 装配
 
-    def _build_ui(self) -> None:
+    def _build_ui(self, app_name: str) -> None:
         layout = QVBoxLayout(self)
         layout.setContentsMargins(36, 28, 36, 26)
         layout.setSpacing(14)
@@ -64,7 +64,7 @@ class StartupSplash(QWidget):
         self._icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._icon)
 
-        self._title = QLabel("qgis_dev", self)
+        self._title = QLabel(app_name, self)
         self._title.setObjectName("SplashTitle")
         self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(self._title)

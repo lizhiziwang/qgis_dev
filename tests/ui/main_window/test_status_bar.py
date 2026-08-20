@@ -97,3 +97,23 @@ def test_coordinate_label_projected_uses_plain_numbers(qgis_app):
     mw.canvas.setDestinationCrs(QgsCoordinateReferenceSystem("EPSG:3857"))
     mw.canvas.xyCoordinates.emit(QgsPointXY(123456.789, 2345678.94))
     assert sb.coord_label.text() == "123456.8, 2345678.9"
+
+
+@pytest.mark.gui
+def test_projection_selector_displays_current_project_crs(qgis_app):
+    """投影选择器构造后 crs() 默认无效（authid 空），修复后必须显示当前
+    工程 CRS，否则状态栏永远显示"无效投影"占位。
+    """
+    from qgis.gui import QgsProjectionSelectionWidget
+
+    from app.ui.main_window.main_window import MainWindow
+
+    win = MainWindow()
+    try:
+        selector = win.findChild(QgsProjectionSelectionWidget)
+        assert selector is not None, "MainWindow 装配失败：状态栏没找到投影选择器"
+        # 修复前：crs().isValid() == False；修复后：等于当前工程 CRS (EPSG:4490)
+        assert selector.crs().isValid(), "投影选择器构造后未绑定有效 CRS（仍在显示'无效投影'）"
+        assert selector.crs().authid() == "EPSG:4490"
+    finally:
+        win.close()

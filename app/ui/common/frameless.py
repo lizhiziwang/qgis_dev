@@ -32,7 +32,7 @@ from ctypes import wintypes
 
 from PyQt6.QtCore import QEvent, QPoint, QRect, Qt
 from PyQt6.QtGui import QCursor, QGuiApplication
-from PyQt6.QtWidgets import QApplication, QMainWindow, QMenuBar, QVBoxLayout, QWidget
+from PyQt6.QtWidgets import QMainWindow, QMenuBar, QTabBar, QVBoxLayout, QWidget
 
 # ---------------------------------------------------------------------------
 # Windows 无边框窗口辅助：WM_NCHITTEST 让系统接管"标题栏拖动 + 边缘缩放"；
@@ -123,19 +123,22 @@ class FramelessMixin:
         class MainWindow(FramelessMixin, QMainWindow):
             def __init__(self):
                 super().__init__()
-                self.title_bar = self.enable_frameless(with_menu_bar=True)
+                self.title_bar = self.enable_frameless(with_tab_bar=True)
     """
 
     def enable_frameless(
         self,
         *,
         with_menu_bar: bool = False,
+        with_tab_bar: bool = False,
         show_min_button: bool = True,
         show_max_button: bool = True,
     ):
         """把宿主设为无边框窗口，挂载自绘标题栏，并装配平台行为。
 
         :param with_menu_bar: QMainWindow 是否在标题栏下再挂一个菜单栏。
+        :param with_tab_bar: 是否在标题栏下挂一个 QTabBar 取代菜单栏（MainWindow
+            的"菜单栏改 tab 切换器"用）。与 ``with_menu_bar`` 互斥，优先。
         :param show_min_button: 标题栏是否显示最小化按钮（对话框传 False）。
         :param show_max_button: 标题栏是否显示最大化按钮（对话框传 False）。
         :return: 创建好的 :class:`TitleBar` 实例（也存到 ``self.title_bar``）。
@@ -167,7 +170,13 @@ class FramelessMixin:
             v.setContentsMargins(0, 0, 0, 0)
             v.setSpacing(0)
             v.addWidget(self.title_bar)
-            if with_menu_bar:
+            if with_tab_bar:
+                # Tab 切换器：取代菜单栏。objectName 供 window_qss 精确套样式
+                # （QTabBar#ChromeTabBar），不影响 dock 里的普通 QTabBar。
+                self._tab_bar = QTabBar(self)
+                self._tab_bar.setObjectName("ChromeTabBar")
+                v.addWidget(self._tab_bar)
+            elif with_menu_bar:
                 self._menubar = QMenuBar(self)
                 v.addWidget(self._menubar)
             self.setMenuWidget(chrome)

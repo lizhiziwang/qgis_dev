@@ -74,7 +74,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # 启动初始化状态页：QgsApplication 创建后立刻弹出，覆盖登录 → initQgis →
     # 插件注册 → 主窗口构建等耗时阶段，主窗口显示时由 _run_qgis_app 关闭。
-    splash = _start_splash()
+    splash = _start_splash(cfg.app_name)
     try:
         # 鉴权优先：本机有未过期凭证就直接跳过登录
         from app.core.auth import load_credential
@@ -233,15 +233,14 @@ def _run_login_dialog() -> Optional[str]:
     return None
 
 
-def _start_splash():
+def _start_splash(app_name: str):
     """创建并显示启动初始化状态页，返回实例。
 
-    QgsApplication 已存在（见 :func:`_ensure_qgis_application`），此时可以弹
-    顶层浮窗；各初始化阶段由调用方用 ``splash.set_status(...)`` 驱动刷新。
+    :param app_name: 应用名（``app.yaml`` → ``app.name``），用作 splash 标题。
     """
     from app.ui.common.splash import StartupSplash
 
-    splash = StartupSplash()
+    splash = StartupSplash(app_name=app_name)
     splash.center_on_screen()
     splash.show()
     return splash
@@ -251,7 +250,7 @@ def _run_qgis_app(cfg: AppConfig, qgis: QgisRuntime, app, splash=None) -> int:
     """登录成功后才真正初始化 QGIS + 主窗口 + exec_。"""
     # 关键：initQgis 必须在登录通过之后
     if splash is not None:
-        splash.set_status("正在初始化 QGIS 核心")
+        splash.set_status("正在初始化核心程序")
     app.initQgis()
 
     # 翻译：仅在 dev 模式装（prod 走 launcher 内置资源）
@@ -284,7 +283,7 @@ def _run_qgis_app(cfg: AppConfig, qgis: QgisRuntime, app, splash=None) -> int:
 
     if splash is not None:
         splash.set_status("正在构建主窗口")
-    window = build_window()
+    window = build_window(app_name=cfg.app_name)
 
     # 主窗口就绪：先关掉初始化状态页再显示，避免浮窗盖在主窗口上
     if splash is not None:
