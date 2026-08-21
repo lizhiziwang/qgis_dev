@@ -22,6 +22,7 @@ class AppConfig:
     paths: "PathsConfig"
     logging: "LoggingConfig"
     server: "ServerConfig"
+    auth: "AuthConfig"
 
     @classmethod
     def from_file(cls, path: Path) -> "AppConfig":
@@ -40,6 +41,7 @@ class AppConfig:
             paths=PathsConfig.from_dict(data.get("paths", {})),
             logging=LoggingConfig.from_dict(data.get("logging", {})),
             server=ServerConfig.from_dict(data.get("server", {})),
+            auth=AuthConfig.from_dict(data.get("auth", {})),
         )
 
 
@@ -140,6 +142,22 @@ class MapConfig:
     def from_dict(cls, data: dict[str, Any]) -> "MapConfig":
         base = data.get("base_tile")
         return cls(base_tile=BaseTileConfig.from_dict(base) if base else None)
+
+
+@dataclass(frozen=True)
+class AuthConfig:
+    """启动登录的本地校验账号（未接真实 auth 服务前只认这一对账号）。"""
+
+    username: str
+    password: str
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "AuthConfig":
+        data = data or {}
+        return cls(
+            username=data.get("username", "admin"),
+            password=data.get("password", "admin"),
+        )
 
 
 def _to_path(v: Any) -> Optional[Path]:

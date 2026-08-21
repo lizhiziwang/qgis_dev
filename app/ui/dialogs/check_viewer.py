@@ -12,6 +12,8 @@ from typing import Any, Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
+    QApplication,
+    QAbstractItemView,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -21,16 +23,17 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QMenu,
     QMessageBox,
+    QProgressBar,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
-    QAbstractItemView,
 )
 
 from app.core.domain.check import CheckParam, CheckService
 from app.infra.logging import get_logger
+from app.infra.messagebar import send
 from app.ui.common.base_dialog import BaseDialog
 
 
@@ -105,14 +108,20 @@ class CheckViewerDialog(BaseDialog):
         self.table.customContextMenuRequested.connect(self._show_context_menu)
         main.addWidget(self.table)
 
+        # 进度条：跑质检时按质检项数步进（每项一个单位），空闲置 0
+        self.loading = QProgressBar()
+        self.loading.setRange(0, 100)
+        self.loading.setValue(0)
+        main.addWidget(self.loading)
+
         # 底部
         btns = QHBoxLayout()
         export_but = QPushButton("导出")
         export_but.clicked.connect(self._export_data)
         btns.addWidget(export_but)
-        confirm_but = QPushButton("确认")
-        confirm_but.clicked.connect(self._start_check)
-        btns.addWidget(confirm_but)
+        self.confirm_but = QPushButton("确认")
+        self.confirm_but.clicked.connect(self._start_check)
+        btns.addWidget(self.confirm_but)
         cancel_but = QPushButton("取消")
         cancel_but.clicked.connect(self.close)
         btns.addWidget(cancel_but)
@@ -188,7 +197,10 @@ class CheckViewerDialog(BaseDialog):
             name_lay.setContentsMargins(5, 0, 5, 0)
             cb = QCheckBox()
             cb.setChecked(item["checked"])
-            cb.setEnabled(False)
+            # 勾选 ↔ JSON 节点的 isApply：勾上 = 该质检项参与执行
+            cb.stateChanged.connect(
+                lambda state, it=item: self._on_toggle_apply(it, state)
+            )
             indent = "　　" * item["level"]
             lbl = QLabel(f"{indent}{item['name']}")
             name_lay.addWidget(cb)
@@ -203,41 +215,204 @@ class CheckViewerDialog(BaseDialog):
             err.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self.table.setItem(row, 2, err)
 
+    def _on_toggle_apply(self, item: dict, state: int) -> None:
+        """勾选/取消勾选 → 同步 JSON 树的 ``isApply``（勾上=参与执行）。
+
+        树形联动：勾上叶子会把所有祖先（含根）一并勾上，否则 :meth:`_collect_params`
+        按 ``isApply==1 且祖先勾选`` 判定，根/中间节点 isApply=0 时勾了也白勾；
+        取消勾选会把所有子孙一并取消。
+        """
+        is_apply = 1 if state == Qt.CheckState.Checked.value else 0
+        node = item.get("original_item")
+        if node is not None:
+            node["isApply"] = is_apply
+            if is_apply:
+                # 祖先（含根）联动勾上
+                for anc in self._find_ancestors(node):
+                    anc["isApply"] = 1
+                if self.json_data is not None:
+                    self.json_data["isApply"] = 1
+            else:
+                # 取消 → 子孙联动取消
+                self._set_descendants_apply(node, 0)
+        self._sync_checked_flags()
+        self._refresh_display()
+
+    def _find_ancestors(self, node: dict) -> list[dict]:
+        """返回从根到 ``node`` 直接父级的祖先节点链（不含 node 自身）。"""
+        if not self.json_data:
+            return []
+        ancestors: list[dict] = []
+
+        def _dfs(items: list, trail: list) -> bool:
+            for it in items:
+                if it is node:
+                    ancestors.extend(trail)
+                    return True
+                if it.get("items") and _dfs(it["items"], trail + [it]):
+                    return True
+            return False
+
+        _dfs(self.json_data.get("items", []), [])
+        return ancestors
+
+    def _set_descendants_apply(self, node: dict, val: int) -> None:
+        """把 ``node`` 下所有子孙节点的 ``isApply`` 设为 ``val``。"""
+
+        def _walk(n: dict) -> None:
+            for ch in n.get("items", []) or []:
+                ch["isApply"] = val
+                _walk(ch)
+
+        _walk(node)
+
+    def _sync_checked_flags(self) -> None:
+        """把表格 ``all_items`` 的 checked 从 JSON 树重新对齐（联动后刷新显示）。"""
+        if not self.json_data:
+            return
+        nodes: list[dict] = [self.json_data]
+
+        def _collect(items: list) -> None:
+            for it in items:
+                nodes.append(it)
+                if it.get("items"):
+                    _collect(it["items"])
+
+        _collect(self.json_data.get("items", []))
+        for entry in self.all_items:
+            node = entry.get("original_item")
+            entry["checked"] = node in nodes and node.get("isApply", 0) == 1
+
     def _start_check(self) -> None:
         if not self.data_source_input.currentText():
             QMessageBox.warning(self, "提示", "请先选择数据源")
             return
         layer = self.parent.project.mapLayersByName(self.data_source_input.currentText())[0]
         params: list[CheckParam] = []
-        self._collect_params(params, self.json_data.get("items", []))
-        for p in params:
-            res = self.check_service.run(p)
-            self._update_item_status(p.check_id, res)
+        # 只跑勾选（isApply==1 且所有祖先勾选）的质检项
+        self._collect_params(
+            params,
+            self.json_data.get("items", []),
+            enabled=self.json_data.get("isApply", 0) == 1,
+        )
+        if not params:
+            QMessageBox.warning(self, "提示", "请先勾选要执行的质检项")
+            return
+
+        # 开始日志 + 进度条按项数步进
+        total = len(params)
+        logger.info("数据质检开始：数据源=%s，共 %d 项质检", layer.name(), total)
+        self.confirm_but.setEnabled(False)
+        self.loading.setRange(0, total)
+        self.loading.setValue(0)
+
+        passed = failed = 0
+        for i, p in enumerate(params, start=1):
+            logger.info("质检执行 %d/%d：%s", i, total, p.check_name or p.check_id)
+            try:
+                res = self.check_service.run(p)
+            except Exception as exc:  # noqa: BLE001
+                logger.error(
+                    "质检执行失败：%s（%s）：%s",
+                    p.check_name or p.check_id,
+                    p.check_id,
+                    exc,
+                    exc_info=True,
+                )
+                failed += 1
+            else:
+                self._update_item_status(p.check_id, res)
+                if res.is_pass:
+                    passed += 1
+                    logger.info("质检通过：%s（不通过 %d 条）", p.check_name or p.check_id, res.failed_count)
+                else:
+                    failed += 1
+                    logger.info("质检不通过：%s（不通过 %d 条）", p.check_name or p.check_id, res.failed_count)
+            self.loading.setValue(i)
+            # 同步阻塞跑质检期间也要让进度条 / 日志面板实时刷新（splash 同款修法）
+            QApplication.processEvents()
+
+        logger.info("数据质检完成：共 %d 项，通过 %d，不通过 %d", total, passed, failed)
+        send("success", f"数据质检完成：共 {total} 项，通过 {passed}，不通过 {failed}", duration=3)
+        self.confirm_but.setEnabled(True)
+        self.loading.setValue(0)
+        self._aggregate_results()
         self._refresh_display()
 
-    def _collect_params(self, params: list, items) -> None:
+    def _collect_params(self, params: list, items, enabled: bool = True) -> None:
+        """收集勾选（``enabled`` 为 True 且该节点 ``isApply==1``）的叶子质检参数。"""
         for it in items:
+            node_enabled = enabled and (it.get("isApply", 0) == 1)
             if "items" not in it:
-                layer = None
-                if self.data_source_input.currentText() and self.parent:
-                    layer = self.parent.project.mapLayersByName(self.data_source_input.currentText())[0]
-                params.append(self.check_service.from_dict(it, layer=layer))
+                if node_enabled:
+                    layer = None
+                    if self.data_source_input.currentText() and self.parent:
+                        layer = self.parent.project.mapLayersByName(self.data_source_input.currentText())[0]
+                    params.append(self.check_service.from_dict(it, layer=layer))
             else:
-                self._collect_params(params, it["items"])
+                self._collect_params(params, it["items"], node_enabled)
 
     def _update_item_status(self, check_id: str, result) -> None:
         if check_id is None or not self.json_data:
             return
+        node = self._find_json_node(check_id)
+        if node is None:
+            return
+        node["isPass"] = result.is_pass
+        node["noPassCount"] = result.failed_count
+        # 同步表格 all_items 快照：_refresh_display / 显示未通过项过滤都读快照，
+        # 不同步的话跑完结果不会回显到表格（一直是加载时的旧值）。
+        for entry in self.all_items:
+            if entry.get("original_item") is node:
+                entry["pass"] = result.is_pass
+                entry["noPassCount"] = result.failed_count
+                break
+
+    def _find_json_node(self, check_id: str):
+        """按 ``check_id`` 在 JSON 树里找节点；JSON 的 id 是 int、check_id 是 str，
+        统一转 ``str`` 比较。"""
+        if not self.json_data:
+            return None
+
         def _walk(node):
-            if node.get("id") == check_id:
-                node["isPass"] = result.is_pass
-                node["noPassCount"] = result.failed_count
-                return True
+            # JSON 的 id 是 int，CheckParam.check_id 是 str，统一转 str 比较
+            if str(node.get("id")) == str(check_id):
+                return node
             for ch in node.get("items", []) or []:
-                if _walk(ch):
-                    return True
-            return False
+                found = _walk(ch)
+                if found is not None:
+                    return found
+            return None
+
+        return _walk(self.json_data)
+
+    def _aggregate_results(self) -> None:
+        """质检跑完后把叶子结果向上聚合，让树状表格整体反映结果。
+
+        中间节点（属性质检/值域范围/根）的 ``isPass`` = 全部子项通过，
+        ``noPassCount`` = 子孙叶子错误数之和；未勾选/未执行的叶子按默认通过
+        参与聚合。聚合后同步 all_items 快照，供表格回显。
+        """
+        if not self.json_data:
+            return
+
+        def _walk(node) -> None:
+            children = node.get("items") or []
+            if not children:
+                return
+            for ch in children:
+                _walk(ch)
+            all_pass = all(ch.get("isPass", True) for ch in children)
+            total = sum(ch.get("noPassCount", 0) or 0 for ch in children)
+            node["isPass"] = all_pass
+            node["noPassCount"] = total
+
         _walk(self.json_data)
+        for entry in self.all_items:
+            node = entry.get("original_item")
+            if node is not None and node.get("items"):
+                entry["pass"] = node.get("isPass", True)
+                entry["noPassCount"] = node.get("noPassCount", 0)
 
     def _show_context_menu(self, pos) -> None:
         idx = self.table.indexAt(pos)
@@ -250,7 +425,8 @@ class CheckViewerDialog(BaseDialog):
             edit_a = QAction("编辑", menu)
             edit_a.triggered.connect(lambda: self._create_check_item(False, item=current))
             menu.addAction(edit_a)
-            if not current["pass"]:
+            # 只有叶子质检项能看错误数据；聚合出"不通过"的中间节点没有 checkParam
+            if not current["pass"] and current["isCheckItem"]:
                 show = QAction("查看错误数据", menu)
                 show.triggered.connect(lambda: self._show_error_data(current))
                 menu.addAction(show)

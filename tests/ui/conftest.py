@@ -52,3 +52,24 @@ def qgis_app():
     if not app.allWidgets():
         app.initQgis()
     yield app
+
+    # 会话收尾：显式销毁残留的顶层 QWidget，再退出 QGIS 运行时。
+    #
+    # 不这样做的话，MainWindow 等窗口的 C++ 对象会残留到解释器退出、由
+    # Python 终结阶段的 GC 才销毁——此时 QgsApplication 已在析构中，Windows
+    # 上触发 0xC0000409（STATUS_STACK_BUFFER_OVERRUN）原生崩溃，pytest 停在
+    # [100%] 打不出汇总行。实测只要构造过一个 MainWindow 就必现（历史问题，
+    # 与功能改动无关）。``close()`` 只隐藏窗口、不销毁 C++ 对象，必须用
+    # ``sip.delete`` 真正释放。
+    from PyQt6 import sip  # noqa: PLC0415
+    from PyQt6.QtWidgets import QApplication  # noqa: PLC0415
+
+    for w in list(QApplication.topLevelWidgets()):
+        try:
+            sip.delete(w)
+        except RuntimeError:
+            pass  # 已被销毁
+    try:
+        app.exitQgis()
+    except Exception:  # noqa: BLE001
+        pass  # 收尾异常不掩盖测试结果

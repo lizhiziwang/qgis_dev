@@ -11,7 +11,7 @@ import re
 from datetime import datetime
 from typing import Optional
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QTextCursor
 from PyQt6.QtWidgets import (
     QComboBox,
@@ -63,6 +63,13 @@ class LogDock(QDockWidget):
         self.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
         self._init_ui()
         self._load_log_file()
+        # 自动刷新：dock 可见且日志文件有新写入时才重载（用 mtime 去抖）。
+        # 手动「刷新日志」也会更新 _last_mtime，避免下一次定时 tick 重复重载。
+        self._last_mtime = self._file_mtime()
+        self._timer = QTimer(self)
+        self._timer.setInterval(2000)
+        self._timer.timeout.connect(self._auto_reload)
+        self._timer.start()
 
     def _init_ui(self) -> None:
         container = QWidget(self)
@@ -141,9 +148,31 @@ class LogDock(QDockWidget):
         html = "\n".join(
             f'<p style="line-height:1.5;margin:2px 0;">{line}</p>' for line in rendered
         )
+        # setHtml 会重置滚动位置；自动滚动开启时跳到底部（追最新日志），
+        # 关闭时恢复到原位置，避免自动刷新把用户正在看的行拽走。
+        scroll_pos = self.txt.verticalScrollBar().value()
         self.txt.setHtml(html)
         if self.auto_scroll:
             self.txt.moveCursor(QTextCursor.MoveOperation.End)
+        else:
+            self.txt.verticalScrollBar().setValue(scroll_pos)
+
+    def _file_mtime(self) -> float:
+        """日志文件最后修改时间；文件不存在返回 0（触发一次重载兜底）。"""
+        try:
+            return os.path.getmtime(_ALL_LOG_PATH)
+        except OSError:
+            return 0.0
+
+    def _auto_reload(self) -> None:
+        """定时 tick：dock 不可见或日志未变化时跳过，避免无谓重绘。"""
+        if not self.isVisible():
+            return
+        mtime = self._file_mtime()
+        if mtime == self._last_mtime:
+            return
+        self._last_mtime = mtime
+        self._load_log_file(self.param)
 
     def _on_search(self) -> None:
         self.param["level"] = self.level_combo.currentText()
@@ -165,6 +194,7 @@ class LogDock(QDockWidget):
 
     def _on_refresh(self) -> None:
         self._load_log_file(self.param)
+        self._last_mtime = self._file_mtime()
 
     def _on_save(self) -> None:
         from app.ui.common.widgets import open_file_dir

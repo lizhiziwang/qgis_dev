@@ -103,6 +103,9 @@ class OverlayService:
                     "OVERLAY": overlay_layer,
                     "OUTPUT": f"memory:{output_name}",
                 }
+            logger.info(
+                "执行算法 %s：输出=%s", alg, params["OUTPUT"]
+            )
             try:
                 res = processing.run(alg, params, context=context, feedback=fb)
             except Exception as exc:  # noqa: BLE001
@@ -130,5 +133,6 @@ class OverlayService:
                 layer = res["OUTPUT"]
             if layer is None or not layer.isValid():
                 raise RuntimeError(f"{label} 结果图层无效")
+            logger.info("%s 完成 → %s（%s 要素）", alg, layer.name(), layer.featureCount())
             results[op] = layer
         return results

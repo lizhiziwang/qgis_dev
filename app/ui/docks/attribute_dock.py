@@ -239,6 +239,10 @@ class PagedAttributeTableModel(QAbstractTableModel):
         self.filter_str = filter_str or "1=1"
         self.show_ids = list(show_ids) if show_ids else []
         self.field_names = [f.name() for f in layer.fields()]
+        # 列头显示名：优先字段别名，无别名降级为字段名（attributeAlias 返回空串即无）
+        self.header_names = [
+            layer.attributeAlias(i) or name for i, name in enumerate(self.field_names)
+        ]
         #: 结果 **fid 列表**（内存主驻留物；要素按需取，见 ``feature_at``）
         self._fids: List[int] = []
         #: 按需取要素的 LRU 缓存（可视窗口内的要素，滚动淘汰，见 ``_cache_feature``）
@@ -485,8 +489,8 @@ class PagedAttributeTableModel(QAbstractTableModel):
         if role == Qt.ItemDataRole.DisplayRole and orientation == Qt.Orientation.Horizontal:
             if section == 0:
                 return "ID"
-            if section - 1 < len(self.field_names):
-                return self.field_names[section - 1]
+            if section - 1 < len(self.header_names):
+                return self.header_names[section - 1]
         return None
 
     def flags(self, index):
@@ -591,11 +595,19 @@ class PagedAttributeTableWidget(QWidget):
         self.table_view.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
         self.table_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         header = self.table_view.horizontalHeader()
-        header.setMinimumSectionSize(20)
-        # Stretch：列宽默认均分填满容器，不留右侧空白（用户无法拖拽改宽，
-        # 若想保留手动调宽可改回 Interactive + setStretchLastSection(True)）
-        header.setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        header.setStretchLastSection(False)
+        # 列宽以"字符"为单位：以当前字体全角字符宽为基准，默认列宽 8 字符、
+        # 最小 4 字符（防止列被拖拽到消失）。用全角"中"作基准保证默认宽度下
+        # 中文字符 / ASCII 编码值都能完整显示。
+        _char_w = max(1, self.table_view.fontMetrics().horizontalAdvance("中"))
+        header.setMinimumSectionSize(_char_w * 4)
+        # 注意：不设 setMaximumSectionSize —— 它会把**用户手动拖拽**也一起卡死在
+        # 8 字符内。默认 8 字符只是初始宽度，手动调宽应当自由。
+        # Interactive：用户可拖拽列边界手动调宽（Stretch 均分填满 → 不可拖）。
+        # stretchLastSection 保证列数不够铺满时最后一列拉伸填满可视区，列总宽
+        # 超可视区时最后一列保持固定宽度、QTableView 自动出横向滚动条。
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setDefaultSectionSize(_char_w * 8)
+        header.setStretchLastSection(True)
         self.table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table_view.customContextMenuRequested.connect(self._show_context_menu)
         main_layout.addWidget(self.table_view)

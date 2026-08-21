@@ -13,7 +13,11 @@ if TYPE_CHECKING:
 from PyQt6.QtCore import pyqtSignal
 from qgis.core import QgsProcessingFeedback, QgsTask
 
+from app.infra.logging import get_logger
+
 from .service import TileJob
+
+logger = get_logger(__name__)
 
 
 class CreateTileTask(QgsTask):
@@ -41,12 +45,20 @@ class CreateTileTask(QgsTask):
             import processing
 
             params = self.job.to_native_params()
+            logger.info(
+                "执行算法 native:writevectortiles_xyz：输出=%s 缩放=%s-%s",
+                self.job.output_dir,
+                self.job.min_zoom,
+                self.job.max_zoom,
+            )
             self.result_output = processing.run(
                 "native:writevectortiles_xyz", params, feedback=self.feedback
             )
+            logger.info("native:writevectortiles_xyz 完成 → %s", self.job.output_dir)
             return True
         except Exception as e:  # noqa: BLE001
             self.exception = e
+            logger.error("native:writevectortiles_xyz 执行失败：%s", e, exc_info=True)
             return False
 
     def finished(self, result: bool) -> None:  # noqa: D401

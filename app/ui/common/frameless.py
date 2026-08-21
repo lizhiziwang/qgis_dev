@@ -47,6 +47,7 @@ WM_NCLBUTTONDOWN = 0x00A1
 WM_NCLBUTTONDBLCLK = 0x00A3
 WM_SYSCOMMAND = 0x0112
 SC_MOVE = 0xF010
+SC_SIZE = 0xF000
 HTCLIENT = 1
 HTCAPTION = 2
 HTLEFT = 10
@@ -57,6 +58,10 @@ HTTOPRIGHT = 14
 HTBOTTOM = 15
 HTBOTTOMLEFT = 16
 HTBOTTOMRIGHT = 17
+#: 全部边缘缩放 HT 码（WM_NCHITTEST 的 HT* 返回值中用于启动系统缩放循环的那些）。
+_SIZE_HT_CODES = frozenset(
+    {HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT}
+)
 MONITOR_DEFAULTTONEAREST = 2
 
 
@@ -113,6 +118,16 @@ def _cursor_for(edges) -> Qt.CursorShape:
     if edges in (Qt.Edge.TopEdge | Qt.Edge.RightEdge, Qt.Edge.BottomEdge | Qt.Edge.LeftEdge):
         return Qt.CursorShape.SizeBDiagCursor
     return Qt.CursorShape.ArrowCursor
+
+
+def sc_size_wparam(ht: int) -> int:
+    """把 WM_NCHITTEST 的 HT 码映射成 ``WM_SYSCOMMAND`` + ``SC_SIZE`` 的 wParam。
+
+    不能直接 ``SC_SIZE | ht``：HTBOTTOMRIGHT=17 占 5 bit，``0xF000 | 17 = 0xF011``，
+    系统按 ``wParam & 0xFFF0`` 取命令会得到 SC_MOVE(0xF010)，缩放被当成拖动。
+    SC_SIZE 的方向编号与 HT 码错一位：HTLEFT..HTBOTTOMRIGHT(10..17) → 1..8。
+    """
+    return SC_SIZE | (ht - 9)
 
 
 class FramelessMixin:
@@ -259,15 +274,29 @@ class FramelessMixin:
                     if msg.message == WM_GETMINMAXINFO:
                         self._wm_getminmaxinfo(msg)
                         return (True, 0)
-                    if msg.message == WM_NCLBUTTONDOWN and msg.wParam == HTCAPTION:
-                        # 无边框窗口下 Qt 把标题栏区当客户区，系统原生拖动（含 Aero
-                        # Snap 贴边吸附）不会启动。ReleaseCapture + 重发
-                        # WM_SYSCOMMAND(SC_MOVE|HTCAPTION) 让系统进入原生移动循环。
-                        ctypes.windll.user32.ReleaseCapture()
-                        ctypes.windll.user32.SendMessageW(
-                            int(self.winId()), WM_SYSCOMMAND, SC_MOVE | HTCAPTION, 0
-                        )
-                        return (True, 0)
+                    if msg.message == WM_NCLBUTTONDOWN:
+                        wp = int(msg.wParam)
+                        if wp == HTCAPTION:
+                            # 无边框窗口下 Qt 把标题栏区当客户区，系统原生拖动（含 Aero
+                            # Snap 贴边吸附）不会启动。ReleaseCapture + 重发
+                            # WM_SYSCOMMAND(SC_MOVE|HTCAPTION) 让系统进入原生移动循环。
+                            ctypes.windll.user32.ReleaseCapture()
+                            ctypes.windll.user32.SendMessageW(
+                                int(self.winId()), WM_SYSCOMMAND, SC_MOVE | HTCAPTION, 0
+                            )
+                            return (True, 0)
+                        if wp in _SIZE_HT_CODES:
+                            # 边缘缩放同理：WM_NCHITTEST 返回 HT* 缩放码后，系统发的
+                            # WM_NCLBUTTONDOWN(wParam=HT*) 默认由 Qt 窗口过程丢弃，不会
+                            # 进入系统 resize 循环（探针实测尺寸纹丝不动）。这里重发
+                            # WM_SYSCOMMAND(SC_SIZE|方向) 让系统接管缩放。
+                            # 方向编号见 :func:`sc_size_wparam`（不能用 SC_SIZE|wp，会被
+                            # 当 SC_MOVE 解析成拖动）。
+                            ctypes.windll.user32.ReleaseCapture()
+                            ctypes.windll.user32.SendMessageW(
+                                int(self.winId()), WM_SYSCOMMAND, sc_size_wparam(wp), 0
+                            )
+                            return (True, 0)
                     if msg.message == WM_NCLBUTTONDBLCLK and msg.wParam == HTCAPTION:
                         self._toggle_maximize()
                         return (True, 0)

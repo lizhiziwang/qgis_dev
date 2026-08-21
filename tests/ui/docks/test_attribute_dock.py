@@ -449,13 +449,119 @@ def test_main_window_has_zoom_to_layer_extent_transform(qgis_app):
 
 
 @pytest.mark.gui
-def test_widget_columns_stretch_to_fill_container(layer, qgis_app):
-    """列宽默认 Stretch：均分填满容器宽度，不留右侧空白。"""
+def test_widget_columns_interactive_with_min_max_width(layer, qgis_app):
+    """列宽 Interactive 可手动拖拽；默认宽 8 字符、下限 4 字符，末列拉伸填满。
+
+    8 字符只是**默认/初始**宽度而非上限：手动调宽不受它约束（不设
+    ``setMaximumSectionSize``，否则连用户拖拽也会被卡死在 8 字符内）。
+    """
     from PyQt6.QtWidgets import QHeaderView
 
     from app.ui.docks.attribute_dock import PagedAttributeTableWidget
 
     w = PagedAttributeTableWidget(layer, page_size=50)
     header = w.table_view.horizontalHeader()
-    assert header.sectionResizeMode(0) == QHeaderView.ResizeMode.Stretch
-    assert header.stretchLastSection() is False
+    char_w = max(1, w.table_view.fontMetrics().horizontalAdvance("中"))
+    assert header.sectionResizeMode(0) == QHeaderView.ResizeMode.Interactive
+    assert header.minimumSectionSize() == char_w * 4
+    assert header.defaultSectionSize() == char_w * 8
+    # 未设上限：maxSectionSize 保持 Qt 默认（远大于 8 字符），手动拖拽不受钳制
+    assert header.maximumSectionSize() > char_w * 8
+    assert header.stretchLastSection() is True
+
+
+@pytest.mark.gui
+def test_widget_manual_resize_beyond_8_chars(qgis_app):
+    """手动调宽可超过 8 字符（修复前被 maximumSectionSize=8字符 卡死）。"""
+    from PyQt6.QtCore import QVariant
+    from qgis.core import QgsField, QgsVectorLayer
+
+    from app.ui.docks.attribute_dock import PagedAttributeTableWidget
+
+    # 用多字段图层：单列 + stretchLastSection 时 QHeaderView 对唯一一列有额外
+    # 下限（探测得 100px），会干扰缩到 4 字符的断言，不是产品行为。
+    lyr = QgsVectorLayer("Point?crs=EPSG:4326", "调宽", "memory")
+    lyr.dataProvider().addAttributes([QgsField(f"f{i}", QVariant.String) for i in range(3)])
+    lyr.updateFields()
+
+    w = PagedAttributeTableWidget(lyr, page_size=50)
+    header = w.table_view.horizontalHeader()
+    char_w = max(1, w.table_view.fontMetrics().horizontalAdvance("中"))
+
+    # 模拟用户拖到 12 字符宽：8 字符上限已移除，不应被钳制回 8 字符
+    header.resizeSection(0, char_w * 12)
+    assert header.sectionSize(0) == char_w * 12
+
+    # 下限仍生效：拖到 1px 会被钳制到 4 字符，而不是 0 / 消失
+    header.resizeSection(0, 1)
+    assert header.sectionSize(0) == char_w * 4
+
+
+@pytest.mark.gui
+def test_model_header_shows_alias_or_field_name(qgis_app):
+    """列头优先字段别名，无别名降级为字段名。"""
+    from PyQt6.QtCore import Qt, QVariant
+    from qgis.core import QgsField, QgsVectorLayer
+
+    from app.ui.docks.attribute_dock import PagedAttributeTableModel
+
+    lyr = QgsVectorLayer("Point?crs=EPSG:4326", "别名", "memory")
+    lyr.dataProvider().addAttributes(
+        [QgsField("DI_LEI", QVariant.String), QgsField("MIAN_JI", QVariant.Double)]
+    )
+    lyr.updateFields()
+    lyr.setFieldAlias(0, "地类")
+
+    model = PagedAttributeTableModel(lyr, page_size=50)
+    # 列 0 = ID；列 1 = DI_LEI（有别名 → 别名）；列 2 = MIAN_JI（无别名 → 字段名）
+    assert model.headerData(0, Qt.Orientation.Horizontal) == "ID"
+    assert model.headerData(1, Qt.Orientation.Horizontal) == "地类"
+    assert model.headerData(2, Qt.Orientation.Horizontal) == "MIAN_JI"
+
+
+@pytest.mark.gui
+def test_widget_few_columns_stretch_to_fill(qgis_app):
+    """列数不够铺满时：最后一列拉伸填满可视区，不出横向滚动条。"""
+    from PyQt6.QtCore import QVariant
+    from qgis.core import QgsField, QgsVectorLayer
+
+    from app.ui.docks.attribute_dock import PagedAttributeTableWidget
+
+    lyr = QgsVectorLayer("Point?crs=EPSG:4326", "少列", "memory")
+    lyr.dataProvider().addAttributes([QgsField(f"f{i}", QVariant.String) for i in range(3)])
+    lyr.updateFields()
+
+    w = PagedAttributeTableWidget(lyr, page_size=50)
+    w.resize(600, 300)
+    w.show()
+    qgis_app.processEvents()
+
+    header = w.table_view.horizontalHeader()
+    char_w = w.table_view.fontMetrics().horizontalAdvance("中")
+    last = header.count() - 1
+    assert header.stretchLastSection() is True
+    assert header.sectionSize(last) > char_w * 8, "列少时最后一列应拉伸填满"
+    assert w.table_view.horizontalScrollBar().maximum() == 0, "列少不应出横向滚动条"
+
+
+@pytest.mark.gui
+def test_widget_many_columns_shows_horizontal_scrollbar(qgis_app):
+    """列数过多（固定列宽 + 非拉伸）时出现横向滚动条，不被压缩。"""
+    from PyQt6.QtCore import QVariant
+    from qgis.core import QgsField, QgsVectorLayer
+
+    from app.ui.docks.attribute_dock import PagedAttributeTableWidget
+
+    lyr = QgsVectorLayer("Point?crs=EPSG:4326", "多列", "memory")
+    lyr.dataProvider().addAttributes([QgsField(f"f{i:02d}", QVariant.String) for i in range(20)])
+    lyr.updateFields()
+    lyr.startEditing()
+    lyr.commitChanges()
+
+    w = PagedAttributeTableWidget(lyr, page_size=50)
+    w.table_view.setFixedWidth(300)
+    w.show()
+    qgis_app.processEvents()
+
+    scroll = w.table_view.horizontalScrollBar()
+    assert scroll.maximum() > 0, "20 列固定列宽超出可视区，应出现横向滚动条"

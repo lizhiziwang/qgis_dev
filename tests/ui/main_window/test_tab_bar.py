@@ -108,3 +108,22 @@ def test_main_window_default_app_name_when_unspecified(win):
     """不传 ``app_name`` 时走默认 "qgis_dev"（向后兼容现有测试）。"""
     assert win.windowTitle() == "qgis_dev"
     assert win._app_name == "qgis_dev"
+
+
+@pytest.mark.gui
+def test_close_clears_global_messagebar_property(win):
+    """关闭主窗口后，全局 ``messageBar`` 属性必须被清理（防悬空指针）。
+
+    回归：MainWindow 构造时把 ``self.messageBar`` 塞进 ``QgsApplication``
+    全局属性。若窗口销毁而不清理，属性里残留的 ``QgsMessageBar*`` 是悬空
+    指针，之后任何 ``send()`` 访问 ``property("messageBar")`` 都会 native
+    access violation（实测：测试里 MainWindow 被 GC 后，reproject 的
+    ``send("success", ...)`` 崩溃）。``closeEvent`` 必须同步清掉该属性。
+    """
+    from qgis.core import QgsApplication
+
+    app = QgsApplication.instance()
+    assert app is not None
+    assert app.property("messageBar") is win.messageBar
+    win.close()
+    assert app.property("messageBar") is None

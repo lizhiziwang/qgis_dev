@@ -850,6 +850,95 @@ def flow_panel_qss(t: Theme) -> str:
     """
 
 
+def login_qss(t: Theme) -> str:
+    """登录对话框 QSS（现代简洁卡片风格，与启动 splash 视觉统一）。
+
+    结构：
+    - 品牌区：应用图标 + 标题 + 副标题 + 强调线（``LoginTitle / LoginSubtitle /
+      LoginAccent``）
+    - 卡片表单：``LoginCard`` 圆角卡片，字段标签在输入框上方
+      （``LoginFieldLabel``），圆角输入框 ``LoginField``（聚焦/悬浮强调色描边）
+    - 操作：主色实心 ``LoginPrimary``（hover/按下自动加深）+ 描边 ``LoginCancel``
+    - 错误提示复用全局 ``loginError`` 规则（text_error 色），此处再显式声明一次
+
+    保留系统原生窗口边框，仅美化内容 → 既是系统程序对话框、又是现代化简洁风格。
+    """
+    primary = QColor(t.input_focus)
+    hover = primary.darker(112)
+    pressed = primary.darker(126)
+    return f"""
+    QDialog#LoginDialog {{
+        background-color: {t.window_bg};
+    }}
+    QLabel#LoginTitle {{
+        color: {t.menu_text};
+        font-size: 20px;
+        font-weight: 600;
+    }}
+    QLabel#LoginSubtitle {{
+        color: {t.text_secondary};
+        font-size: 12px;
+    }}
+    QLabel#LoginAccent {{
+        background-color: {t.input_focus};
+        border-radius: 1px;
+    }}
+    QFrame#LoginCard {{
+        background-color: {t.panel_bg};
+        border: 1px solid {t.border};
+        border-radius: 8px;
+    }}
+    QLabel#LoginFieldLabel {{
+        color: {t.text_secondary};
+        font-size: 11px;
+        font-weight: 600;
+    }}
+    QLineEdit#LoginField {{
+        background-color: {t.input_bg};
+        color: {t.menu_text};
+        border: 1px solid {t.input_border};
+        border-radius: 6px;
+        padding: 8px 10px;
+        font-size: 13px;
+        selection-background-color: {t.input_focus};
+        selection-color: #ffffff;
+    }}
+    QLineEdit#LoginField:hover {{
+        border-color: {t.input_focus};
+    }}
+    QLineEdit#LoginField:focus {{
+        border-color: {t.input_focus};
+    }}
+    QLabel#loginError {{
+        color: {t.text_error};
+        font-size: 12px;
+    }}
+    QPushButton#LoginPrimary {{
+        background-color: {t.input_focus};
+        color: #ffffff;
+        border: none;
+        border-radius: 6px;
+        padding: 8px 22px;
+        font-size: 13px;
+        font-weight: 600;
+    }}
+    QPushButton#LoginPrimary:hover {{ background-color: {hover.name()}; }}
+    QPushButton#LoginPrimary:pressed {{ background-color: {pressed.name()}; }}
+    QPushButton#LoginPrimary:focus {{ outline: none; }}
+    QPushButton#LoginCancel {{
+        background-color: transparent;
+        color: {t.menu_text};
+        border: 1px solid {t.input_border};
+        border-radius: 6px;
+        padding: 8px 22px;
+        font-size: 13px;
+    }}
+    QPushButton#LoginCancel:hover {{ background-color: {t.btn_hover}; }}
+    QPushButton#LoginCancel:pressed {{ background-color: {t.btn_pressed}; }}
+    QPushButton#LoginCancel:focus {{ outline: none; }}
+    """
+
+
 def apply_app_theme(theme: Theme) -> None:
     """把全局控件配色设到 QApplication（弹窗 / 右键菜单 / ToolTip 等顶层窗口）。
 
@@ -883,6 +972,7 @@ __all__ = [
     "app_qss",
     "canvas_zoom_qss",
     "flow_panel_qss",
+    "login_qss",
     "apply_app_theme",
     "apply_app_tooltip_style",
 ]

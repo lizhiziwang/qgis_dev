@@ -64,6 +64,11 @@ class ReprojectService:
             "TARGET_CRS": job.target_crs,
             "OUTPUT": job.output_path or f"memory:{job.output_name}",
         }
+        logger.info(
+            "执行算法 native:reprojectlayer：输出=%s 目标坐标系=%s",
+            job.output_path or f"memory:{job.output_name}",
+            job.target_crs.authid() or job.target_crs.description() or "(未指定)",
+        )
         try:
             results = processing.run("native:reprojectlayer", params, context=context, feedback=fb)
         except Exception as exc:  # noqa: BLE001
@@ -93,4 +98,10 @@ class ReprojectService:
             layer = results["OUTPUT"]
         if layer is None or not layer.isValid():
             raise RuntimeError(f"重投影结果图层无效：{job.output_name}")
+        logger.info(
+            "native:reprojectlayer 完成 → %s（%s 要素%s）",
+            layer.name(),
+            layer.featureCount(),
+            f"，文件={job.output_path}" if job.output_path else "",
+        )
         return layer

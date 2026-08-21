@@ -6,7 +6,8 @@
 设计：
 
 - 只依赖 PyQt6，不引入 ``qgis.*``，避免登录阶段拖 QGIS 启动开销。
-- 默认账号 ``admin / admin``（生产环境请接真实 auth 服务 / 配置文件）。
+- 默认账号来自 ``config/app.yaml`` 的 ``auth`` 段（bootstrap 传入）；未传时兜底
+  ``admin / admin``（生产环境请接真实 auth 服务 / 配置文件）。
 - 取消 → :meth:`reject`，外层 :func:`bootstrap.main` 据此 ``return 0`` 退出。
 """
 
@@ -15,20 +16,20 @@ from __future__ import annotations
 from typing import Optional
 
 from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
     QDialog,
-    QDialogButtonBox,
-    QFormLayout,
+    QFrame,
+    QHBoxLayout,
     QLabel,
     QLineEdit,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from app.ui.common.icons import Icons
 
-# 默认账号（dev / 占位用；生产请替换为读配置 / 调 auth 服务）
+# 兜底账号（无 config / 未传入时的默认值；实际值由 bootstrap 从 app.yaml 传入）
 _DEFAULT_USER = "admin"
 _DEFAULT_PASSWORD = "admin"
 
@@ -36,14 +37,25 @@ _DEFAULT_PASSWORD = "admin"
 class LoginDialog(QDialog):
     """启动登录对话框。"""
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        default_user: str = _DEFAULT_USER,
+        default_password: str = _DEFAULT_PASSWORD,
+        app_name: str = "qgis_dev",
+    ) -> None:
         super().__init__(parent)
-        self.setWindowTitle("登录 - qgis_dev")
+        self.setWindowTitle(f"登录 - {app_name}")
         self.setWindowIcon(Icons.app())
         self.setModal(True)
         self.setMinimumWidth(400)
         # 不显示问号按钮
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
+
+        # 本地校验账号（来自 config/app.yaml → bootstrap 传入）
+        self._default_user = default_user
+        self._default_password = default_password
+        self._app_name = app_name
 
         self._username: str = ""
 
@@ -52,70 +64,105 @@ class LoginDialog(QDialog):
     # ============================================================== UI
 
     def _build_ui(self) -> None:
-        # 配色统一走主题（app_qss，QApplication 级）：输入框 / 按钮 / 字体由
-        # 全局规则负责；二级文字、错误提示用 object-name 规则
-        # （QLabel#loginSubtitle / QLabel#loginError），颜色来自 Theme。
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(24, 24, 24, 24)
-        layout.setSpacing(12)
+        """现代简洁卡片式登录界面（与启动 splash 视觉统一）。
 
-        # 标题
-        title = QLabel("qgis_dev")
-        title_font = QFont()
-        title_font.setPointSize(18)
-        title_font.setBold(True)
-        title.setFont(title_font)
+        结构：品牌区（图标 + 应用名 + 副标题 + 强调线）→ 卡片表单（字段标签
+        在输入框上方、圆角输入框）→ 右下角操作（取消 + 主色登录按钮）。
+        配色全部来自当前主题（:func:`app.ui.common.theme.login_qss`），保留
+        系统原生窗口边框 → 既是系统程序对话框、内容又是现代化简洁风格。
+        """
+        from app.ui.common.theme import ThemeManager, login_qss
+
+        self.setObjectName("LoginDialog")
+        self.setFixedWidth(400)
+        self.setStyleSheet(login_qss(ThemeManager.instance().current()))
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(32, 28, 32, 24)
+        layout.setSpacing(10)
+
+        # ---- 品牌区 ----
+        icon = QLabel(self)
+        icon.setPixmap(Icons.app().pixmap(56, 56))
+        icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.addWidget(icon)
+
+        title = QLabel(self._app_name, self)
+        title.setObjectName("LoginTitle")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(title)
 
-        subtitle = QLabel("矢量数据处理工具")
-        subtitle.setObjectName("loginSubtitle")
+        subtitle = QLabel("登录您的账号以继续", self)
+        subtitle.setObjectName("LoginSubtitle")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.addWidget(subtitle)
 
-        layout.addSpacing(8)
+        accent = QLabel(self)
+        accent.setObjectName("LoginAccent")
+        accent.setFixedSize(48, 2)
+        layout.addWidget(accent, alignment=Qt.AlignmentFlag.AlignHCenter)
 
-        # 表单
-        form = QFormLayout()
-        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
-        form.setSpacing(8)
+        layout.addSpacing(16)
 
-        self.username_edit = QLineEdit()
+        # ---- 卡片表单 ----
+        card = QFrame(self)
+        card.setObjectName("LoginCard")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(20, 20, 20, 20)
+        card_layout.setSpacing(6)
+
+        user_label = QLabel("用户名", card)
+        user_label.setObjectName("LoginFieldLabel")
+        card_layout.addWidget(user_label)
+
+        self.username_edit = QLineEdit(card)
+        self.username_edit.setObjectName("LoginField")
         self.username_edit.setPlaceholderText("请输入用户名")
-        self.username_edit.setText(_DEFAULT_USER)  # dev 模式默认填上
-        form.addRow("用户名：", self.username_edit)
+        card_layout.addWidget(self.username_edit)
 
-        self.password_edit = QLineEdit()
+        card_layout.addSpacing(10)
+
+        pwd_label = QLabel("密码", card)
+        pwd_label.setObjectName("LoginFieldLabel")
+        card_layout.addWidget(pwd_label)
+
+        self.password_edit = QLineEdit(card)
+        self.password_edit.setObjectName("LoginField")
         self.password_edit.setPlaceholderText("请输入密码")
         self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.password_edit.setText(_DEFAULT_PASSWORD)  # dev 模式默认填上
-        form.addRow("密  码：", self.password_edit)
+        card_layout.addWidget(self.password_edit)
 
-        layout.addLayout(form)
-
-        # 错误标签（初始隐藏）
-        self.error_label = QLabel("")
+        # 错误提示（占位预留高度，出现时布局不跳动）
+        self.error_label = QLabel("", card)
         self.error_label.setObjectName("loginError")
-        self.error_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.error_label.setMinimumHeight(20)
-        layout.addWidget(self.error_label)
+        self.error_label.setMinimumHeight(18)
+        card_layout.addWidget(self.error_label)
 
+        layout.addWidget(card)
         layout.addStretch(1)
 
-        # 按钮
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
-        )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("登录")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
-        # 默认焦点在"登录"按钮上，回车直接登录
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setDefault(True)
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setAutoDefault(True)
-        buttons.accepted.connect(self._on_accept)
-        buttons.rejected.connect(self.reject)
-        layout.addWidget(buttons)
+        # ---- 操作区（右下角，符合系统对话框习惯）----
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        btn_row.addStretch(1)
 
-        # 让密码框回车直接触发 accept
+        cancel_btn = QPushButton("取消", self)
+        cancel_btn.setObjectName("LoginCancel")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        login_btn = QPushButton("登  录", self)
+        login_btn.setObjectName("LoginPrimary")
+        login_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        login_btn.setDefault(True)
+        login_btn.setAutoDefault(True)
+
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(login_btn)
+        layout.addLayout(btn_row)
+
+        cancel_btn.clicked.connect(self.reject)
+        login_btn.clicked.connect(self._on_accept)
+        # 密码框回车直接触发登录
         self.password_edit.returnPressed.connect(self._on_accept)
 
     # ============================================================== 行为
@@ -126,7 +173,7 @@ class LoginDialog(QDialog):
         if not username or not password:
             self._show_error("用户名和密码不能为空")
             return
-        if username != _DEFAULT_USER or password != _DEFAULT_PASSWORD:
+        if username != self._default_user or password != self._default_password:
             self._show_error("用户名或密码错误")
             return
         self._username = username

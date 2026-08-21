@@ -109,6 +109,13 @@ class ShortestPathService:
 
         params = build_shortest_path_params(job, job.output_path or f"memory:{job.output_name}")
 
+        logger.info(
+            "执行算法 native:shortestpathpointtopoint：输出=%s 起点=%s 终点=%s strategy=%s",
+            job.output_path or f"memory:{job.output_name}",
+            job.start_point.asWkt(),
+            job.end_point.asWkt(),
+            job.strategy,
+        )
         try:
             res = processing.run(
                 "native:shortestpathpointtopoint", params, context=context, feedback=fb
@@ -137,4 +144,10 @@ class ShortestPathService:
         if layer is None or not layer.isValid():
             raise RuntimeError(f"最短路径结果图层无效：{job.output_name}")
         travel_cost = res.get("TRAVEL_COST")
+        logger.info(
+            "native:shortestpathpointtopoint 完成 → %s（总代价=%s%s）",
+            layer.name(),
+            travel_cost,
+            f"，文件={job.output_path}" if job.output_path else "",
+        )
         return layer, travel_cost

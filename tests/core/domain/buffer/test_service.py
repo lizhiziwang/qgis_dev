@@ -113,8 +113,12 @@ def test_buffer_succeeds_on_real_gdb(gdb_layer):
 @pytest.mark.gui
 def test_output_path_writes_gpkg(qgis_app, tmp_path):
     """给定输出文件路径时写入 gpkg，并返回从文件加载的图层。"""
+    from processing.core.Processing import Processing
     from PyQt6.QtCore import QVariant
     from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsVectorLayer
+
+    # 显式初始化：该测试可能先于其它调用了 Processing.initialize() 的测试运行
+    Processing.initialize()
 
     layer = QgsVectorLayer("Polygon?crs=EPSG:4326", "缓冲输入", "memory")
     layer.dataProvider().addAttributes([QgsField("name", QVariant.String)])
@@ -132,3 +136,54 @@ def test_output_path_writes_gpkg(qgis_app, tmp_path):
     assert result.providerType() == "ogr"
     assert result.featureCount() == 1
     assert Path(out_path).exists()
+
+
+@pytest.mark.gui
+def test_buffer_logs_algorithm_execution(qgis_app):
+    """算法运行前后分别记录「执行算法 / 完成」日志（供日志面板追溯）。"""
+    import logging
+
+    from processing.core.Processing import Processing
+    from PyQt6.QtCore import QVariant
+    from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsVectorLayer
+
+    # 不能用 caplog：conftest 的 _isolate_logger 会在代码首次 get_logger 时
+    # 触发 _RootSink.configure 清掉 caplog 的 handler。这里先 configure 再挂
+    # 临时 list handler（同 tests/ui/main_window/test_logging.py）。
+    from app.infra.logging import get_logger
+
+    get_logger()
+
+    class _ListHandler(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.records: list[str] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.records.append(record.getMessage())
+
+    root = logging.getLogger()
+    handler = _ListHandler()
+    handler.setLevel(logging.INFO)
+    root.addHandler(handler)
+    try:
+        Processing.initialize()
+
+        layer = QgsVectorLayer("Polygon?crs=EPSG:4326", "缓冲输入", "memory")
+        layer.dataProvider().addAttributes([QgsField("name", QVariant.String)])
+        layer.updateFields()
+        feature = QgsFeature(layer.fields())
+        feature.setGeometry(QgsGeometry.fromWkt("POLYGON((0 0,10 0,10 10,0 10,0 0))"))
+        feature.setAttribute("name", "A")
+        layer.dataProvider().addFeatures([feature])
+
+        result = BufferService().run(
+            BufferJob(layer=layer, distance=1.0, output_name="日志测试")
+        )
+        assert result.isValid()
+    finally:
+        root.removeHandler(handler)
+
+    messages = handler.records
+    assert any("执行算法 native:buffer" in m for m in messages), f"缺少执行日志：{messages}"
+    assert any("native:buffer 完成" in m for m in messages), f"缺少完成日志：{messages}"

@@ -29,6 +29,7 @@ from dataclasses import dataclass, field
 from typing import Any, Optional, TYPE_CHECKING
 
 from app.core.domain.geom_cleanup import copy_with_widened_string_fields
+from app.infra.logging import get_logger
 
 if TYPE_CHECKING:
     from qgis.core import (
@@ -38,6 +39,8 @@ if TYPE_CHECKING:
         QgsProcessingOutputDefinition,
         QgsProcessingParameterDefinition,
     )
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -106,12 +109,18 @@ class GenericAlgService:
                 job.output_path or f"memory:{job.output_name}"
             )
 
+        logger.info(
+            "执行算法 %s：输出=%s",
+            job.algo_id,
+            job.output_path or f"memory:{job.output_name}",
+        )
         results = processing.run(
             job.algo_id,
             params,
             context=context,
             feedback=fb,
         )
+        logger.info("%s 完成：%s", job.algo_id, self._describe_output(primary_output, results))
 
         # 按输出定义装配返回值
         if primary_output is not None:
@@ -171,6 +180,16 @@ class GenericAlgService:
         for odef in alg.destinationParameterDefinitions():
             return odef
         return None
+
+    def _describe_output(self, primary_output, results: dict) -> str:
+        """把 ``results`` 里的主输出整理成日志可读的字符串。"""
+        if primary_output is None:
+            return "无输出（信息型算法）"
+        value = results.get(primary_output.name())
+        if value is None:
+            return f"{primary_output.name()}=(空)"
+        name = value.name() if hasattr(value, "name") else str(value)
+        return f"{primary_output.name()}={name}"
 
     def _wrap_destination_result(self, results: dict, dest_param, job: GenericAlgJob):
         """按 destination 参数类型把 ``results["OUTPUT"]`` 包装成图层或路径 dict。

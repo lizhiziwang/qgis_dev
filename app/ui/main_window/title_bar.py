@@ -22,7 +22,15 @@ import time
 
 from PyQt6.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
-from PyQt6.QtWidgets import QHBoxLayout, QLabel, QMenu, QToolButton, QWidget
+from PyQt6.QtWidgets import (
+    QButtonGroup,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QPushButton,
+    QToolButton,
+    QWidget,
+)
 
 from app.ui.common.icons import Icons
 from app.ui.common.theme import THEMES, ThemeManager, title_bar_qss
@@ -110,6 +118,148 @@ def _theme_icon() -> QIcon:
     return QIcon(pm)
 
 
+#: 任务模式 / 工程模式 — ``TitleBar.mode_switch`` 持有的状态 key。
+#: 暴露成模块级常量便于 ``MainWindow`` / 其它模块做相等性比较。
+MODE_TASK = "task"
+MODE_PROJECT = "project"
+_MODE_OPTIONS: list[tuple[str, str]] = [
+    # (key, 显示文本) —— 左→右排列
+    (MODE_TASK, "任务模式"),
+    (MODE_PROJECT, "工程模式"),
+]
+
+
+def _mode_switch_qss(theme) -> str:
+    """生成 ``_ModeSwitch`` 在当前主题下的样式表（胶囊形分段控件）。
+
+    视觉：
+    - 整体外框：与 ``menu_bg`` 同色的圆角矩形，作为「轨道」
+    - 未选中：轨道色（``menu_bg``）底 + ``menu_text`` 普通文字。**不能用
+      transparent**：蓝/绿主题的标题栏是主题主色，透明会让标题栏颜色从按钮后
+      透出，选中段和未选中段看起来同色，看不出选中态。
+    - 选中项：强调色（``input_focus``）底 + 白字。但蓝/绿主题
+      ``input_focus == title_bg``（标题栏即主题主色），选中段与标题栏同色会
+      看不出选中态，此时改用深色 ``menu_text`` 打底，白字照常 → 选中段始终
+      与标题栏形成对比。
+    - hover：``menu_hover`` 微调
+    """
+    sel_bg = theme.input_focus
+    if sel_bg == theme.title_bg:
+        sel_bg = theme.menu_text
+    return (
+        # 容器：圆角胶囊，底色 = 菜单背景，营造「轨道」感
+        f"QWidget#ModeSwitchContainer {{"
+        f"  background-color: {theme.menu_bg};"
+        f"  border: 1px solid {theme.border};"
+        f"  border-radius: {TITLE_BAR_HEIGHT // 2}px;"
+        f"}}"
+        # 按钮：未选中与轨道同色（避免标题栏从后透出），文字用菜单文字色
+        f"QPushButton#ModeSwitchBtn {{"
+        f"  background-color: {theme.menu_bg};"
+        f"  color: {theme.menu_text};"
+        f"  border: none;"
+        f"  border-radius: {TITLE_BAR_HEIGHT // 2}px;"
+        f"  padding: 0 12px;"
+        f"  font-size: 12px;"
+        f"}}"
+        # hover（仅未选中态）
+        f"QPushButton#ModeSwitchBtn:hover {{"
+        f"  background-color: {theme.menu_hover};"
+        f"}}"
+        # 选中态：强调色（必要时回退 menu_text）背景 + 白字
+        f"QPushButton#ModeSwitchBtn:checked {{"
+        f"  background-color: {sel_bg};"
+        f"  color: white;"
+        f"}}"
+        f"QPushButton#ModeSwitchBtn:checked:hover {{"
+        f"  background-color: {sel_bg};"
+        f"  color: white;"
+        f"}}"
+    )
+
+
+class _ModeSwitch(QWidget):
+    """任务模式 / 工程模式 二选一切换开关（胶囊形分段控件）。
+
+    设计：
+    - 顶部 chrome 的视觉密度低、宽 34px，所以这里把两个按钮合并到同一个圆角
+      容器里，左「任务模式」右「工程模式」，选中态走强调色底 + 白字（用
+      ``input_focus`` 主题色，4 个主题都已定义）
+    - 状态管理：内部 ``_mode``（str），外部通过 :attr:`mode` 只读属性读取
+    - 事件：用户点击切换 → emit :attr:`mode_changed`
+    - 默认值：``MODE_PROJECT``（GIS 工程模式更常用）
+    """
+
+    mode_changed = pyqtSignal(str)  # 新模式 key（MODE_TASK / MODE_PROJECT）
+
+    def __init__(self, parent: QWidget = None) -> None:
+        super().__init__(parent)
+        self.setObjectName("ModeSwitchContainer")
+        self.setFixedHeight(TITLE_BAR_HEIGHT - 8)  # 上下各留 4px 边距
+        # 普通 QWidget 的 QSS background / border 必须开 WA_StyledBackground 才
+        # 渲染。否则「轨道」容器是透明的，蓝/绿主题（input_focus == title_bg）
+        # 下选中段会直接坐在同色标题栏上 → 隐形（看不出哪个模式被选中）。
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        self._mode = MODE_PROJECT  # 默认工程模式
+        self._buttons: dict[str, QPushButton] = {}
+        self._group = QButtonGroup(self)
+        self._group.setExclusive(True)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+
+        for key, label in _MODE_OPTIONS:
+            btn = QPushButton(label, self)
+            btn.setObjectName("ModeSwitchBtn")
+            btn.setCheckable(True)
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            btn.setFixedHeight(self.height())
+            btn.setMinimumWidth(64)
+            # 在 group 中按顺序加 → buttonId 0 / 1，用于反向查 key
+            self._group.addButton(btn, len(self._buttons))
+            self._buttons[key] = btn
+            layout.addWidget(btn)
+
+        # 默认勾选 + 信号转发
+        self._buttons[self._mode].setChecked(True)
+        self._group.idClicked.connect(self._on_id_clicked)
+
+    # --------------------------------------------------------- 公共接口
+
+    @property
+    def mode(self) -> str:
+        """当前模式 key（``MODE_TASK`` / ``MODE_PROJECT``）。"""
+        return self._mode
+
+    def set_mode(self, key: str, *, emit: bool = True) -> None:
+        """程序化设置模式（如从工程文件恢复）；默认 emit 触发信号。"""
+        if key not in self._buttons:
+            return
+        if key == self._mode:
+            return
+        self._mode = key
+        self._buttons[key].setChecked(True)
+        if emit:
+            self.mode_changed.emit(key)
+
+    def apply_theme(self, theme) -> None:
+        """主题切换时刷新样式（colors 全从 theme 字段取，无硬编码）。"""
+        self.setStyleSheet(_mode_switch_qss(theme))
+
+    # --------------------------------------------------------- 内部
+
+    def _on_id_clicked(self, button_id: int) -> None:
+        # buttonId 顺序与 _MODE_OPTIONS 一致
+        if 0 <= button_id < len(_MODE_OPTIONS):
+            key = _MODE_OPTIONS[button_id][0]
+            if key != self._mode:
+                self._mode = key
+                self.mode_changed.emit(key)
+
+
 class _TitleButton(QToolButton):
     """窗口控制按钮：hover 时切换图标（关闭按钮 hover 变白、背景变红）。"""
 
@@ -149,6 +299,7 @@ class TitleBar(QWidget):
     minimize_requested = pyqtSignal()
     maximize_requested = pyqtSignal()
     close_requested = pyqtSignal()
+    mode_changed = pyqtSignal(str)  # 转发 _ModeSwitch.mode_changed（``MODE_TASK`` / ``MODE_PROJECT``）
 
     def __init__(
         self,
@@ -201,6 +352,11 @@ class TitleBar(QWidget):
         self._btn_theme.setMenu(self._theme_menu)
         layout.addWidget(self._btn_theme)
 
+        # 任务模式 / 工程模式 二选一开关（胶囊形分段控件）
+        self._mode_switch = _ModeSwitch(self)
+        self._mode_switch.mode_changed.connect(self.mode_changed)
+        layout.addSpacing(4)
+        layout.addWidget(self._mode_switch)
         layout.addSpacing(4)
 
         # 窗口控制按钮
@@ -231,6 +387,7 @@ class TitleBar(QWidget):
             for b in (
                 self._user_btn,
                 self._btn_theme,
+                self._mode_switch,
                 self._btn_min,
                 self._btn_max,
                 self._btn_close,
@@ -317,6 +474,7 @@ class TitleBar(QWidget):
         )
         self._user_menu.setStyleSheet(menu_style)
         self._theme_menu.setStyleSheet(menu_style)
+        self._mode_switch.apply_theme(theme)
         self._rebuild_theme_menu()
 
     def is_interactive_child(self, widget) -> bool:

@@ -6,9 +6,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional
 
 from app.core.domain.geom_cleanup import copy_with_widened_string_fields
+from app.infra.logging import get_logger
 
 if TYPE_CHECKING:
     from qgis.core import QgsProcessingFeedback, QgsVectorLayer
+
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,10 @@ class OrientedBBoxService:
             "INPUT": input_layer,  # 传图层对象，不要传 job.layer.source()
             "OUTPUT": job.output_path or f"memory:{job.output_name}",
         }
+        logger.info(
+            "执行算法 native:orientedminimumboundingbox：输出=%s",
+            job.output_path or f"memory:{job.output_name}",
+        )
         results = processing.run(
             "native:orientedminimumboundingbox",
             params,
@@ -70,4 +77,10 @@ class OrientedBBoxService:
             layer = results["OUTPUT"]
         if layer is None or not layer.isValid():
             raise RuntimeError(f"最小外包矩形结果图层无效：{job.output_name}")
+        logger.info(
+            "native:orientedminimumboundingbox 完成 → %s（%s 要素%s）",
+            layer.name(),
+            layer.featureCount(),
+            f"，文件={job.output_path}" if job.output_path else "",
+        )
         return layer

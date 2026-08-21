@@ -21,6 +21,7 @@ from typing import Optional
 from PyQt6.QtCore import QEvent, QPoint, Qt
 from PyQt6.QtGui import QAction, QCloseEvent, QColor, QKeySequence
 from PyQt6.QtWidgets import (
+    QDialog,
     QListWidget,
     QMainWindow,
     QMenu,
@@ -58,6 +59,7 @@ from qgis.gui import (
 from app.core.domain.editing import LayerEditService
 from app.core.domain.query import SpaceQueryService
 from app.infra.fs.paths import Paths
+from app.infra.logging import get_logger
 from app.ui.common.frameless import FramelessMixin
 from app.ui.common.icons import Icons
 from app.ui.common.theme import ThemeManager, toolbar_qss, window_qss
@@ -71,6 +73,8 @@ from app.ui.main_window.draw_toolbar import DigitizingToolbar
 from app.ui.main_window.layer_dock import LayerDock
 from app.ui.main_window.status_bar import StatusBar
 from app.ui.main_window.tool_bar import ToolBar
+
+logger = get_logger(__name__)
 
 # 让组件行为兼容旧 `component.SpaceQuery` 等可选的 legacy 模块
 # （这些模块在阶段 4 后期会从 legacy 重新启用，或被新 service 替换）
@@ -184,6 +188,9 @@ class MainWindow(FramelessMixin, QMainWindow):
         qgis_app = QgsApplication.instance()
         if qgis_app is not None:
             qgis_app.setProperty("messageBar", self.messageBar)
+        # 窗口销毁时必须清理该属性，否则残留悬空 QgsMessageBar*，
+        # 后续 send() 访问会 native access violation
+        self.destroyed.connect(self._clear_global_messagebar)
         layout.addWidget(self.messageBar)
 
         layout.addWidget(self.canvas)
@@ -347,11 +354,20 @@ class MainWindow(FramelessMixin, QMainWindow):
         """顶部 chrome 主题装配。
 
         无边框标题栏 + 菜单栏的装配已由 :meth:`FramelessMixin.enable_frameless`
-        完成（__init__ 开头调用）；这里只负责窗口级主题：用户信息 + 主题连接 + QSS。
+        完成（__init__ 开头调用）；这里只负责窗口级主题：用户信息 + 主题连接 + QSS，
+        并把标题栏模式开关的 ``mode_changed`` 信号接上日志。
         """
         self._apply_user_info_to_titlebar()
+        self.title_bar.mode_changed.connect(self._on_mode_changed)
         ThemeManager.instance().theme_changed.connect(self._on_theme_changed)
         self._apply_theme_qss()
+
+    def _on_mode_changed(self, mode: str) -> None:
+        """任务 / 工程模式切换 → 记日志（供日志面板追溯操作历史）。"""
+        from app.ui.main_window.title_bar import MODE_PROJECT, MODE_TASK
+
+        label = {MODE_PROJECT: "工程模式", MODE_TASK: "任务模式"}.get(mode, mode)
+        logger.info("模式切换：%s", label)
 
     def _apply_theme_qss(self) -> None:
         """按当前主题重绘窗体 chrome（菜单栏/状态栏/Dock）、主工具条和画布底色。"""
@@ -523,6 +539,9 @@ class MainWindow(FramelessMixin, QMainWindow):
         self.project.addMapLayer(layer, False)
         group = getattr(self, "_data_group", None) or self.project.layerTreeRoot()
         group.insertLayer(0, layer)
+        # 所有用户导入（打开文件 / 浏览器双击 / 拖拽）都走这里，统一记日志
+        src = getattr(layer, "path_c", None) or layer.source()
+        logger.info("导入图层：%s（来源=%s）", layer.name(), src)
 
     def _load_config_base_tile_into_ref_group(self) -> None:
         """加载配置底图并移入"参考图层"分组（底图已平铺挂根，需移动）。"""
@@ -758,6 +777,7 @@ class MainWindow(FramelessMixin, QMainWindow):
         self.messageBar.pushSuccess(
             "新建图层", f"已创建 {os.path.basename(path)}"
         )
+        logger.info("新建矢量文件：%s（驱动=%s）", path, driver)
 
     def _on_browser_add_gdb_layer(self, item) -> None:
         """向已存在的 File Geodatabase（.gdb）中新增一个空图层。"""
@@ -798,6 +818,7 @@ class MainWindow(FramelessMixin, QMainWindow):
             return
         item.refresh()
         self.messageBar.pushSuccess("新增图层", f"已创建 {layer_name}")
+        logger.info("GDB 新增图层：%s → %s", layer_name, gdb)
 
     # ---- 画布拖拽添加图层（数据浏览器拖出 → 画布 drop）----
 
@@ -1335,7 +1356,11 @@ class MainWindow(FramelessMixin, QMainWindow):
                 btn.setText("取消")
             elif t in ("help", "帮助"):
                 btn.hide()
-        dlg.exec()
+        result = dlg.exec()
+        if result == QDialog.DialogCode.Accepted:
+            # 对话框内部已把图层写出（exec 的 OK 槽触发保存）；记日志
+            out = dlg.fileName() or ""
+            logger.info("导出图层：%s → %s", layer.name(), out)
 
     def _open_layer_properties(self, layer) -> None:
         try:
@@ -1387,4 +1412,25 @@ class MainWindow(FramelessMixin, QMainWindow):
         try:
             self.project.clear()
         finally:
+            self._clear_global_messagebar()
             event.accept()
+
+    def _clear_global_messagebar(self, *args) -> None:
+        """清理全局 ``messageBar`` 属性（防悬空指针 native 崩溃）。
+
+        构造时把 ``self.messageBar`` 塞进 ``QgsApplication`` 全局属性（兼容旧
+        ``sendMessageToTopParent``）。如果窗口销毁而不清理，属性里残留的
+        ``QgsMessageBar*`` 就是悬空指针——之后任何 ``send()`` 访问该属性都会
+        access violation（实测：测试里 MainWindow 被 GC 后，reproject 的
+        ``send("success", ...)`` 在 ``property("messageBar")`` 处崩溃）。
+
+        ``closeEvent`` 与 ``destroyed`` 信号都走这里；两者分别覆盖「用户主动
+        关闭」和「被 GC / deleteLater 销毁」两条路径。
+        """
+        qgis_app = QgsApplication.instance()
+        if qgis_app is None:
+            return
+        try:
+            qgis_app.setProperty("messageBar", None)
+        except RuntimeError:
+            pass  # 对象已部分销毁，属性残留交给 Qt 自身兜底

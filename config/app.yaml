@@ -12,6 +12,11 @@ app:
   language: zh-Hans       # i18n
   crs: EPSG:4490          # 默认坐标系（中国 2000）
 
+# 启动登录的本地校验账号（dev 占位；未接真实 auth 服务前只认这一对账号）
+auth:
+  username: admin
+  password: admin
+
 map:
   # 启动后自动加载的 XYZ 底图；enabled: false 则不加载
   base_tile:

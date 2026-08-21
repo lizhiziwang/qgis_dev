@@ -89,9 +89,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             )
             return _run_qgis_app(cfg, qgis, app, splash)
 
-        # 没有有效凭证 → 弹登录
+        # 没有有效凭证 → 弹登录（默认账号来自 config/app.yaml 的 auth 段）
         logger.info("本地无有效凭证，弹出登录对话框")
-        username = _run_login_dialog()
+        username = _run_login_dialog(cfg)
         if not username:
             logger.info("登录取消，退出")
             return 0
@@ -219,13 +219,21 @@ def _ensure_qgis_application(qgis: QgisRuntime):
     return app
 
 
-def _run_login_dialog() -> Optional[str]:
-    """弹登录对话框；返回登录成功的用户名，或 ``None``（取消 / 校验失败）。"""
+def _run_login_dialog(cfg: AppConfig) -> Optional[str]:
+    """弹登录对话框；返回登录成功的用户名，或 ``None``（取消 / 校验失败）。
+
+    校验账号来自 ``config/app.yaml`` 的 ``auth`` 段（未接真实 auth 服务前
+    只认这一对本地账号）。
+    """
     from PyQt6.QtWidgets import QDialog
 
     from app.ui.dialogs.login import LoginDialog
 
-    dlg = LoginDialog()
+    dlg = LoginDialog(
+        default_user=cfg.auth.username,
+        default_password=cfg.auth.password,
+        app_name=cfg.app_name,
+    )
     if dlg.exec() == QDialog.DialogCode.Accepted:
         logger.info("用户登录成功 username=%s", dlg.username())
         return dlg.username()

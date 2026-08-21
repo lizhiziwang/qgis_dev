@@ -105,6 +105,12 @@ class BufferService:
             "DISSOLVE": job.dissolve,
             "OUTPUT": job.output_path or f"memory:{job.output_name}",
         }
+        logger.info(
+            "执行算法 native:buffer：输出=%s 距离=%s 融合=%s",
+            job.output_path or f"memory:{job.output_name}",
+            job.distance,
+            job.dissolve,
+        )
         try:
             results = processing.run("native:buffer", params, context=context, feedback=fb)
         except Exception as exc:  # noqa: BLE001
@@ -139,4 +145,10 @@ class BufferService:
             layer = results["OUTPUT"]
         if layer is None or not layer.isValid():
             raise RuntimeError(f"缓冲区结果图层无效：{job.output_name}")
+        logger.info(
+            "native:buffer 完成 → %s（%s 要素%s）",
+            layer.name(),
+            layer.featureCount(),
+            f"，文件={job.output_path}" if job.output_path else "",
+        )
         return layer

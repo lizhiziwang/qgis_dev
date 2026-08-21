@@ -84,6 +84,19 @@ def test_app_config_map_defaults_to_none():
     assert cfg.map.base_tile is None
 
 
+def test_app_config_auth_parses():
+    cfg = AppConfig.from_dict({"auth": {"username": "root", "password": "secret"}})
+    assert cfg.auth.username == "root"
+    assert cfg.auth.password == "secret"
+
+
+def test_app_config_auth_defaults_to_admin_admin():
+    """未配 auth 段时兜底 admin/admin（本地 dev 校验账号）。"""
+    cfg = AppConfig.from_dict({})
+    assert cfg.auth.username == "admin"
+    assert cfg.auth.password == "admin"
+
+
 def test_qgis_runtime_for_dev_builds_paths():
     base = Path("D:/qgis")
     r = QgisRuntime.for_dev(base)
