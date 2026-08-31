@@ -91,7 +91,6 @@ _NEW_VECTOR_FORMATS = (
     ("CSV 表格", "csv", "CSV"),
 )
 
-
 class MainWindow(FramelessMixin, QMainWindow):
     """主窗口。"""
 
@@ -116,6 +115,8 @@ class MainWindow(FramelessMixin, QMainWindow):
 
         self.setWindowTitle(self._app_name)
         self.setGeometry(100, 100, 1200, 800)
+        # 最小宽高 500×300：无边框窗口边缘拖拽缩放下限
+        self.setMinimumSize(500, 300)
         self.setWindowIcon(Icons.app())
 
         # ---- 项目 + 图层树桥（先建好，_build_central_widget 要用 self.project）----
@@ -126,6 +127,11 @@ class MainWindow(FramelessMixin, QMainWindow):
         self.canvas = self._build_canvas()
         self.bridge = QgsLayerTreeMapCanvasBridge(self.tree_root, self.canvas)
         self.bridge.setAutoSetupOnFirstLayer(True)
+        # 后台瓦片预热：天地图 XYZ 底图拖动/放大后白屏的修复（渲染完成 →
+        # 后台离屏预取四周 8 个相邻视口的瓦片进缓存，平移时命中缓存不白屏）
+        from app.core.domain.tile_prefetch import TilePrefetcher
+
+        self._tile_prefetcher = TilePrefetcher(self.canvas, project=self.project, parent=self)
         self._build_central_widget()
 
         # ---- 画布左上角缩放工具（覆盖层）----
@@ -221,17 +227,24 @@ class MainWindow(FramelessMixin, QMainWindow):
     def _build_tool_bar(self) -> None:
         callbacks = {
             "pan": self._on_pan,
+            "select_point": self._on_select_point,
+            "select_box": self._on_select_box,
+            "clear_selection": self._on_clear_selection,
             "identify": self._on_identify,
             "zoom_in": self._on_zoom_in,
             "zoom_out": self._on_zoom_out,
             "quality": self._on_quality,
             "analyse": self._on_analyse,
+            "swipe": self._on_swipe,
+            "qmap_compare": self._on_qmap_compare,
             "zoom_full": self._on_zoom_full,
             "refresh": self._on_refresh,
             "test": self._on_test,
         }
         self.tool_bar_builder = ToolBar(self)
         self.tool_bar = self.tool_bar_builder.build(callbacks)
+        # 工具条按钮高亮跟随画布激活的地图工具（含启动时默认平移）
+        self.canvas.mapToolSet.connect(self._on_map_tool_set)
 
         # 追加绘图 / 编辑工具条（2 个下拉按钮，与旧 component.draw_tool.Draw 一致）
         self.digitizing_toolbar = DigitizingToolbar(
@@ -401,13 +414,60 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     # ===================================================== 工具回调
 
+    def _tool_key(self, tool) -> Optional[str]:
+        """地图工具 → 工具条按钮 key（None 表示非工具条地图工具，不高亮）。"""
+        if tool is None:
+            return None
+        if tool is self._pan_tool:
+            return "pan"
+        if tool is self._zoom_in_tool:
+            return "zoom_in"
+        if tool is self._zoom_out_tool:
+            return "zoom_out"
+        return {
+            "PointSelectTool": "select_point",
+            "RectSelectTool": "select_box",
+            "FindFeatureTool": "identify",
+            "SwipeTool": "swipe",
+        }.get(type(tool).__name__)
+
+    def _on_map_tool_set(self, tool) -> None:
+        """画布激活的地图工具变化 → 同步工具条单选高亮。"""
+        self.tool_bar_builder.set_active(self._tool_key(tool))
+
     def _on_pan(self) -> None:
         self.canvas.setMapTool(self._pan_tool)
+        # setMapTool(同一工具) 不触发 mapToolSet：重复点击已激活按钮时
+        # 勾选态被 QAction 自动翻转，这里显式恢复
+        self.tool_bar_builder.set_active("pan")
+
+    def _on_select_point(self) -> None:
+        from app.ui.tools.select_feature import PointSelectTool
+        self._select_point_tool = PointSelectTool(self.canvas)
+        self.canvas.setMapTool(self._select_point_tool)
+        self.tool_bar_builder.set_active("select_point")
+
+    def _on_select_box(self) -> None:
+        from app.ui.tools.select_feature import RectSelectTool
+        self._select_box_tool = RectSelectTool(self.canvas)
+        self.canvas.setMapTool(self._select_box_tool)
+        self.tool_bar_builder.set_active("select_box")
+
+    def _on_clear_selection(self) -> None:
+        """取消选择：清空**所有矢量图层**的当前选择并刷新画布。"""
+        from PyQt6.QtCore import QTimer
+        from qgis.core import QgsVectorLayer
+
+        for layer in self.project.mapLayers().values():
+            if isinstance(layer, QgsVectorLayer) and layer.selectedFeatureCount() > 0:
+                layer.removeSelection()
+        QTimer.singleShot(0, self.canvas.refresh)
 
     def _on_identify(self) -> None:
         from app.ui.tools.find_feature import FindFeatureTool
         self._find_feature_tool = FindFeatureTool(self.canvas, parent=self)
         self.canvas.setMapTool(self._find_feature_tool)
+        self.tool_bar_builder.set_active("identify")
 
     def show_feature_info(self, result, highlight=None) -> None:
         """点击识别后把要素详情显示到右侧 Dock（懒创建，内容就地刷新）。"""
@@ -418,9 +478,11 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def _on_zoom_in(self) -> None:
         self.canvas.setMapTool(self._zoom_in_tool)
+        self.tool_bar_builder.set_active("zoom_in")
 
     def _on_zoom_out(self) -> None:
         self.canvas.setMapTool(self._zoom_out_tool)
+        self.tool_bar_builder.set_active("zoom_out")
 
     def _on_quality(self) -> None:
         from app.ui.dialogs.check_viewer import CheckViewerDialog
@@ -434,6 +496,80 @@ class MainWindow(FramelessMixin, QMainWindow):
             self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._analyse_dock)
         self._analyse_dock.show()
         self._analyse_dock.raise_()
+
+    def _on_swipe(self) -> None:
+        """卷帘对比：分屏会话已存续则直接恢复（不弹窗）；否则弹窗选栅格激活。
+
+        分屏是视图状态常驻：切到任意工具（平移/缩放/画要素/查询）后覆盖层仍在，
+        再点「卷帘对比」即恢复分隔条拖拽；Esc 才真正退出会话。
+        """
+        tool = getattr(self, "_swipe_tool", None)
+        if tool is not None and tool.is_alive():
+            self.canvas.setMapTool(tool)
+            self.tool_bar_builder.set_active("swipe")
+            return
+        if not any(
+            isinstance(l, QgsRasterLayer) for l in self.project.mapLayers().values()
+        ):
+            QMessageBox.information(self, "提示", "请先加载至少一个栅格图层")
+            return
+        from app.ui.dialogs.swipe_compare import SwipeCompareDialog
+        from app.ui.tools.swipe import SwipeTool
+
+        dlg = SwipeCompareDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        base, compare, orientation = dlg.selected_params()
+        if base is None or compare is None:
+            return
+        self._swipe_tool = SwipeTool(self.canvas, base, compare, orientation, parent=self)
+        self.canvas.setMapTool(self._swipe_tool)
+        self.tool_bar_builder.set_active("swipe")
+
+    def _on_qmap_compare(self) -> None:
+        """地图对比：会话激活时再点即停止；否则弹窗选择图层 + 模式后启动。
+
+        支持三种模式（参照 qmapcompare 插件）：
+        - 垂直/水平分割、放大镜：mask 图层组方案（CompareMask）
+        - 镜像分屏：右侧 dock 第二画布（MirrorCompare）
+        """
+        session = getattr(self, "_qmap_compare_session", None)
+        if session is not None and session.is_active:
+            session.stop()
+            self.tool_bar_builder.set_session_active("qmap_compare", False)
+            self.messageBar.pushMessage(
+                "已停止地图对比", level=Qgis.MessageLevel.Info, duration=3
+            )
+            return
+        if not self.project.mapLayers():
+            QMessageBox.information(self, "提示", "请先加载至少一个图层")
+            return
+        from app.ui.dialogs.qmap_compare import QMapCompareDialog
+
+        dlg = QMapCompareDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        layers, mode, lens_shape, lens_rate = dlg.selected()
+        if not layers:
+            return
+        if mode == "mirror":
+            from app.ui.tools.qmap_compare import MirrorCompare
+
+            session = MirrorCompare(self, self.canvas, parent=self)
+            session.start(layers)
+        else:
+            from app.ui.tools.qmap_compare import CompareMask
+
+            session = CompareMask(self.project, parent=self)
+            session.start(layers, mode, lens_shape, lens_rate)
+        self._qmap_compare_session = session
+        # 地图对比无地图工具：会话存活期间按钮独立常亮（再点停止）
+        self.tool_bar_builder.set_session_active("qmap_compare", True)
+        self.messageBar.pushMessage(
+            "地图对比已启动，再点「地图对比」停止",
+            level=Qgis.MessageLevel.Info,
+            duration=3,
+        )
 
     def _on_zoom_full(self) -> None:
         layers = [l for l in self.project.mapLayers().values() if l.isValid()]

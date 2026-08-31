@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from PyQt6.QtWidgets import (
     QCheckBox,
-    QDialog,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -25,6 +24,7 @@ from PyQt6.QtWidgets import (
 
 from app.core.domain.flow.model import InputSpec, unbound_inputs
 from app.core.domain.flow.types import PortType
+from app.ui.common.base_dialog import BaseDialog
 
 #: 文件类端口 → 浏览对话框文件过滤器
 _FILE_FILTERS: dict[PortType, str] = {
@@ -35,7 +35,7 @@ _FILE_FILTERS: dict[PortType, str] = {
 }
 
 
-class RunParamsDialog(QDialog):
+class RunParamsDialog(BaseDialog):
     """运行前参数填写对话框。"""
 
     def __init__(self, graph, parent=None) -> None:
@@ -49,7 +49,7 @@ class RunParamsDialog(QDialog):
     # ------------------------------------------------------------ 构建
 
     def _build(self, graph) -> None:
-        root = QVBoxLayout(self)
+        root = QVBoxLayout()
 
         hint = QLabel("以下输入未绑定上游，请填写本次运行使用的值（带 * 为必填）：")
         hint.setWordWrap(True)
@@ -83,6 +83,7 @@ class RunParamsDialog(QDialog):
         btns.addWidget(run_btn)
         btns.addWidget(cancel_btn)
         root.addLayout(btns)
+        self.setLayout(root)
 
     def _add_row(self, layout: QVBoxLayout, node_id: str, ins: InputSpec) -> None:
         star = " *" if ins.required else ""

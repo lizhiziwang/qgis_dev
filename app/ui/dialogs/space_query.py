@@ -63,7 +63,7 @@ class SpaceQueryDialog(BaseDialog):
         self._init_ui()
 
     def _init_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        layout = QVBoxLayout()
         try:
             from app.ui.common.widgets import open_file_dir
             from app.ui.dialogs.query_builder import QueryBuilderDialog  # noqa
@@ -114,6 +114,7 @@ class SpaceQueryDialog(BaseDialog):
         bb.accepted.connect(self._on_query)
         bb.rejected.connect(self.close)
         layout.addWidget(bb)
+        self.setLayout(layout)
 
     def _start_draw(self) -> None:
         self.hide()

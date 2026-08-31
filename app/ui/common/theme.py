@@ -294,8 +294,18 @@ def title_bar_qss(t: Theme) -> str:
     """
 
 
+def _with_alpha(hex_color: str, alpha: int) -> str:
+    """#rrggbb → rgba(r, g, b, alpha)，用于生成半透明强调色。"""
+    c = QColor(hex_color)
+    return f"rgba({c.red()}, {c.green()}, {c.blue()}, {alpha})"
+
+
 def toolbar_qss(t: Theme) -> str:
-    """主工具条 QSS（工具按钮 hover/按下/选中态）。"""
+    """主工具条 QSS（工具按钮 hover/按下/选中态）。
+
+    选中态（激活中的工具按钮）用主题强调色 ``input_focus`` 着底 + 底部
+    下划线，与 Tab 选中下划线风格一致，一眼可辨当前激活工具。
+    """
     return f"""
     QToolBar {{
         background-color: {t.toolbar_bg};
@@ -314,7 +324,8 @@ def toolbar_qss(t: Theme) -> str:
     QToolButton:hover {{ background-color: {t.toolbar_hover}; }}
     QToolButton:pressed {{ background-color: {t.toolbar_pressed}; }}
     QToolButton:checked {{
-        background-color: {t.toolbar_hover};
+        background-color: {_with_alpha(t.input_focus, 36)};
+        border-bottom: 2px solid {t.input_focus};
         color: {t.toolbar_text};
     }}
     """

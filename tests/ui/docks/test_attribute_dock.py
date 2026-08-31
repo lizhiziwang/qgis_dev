@@ -565,3 +565,153 @@ def test_widget_many_columns_shows_horizontal_scrollbar(qgis_app):
 
     scroll = w.table_view.horizontalScrollBar()
     assert scroll.maximum() > 0, "20 列固定列宽超出可视区，应出现横向滚动条"
+
+
+@pytest.mark.gui
+def test_widget_has_field_calc_button(layer, qgis_app):
+    """工具条含"字段计算器"按钮（复用 QgsFieldCalculator 的入口）。"""
+    from PyQt6.QtWidgets import QPushButton
+
+    from app.ui.docks.attribute_dock import PagedAttributeTableWidget
+
+    w = PagedAttributeTableWidget(layer, page_size=50)
+    btn = w.findChild(QPushButton, "fieldCalcBtn")
+    assert btn is not None
+    assert btn.toolTip() == "字段计算器"
+    assert w.calc_btn is btn
+
+
+@pytest.mark.gui
+def test_reload_fields_reflects_new_field(qgis_app):
+    """字段计算器新增字段后 reload_fields：列数 +1、新列头正确，fids 保留不重流。"""
+    from PyQt6.QtCore import Qt, QVariant
+    from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsVectorLayer
+
+    from app.ui.docks.attribute_dock import PagedAttributeTableModel
+
+    lyr = QgsVectorLayer("Point?crs=EPSG:4326&field=name:string(20)", "字段计算", "memory")
+    feats = []
+    for i in range(5):
+        f = QgsFeature(lyr.fields())
+        f.setGeometry(QgsGeometry.fromWkt(f"POINT({i} {i})"))
+        f["name"] = f"c{i}"
+        feats.append(f)
+    lyr.dataProvider().addFeatures(feats)
+
+    model = PagedAttributeTableModel(lyr, page_size=50)
+    cols_before = model.columnCount()
+    fids_before = list(model.fids)
+
+    lyr.dataProvider().addAttributes([QgsField("AREA", QVariant.Double)])
+    lyr.updateFields()
+    model.reload_fields()
+
+    assert model.columnCount() == cols_before + 1
+    assert model.headerData(model.columnCount() - 1, Qt.Orientation.Horizontal) == "AREA"
+    assert list(model.fids) == fids_before  # 加字段不改 fids，不应重流
+
+
+@pytest.mark.gui
+def test_reload_fields_refreshes_updated_value(qgis_app):
+    """字段计算器更新已有字段值后 reload_fields：可视行取到编辑缓冲内的新值。"""
+    from PyQt6.QtCore import Qt, QVariant
+    from qgis.core import QgsFeature, QgsGeometry, QgsVectorLayer
+
+    from app.ui.docks.attribute_dock import PagedAttributeTableModel
+
+    lyr = QgsVectorLayer("Point?crs=EPSG:4326&field=val:double", "字段更新", "memory")
+    feats = []
+    for i in range(3):
+        f = QgsFeature(lyr.fields())
+        f.setGeometry(QgsGeometry.fromWkt(f"POINT({i} {i})"))
+        f["val"] = i * 10.0
+        feats.append(f)
+    lyr.dataProvider().addFeatures(feats)
+
+    model = PagedAttributeTableModel(lyr, page_size=50)
+    assert model.data(model.index(0, 1), Qt.ItemDataRole.DisplayRole) == 0.0
+
+    # 进入编辑态改值（字段计算器在编辑态下改值的等效路径）
+    lyr.startEditing()
+    lyr.changeAttributeValue(model.fids[0], 0, 999.0)
+    model.reload_fields()
+    assert model.data(model.index(0, 1), Qt.ItemDataRole.DisplayRole) == 999.0
+    lyr.rollBack()
+
+
+@pytest.mark.gui
+def test_field_calc_accept_refreshes_model(layer, qgis_app, monkeypatch, caplog):
+    """点字段计算器按钮：对话框 accept 后刷新 model（新增字段 → 列数 +1）并记日志。
+
+    用假对话框替掉 C++ 的 QgsFieldCalculator（真实对话框需交互，无法驱动）。
+    """
+    import logging
+
+    from PyQt6.QtCore import Qt, QVariant
+    from PyQt6.QtWidgets import QDialog
+    from qgis.core import QgsField
+
+    from app.ui.docks.attribute_dock import PagedAttributeTableWidget
+
+    class _FakeDlg:
+        def __init__(self, lyr, parent):
+            self._lyr = lyr
+
+        def exec(self):
+            # 模拟字段计算器 OK：给图层加一个字段
+            self._lyr.dataProvider().addAttributes([QgsField("CALC", QVariant.String)])
+            self._lyr.updateFields()
+            return QDialog.DialogCode.Accepted
+
+        def result(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr("qgis.gui.QgsFieldCalculator", _FakeDlg)
+    with caplog.at_level(logging.INFO, logger="app.ui.docks.attribute_dock"):
+        w = PagedAttributeTableWidget(layer, page_size=50)
+        _load_all(qgis_app, w.model)
+        cols_before = w.model.columnCount()
+
+        w.calc_btn.click()
+
+        assert w.model.columnCount() == cols_before + 1
+        assert w.model.headerData(w.model.columnCount() - 1, Qt.Orientation.Horizontal) == "CALC"
+        # 新增字段 → 日志应含"新增字段"与字段名
+        assert any("字段计算完成" in r.message and "CALC" in r.message for r in caplog.records)
+
+
+@pytest.mark.gui
+def test_field_calc_update_existing_logs(layer, qgis_app, monkeypatch, caplog):
+    """仅更新已有字段值（不新增字段）→ 日志记为"更新已有字段"。"""
+    import logging
+
+    from PyQt6.QtCore import QVariant
+    from PyQt6.QtWidgets import QDialog
+    from qgis.core import QgsField
+
+    from app.ui.docks.attribute_dock import PagedAttributeTableWidget
+
+    class _FakeDlg:
+        def __init__(self, lyr, parent):
+            self._lyr = lyr
+
+        def exec(self):
+            # 模拟字段计算器 OK：新增后立刻又删除（净字段数不变）→ 走"更新"分支
+            self._lyr.dataProvider().addAttributes([QgsField("TMP", QVariant.String)])
+            self._lyr.updateFields()
+            self._lyr.dataProvider().deleteAttributes([self._lyr.fields().indexOf("TMP")])
+            self._lyr.updateFields()
+            return QDialog.DialogCode.Accepted
+
+        def result(self):
+            return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr("qgis.gui.QgsFieldCalculator", _FakeDlg)
+    with caplog.at_level(logging.INFO, logger="app.ui.docks.attribute_dock"):
+        w = PagedAttributeTableWidget(layer, page_size=50)
+        w.calc_btn.click()
+
+        assert any(
+            "字段计算完成" in r.message and "更新已有字段" in r.message for r in caplog.records
+        )
+

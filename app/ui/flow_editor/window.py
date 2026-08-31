@@ -54,8 +54,13 @@ class FlowEditorWindow(FramelessMixin, QMainWindow):
         self.setWindowTitle("流程节点编辑器")
         self.setWindowIcon(Icons.app())  # 与主窗口同款应用图标
         self.resize(1280, 820)
-        # 无边框窗口 + 自绘标题栏（与主窗口一致；流程编辑器没有菜单栏）
-        self.title_bar = self.enable_frameless()
+        # 无边框窗口 + 自绘标题栏（与主窗口同款边框，但只保留
+        # 图标/标题/最小化/最大化/关闭；用户信息、主题切换、模式切换不进流程编辑器边框）
+        self.title_bar = self.enable_frameless(
+            show_user_button=False,
+            show_theme_button=False,
+            show_mode_switch=False,
+        )
         self._dirty = False
         self._current_file = ""
 

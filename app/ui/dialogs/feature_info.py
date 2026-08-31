@@ -6,7 +6,6 @@ from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QFont, QIcon
 from PyQt6.QtWidgets import (
     QApplication,
-    QDialog,
     QHBoxLayout,
     QLabel,
     QPushButton,
@@ -18,11 +17,12 @@ from qgis.core import QgsWkbTypes
 from qgis.gui import QgsHighlight
 
 from app.core.domain.identify import IdentifyResult
+from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.icons import Icons
 from app.ui.common.theme import ThemeManager
 
 
-class FeatureInfoDialog(QDialog):
+class FeatureInfoDialog(BaseDialog):
     """点击识别后展示要素详情的 Dialog。"""
 
     def __init__(self, parent, result: IdentifyResult, highlight: QgsHighlight = None) -> None:

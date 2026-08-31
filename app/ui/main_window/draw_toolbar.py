@@ -2,10 +2,8 @@
 
 按旧版设计：
 
-- 工具条含 2 个 :class:`QToolButton`（编辑器 / 添加要素），各带一个
-  :class:`QMenu`。
-- 编辑器菜单：开始编辑 / 停止编辑 / 保存所选图层编辑
-- 添加要素菜单：添加点 / 添加线 / 添加面
+- 工具条平铺 7 个文本按钮（不用下拉菜单）：
+  开始编辑 / 停止编辑 / 保存编辑 / 融合几何 ｜ 添加点 / 添加线 / 添加面
 - 默认全部 disabled；外部 :meth:`set_edit_target` 启用"开始编辑"按钮。
 - 几何类型按当前 layer 启用对应按钮（点 layer 只能点，线 layer 只能线）。
 
@@ -24,23 +22,21 @@
 
 from __future__ import annotations
 
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from qgis.core import QgsVectorLayer
     from qgis.gui import QgsMapCanvas
 
-from PyQt6.QtCore import Qt, QObject, pyqtSignal
+from PyQt6.QtCore import QObject, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QColor
 from PyQt6.QtWidgets import (
     QMainWindow,
-    QMenu,
     QMessageBox,
     QToolBar,
-    QToolButton,
 )
-
 from qgis.core import (
+    Qgis,
     QgsGeometry,
     QgsWkbTypes,
 )
@@ -79,6 +75,7 @@ class DigitizingToolbar(QObject):
         self.temp_points: list = []
         self.rubber_band = None
         self.active_tool = None
+        self.merge_tool = None
 
         # 当前是否处于编辑态（start_edit_fun 成功后 True，stop_edit_fun 后 False）
         self._editing = False
@@ -90,41 +87,39 @@ class DigitizingToolbar(QObject):
     def _build_toolbar(self) -> None:
         self.digitizing_toolbar = QToolBar("编辑工具")
         self.digitizing_toolbar.setObjectName("DigitizingToolbar")
+        # 6 个工具直接平铺成文本按钮（不用下拉菜单），按编辑态/几何类型启用/禁用
+        self.digitizing_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
 
-        # ---- 编辑器下拉按钮 ----
-        self.digitize_button = QToolButton()
-        self.digitize_button.setText("编辑器")
-        self.digitize_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.digitize_menu = QMenu()
-
-        self.start_edit = QAction("开始编辑", self.digitize_menu)
+        # ---- 编辑操作 ----
+        self.start_edit = QAction("开始编辑", self.digitizing_toolbar)
         self.start_edit.triggered.connect(self.start_edit_fun)
-        self.stop_edit = QAction("停止编辑", self.digitize_menu)
+        self.stop_edit = QAction("停止编辑", self.digitizing_toolbar)
         self.stop_edit.triggered.connect(self.stop_edit_fun)
-        self.save_edit = QAction("保存所选图层编辑", self.digitize_menu)
+        self.save_edit = QAction("保存编辑", self.digitizing_toolbar)
         # 旧逻辑：stop_edit 也绑了 commitChanges，但语义重叠，这里拆开
         self.save_edit.triggered.connect(self._save_edits)
 
+        # ---- 融合几何（需处于编辑态）----
+        self.merge_geometry_action = QAction("融合几何", self.digitizing_toolbar)
+        self.merge_geometry_action.triggered.connect(self.enable_merge_tool)
+
         # 默认禁用（与旧版一致：edit_layer is None 时全 disable）
-        self._set_edit_menu_enabled(False)
+        self._set_edit_actions_enabled(False)
 
-        self.digitize_menu.addAction(self.start_edit)
-        self.digitize_menu.addAction(self.stop_edit)
-        self.digitize_menu.addAction(self.save_edit)
-        self.digitize_button.setMenu(self.digitize_menu)
-        self.digitizing_toolbar.addWidget(self.digitize_button)
+        self.digitizing_toolbar.addAction(self.start_edit)
+        self.digitizing_toolbar.addAction(self.stop_edit)
+        self.digitizing_toolbar.addAction(self.save_edit)
+        self.digitizing_toolbar.addAction(self.merge_geometry_action)
 
-        # ---- 添加要素下拉按钮 ----
-        self.add_feature_button = QToolButton()
-        self.add_feature_button.setText("添加要素")
-        self.add_feature_button.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self.add_feature_menu = QMenu()
+        # 分隔两组
+        self.digitizing_toolbar.addSeparator()
 
-        self.add_point_action = QAction("添加点", self.add_feature_menu)
+        # ---- 添加要素 ----
+        self.add_point_action = QAction("添加点", self.digitizing_toolbar)
         self.add_point_action.triggered.connect(lambda: self.enable_draw_tool("point"))
-        self.add_line_action = QAction("添加线", self.add_feature_menu)
+        self.add_line_action = QAction("添加线", self.digitizing_toolbar)
         self.add_line_action.triggered.connect(lambda: self.enable_draw_tool("line"))
-        self.add_polygon_action = QAction("添加面", self.add_feature_menu)
+        self.add_polygon_action = QAction("添加面", self.digitizing_toolbar)
         self.add_polygon_action.triggered.connect(lambda: self.enable_draw_tool("polygon"))
 
         # 默认禁用
@@ -132,11 +127,9 @@ class DigitizingToolbar(QObject):
         self.add_line_action.setEnabled(False)
         self.add_polygon_action.setEnabled(False)
 
-        self.add_feature_menu.addAction(self.add_point_action)
-        self.add_feature_menu.addAction(self.add_line_action)
-        self.add_feature_menu.addAction(self.add_polygon_action)
-        self.add_feature_button.setMenu(self.add_feature_menu)
-        self.digitizing_toolbar.addWidget(self.add_feature_button)
+        self.digitizing_toolbar.addAction(self.add_point_action)
+        self.digitizing_toolbar.addAction(self.add_line_action)
+        self.digitizing_toolbar.addAction(self.add_polygon_action)
 
         # 挂到主窗口
         self.main_window.addToolBar(self.digitizing_toolbar)
@@ -153,31 +146,31 @@ class DigitizingToolbar(QObject):
         """
         target = layer if layer is not None else self._current_layer()
         if target is None:
-            self._set_edit_menu_enabled(False)
+            self._set_edit_actions_enabled(False)
             self._set_add_buttons_for_geometry(-1)
             return
         if target.type() != target.VectorLayer:
-            self._set_edit_menu_enabled(False)
+            self._set_edit_actions_enabled(False)
             self._set_add_buttons_for_geometry(-1)
             return
 
         # 进入"已指定编辑图层"态：开始编辑可用，按图层几何类型启用"添加要素"
-        self._set_edit_menu_enabled(True, editing_now=False)
+        self._set_edit_actions_enabled(True, editing_now=False)
         self._set_add_buttons_for_geometry(target.geometryType())
 
     def refresh_for_current_layer(self) -> None:
         """根据当前 ``edit_layer`` 重新刷一遍按钮状态（应对切图层等场景）。"""
         layer = self._current_layer()
         if layer is None or layer.type() != layer.VectorLayer:
-            self._set_edit_menu_enabled(False)
+            self._set_edit_actions_enabled(False)
             self._set_add_buttons_for_geometry(-1)
             return
         if layer.isEditable():
             # 当前已经在编辑态，保持按钮可用状态
-            self._set_edit_menu_enabled(True, editing_now=True)
+            self._set_edit_actions_enabled(True, editing_now=True)
             self._set_add_buttons_for_geometry(layer.geometryType())
         else:
-            self._set_edit_menu_enabled(True, editing_now=False)
+            self._set_edit_actions_enabled(True, editing_now=False)
             self._set_add_buttons_for_geometry(layer.geometryType())
 
     # ============================================================== 编辑器菜单回调
@@ -191,7 +184,7 @@ class DigitizingToolbar(QObject):
             # 已经在编辑态：保持现状即可（按钮状态以 _editing 为准）
             if not self._editing:
                 self._editing = True
-                self._set_edit_menu_enabled(True, editing_now=True)
+                self._set_edit_actions_enabled(True, editing_now=True)
                 self._set_add_buttons_for_geometry(layer.geometryType())
             return
 
@@ -201,7 +194,7 @@ class DigitizingToolbar(QObject):
             return
 
         self._editing = True
-        self._set_edit_menu_enabled(True, editing_now=True)
+        self._set_edit_actions_enabled(True, editing_now=True)
         self._set_add_buttons_for_geometry(layer.geometryType())
         self.editing_state_changed.emit(True)
 
@@ -227,7 +220,7 @@ class DigitizingToolbar(QObject):
 
         self._editing = False
         # 切回"已指定编辑图层"态：开始编辑可用，停止/保存禁用
-        self._set_edit_menu_enabled(True, editing_now=False)
+        self._set_edit_actions_enabled(True, editing_now=False)
         # "添加要素"按钮保持启用（layer 仍是 target，但未进入 editing 态）
         # ——若要严格只在 editing 态可用，把下面这行注释掉
         if layer is not None and layer.type() == layer.VectorLayer:
@@ -284,6 +277,34 @@ class DigitizingToolbar(QObject):
             f"已激活「添加{geom_type}」工具，点击画布绘制！",
         )
 
+    def enable_merge_tool(self) -> None:
+        """激活融合几何工具：右键选要素，左键双击融合。"""
+        layer = self._current_layer()
+        if layer is None or layer.type() != layer.VectorLayer:
+            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            return
+        if not layer.isEditable():
+            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            return
+        # 清掉可能激活的绘制 / 融合工具，避免两个工具并存
+        self.clear_draw_tool()
+
+        from app.ui.tools.merge_geometry import MergeGeometryTool
+
+        self.merge_tool = MergeGeometryTool(
+            self.canvas,
+            editing_layer_getter=self._editing_layer_getter,
+            hint=lambda text: self.main_window.messageBar.pushMessage(
+                text, level=Qgis.MessageLevel.Info, duration=2
+            ),
+        )
+        self.canvas.setMapTool(self.merge_tool)
+        QMessageBox.information(
+            self.main_window,
+            "提示",
+            "已激活「融合几何」工具：右键选择要素，双击融合；Esc 退出",
+        )
+
     def finish_draw(self, geometry: "QgsGeometry") -> None:
         """绘制完成：校验 + 创建要素 + 弹属性对话框（与旧版 finish_draw 行为一致）。"""
         if geometry is None:
@@ -323,6 +344,12 @@ class DigitizingToolbar(QObject):
 
     def clear_draw_tool(self) -> None:
         """清掉激活工具 + 共享 rubber_band + 临时点（与旧版一致）。"""
+        if getattr(self, "merge_tool", None) is not None:
+            try:
+                self.canvas.unsetMapTool(self.merge_tool)
+            except Exception:  # noqa: BLE001
+                pass
+            self.merge_tool = None
         if self.active_tool is not None:
             try:
                 self.canvas.unsetMapTool(self.active_tool)
@@ -342,8 +369,8 @@ class DigitizingToolbar(QObject):
     def _current_layer(self) -> "Optional[QgsVectorLayer]":
         return self._editing_layer_getter()
 
-    def _set_edit_menu_enabled(self, enabled: bool, *, editing_now: bool = False) -> None:
-        """编辑器菜单 3 个按钮的整体启用状态。
+    def _set_edit_actions_enabled(self, enabled: bool, *, editing_now: bool = False) -> None:
+        """编辑器 3 个按钮（开始/停止/保存）的整体启用状态。
 
         :param enabled: False → 3 个全禁用（默认态）。
         :param editing_now: True → 处于编辑态：开始编辑禁用、停止/保存启用。
@@ -353,10 +380,13 @@ class DigitizingToolbar(QObject):
             self.start_edit.setEnabled(False)
             self.stop_edit.setEnabled(False)
             self.save_edit.setEnabled(False)
+            self.merge_geometry_action.setEnabled(False)
             return
         self.start_edit.setEnabled(not editing_now)
         self.stop_edit.setEnabled(editing_now)
         self.save_edit.setEnabled(editing_now)
+        # 融合几何要求编辑态：编辑中才可用
+        self.merge_geometry_action.setEnabled(editing_now)
 
     def _set_add_buttons_for_geometry(self, g_type: int) -> None:
         """按 ``g_type`` 启用对应的"添加点/线/面"按钮；``g_type=-1`` 表示全禁用。"""

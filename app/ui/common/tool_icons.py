@@ -27,6 +27,9 @@ _FONT_FAMILY = "Font Awesome 5 Free Solid"
 # key -> Font Awesome 5 Solid 码位（PUA，U+F000 区段）
 _GLYPHS: dict[str, str] = {
     "pan": "",                 # arrows-alt 四向移动
+    "select_point": "",       # mouse-pointer 点选
+    "select_box": "",         # vector-square 框选
+    "clear_selection": "",    # times-circle 取消选择（清空全部选择）
     "identify": "",            # search 放大镜
     "zoom_in": "",             # search-plus 放大镜+加号
     "zoom_out": "",            # search-minus 放大镜+减号
@@ -35,6 +38,8 @@ _GLYPHS: dict[str, str] = {
     "zoom_full": "",           # globe 地球（全图）
     "refresh": "",             # sync 环形刷新
     "test": "",                # flask 烧瓶
+    "swipe": "",              # columns 竖向分割（卷帘对比）
+    "qmap_compare": "",       # object-group 图层组（地图对比：分割/放大镜/镜像）
     "space_query_point": "",   # map-marker 定位大头针
     "space_query_line": "",    # route 路线（线查询）
     "space_query_polygon": "", # draw-polygon 多边形（面查询）

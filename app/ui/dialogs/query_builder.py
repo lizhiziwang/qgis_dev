@@ -29,6 +29,8 @@ from qgis.core import (
 )
 from qgis.gui import QgsFieldComboBox
 
+from app.ui.common.base_dialog import BaseDialog
+
 _OPERATORS = ["=", "<", ">", "LIKE", "%", "IN", "NOT IN", "<=", ">=", "!=", "ILIKE", "AND", "OR", "NOT"]
 
 
@@ -71,7 +73,7 @@ class _SqlCountWorker(QObject):
             self.failed.emit(str(e))
 
 
-class QueryBuilderDialog(QDialog):
+class QueryBuilderDialog(BaseDialog):
     """SQL 条件构建器。"""
 
     sqlConfirmed = pyqtSignal(str)
@@ -87,7 +89,7 @@ class QueryBuilderDialog(QDialog):
         self._init_signals()
 
     def _init_ui(self) -> None:
-        main = QVBoxLayout(self)
+        main = QVBoxLayout()
         splitter = QSplitter(Qt.Orientation.Horizontal)
         main.addWidget(splitter)
 
@@ -146,6 +148,7 @@ class QueryBuilderDialog(QDialog):
         main.addLayout(btm)
 
         splitter.setSizes([300, 420])
+        self.setLayout(main)
 
     def _init_signals(self) -> None:
         self.field_combo.fieldChanged.connect(self._on_field_changed)

@@ -230,3 +230,55 @@ def test_mode_switch_exclusive_group(title_bar, qgis_app):
     assert sum(1 for b in sw._buttons.values() if b.isChecked()) == 1
     assert sw._buttons["task"].isChecked()
     assert not sw._buttons["project"].isChecked()
+
+
+@pytest.mark.gui
+def test_default_title_bar_has_user_theme_mode(qgis_app):
+    """默认构造：用户信息 / 主题切换 / 模式切换 / 三个窗口按钮都在。"""
+    from PyQt6.QtWidgets import QMainWindow
+
+    from app.ui.main_window.title_bar import TitleBar
+
+    win = QMainWindow()
+    tb = TitleBar(win)
+    assert tb._user_btn is not None
+    assert tb._btn_theme is not None
+    assert tb._mode_switch is not None
+    for btn in (tb._btn_min, tb._btn_max, tb._btn_close):
+        assert btn in tb._interactive
+    tb.deleteLater()
+    win.close()
+    win.deleteLater()
+
+
+@pytest.mark.gui
+def test_minimal_title_bar_hides_user_theme_mode(qgis_app):
+    """精简标题栏（对话框 / 流程编辑器用）：只留 图标/标题/最小化/最大化/关闭。"""
+    from PyQt6.QtWidgets import QMainWindow
+
+    from app.ui.main_window.title_bar import TitleBar
+
+    win = QMainWindow()
+    tb = TitleBar(
+        win,
+        show_user=False,
+        show_theme=False,
+        show_mode_switch=False,
+    )
+    assert tb._user_btn is None, "用户信息不应出现在精简标题栏"
+    assert tb._btn_theme is None, "主题切换不应出现在精简标题栏"
+    assert tb._mode_switch is None, "模式切换不应出现在精简标题栏"
+    # 窗口按钮齐全且进入 _interactive（frameless 命中判定不会把按钮区当拖动区）
+    for btn in (tb._btn_min, tb._btn_max, tb._btn_close):
+        assert btn in tb._interactive
+    # 图标 + 标题仍保留
+    assert tb._icon_label is not None
+    assert tb._title_label is not None
+    # 精简模式下 set_user / 切主题 不应崩溃（None 守卫）
+    tb.set_user("测试用户")
+    from app.ui.common.theme import ThemeManager
+
+    tb._apply_theme(ThemeManager.instance().current())
+    tb.deleteLater()
+    win.close()
+    win.deleteLater()

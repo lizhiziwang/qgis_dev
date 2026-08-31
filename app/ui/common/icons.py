@@ -18,6 +18,7 @@ class Icons:
     SAVE_EDIT = ("png", "保存编辑.png")
     STOP_EDIT = ("png", "停止编辑.png")
     FILTER = ("png", "属性筛选器.png")
+    FIELD_CALC = ("png", "字段计算器.png")
     EDIT = ("png", "编辑.png")
     ZOOM_IN = ("svg", "zoom_in.svg")
     ZOOM_OUT = ("svg", "zoom_out.svg")
@@ -51,6 +52,10 @@ class Icons:
     @classmethod
     def filter(cls) -> QIcon:
         return QIcon(cls._resolve(cls.FILTER))
+
+    @classmethod
+    def field_calc(cls) -> QIcon:
+        return QIcon(cls._resolve(cls.FIELD_CALC))
 
     @classmethod
     def edit(cls) -> QIcon:

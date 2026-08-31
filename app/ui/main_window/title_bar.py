@@ -294,6 +294,10 @@ class TitleBar(QWidget):
 
     空白区域可拖动：Windows 由 :class:`FramelessMixin.nativeEvent` 的 ``WM_NCHITTEST``
     接管（返回 ``HTCAPTION``），其他平台走本组件的鼠标兜底。
+
+    默认展示：应用图标 + 窗口标题 + 用户信息 + 主题切换 + 模式切换 +
+    最小化/最大化/关闭。流程编辑器 / 对话框通过 ``show_user`` / ``show_theme`` /
+    ``show_mode_switch`` 关掉非窗口控制元素，只留图标 / 标题 / 窗口按钮。
     """
 
     minimize_requested = pyqtSignal()
@@ -306,6 +310,9 @@ class TitleBar(QWidget):
         parent: QWidget = None,
         show_min_button: bool = True,
         show_max_button: bool = True,
+        show_user: bool = True,
+        show_theme: bool = True,
+        show_mode_switch: bool = True,
     ) -> None:
         super().__init__(parent)
         self.setObjectName("TitleBar")
@@ -334,30 +341,38 @@ class TitleBar(QWidget):
         layout.addSpacing(8)
 
         # 用户信息（头像 + 用户名），点击弹出账号菜单
-        self._user_btn = QToolButton(self)
-        self._user_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
-        self._user_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self._user_btn.setIconSize(QSize(22, 22))
-        self._user_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-        self._user_menu = QMenu(self._user_btn)
-        self._user_btn.setMenu(self._user_menu)
-        self._sync_login_state()
-        layout.addWidget(self._user_btn)
+        self._user_btn: QToolButton | None = None
+        self._user_menu: QMenu | None = None
+        if show_user:
+            self._user_btn = QToolButton(self)
+            self._user_btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextBesideIcon)
+            self._user_btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+            self._user_btn.setIconSize(QSize(22, 22))
+            self._user_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._user_menu = QMenu(self._user_btn)
+            self._user_btn.setMenu(self._user_menu)
+            self._sync_login_state()
+            layout.addWidget(self._user_btn)
 
         # 主题切换按钮（调色盘图标，弹出主题菜单）
-        self._btn_theme = _TitleButton(_theme_icon(), parent=self)
-        self._btn_theme.setToolTip("切换主题")
-        self._btn_theme.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
-        self._theme_menu = QMenu(self._btn_theme)
-        self._btn_theme.setMenu(self._theme_menu)
-        layout.addWidget(self._btn_theme)
+        self._btn_theme: _TitleButton | None = None
+        self._theme_menu: QMenu | None = None
+        if show_theme:
+            self._btn_theme = _TitleButton(_theme_icon(), parent=self)
+            self._btn_theme.setToolTip("切换主题")
+            self._btn_theme.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
+            self._theme_menu = QMenu(self._btn_theme)
+            self._btn_theme.setMenu(self._theme_menu)
+            layout.addWidget(self._btn_theme)
 
         # 任务模式 / 工程模式 二选一开关（胶囊形分段控件）
-        self._mode_switch = _ModeSwitch(self)
-        self._mode_switch.mode_changed.connect(self.mode_changed)
-        layout.addSpacing(4)
-        layout.addWidget(self._mode_switch)
-        layout.addSpacing(4)
+        self._mode_switch: _ModeSwitch | None = None
+        if show_mode_switch:
+            self._mode_switch = _ModeSwitch(self)
+            self._mode_switch.mode_changed.connect(self.mode_changed)
+            layout.addSpacing(4)
+            layout.addWidget(self._mode_switch)
+            layout.addSpacing(4)
 
         # 窗口控制按钮
         self._btn_min = _TitleButton(_window_icon("min"), parent=self)
@@ -392,7 +407,7 @@ class TitleBar(QWidget):
                 self._btn_max,
                 self._btn_close,
             )
-            if not b.isHidden()
+            if b is not None and not b.isHidden()
         ]
 
         # 主题：跟随 ThemeManager，切换时重绘自身配色（连接放最后，避免初始化期回调）
@@ -413,7 +428,12 @@ class TitleBar(QWidget):
         self._btn_max.set_icons(_window_icon(kind, QColor(self._icon_color)))
 
     def set_user(self, username: str, expires_at: int = None) -> None:
-        """设置标题栏用户信息；``expires_at`` 为 unix 秒时显示剩余有效期。"""
+        """设置标题栏用户信息；``expires_at`` 为 unix 秒时显示剩余有效期。
+
+        用户区被隐藏（``show_user=False``，如对话框标题栏）时无操作。
+        """
+        if self._user_btn is None or self._user_menu is None:
+            return
         self._username = (username or "未登录").strip()
         self._user_btn.setText(self._username)
         self._user_btn.setIcon(QIcon(make_avatar_pixmap(self._username)))
@@ -428,6 +448,8 @@ class TitleBar(QWidget):
 
     def _sync_login_state(self) -> None:
         """与主窗口一致：构造时从本地凭证加载登录状态（未登录显示"未登录"）。"""
+        if self._user_btn is None:
+            return
         from app.core.auth import load_credential
 
         cred = load_credential()
@@ -442,7 +464,12 @@ class TitleBar(QWidget):
         ThemeManager.instance().set_theme(key)
 
     def _rebuild_theme_menu(self) -> None:
-        """按 :data:`THEMES` 重建主题菜单（勾选当前主题）。"""
+        """按 :data:`THEMES` 重建主题菜单（勾选当前主题）。
+
+        主题按钮被隐藏（``show_theme=False``）时无操作。
+        """
+        if self._theme_menu is None:
+            return
         tm = ThemeManager.instance()
         self._theme_menu.clear()
         for key, theme in THEMES.items():
@@ -472,9 +499,12 @@ class TitleBar(QWidget):
             f"border: 1px solid {theme.border}; }} "
             f"QMenu::item:selected {{ background-color: {theme.menu_hover}; }}"
         )
-        self._user_menu.setStyleSheet(menu_style)
-        self._theme_menu.setStyleSheet(menu_style)
-        self._mode_switch.apply_theme(theme)
+        if self._user_menu is not None:
+            self._user_menu.setStyleSheet(menu_style)
+        if self._theme_menu is not None:
+            self._theme_menu.setStyleSheet(menu_style)
+        if self._mode_switch is not None:
+            self._mode_switch.apply_theme(theme)
         self._rebuild_theme_menu()
 
     def is_interactive_child(self, widget) -> bool:

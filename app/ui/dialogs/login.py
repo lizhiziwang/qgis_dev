@@ -17,7 +17,6 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -27,6 +26,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.icons import Icons
 
 # 兜底账号（无 config / 未传入时的默认值；实际值由 bootstrap 从 app.yaml 传入）
@@ -34,7 +34,7 @@ _DEFAULT_USER = "admin"
 _DEFAULT_PASSWORD = "admin"
 
 
-class LoginDialog(QDialog):
+class LoginDialog(BaseDialog):
     """启动登录对话框。"""
 
     def __init__(
@@ -46,10 +46,9 @@ class LoginDialog(QDialog):
     ) -> None:
         super().__init__(parent)
         self.setWindowTitle(f"登录 - {app_name}")
-        self.setWindowIcon(Icons.app())
         self.setModal(True)
         self.setMinimumWidth(400)
-        # 不显示问号按钮
+        # 不显示问号按钮（无边框标题栏本来就没有原生问号，保留该行无害且保险）
         self.setWindowFlags(self.windowFlags() & ~Qt.WindowType.WindowContextHelpButtonHint)
 
         # 本地校验账号（来自 config/app.yaml → bootstrap 传入）
@@ -77,7 +76,7 @@ class LoginDialog(QDialog):
         self.setFixedWidth(400)
         self.setStyleSheet(login_qss(ThemeManager.instance().current()))
 
-        layout = QVBoxLayout(self)
+        layout = QVBoxLayout()
         layout.setContentsMargins(32, 28, 32, 24)
         layout.setSpacing(10)
 
@@ -164,6 +163,7 @@ class LoginDialog(QDialog):
         login_btn.clicked.connect(self._on_accept)
         # 密码框回车直接触发登录
         self.password_edit.returnPressed.connect(self._on_accept)
+        self.setLayout(layout)
 
     # ============================================================== 行为
 

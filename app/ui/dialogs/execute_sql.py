@@ -13,7 +13,6 @@ from osgeo import ogr
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
-    QDialog,
     QFormLayout,
     QFrame,
     QGroupBox,
@@ -29,6 +28,7 @@ from PyQt6.QtWidgets import (
 from qgis.core import QgsVectorLayer
 
 from app.infra.logging import get_logger
+from app.ui.common.base_dialog import BaseDialog
 
 logger = get_logger(__name__)
 
@@ -239,7 +239,7 @@ class _SqlStreamWorker(QObject):
             ds = None
 
 
-class ExecuteSqlDialog(QDialog):
+class ExecuteSqlDialog(BaseDialog):
     """执行 ogr SQL 并展示结果。"""
 
     def __init__(self, layer: QgsVectorLayer, parent=None) -> None:
@@ -250,7 +250,7 @@ class ExecuteSqlDialog(QDialog):
         self._setup_ui()
 
     def _setup_ui(self) -> None:
-        layout = QVBoxLayout(self)
+        layout = QVBoxLayout()
 
         sql_frame = QFrame()
         sql_layout = QVBoxLayout(sql_frame)
@@ -307,6 +307,7 @@ class ExecuteSqlDialog(QDialog):
         self.execute_btn.clicked.connect(self._on_execute)
         self.stop_btn.clicked.connect(self._on_stop)
         self.subset_filter_btn.clicked.connect(self._on_open_query_builder)
+        self.setLayout(layout)
 
     def _on_execute(self) -> None:
         # 上一次查询还在跑：先取消

@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import pytest
-from PyQt6.QtWidgets import QApplication, QMessageBox
+from PyQt6.QtWidgets import QApplication, QDialog, QMessageBox
 
 from app.core.domain.flow.executor import STATUS_FAILED, STATUS_SUCCESS
 from app.core.domain.flow.serialization import FlowCodec
@@ -19,13 +19,24 @@ pytestmark = pytest.mark.gui
 
 @pytest.fixture(autouse=True)
 def _no_dialogs(monkeypatch):
-    """把弹窗换成直接返回 Yes，防止 offscreen 下阻塞。"""
+    """把弹窗换成直接返回 Yes，防止 offscreen 下阻塞。
+
+    只 patch QMessageBox 还不够：``_run_flow`` 里还会经
+    ``RunParamsDialog.exec()`` 打开**模态**对话框——真跑会阻塞测试（QgsApplication
+    下无交互事件循环，exec 不返回）。把 ``QDialog.exec`` 也替换成直接 Accepted，
+    ``_collect_run_overrides`` 才能拿到默认值继续执行流程（与旧的"点运行"行为一致）。
+    """
     for name in ("information", "warning", "critical", "question"):
         monkeypatch.setattr(
             QMessageBox,
             name,
             lambda *a, **k: QMessageBox.StandardButton.Yes,
         )
+    monkeypatch.setattr(
+        QDialog,
+        "exec",
+        lambda self: QDialog.DialogCode.Accepted,
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -41,6 +52,13 @@ def test_window_builds(qgis_app):
     assert w.node_library is not None
     # 工具条有运行按钮
     assert w.act_run is not None
+    # 边框精简：用户信息 / 主题切换 / 模式切换不进流程编辑器标题栏
+    tb = w.title_bar
+    assert tb._user_btn is None, "流程编辑器标题栏不应有用户信息"
+    assert tb._btn_theme is None, "流程编辑器标题栏不应有主题切换"
+    assert tb._mode_switch is None, "流程编辑器标题栏不应有模式切换"
+    for btn in (tb._btn_min, tb._btn_max, tb._btn_close):
+        assert btn in tb._interactive
 
 
 def test_select_node_shows_param_panel(qgis_app):

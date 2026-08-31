@@ -8,7 +8,6 @@ from typing import Optional
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QDialog,
     QDialogButtonBox,
     QFormLayout,
     QFrame,
@@ -22,8 +21,10 @@ from PyQt6.QtWidgets import (
 
 from qgis.core import QgsVectorLayer
 
+from app.ui.common.base_dialog import BaseDialog
 
-class CustomAttrDialog(QDialog):
+
+class CustomAttrDialog(BaseDialog):
     """自定义属性编辑 Dialog。"""
 
     def __init__(self, layer: QgsVectorLayer, feature=None, parent: Optional[QWidget] = None) -> None:
@@ -36,9 +37,10 @@ class CustomAttrDialog(QDialog):
     def _init_ui(self) -> None:
         self.setWindowTitle(f"{self.layer.name()} - 要素属性")
         self.setModal(True)
-        self.setFixedSize(500, 550)
+        # 无边框标题栏占高 34px，固定高度 +TITLE_BAR_HEIGHT 保住内容区原尺寸
+        self.setFixedSize(500, 550 + self.title_bar.height())
 
-        main = QVBoxLayout(self)
+        main = QVBoxLayout()
         main.setContentsMargins(10, 10, 10, 10)
         main.setSpacing(5)
 
@@ -79,6 +81,7 @@ class CustomAttrDialog(QDialog):
         bb.rejected.connect(self.reject)
         button_layout.addWidget(bb)
         main.addWidget(button_container)
+        self.setLayout(main)
 
     def _on_focus(self, line_edit, event) -> None:
         if line_edit.text() == "NULL":

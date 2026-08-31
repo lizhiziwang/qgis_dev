@@ -16,7 +16,31 @@ from app.ui.common.theme import ThemeManager, Theme, toolbar_qss
 
 
 class ToolBar:
-    """主工具条构建器。"""
+    """主工具条构建器。
+
+    两类状态按钮：
+
+    - 地图工具（平移/缩放/选择/识别/卷帘）：单选高亮，跟随画布当前激活的
+      :class:`QgsMapTool`（``MainWindow`` 监听 ``mapToolSet`` 后调用
+      :meth:`set_active`）；
+    - 会话型工具（地图对比）：独立开关，会话存活期间保持高亮
+      （:meth:`set_session_active`），不受地图工具切换影响。
+
+    一次性动作（全图/刷新/测试/质检/分析/取消选择）不参与高亮。
+    """
+
+    #: 地图工具 key → 按钮可勾选（单选组，跟随激活的地图工具）
+    _TOOL_KEYS = frozenset({
+        "pan",
+        "select_point",
+        "select_box",
+        "identify",
+        "zoom_in",
+        "zoom_out",
+        "swipe",
+    })
+    #: 会话型工具 key → 按钮独立开关（会话存活期常亮）
+    _SESSION_KEYS = frozenset({"qmap_compare"})
 
     def __init__(self, main_window: QMainWindow) -> None:
         self.main_window = main_window
@@ -24,6 +48,10 @@ class ToolBar:
         self.draw_manager = None  # 由 MainWindow 注入
         #: 已创建的按钮 + 图标 key，主题切换时用它重刷图标颜色
         self._icon_items: list[tuple[QAction | QToolButton, str]] = []
+        #: 工具 key → 可勾选按钮（地图工具 + 会话工具）
+        self._tool_actions: dict[str, QAction] = {}
+        #: 当前高亮的工具 key（单选组）
+        self._active_key: Optional[str] = None
 
     def build(self, callbacks: dict[str, Callable[[], None]]) -> QToolBar:
         """构建工具条。
@@ -33,6 +61,7 @@ class ToolBar:
             - identify
             - quality (质检 dialog)
             - analyse (分析)
+            - swipe (卷帘对比)
             - refresh
             - test
         """
@@ -46,11 +75,16 @@ class ToolBar:
         color = ThemeManager.instance().current().toolbar_text
         for text, key in [
             ("平移", "pan"),
+            ("点选", "select_point"),
+            ("框选", "select_box"),
+            ("取消选择", "clear_selection"),
             ("属性", "identify"),
             ("放大", "zoom_in"),
             ("缩小", "zoom_out"),
             ("质检", "quality"),
             ("分析", "analyse"),
+            ("卷帘对比", "swipe"),
+            ("地图对比", "qmap_compare"),
             ("全图", "zoom_full"),
             ("刷新", "refresh"),
             ("测试", "test"),
@@ -59,6 +93,31 @@ class ToolBar:
 
         tb.setStyleSheet(toolbar_qss(ThemeManager.instance().current()))
         return tb
+
+    # ------------------------------------------------------------ 状态高亮
+
+    def set_active(self, key: Optional[str]) -> None:
+        """地图工具单选：高亮 ``key`` 对应按钮，其余地图工具按钮取消高亮。
+
+        会话型工具（地图对比）不受影响。
+        """
+        self._active_key = key
+        for k, act in self._tool_actions.items():
+            if k in self._SESSION_KEYS:
+                continue
+            act.setChecked(k == key)
+
+    def set_session_active(self, key: str, active: bool) -> None:
+        """会话型工具独立开关：会话存活期间按钮保持高亮。"""
+        if key not in self._SESSION_KEYS:
+            return
+        act = self._tool_actions.get(key)
+        if act is not None:
+            act.setChecked(active)
+
+    def active_key(self) -> Optional[str]:
+        """当前高亮的地图工具 key（测试用）。"""
+        return self._active_key
 
     def _add_action(
         self,
@@ -72,6 +131,9 @@ class ToolBar:
         act = QAction(text, self.main_window)
         act.setIcon(tool_icons.icon(key, color))
         act.setToolTip(text)
+        if key in self._TOOL_KEYS or key in self._SESSION_KEYS:
+            act.setCheckable(True)
+            self._tool_actions[key] = act
         act.triggered.connect(callbacks.get(key, lambda: None))
         tb.addAction(act)
         self._icon_items.append((act, key))

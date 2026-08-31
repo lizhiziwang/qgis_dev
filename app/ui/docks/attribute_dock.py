@@ -11,6 +11,7 @@ from typing import List, Optional
 from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, QTimer, QVariant, pyqtSignal
 from PyQt6.QtWidgets import (
     QAbstractItemView,
+    QDialog,
     QDockWidget,
     QHBoxLayout,
     QHeaderView,
@@ -32,7 +33,10 @@ from qgis.core import (
 )
 
 from app.core.domain.editing import LayerEditService
+from app.infra.logging import get_logger
 from app.ui.common.icons import Icons
+
+logger = get_logger(__name__)
 
 #: 超过该数量才启用分批动态加载；≤ 阈值时一次性全量加载（避免小图层分页闪烁）
 DYNAMIC_LOAD_THRESHOLD = 1000
@@ -391,6 +395,23 @@ class PagedAttributeTableModel(QAbstractTableModel):
         self.endResetModel()
         self._start_stream()
 
+    def reload_fields(self) -> None:
+        """字段计算器改动图层字段后刷新列定义与已渲染值。
+
+        只重读字段名/列头并清要素缓存后原地 reset：**不重流 fids**（加字段
+        不改要素数/顺序，500w 图层也只需重取可视行，无额外全表扫描）。
+        新增字段 → ``columnCount``/列头更新；仅更新已有字段值 → 可视行从
+        图层重取新值（编辑缓冲内的值同样可见）。
+        """
+        self.field_names = [f.name() for f in self.layer.fields()]
+        # 列头显示名：优先字段别名，无别名降级为字段名（同 __init__ 逻辑）
+        self.header_names = [
+            self.layer.attributeAlias(i) or name for i, name in enumerate(self.field_names)
+        ]
+        self._feature_cache.clear()
+        self.beginResetModel()
+        self.endResetModel()
+
     # ------------------------------------------------- worker 信号槽（主线程）
 
     def _on_chunk(self, worker, fids: List[int]) -> None:
@@ -578,11 +599,17 @@ class PagedAttributeTableWidget(QWidget):
         self.filter_btn.setIcon(Icons.filter())
         self.filter_btn.setToolTip("属性筛选")
         self.filter_btn.setFixedSize(26, 26)
+        self.calc_btn = QPushButton()
+        self.calc_btn.setObjectName("fieldCalcBtn")
+        self.calc_btn.setIcon(Icons.field_calc())
+        self.calc_btn.setToolTip("字段计算器")
+        self.calc_btn.setFixedSize(26, 26)
         self.start_btn.clicked.connect(self._start_edit)
         self.save_btn.clicked.connect(self._save_edit)
         self.stop_btn.clicked.connect(self._stop_edit)
         self.filter_btn.clicked.connect(self._filter)
-        for b in (self.start_btn, self.save_btn, self.stop_btn, self.filter_btn):
+        self.calc_btn.clicked.connect(self._field_calc)
+        for b in (self.start_btn, self.save_btn, self.stop_btn, self.filter_btn, self.calc_btn):
             tb.addWidget(b)
         tb.addStretch(0)
         main_layout.addLayout(tb)
@@ -722,6 +749,44 @@ class PagedAttributeTableWidget(QWidget):
             self.model.set_filter(cond)
             self.table_view.scrollToTop()
             self._refresh_load_state()
+
+    def _field_calc(self) -> None:
+        """打开 QGIS 内置字段计算器（复用矢量图层属性窗口字段页的那个）。
+
+        对话框 OK 时直接把计算结果应用到图层（必要时自动进入编辑态），
+        关闭后刷新表格列/值。
+        """
+        from qgis.gui import QgsFieldCalculator
+
+        before_names = [f.name() for f in self.layer.fields()]
+        dlg = QgsFieldCalculator(self.layer, self)
+        dlg.exec()
+        if dlg.result() != QDialog.DialogCode.Accepted:
+            return
+        # 内置对话框不暴露表达式/输出字段，日志按字段状态变化记录
+        after_names = [f.name() for f in self.layer.fields()]
+        new_fields = [n for n in after_names if n not in before_names]
+        if new_fields:
+            logger.info(
+                "字段计算完成：图层=%s，新增字段 %s（字段数 %d→%d）",
+                self.layer.name(), new_fields, len(before_names), len(after_names),
+            )
+        else:
+            logger.info(
+                "字段计算完成：图层=%s，更新已有字段（字段数 %d）",
+                self.layer.name(), len(after_names),
+            )
+        # 计算器可能启动了编辑：同步"保存编辑/停止编辑"按钮可用性
+        self._sync_edit_buttons()
+        # 新增字段 → 列定义刷新；仅更新值 → 可视行重取新值，两者都覆盖
+        if self.model is not None:
+            self.model.reload_fields()
+
+    def _sync_edit_buttons(self) -> None:
+        """按图层编辑态同步"保存编辑/停止编辑"按钮可用性。"""
+        editing = bool(self.layer.isEditable())
+        self.save_btn.setEnabled(editing)
+        self.stop_btn.setEnabled(editing)
 
     def _show_context_menu(self, position) -> None:
         from PyQt6.QtGui import QAction

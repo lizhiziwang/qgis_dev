@@ -148,6 +148,9 @@ class FramelessMixin:
         with_tab_bar: bool = False,
         show_min_button: bool = True,
         show_max_button: bool = True,
+        show_user_button: bool = True,
+        show_theme_button: bool = True,
+        show_mode_switch: bool = True,
     ):
         """把宿主设为无边框窗口，挂载自绘标题栏，并装配平台行为。
 
@@ -156,6 +159,10 @@ class FramelessMixin:
             的"菜单栏改 tab 切换器"用）。与 ``with_menu_bar`` 互斥，优先。
         :param show_min_button: 标题栏是否显示最小化按钮（对话框传 False）。
         :param show_max_button: 标题栏是否显示最大化按钮（对话框传 False）。
+        :param show_user_button: 标题栏是否显示用户信息（头像 + 用户名）。
+        :param show_theme_button: 标题栏是否显示主题切换按钮。
+        :param show_mode_switch: 标题栏是否显示任务/工程模式开关。
+            流程编辑器 / 对话框把后三个传 False，只留 图标/标题/窗口按钮。
         :return: 创建好的 :class:`TitleBar` 实例（也存到 ``self.title_bar``）。
         """
         from app.ui.main_window.title_bar import TitleBar
@@ -167,7 +174,14 @@ class FramelessMixin:
         self._resize_edges = Qt.Edge(0)  # 非 0 = 正在手动 resize（Wayland 兜底）
 
         # ---- 标题栏 + 信号 ----
-        self.title_bar = TitleBar(self, show_min_button, show_max_button)
+        self.title_bar = TitleBar(
+            self,
+            show_min_button,
+            show_max_button,
+            show_user_button,
+            show_theme_button,
+            show_mode_switch,
+        )
         self.title_bar.close_requested.connect(self._frameless_close)
         self.title_bar.maximize_requested.connect(self._toggle_maximize)
         if show_min_button:
@@ -364,7 +378,12 @@ class FramelessMixin:
         return HTCLIENT
 
     def _wm_getminmaxinfo(self, msg) -> None:
-        """修正最大化几何：无边框窗口最大化时填满工作区，不盖住任务栏。"""
+        """修正最大化几何 + 缩放下限：无边框窗口最大化时填满工作区，不盖住任务栏。
+
+        ``WM_GETMINMAXINFO`` 被本类拦截后不再走 Qt 默认填充，必须在这里手动把
+        ``ptMinTrackSize`` 填成 ``setMinimumSize`` 的值 —— 否则原生 SC_SIZE 缩放
+        循环会把它当 0，窗口能被拖到任意小（主窗口的 300×500 下限就失效了）。
+        """
         mmi = _MINMAXINFO.from_address(int(msg.lParam))
         monitor = ctypes.windll.user32.MonitorFromWindow(
             int(self.winId()), MONITOR_DEFAULTTONEAREST
@@ -377,6 +396,13 @@ class FramelessMixin:
         mmi.ptMaxSize.x, mmi.ptMaxSize.y = w, h
         mmi.ptMaxPosition.x, mmi.ptMaxPosition.y = info.rcWork.left, info.rcWork.top
         mmi.ptMaxTrackSize.x, mmi.ptMaxTrackSize.y = w, h
+        # 缩放下限：Qt setMinimumSize 是逻辑像素，WM 坐标是物理像素，HiDPI 需按 dpr 换算
+        min_w, min_h = self.minimumSize().width(), self.minimumSize().height()
+        ratio = self.devicePixelRatioF()
+        if ratio not in (0.0, 1.0):
+            min_w = round(min_w * ratio)
+            min_h = round(min_h * ratio)
+        mmi.ptMinTrackSize.x, mmi.ptMinTrackSize.y = min_w, min_h
 
     # ------------------------------------------------------------ Linux 边缘缩放
 
