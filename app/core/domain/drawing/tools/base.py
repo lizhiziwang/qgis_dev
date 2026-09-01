@@ -2,7 +2,7 @@
 
 设计：
 
-- 业务层不依赖 PyQt6 widget（除了 :class:`QgsMapTool`，它本身是 Qt 抽象类，
+- 业务层不依赖 Qt widget 控件（除了 :class:`QgsMapTool`，它本身是 Qt 抽象类，
   没办法）。所以允许本模块 import qgis.gui。
 - 几何采集由工具类完成，业务层通过 :class:`ActiveDraw` 拿到 :class:`QgsGeometry`。
 - 工具通过 :attr:`finished` 信号通知绘制完成；UI 层订阅后做属性编辑等后处理。
@@ -19,11 +19,11 @@ if TYPE_CHECKING:
     from qgis.core import QgsGeometry
     from qgis.gui import QgsMapCanvas, QgsMapTool
 
-from PyQt6.QtCore import pyqtSignal
+from qgis.PyQt.QtCore import pyqtSignal
 from qgis.core import QgsWkbTypes
 from qgis.gui import QgsMapTool, QgsRubberBand
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QColor
 
 
 class BaseDrawTool(QgsMapTool):

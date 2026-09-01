@@ -22,7 +22,7 @@ import sqlite3
 import threading
 from html import escape as html_escape
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from qgis.PyQt.QtCore import QObject, pyqtSignal
 
 from app.core.domain.imagery_tiles.feedback import ProcessingLogFeedback
 from app.infra.logging import get_logger

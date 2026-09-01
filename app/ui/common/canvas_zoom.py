@@ -15,9 +15,9 @@ from __future__ import annotations
 import math
 from typing import Optional
 
-from PyQt6.QtCore import QSize, Qt, QTimer
-from PyQt6.QtGui import QColor
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtCore import QSize, Qt, QTimer
+from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtWidgets import (
     QFrame,
     QGraphicsDropShadowEffect,
     QPushButton,

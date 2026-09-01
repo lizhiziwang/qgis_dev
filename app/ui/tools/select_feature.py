@@ -26,8 +26,8 @@ if TYPE_CHECKING:
     from qgis.core import QgsGeometry, QgsPointXY, QgsVectorLayer
     from qgis.gui import QgsMapCanvas
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QColor
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QColor
 from qgis.core import (
     Qgis,
     QgsGeometry,

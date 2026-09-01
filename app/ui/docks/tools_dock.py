@@ -10,8 +10,9 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtWidgets import (
+from qgis.core import QgsApplication
+from qgis.PyQt.QtCore import QSize, Qt
+from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QDockWidget,
     QHBoxLayout,
@@ -328,7 +329,13 @@ class ToolsDock(QDockWidget):
         self.setWidget(wrapper)
 
     def _build_tree(self) -> None:
-        """按 :data:`_TOOL_GROUPS` 构建分组树；分组加粗，叶子加 tooltip。"""
+        """按 :data:`_TOOL_GROUPS` 构建分组树；分组加粗，叶子加 tooltip。
+
+        跳过当前 QGIS 环境不存在的 GDAL 算法（如 QGIS 3.40 无
+        ``gdal:createcog`` / ``gdal:dataset_identify``），否则点开
+        ``GenericAlgDialog`` 会因 ``algorithmById`` 为 None 崩溃。
+        """
+        reg = QgsApplication.processingRegistry()
         group_font = self.tree.font()
         group_font.setBold(True)
         for group_name, tools in _TOOL_GROUPS:
@@ -337,6 +344,9 @@ class ToolsDock(QDockWidget):
             group.setFont(0, group_font)
             group.setSizeHint(0, QSize(0, 28))
             for text, code in tools:
+                if code in _DIALOG_FACTORIES and reg.algorithmById(code) is None:
+                    # 当前 QGIS 版本无此算法（processing provider 未注册）
+                    continue
                 item = QTreeWidgetItem(group)
                 item.setText(0, text)
                 item._code_ = code

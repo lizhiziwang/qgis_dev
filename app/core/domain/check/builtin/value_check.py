@@ -20,7 +20,7 @@ mismatch or improper type of arguments to IN operator.``，且前导零被丢弃
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QMetaType
+from qgis.PyQt.QtCore import QMetaType
 
 from app.core.domain.check.param import CheckParam
 from app.core.domain.check.registry import BaseCheck, register

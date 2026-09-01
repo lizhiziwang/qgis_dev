@@ -59,7 +59,7 @@ class FeatureIdentifyService:
             mode = QgsMapToolIdentify.IdentifyMode.TopDownAll
         tool = QgsMapToolIdentify(canvas)
         # QGIS 4.x 的 identify(x, y, mode) 要求 int 坐标 + IdentifyMode 枚举，
-        # 传 float / int 都会 TypeError（int 在 PyQt6 不再自动转枚举）
+        # 传 float / int 都会 TypeError（int 在 Qt6 绑定不再自动转枚举）
         results = tool.identify(int(x), int(y), mode)
         out: List[IdentifyResult] = []
         for r in results:
@@ -101,8 +101,8 @@ class FeatureIdentifyService:
         feature: "QgsFeature",
     ) -> "QgsHighlight":
         """创建高亮对象（红色边框），调用方负责 ``deleteLater()``。"""
-        from PyQt6.QtCore import Qt
-        from PyQt6.QtGui import QColor
+        from qgis.PyQt.QtCore import Qt
+        from qgis.PyQt.QtGui import QColor
         from qgis.gui import QgsHighlight
 
         h = QgsHighlight(canvas, feature, layer)

@@ -38,9 +38,9 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
-from PyQt6.QtCore import QObject, Qt, QTimer
-from PyQt6.QtGui import QPainter
-from PyQt6.QtWidgets import QDockWidget
+from qgis.PyQt.QtCore import QObject, Qt, QTimer
+from qgis.PyQt.QtGui import QPainter
+from qgis.PyQt.QtWidgets import QDockWidget
 from qgis.core import (
     Qgis,
     QgsCoordinateTransformContext,
@@ -60,7 +60,7 @@ from qgis.core import (
 from qgis.gui import QgsMapCanvas, QgsMapToolPan
 
 if TYPE_CHECKING:  # pragma: no cover
-    from PyQt6.QtWidgets import QMainWindow
+    from qgis.PyQt.QtWidgets import QMainWindow
 
 # ---------------------------------------------------------------------------
 # 常量（与 qmapcompare 保持一致，便于对照源码）
@@ -527,8 +527,8 @@ def offscreen_render(settings, project, size=(400, 400), background="white"):
     ``@map_extent_*`` 等变量，需要手动注入 global + project +
     mapSettings scope（GUI 画布渲染无需此步骤）。
     """
-    from PyQt6.QtCore import QSize
-    from PyQt6.QtGui import QColor, QImage, QPainter
+    from qgis.PyQt.QtCore import QSize
+    from qgis.PyQt.QtGui import QColor, QImage, QPainter
 
     from qgis.core import QgsMapRendererCustomPainterJob
 

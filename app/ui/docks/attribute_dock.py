@@ -8,8 +8,8 @@ import threading
 import time
 from typing import List, Optional
 
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, QTimer, QVariant, pyqtSignal
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, QTimer, QVariant, pyqtSignal
+from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QDialog,
     QDockWidget,
@@ -789,8 +789,8 @@ class PagedAttributeTableWidget(QWidget):
         self.stop_btn.setEnabled(editing)
 
     def _show_context_menu(self, position) -> None:
-        from PyQt6.QtGui import QAction
-        from PyQt6.QtWidgets import QMenu
+        from qgis.PyQt.QtGui import QAction
+        from qgis.PyQt.QtWidgets import QMenu
         if not self.model:
             return
         idx = self.table_view.indexAt(position)

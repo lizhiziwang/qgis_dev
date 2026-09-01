@@ -225,7 +225,7 @@ def _run_login_dialog(cfg: AppConfig) -> Optional[str]:
     校验账号来自 ``config/app.yaml`` 的 ``auth`` 段（未接真实 auth 服务前
     只认这一对本地账号）。
     """
-    from PyQt6.QtWidgets import QDialog
+    from qgis.PyQt.QtWidgets import QDialog
 
     from app.ui.dialogs.login import LoginDialog
 
@@ -265,7 +265,7 @@ def _run_qgis_app(cfg: AppConfig, qgis: QgisRuntime, app, splash=None) -> int:
     if cfg.env == "dev":
         if splash is not None:
             splash.set_status("正在加载语言")
-        from PyQt6.QtCore import QLibraryInfo, QTranslator
+        from qgis.PyQt.QtCore import QLibraryInfo, QTranslator
 
         translator = QTranslator()
         translator.load("qgis_zh-Hans.qm", app.i18nPath())
@@ -275,7 +275,12 @@ def _run_qgis_app(cfg: AppConfig, qgis: QgisRuntime, app, splash=None) -> int:
         # qgis_zh-Hans 只管 QGIS 自带文案，不翻译这些按钮，不装的话弹窗里
         # 全是英文（如流程窗口关闭时的 Save / Discard / Cancel）。
         qt_translator = QTranslator()
-        qt_path = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+        # Qt 6：QLibraryInfo.path(LibraryPath.TranslationsPath)；
+        # Qt 5：QLibraryInfo.location(TranslationsPath)。qgis.PyQt 不提供 path shim，需双写。
+        try:
+            qt_path = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+        except AttributeError:  # PyQt5 / Qt5
+            qt_path = QLibraryInfo.location(QLibraryInfo.TranslationsPath)
         if qt_translator.load("qtbase_zh_CN.qm", qt_path):
             app.installTranslator(qt_translator)
 

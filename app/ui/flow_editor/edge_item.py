@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import math
 
-from PyQt6.QtCore import QPointF, QRectF, Qt
-from PyQt6.QtGui import QPainter, QPainterPath, QPen, QPolygonF
-from PyQt6.QtWidgets import QGraphicsPathItem, QMenu
+from qgis.PyQt.QtCore import QPointF, QRectF, Qt
+from qgis.PyQt.QtGui import QPainter, QPainterPath, QPen, QPolygonF
+from qgis.PyQt.QtWidgets import QGraphicsPathItem, QMenu
 
 from .flow_theme import current as current_palette
 

@@ -12,9 +12,9 @@ UI 只负责发信号，真正清空/创建工程由 :class:`MainWindow` 处理
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QFont
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtGui import QFont
+from qgis.PyQt.QtWidgets import (
     QDockWidget,
     QHBoxLayout,
     QLabel,

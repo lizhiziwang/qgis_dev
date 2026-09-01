@@ -9,9 +9,9 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QPointF, QRectF, Qt
-from PyQt6.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtCore import QPointF, QRectF, Qt, QVariant
+from qgis.PyQt.QtGui import QBrush, QColor, QLinearGradient, QPainter, QPen
+from qgis.PyQt.QtWidgets import (
     QGraphicsDropShadowEffect,
     QGraphicsItem,
     QGraphicsObject,
@@ -332,6 +332,16 @@ class NodeItem(QGraphicsObject):
         self.update()
 
     def itemChange(self, change, value):  # noqa: N802 —— Qt 命名
+        # PyQt5（qgis.PyQt 映射）下 item 脱离场景时 ItemSceneHasChanged 的
+        # value 是 PyQt_PyObject 型 QVariant（内部 Python 对象已被消费），
+        # 原样透传 super() 会因无法转回 Python 对象而 TypeError；而
+        # .value() 也会失败（PyQt6 下 value 本就是普通对象，不会进来）。
+        if isinstance(value, QVariant):
+            try:
+                value = value.value()
+            except TypeError:
+                # 解包失败的 change（如脱离场景）业务上用不到该 value，置 None 安全透传
+                value = None
         if change == QGraphicsItem.GraphicsItemChange.ItemPositionChange and self.scene() is not None:
             scene = self.scene()
             if hasattr(scene, "on_node_moved"):

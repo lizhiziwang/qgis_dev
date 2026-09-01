@@ -114,8 +114,12 @@ mypy --strict app/infra app/env
 
 ```bat
 powershell -ExecutionPolicy Bypass -File tools\build_windows.ps1     rem Windows
-bash tools/build_linux.sh                                            rem Linux
+bash tools/build_linux.sh                                            rem Linux / 银河麒麟 V10
 ```
+
+> **银河麒麟 V10 打包**：代码已做 PyQt6 → `qgis.PyQt` 兼容改造（麒麟源/conda-forge 的 QGIS 均为 PyQt5），
+> 在麒麟机/容器上 `bash tools/build_linux.sh` → `bash tools/kylin/build_deb.sh` 出 `.deb`。
+> 完整指南见 [`tools/kylin/README.md`](tools/kylin/README.md)。
 
 `build_windows.ps1` 自动完成三步：
 1. **清理** 旧 `dist/`、`build/`
@@ -141,7 +145,7 @@ bash tools/build_linux.sh                                            rem Linux
 - 入口 `scripts/entry.py`，`pathex` 为项目根；用 `SPECPATH`（而非 `__file__`）推导项目根（spec 命名空间没有 `__file__`）。
 - `datas`：`qgis` python 包、`resource/`、`config/`、`srs.db`、`proj.db`。
 - `binaries`：`qgis_core.dll`、`qgis_gui.dll`、`gdal313.dll`、`geos_c.dll`、`pdalcpp.dll`、`proj_9.dll`、Qt6 核心 DLL、Qt 平台插件。
-- `hiddenimports`：qgis.core/gui/utils + 全部 PyQt6 子模块。
+- `hiddenimports`：qgis.core/gui/utils + qgis.PyQt + 全部 PyQt 子模块（Win=PyQt6，Linux=PyQt5，spec 按平台自动选）。
 
 ---
 

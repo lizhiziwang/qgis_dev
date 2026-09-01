@@ -12,7 +12,8 @@ license = { text = "Proprietary" }
 authors = [{ name = "zsh" }]
 
 dependencies = [
-    # GUI
+    # GUI：Qt 绑定统一走 QGIS 自带的 qgis.PyQt（兼容 PyQt5 / PyQt6，由 QGIS 版本决定）；
+    # 这里保留 PyQt6 声明便于 pip 环境解析，运行时不直接 import PyQt6。
     "PyQt6>=6.7",
     # QGIS 由宿主机或 conda 提供，不在这里锁
     # GIS 数据

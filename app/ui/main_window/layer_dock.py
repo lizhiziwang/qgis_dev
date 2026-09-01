@@ -5,8 +5,8 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtWidgets import QDockWidget, QWidget
+from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtWidgets import QDockWidget, QWidget
 
 from qgis.core import QgsLayerTreeModel, QgsProject
 from qgis.gui import QgsLayerTreeView

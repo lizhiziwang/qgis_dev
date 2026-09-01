@@ -7,8 +7,8 @@ from __future__ import annotations
 import threading
 from typing import Optional
 
-from PyQt6.QtCore import QObject, Qt, QVariant, pyqtSignal
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtCore import QObject, Qt, QVariant, pyqtSignal
+from qgis.PyQt.QtWidgets import (
     QDialog,
     QGridLayout,
     QGroupBox,

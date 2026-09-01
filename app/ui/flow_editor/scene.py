@@ -10,9 +10,9 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QPointF, QRectF, Qt, pyqtSignal
-from PyQt6.QtGui import QBrush
-from PyQt6.QtWidgets import QGraphicsItem, QGraphicsScene
+from qgis.PyQt.QtCore import QPointF, QRectF, Qt, pyqtSignal
+from qgis.PyQt.QtGui import QBrush
+from qgis.PyQt.QtWidgets import QGraphicsItem, QGraphicsScene
 
 from app.core.domain.flow.algorithm_library import (
     BUILTIN_TEMPLATES,

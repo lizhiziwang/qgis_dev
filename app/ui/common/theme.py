@@ -16,9 +16,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PyQt6.QtCore import QCoreApplication, QObject, QSettings, pyqtSignal
-from PyQt6.QtGui import QColor, QPalette
-from PyQt6.QtWidgets import QApplication, QToolTip
+from qgis.PyQt.QtCore import QCoreApplication, QObject, QSettings, pyqtSignal
+from qgis.PyQt.QtGui import QColor, QPalette
+from qgis.PyQt.QtWidgets import QApplication, QToolTip
 
 
 @dataclass(frozen=True)
@@ -435,8 +435,8 @@ def _arrow_url(color: str, up: bool = False) -> str:
     import tempfile
     from pathlib import Path
 
-    from PyQt6.QtCore import QPoint, Qt
-    from PyQt6.QtGui import QColor, QPainter, QPixmap
+    from qgis.PyQt.QtCore import QPoint, Qt
+    from qgis.PyQt.QtGui import QColor, QPainter, QPixmap
 
     pm = QPixmap(10, 8)
     pm.fill(Qt.GlobalColor.transparent)

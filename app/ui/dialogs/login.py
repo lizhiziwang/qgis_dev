@@ -5,7 +5,7 @@
 
 设计：
 
-- 只依赖 PyQt6，不引入 ``qgis.*``，避免登录阶段拖 QGIS 启动开销。
+- 只依赖 qgis.PyQt（QGIS 自带绑定），不引入其他 qgis 模块，避免登录阶段拖 QGIS 启动开销。
 - 默认账号来自 ``config/app.yaml`` 的 ``auth`` 段（bootstrap 传入）；未传时兜底
   ``admin / admin``（生产环境请接真实 auth 服务 / 配置文件）。
 - 取消 → :meth:`reject`，外层 :func:`bootstrap.main` 据此 ``return 0`` 退出。
@@ -15,8 +15,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,

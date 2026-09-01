@@ -5,8 +5,8 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,

@@ -21,10 +21,10 @@ if TYPE_CHECKING:
 
     from .tools.qgis.base import BaseQgsDrawTool
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from qgis.PyQt.QtCore import QObject, pyqtSignal
 from qgis.core import QgsWkbTypes
 from qgis.gui import QgsRubberBand
-from PyQt6.QtCore import Qt
+from qgis.PyQt.QtCore import Qt
 
 from .service import ActiveDraw, DrawingService
 

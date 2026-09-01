@@ -11,9 +11,9 @@ import re
 from datetime import datetime
 from typing import Optional
 
-from PyQt6.QtCore import QTimer, Qt
-from PyQt6.QtGui import QTextCursor
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtCore import QTimer, Qt
+from qgis.PyQt.QtGui import QTextCursor
+from qgis.PyQt.QtWidgets import (
     QComboBox,
     QHBoxLayout,
     QLabel,

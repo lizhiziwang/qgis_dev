@@ -10,8 +10,8 @@ import os
 import uuid
 from typing import Any, Optional
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtWidgets import (
     QApplication,
     QAbstractItemView,
     QCheckBox,
@@ -417,7 +417,7 @@ class CheckViewerDialog(BaseDialog):
     def _show_context_menu(self, pos) -> None:
         idx = self.table.indexAt(pos)
         menu = QMenu(self.table)
-        from PyQt6.QtGui import QAction
+        from qgis.PyQt.QtGui import QAction
         if idx.isValid():
             row = idx.row()
             current = self.display_items[row]

@@ -22,7 +22,7 @@ def copy_with_widened_string_fields(layer: "QgsVectorLayer") -> "QgsVectorLayer"
     把超长字段的长度放宽到实际最大值，并拷贝成临时 memory 图层；
     无需修正时原样返回，不产生额外开销。
     """
-    from PyQt6.QtCore import QVariant
+    from qgis.PyQt.QtCore import QVariant
     from qgis.core import (
         Qgis,
         QgsFeature,

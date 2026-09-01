@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from PyQt6.QtWidgets import QTextBrowser
+from qgis.PyQt.QtWidgets import QTextBrowser
 
 from app.infra.logging import get_logger
 from app.ui.common.theme import THEMES, ThemeManager

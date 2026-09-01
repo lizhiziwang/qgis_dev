@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QFont, QIcon
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QFont, QIcon
+from qgis.PyQt.QtWidgets import (
     QApplication,
     QDockWidget,
     QHBoxLayout,

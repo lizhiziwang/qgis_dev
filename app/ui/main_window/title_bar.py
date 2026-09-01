@@ -20,9 +20,9 @@ from __future__ import annotations
 import hashlib
 import time
 
-from PyQt6.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
-from PyQt6.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
+from qgis.PyQt.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
+from qgis.PyQt.QtWidgets import (
     QButtonGroup,
     QHBoxLayout,
     QLabel,

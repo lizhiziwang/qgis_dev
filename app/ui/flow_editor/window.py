@@ -9,9 +9,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtGui import QAction, QBrush, QColor, QKeySequence
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtCore import QSize, Qt
+from qgis.PyQt.QtGui import QAction, QBrush, QColor, QKeySequence
+from qgis.PyQt.QtWidgets import (
     QDialog,
     QFileDialog,
     QInputDialog,

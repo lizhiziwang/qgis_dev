@@ -30,9 +30,9 @@ import ctypes
 import sys
 from ctypes import wintypes
 
-from PyQt6.QtCore import QEvent, QPoint, QRect, Qt
-from PyQt6.QtGui import QCursor, QGuiApplication
-from PyQt6.QtWidgets import QMainWindow, QMenuBar, QTabBar, QVBoxLayout, QWidget
+from qgis.PyQt.QtCore import QEvent, QPoint, QRect, Qt
+from qgis.PyQt.QtGui import QCursor, QGuiApplication
+from qgis.PyQt.QtWidgets import QMainWindow, QMenuBar, QTabBar, QVBoxLayout, QWidget
 
 # ---------------------------------------------------------------------------
 # Windows 无边框窗口辅助：WM_NCHITTEST 让系统接管"标题栏拖动 + 边缘缩放"；
@@ -241,7 +241,7 @@ class FramelessMixin:
 
     def _frameless_close(self) -> None:
         """标题栏关闭按钮：QDialog 走 reject，其它走 close。"""
-        from PyQt6.QtWidgets import QDialog
+        from qgis.PyQt.QtWidgets import QDialog
 
         if isinstance(self, QDialog):
             self.reject()
@@ -316,7 +316,7 @@ class FramelessMixin:
                         return (True, 0)
             except Exception:  # noqa: BLE001 —— 兜底走 Qt 默认，不拖垮事件循环
                 pass
-        # PyQt6 下 super().nativeEvent 对未处理的消息返回 (False, None)；把这个 None
+        # Qt6 绑定下 super().nativeEvent 对未处理的消息返回 (False, None)；把这个 None
         # 直接透传回 Qt 时，sip 无法把 None 转成 qintptr 结果参数，抛出的 TypeError
         # 会穿进 C++ 事件分发，导致原生访问冲突（进程无 traceback 退出）。必须强转 int。
         ok, res = super().nativeEvent(eventType, message)

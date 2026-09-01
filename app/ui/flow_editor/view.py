@@ -6,9 +6,9 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, pyqtSignal
-from PyQt6.QtGui import QBrush, QPainter
-from PyQt6.QtWidgets import QGraphicsView
+from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtGui import QBrush, QPainter
+from qgis.PyQt.QtWidgets import QGraphicsView
 
 from .flow_theme import current as current_palette
 from .scene import FlowScene

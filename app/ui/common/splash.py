@@ -13,9 +13,9 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt, QTimer
-from PyQt6.QtGui import QGuiApplication
-from PyQt6.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
+from qgis.PyQt.QtCore import Qt, QTimer
+from qgis.PyQt.QtGui import QGuiApplication
+from qgis.PyQt.QtWidgets import QApplication, QLabel, QVBoxLayout, QWidget
 
 from app.ui.common.icons import Icons
 from app.ui.common.theme import ThemeManager

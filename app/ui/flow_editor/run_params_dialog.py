@@ -9,7 +9,7 @@ JSON**；下次运行仍用节点里保存的默认值 / 绑定。
 
 from __future__ import annotations
 
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtWidgets import (
     QCheckBox,
     QFileDialog,
     QHBoxLayout,

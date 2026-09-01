@@ -38,8 +38,8 @@ import threading
 from collections import OrderedDict, deque
 from typing import Optional
 
-from PyQt6.QtCore import QObject, QTimer
-from PyQt6.QtGui import QColor, QImage, QPainter
+from qgis.PyQt.QtCore import QObject, QTimer
+from qgis.PyQt.QtGui import QColor, QImage, QPainter
 
 from app.infra.logging import get_logger
 

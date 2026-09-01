@@ -24,9 +24,9 @@ from __future__ import annotations
 
 from typing import Optional
 
-from PyQt6.QtCore import QEvent, QRect, Qt, QTimer
-from PyQt6.QtGui import QColor, QImage, QPainter, QPen
-from PyQt6.QtWidgets import QWidget
+from qgis.PyQt.QtCore import QEvent, QRect, Qt, QTimer
+from qgis.PyQt.QtGui import QColor, QImage, QPainter, QPen
+from qgis.PyQt.QtWidgets import QWidget
 from qgis.core import QgsMapLayer, QgsMapRendererParallelJob, QgsMapSettings, QgsProject
 from qgis.gui import QgsMapTool
 

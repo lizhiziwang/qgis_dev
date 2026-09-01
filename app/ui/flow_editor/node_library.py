@@ -8,9 +8,9 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QMimeData, QSize, Qt
-from PyQt6.QtGui import QDrag
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtCore import QMimeData, QSize, Qt
+from qgis.PyQt.QtGui import QDrag
+from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QDockWidget,
     QHBoxLayout,

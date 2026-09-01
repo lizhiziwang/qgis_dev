@@ -10,8 +10,8 @@ import time
 from typing import Any, List, Optional
 
 from osgeo import ogr
-from PyQt6.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, pyqtSignal
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, pyqtSignal
+from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QFormLayout,
     QFrame,

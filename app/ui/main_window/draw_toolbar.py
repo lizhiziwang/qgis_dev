@@ -28,9 +28,9 @@ if TYPE_CHECKING:
     from qgis.core import QgsVectorLayer
     from qgis.gui import QgsMapCanvas
 
-from PyQt6.QtCore import QObject, Qt, pyqtSignal
-from PyQt6.QtGui import QAction, QColor
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtCore import QObject, Qt, pyqtSignal
+from qgis.PyQt.QtGui import QAction, QColor
+from qgis.PyQt.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QToolBar,
@@ -51,7 +51,7 @@ class DigitizingToolbar(QObject):
 
     继承 :class:`QObject` 是为了挂 :pyattr:`editing_state_changed` 信号——
     :class:`pyqtSignal` 必须挂在 :class:`QObject` 派生类上才能 ``emit`` /
-    ``connect``，否则会触发 ``TypeError: cannot be converted to PyQt6.QtCore.QObject``。
+    ``connect``，否则会触发 ``TypeError: cannot be converted to QObject``。
     """
 
     #: 编辑状态切换时发出：True=进入编辑态，False=退出编辑态。

@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 from qgis.core import QgsGeometry, QgsPointXY, QgsWkbTypes
 from qgis.gui import QgsRubberBand
-from PyQt6.QtCore import Qt
+from qgis.PyQt.QtCore import Qt
 
 from .base import BaseDrawTool
 

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QTimer
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtCore import QTimer
+from qgis.PyQt.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -129,7 +129,7 @@ class OverlayDialog(BaseDialog):
         layout.addStretch()
 
     def _browse_output_dir(self) -> None:
-        from PyQt6.QtWidgets import QFileDialog
+        from qgis.PyQt.QtWidgets import QFileDialog
 
         path = QFileDialog.getExistingDirectory(
             self, "选择输出目录", self.output_dir_edit.text()

@@ -8,7 +8,7 @@ imagery_tile 的填充模式（图层对象存 ``itemData``，``showEvent`` +
 
 from __future__ import annotations
 
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtWidgets import (
     QButtonGroup,
     QComboBox,
     QHBoxLayout,

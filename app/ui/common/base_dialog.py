@@ -20,8 +20,8 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtWidgets import QDialog, QLayout, QWidget
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtWidgets import QDialog, QLayout, QWidget
 
 from app.ui.common.frameless import FramelessMixin
 from app.ui.common.icons import Icons

@@ -15,9 +15,9 @@ from __future__ import annotations
 import os
 from typing import Optional
 
-from PyQt6.QtCore import QTimer
-from PyQt6.QtGui import QGuiApplication
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtCore import QTimer
+from qgis.PyQt.QtGui import QGuiApplication
+from qgis.PyQt.QtWidgets import (
     QFileDialog,
     QFormLayout,
     QGroupBox,

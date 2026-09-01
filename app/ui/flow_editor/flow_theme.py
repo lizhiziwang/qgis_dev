@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from PyQt6.QtGui import QColor
+from qgis.PyQt.QtGui import QColor
 
 from app.ui.common.theme import THEMES, Theme
 

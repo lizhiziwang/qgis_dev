@@ -18,9 +18,9 @@ import os
 import sys
 from typing import Optional
 
-from PyQt6.QtCore import QEvent, QPoint, Qt
-from PyQt6.QtGui import QAction, QCloseEvent, QColor, QKeySequence
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtCore import QEvent, QPoint, Qt
+from qgis.PyQt.QtGui import QAction, QCloseEvent, QColor, QKeySequence
+from qgis.PyQt.QtWidgets import (
     QDialog,
     QListWidget,
     QMainWindow,
@@ -455,7 +455,7 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def _on_clear_selection(self) -> None:
         """取消选择：清空**所有矢量图层**的当前选择并刷新画布。"""
-        from PyQt6.QtCore import QTimer
+        from qgis.PyQt.QtCore import QTimer
         from qgis.core import QgsVectorLayer
 
         for layer in self.project.mapLayers().values():
@@ -627,7 +627,7 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def _ask_project_name(self):
         """弹窗输入工程名；返回工程名，取消或为空则返回 ``None``。"""
-        from PyQt6.QtWidgets import QInputDialog
+        from qgis.PyQt.QtWidgets import QInputDialog
 
         while True:
             name, ok = QInputDialog.getText(self, "新建工程", "请输入工程名：")
@@ -814,7 +814,7 @@ class MainWindow(FramelessMixin, QMainWindow):
             self._add_layer_to_project(rlayer)
 
     def _on_browser_context_menu(self, pos) -> None:
-        from PyQt6.QtWidgets import QMenu
+        from qgis.PyQt.QtWidgets import QMenu
 
         index = self.browser_dock.view.indexAt(pos)
         if not index.isValid():
@@ -880,7 +880,7 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def _on_browser_create_vector(self, item, name: str, ext: str, driver: str) -> None:
         """在浏览器目录项下新建空矢量数据文件（"新建"子菜单入口）。"""
-        from PyQt6.QtWidgets import QFileDialog
+        from qgis.PyQt.QtWidgets import QFileDialog
         from qgis.core import (
             QgsCoordinateReferenceSystem,
             QgsCoordinateTransformContext,
@@ -917,7 +917,7 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def _on_browser_add_gdb_layer(self, item) -> None:
         """向已存在的 File Geodatabase（.gdb）中新增一个空图层。"""
-        from PyQt6.QtWidgets import QInputDialog
+        from qgis.PyQt.QtWidgets import QInputDialog
         from qgis.core import (
             QgsCoordinateReferenceSystem,
             QgsCoordinateTransformContext,
@@ -1154,7 +1154,7 @@ class MainWindow(FramelessMixin, QMainWindow):
         """重命名图层：layer.setName 会同步树节点名（已实测）。"""
         if layer is None:
             return
-        from PyQt6.QtWidgets import QInputDialog
+        from qgis.PyQt.QtWidgets import QInputDialog
 
         new_name, ok = QInputDialog.getText(self, "重命名图层", "图层名称：", text=layer.name())
         if not ok:
@@ -1288,7 +1288,7 @@ class MainWindow(FramelessMixin, QMainWindow):
         用 :class:`QTimer.singleShot` 推到下一个事件循环 tick，等
         ``layersRemoved`` 信号链彻底走完再画。
         """
-        from PyQt6.QtCore import QTimer
+        from qgis.PyQt.QtCore import QTimer
 
         if layer is None:
             return

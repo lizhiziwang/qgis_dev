@@ -16,8 +16,8 @@ if TYPE_CHECKING:
     from qgis.core import QgsGeometry, QgsVectorLayer
     from qgis.gui import QgsMapCanvas
 
-from PyQt6.QtGui import QAction
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtGui import QAction
+from qgis.PyQt.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QToolBar,

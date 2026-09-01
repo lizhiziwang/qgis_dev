@@ -11,8 +11,8 @@ import os
 from html import escape
 from typing import Optional
 
-from PyQt6.QtGui import QTextCursor
-from PyQt6.QtWidgets import (
+from qgis.PyQt.QtGui import QTextCursor
+from qgis.PyQt.QtWidgets import (
     QCheckBox,
     QComboBox,
     QHBoxLayout,

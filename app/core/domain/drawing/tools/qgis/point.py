@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     from qgis.core import QgsGeometry
     from qgis.gui import QgsMapCanvas
 
-from PyQt6.QtCore import Qt
+from qgis.PyQt.QtCore import Qt
 from qgis.core import QgsGeometry
 from qgis.gui import QgsMapToolEmitPoint
 

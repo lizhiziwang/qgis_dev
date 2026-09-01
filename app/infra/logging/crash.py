@@ -2,7 +2,7 @@
 
 覆盖两类"程序崩溃"：
 
-1. **未捕获 Python 异常**（含 Qt 槽 / C++ 回调里抛出的异常）——PyQt6 会先调
+1. **未捕获 Python 异常**（含 Qt 槽 / C++ 回调里抛出的异常）——Qt 绑定（qgis.PyQt）会先调
    ``sys.excepthook`` 再决定是否终止进程，所以这里能拿到完整 traceback。
    写入 ``crash.log``（纯文本，便于事后 grep）。
 2. **原生崩溃**（access violation / ``abort()`` / stack overflow）——

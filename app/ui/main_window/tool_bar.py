@@ -7,9 +7,9 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from PyQt6.QtCore import QSize, Qt
-from PyQt6.QtGui import QAction
-from PyQt6.QtWidgets import QMainWindow, QToolBar, QToolButton
+from qgis.PyQt.QtCore import QSize, Qt
+from qgis.PyQt.QtGui import QAction
+from qgis.PyQt.QtWidgets import QMainWindow, QToolBar, QToolButton
 
 from app.ui.common import tool_icons
 from app.ui.common.theme import ThemeManager, Theme, toolbar_qss

@@ -5,7 +5,7 @@
 - 统一持有 ``finished(QgsGeometry)`` 信号（与自定义版 :class:`BaseDrawTool` 对齐）。
 - 提供 ``is_buffer`` / ``distance`` 后处理。
 - 提供 ``cleanup`` 钩子，关闭 QGIS 自带的 rubber band。
-- **必须**继承 :class:`PyQt6.QtCore.QObject`，否则 :pyattr:`finished`
+- **必须**继承 :class:`qgis.PyQt.QtCore.QObject`，否则 :pyattr:`finished`
   （:class:`pyqtSignal`）无法 emit，调用时会触发 Qt native 崩溃
   （Windows 上表现为 ``STATUS_STACK_BUFFER_OVERRUN`` 0xC0000409）。
 
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from qgis.core import QgsGeometry
     from qgis.gui import QgsMapCanvas, QgsMapTool
 
-from PyQt6.QtCore import QObject, QTimer, pyqtSignal
+from qgis.PyQt.QtCore import QObject, QTimer, pyqtSignal
 
 
 class BaseQgsDrawTool(QObject):

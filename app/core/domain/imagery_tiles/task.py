@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import threading
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from qgis.PyQt.QtCore import QObject, pyqtSignal
 
 from app.infra.logging import get_logger
 

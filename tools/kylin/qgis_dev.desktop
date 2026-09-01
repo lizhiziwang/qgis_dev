@@ -1,0 +1,13 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=图斑核实平台
+Name[zh_CN]=图斑核实平台
+GenericName=GIS 桌面应用
+Comment=基于 PyQGIS 的图斑核实平台
+Exec=/opt/qgis_app/launch_qgis.sh
+Icon=qgis-dev-app
+Terminal=false
+Categories=Science;GIS;Geoscience;
+StartupNotify=true
+StartupWMClass=qgis-dev-app

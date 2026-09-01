@@ -13,7 +13,7 @@ QGIS 3.40 的 :class:`QgsProcessingFeedback` 信号面很窄（只有
 from __future__ import annotations
 
 from qgis.core import QgsProcessingFeedback
-from PyQt6.QtCore import pyqtSignal
+from qgis.PyQt.QtCore import pyqtSignal
 
 
 class ProcessingLogFeedback(QgsProcessingFeedback):

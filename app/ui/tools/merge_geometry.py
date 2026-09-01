@@ -27,8 +27,8 @@ from __future__ import annotations
 
 from collections.abc import Callable
 
-from PyQt6.QtCore import QPointF, Qt, QTimer
-from PyQt6.QtGui import QColor
+from qgis.PyQt.QtCore import QPointF, Qt, QTimer
+from qgis.PyQt.QtGui import QColor
 from qgis.core import QgsGeometry, QgsProject, QgsRectangle, QgsVectorLayer, QgsWkbTypes
 from qgis.gui import QgsMapTool, QgsRubberBand
 
@@ -254,14 +254,17 @@ class MergeGeometryTool(QgsMapTool):
                 and not stitched.isMultipart()
             ):
                 return stitched
-        # 真分离 / 缝合失败：多边形凹包（保形且不丢面积）
-        hull = QgsGeometry.concaveHullOfPolygons(
-            multi, self.CONCAVE_HULL_RATIO, False
-        )
-        if hull is not None and not hull.isEmpty() and not hull.isMultipart():
-            return hull
-        # 理论不可达：凹包失败时凸包兜底
-        return multi.convexHull()
+        # 真分离 / 缝合失败：多边形凹包（保形且不丢面积）。
+        # concaveHullOfPolygons 是 QGIS 3.42+ 新 API（JTS ConcaveHull 移植）；
+        # 3.40 及更早（如麒麟/conda 源默认的 3.40）没有 → 直接走凸包兜底。
+        hull = None
+        if hasattr(QgsGeometry, "concaveHullOfPolygons"):
+            hull = QgsGeometry.concaveHullOfPolygons(
+                multi, self.CONCAVE_HULL_RATIO, False
+            )
+        if hull is None or hull.isEmpty() or hull.isMultipart():
+            return multi.convexHull()
+        return hull
 
     # -------------------------------------------------- 图层 / 高亮
 

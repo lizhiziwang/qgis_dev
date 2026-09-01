@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from qgis.core import QgsTask
 
-from PyQt6.QtCore import pyqtSignal
+from qgis.PyQt.QtCore import pyqtSignal
 from qgis.core import QgsProcessingFeedback, QgsTask
 
 from app.infra.logging import get_logger

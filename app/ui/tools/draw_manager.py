@@ -8,9 +8,9 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QAction
-from PyQt6.QtWidgets import QMainWindow, QMenu, QToolBar, QToolButton
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtGui import QAction
+from qgis.PyQt.QtWidgets import QMainWindow, QMenu, QToolBar, QToolButton
 
 from app.core.domain.drawing import DrawManager
 

@@ -15,8 +15,8 @@
 
 from __future__ import annotations
 
-from PyQt6.QtCore import QRect, Qt
-from PyQt6.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPixmap
+from qgis.PyQt.QtCore import QRect, Qt
+from qgis.PyQt.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPixmap
 
 _LOGICAL = 36        # 逻辑像素边长（与工具条 iconSize 一致）
 _DPR = 2.0           # 2x 渲染，高 DPI 下图标不发虚

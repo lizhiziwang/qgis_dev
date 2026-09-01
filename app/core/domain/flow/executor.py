@@ -21,7 +21,7 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from qgis.PyQt.QtCore import QObject, pyqtSignal
 
 from .model import FlowGraph, InputSpec, NodeSpec, OutputSpec
 from .topo import topo_sort

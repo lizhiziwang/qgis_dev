@@ -9,7 +9,7 @@ from __future__ import annotations
 import html
 import time
 
-from PyQt6.QtWidgets import QDockWidget, QPlainTextEdit
+from qgis.PyQt.QtWidgets import QDockWidget, QPlainTextEdit
 
 from app.infra.logging import get_logger
 

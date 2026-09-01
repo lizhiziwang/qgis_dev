@@ -37,7 +37,7 @@ class FindFeatureTool(QgsMapToolIdentify):
         self._show_info(result)
 
     def _show_highlight(self, result: IdentifyResult) -> None:
-        from PyQt6.QtGui import QColor
+        from qgis.PyQt.QtGui import QColor
         from qgis.gui import QgsHighlight
 
         if self.highlight is not None:

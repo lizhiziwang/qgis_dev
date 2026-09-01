@@ -14,7 +14,7 @@ if TYPE_CHECKING:
     from qgis.core import QgsGeometry, QgsVectorLayer
     from qgis.gui import QgsMapCanvas, QgsMapTool
 
-from PyQt6.QtCore import QObject, pyqtSignal
+from qgis.PyQt.QtCore import QObject, pyqtSignal
 
 from .tools import get_tool_class
 
