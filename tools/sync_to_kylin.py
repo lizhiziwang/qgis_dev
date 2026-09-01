@@ -21,7 +21,7 @@ import paramiko
 
 REMOTE_URL = "http://zhengshuhao:Aa%40123456@git.zwps.top:7780/zhengshuhao/qgis.git"
 BRANCH = "dev"
-KYLIN = {"host": "192.168.191.130", "username": "zsh", "password": "Aa@123456", "timeout": 20}
+KYLIN = {"hostname": "192.168.191.130", "username": "zsh", "password": "Aa@123456", "timeout": 20}
 KYLIN_REPO = "~/桌面/qgis_dev/qgis"
 
 
