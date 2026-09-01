@@ -34,6 +34,8 @@ from qgis.PyQt.QtCore import QEvent, QPoint, QRect, Qt
 from qgis.PyQt.QtGui import QCursor, QGuiApplication
 from qgis.PyQt.QtWidgets import QMainWindow, QMenuBar, QTabBar, QVBoxLayout, QWidget
 
+from app.ui.common.qt_compat import event_pos, global_pos
+
 # ---------------------------------------------------------------------------
 # Windows 无边框窗口辅助：WM_NCHITTEST 让系统接管"标题栏拖动 + 边缘缩放"；
 # WM_GETMINMAXINFO 修正最大化几何；WM_NCLBUTTONDOWN(HTCAPTION) 重发 SC_MOVE
@@ -427,10 +429,10 @@ class FramelessMixin:
             t = event.type()
             if t == QEvent.Type.MouseMove:
                 if self._resize_edges == Qt.Edge(0):
-                    edges = hit_test(self.rect(), watched.mapTo(self, event.position().toPoint()))
+                    edges = hit_test(self.rect(), watched.mapTo(self, event_pos(event)))
                     self._apply_resize_cursor(watched, edges)
             elif t == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                edges = hit_test(self.rect(), watched.mapTo(self, event.position().toPoint()))
+                edges = hit_test(self.rect(), watched.mapTo(self, event_pos(event)))
                 if edges != Qt.Edge(0):
                     self._start_system_resize(edges)
                     return True
@@ -473,7 +475,7 @@ class FramelessMixin:
     def mouseMoveEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
         """手动 resize 兜底：grabMouse 后 MouseMove 直接发给窗口自身。"""
         if self._resize_edges != Qt.Edge(0):
-            self._continue_manual_resize(event.globalPosition().toPoint())
+            self._continue_manual_resize(global_pos(event))
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event) -> None:  # noqa: N802 —— Qt 命名

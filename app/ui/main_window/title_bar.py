@@ -33,6 +33,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from app.ui.common.icons import Icons
+from app.ui.common.qt_compat import global_pos
 from app.ui.common.theme import THEMES, ThemeManager, title_bar_qss
 
 TITLE_BAR_HEIGHT = 34
@@ -535,7 +536,7 @@ class TitleBar(QWidget):
         if event.button() == Qt.MouseButton.LeftButton and not self._is_interactive_pos(event.pos()):
             frame = self.window().frameGeometry() if self.window() else None
             if frame is not None:
-                self._drag_offset = event.globalPosition().toPoint() - frame.topLeft()
+                self._drag_offset = global_pos(event) - frame.topLeft()
                 event.accept()
                 return
         super().mousePressEvent(event)
@@ -546,7 +547,7 @@ class TitleBar(QWidget):
             if handle is not None and hasattr(handle, "startSystemMove"):
                 handle.startSystemMove()  # Qt 5.15+ 原生拖动（含贴边吸附）
             else:
-                self.window().move(event.globalPosition().toPoint() - self._drag_offset)
+                self.window().move(global_pos(event) - self._drag_offset)
             return
         super().mouseMoveEvent(event)
 

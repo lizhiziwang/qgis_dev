@@ -10,6 +10,7 @@ from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtGui import QBrush, QPainter
 from qgis.PyQt.QtWidgets import QGraphicsView
 
+from app.ui.common.qt_compat import event_pos
 from .flow_theme import current as current_palette
 from .scene import FlowScene
 
@@ -98,7 +99,7 @@ class FlowView(QGraphicsView):
     def dropEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
         if event.mimeData().hasFormat(TEMPLATE_MIME):
             key = bytes(event.mimeData().data(TEMPLATE_MIME)).decode("utf-8")
-            scene_pos = self.mapToScene(event.position().toPoint())
+            scene_pos = self.mapToScene(event_pos(event))
             self.template_dropped.emit(key, scene_pos.x(), scene_pos.y())
             event.acceptProposedAction()
         else:
