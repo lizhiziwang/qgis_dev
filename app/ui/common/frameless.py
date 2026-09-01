@@ -174,6 +174,8 @@ class FramelessMixin:
         # ---- 状态（mixin 无 __init__，在这里统一初始化）----
         self._resize_targets: set = set()
         self._resize_edges = Qt.Edge(0)  # 非 0 = 正在手动 resize（Wayland 兜底）
+        self._visual_maximized = False  # X11 手动放大标记（windowState 不反映，isMaximized() 为 False）
+        self._restore_geo = None        # X11 手动放大前的几何，还原时恢复
 
         # ---- 标题栏 + 信号 ----
         self.title_bar = TitleBar(
@@ -253,6 +255,14 @@ class FramelessMixin:
     def _toggle_maximize(self) -> None:
         if self.isMaximized():
             self.showNormal()
+        elif self._visual_maximized:
+            # X11 手动放大（windowState 非 Maximized，isMaximized() 为 False）
+            # → 恢复放大前的几何，避免再点按钮走"放大"分支而无法还原
+            if self._restore_geo is not None:
+                self.setGeometry(self._restore_geo)
+            else:
+                self.showNormal()
+            self._visual_maximized = False
         elif self._is_windows():
             self.showMaximized()          # WM_GETMINMAXINFO 已修正到工作区
         elif self._is_x11():
@@ -261,17 +271,24 @@ class FramelessMixin:
             if screen is not None:
                 self._restore_geo = self.geometry()
                 self.setGeometry(screen.availableGeometry())
+                self._visual_maximized = True
             else:
                 self.showMaximized()
         else:
             self.showMaximized()          # Wayland：交给合成器
+        # X11 手动放大/还原不触发 WindowStateChange，这里主动同步按钮图标
+        tb = getattr(self, "title_bar", None)
+        if tb is not None:
+            tb.set_maximized(self.isMaximized() or self._visual_maximized)
 
     def changeEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
         """最大化/还原状态变化 → 同步标题栏按钮图标。"""
         if event.type() == QEvent.Type.WindowStateChange:
             tb = getattr(self, "title_bar", None)
             if tb is not None and hasattr(self, "isMaximized"):
-                tb.set_maximized(self.isMaximized())
+                tb.set_maximized(
+                    self.isMaximized() or getattr(self, "_visual_maximized", False)
+                )
         super().changeEvent(event)
 
     # ------------------------------------------------------------ Windows 原生事件
