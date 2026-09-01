@@ -26,7 +26,7 @@ KYLIN_REPO = "~/桌面/qgis_dev/qgis"
 
 
 def sh(cmd: str) -> str:
-    r = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+    r = subprocess.run(cmd, shell=True, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if r.returncode != 0:
         print(f"!! 命令失败: {cmd}\n{r.stderr.strip()}")
         sys.exit(1)
