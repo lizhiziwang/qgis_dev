@@ -50,6 +50,8 @@ class QgisRuntime:
     plugins: Path          # apps/qgis/python/plugins
     #: True = 便携扁平布局（QGIS 运行时打进 dist/app，前缀即 dist/app）
     portable: bool = False
+    #: True = 标准 Linux 布局（conda / apt 安装：share/qgis、lib/qgis/plugins）
+    system: bool = False
 
     # -------------------------------------------------------------- 工厂
 
@@ -97,6 +99,27 @@ class QgisRuntime:
             portable=True,
         )
 
+    @classmethod
+    def for_system(cls, prefix: Path) -> "QgisRuntime":
+        """标准 Linux 布局（conda / apt 安装）：
+        ``share/qgis``、``lib/qgis/plugins``、``share/proj``、``share/gdal``
+        都在前缀根目录下（``QGIS_PREFIX_PATH`` 即环境根）。
+
+        Linux 真机直接跑源码（``python app/main.py``）时用，
+        ``export QGIS_PREFIX=$CONDA_PREFIX`` 即生效。
+        """
+        prefix = Path(prefix)
+        return cls(
+            qgis_base=prefix,
+            qgis_prefix=prefix,
+            qt6=prefix,
+            gdal=prefix,
+            proj=prefix / "share" / "proj",
+            bin=prefix / "bin",
+            plugins=prefix / "share" / "qgis" / "python" / "plugins",
+            system=True,
+        )
+
     # -------------------------------------------------------------- 应用
 
     def apply_env(self) -> None:
@@ -107,6 +130,9 @@ class QgisRuntime:
         """
         if self.portable:
             self._apply_portable_env()
+            return
+        if self.system:
+            self._apply_system_env()
             return
 
         # 1) 环境变量
@@ -151,6 +177,23 @@ class QgisRuntime:
         os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = str(p / "platforms")
         os.environ["PATH"] = f"{p}{os.pathsep}{os.environ.get('PATH', '')}"
         for sp in (p, p / "plugins"):
+            self._append_syspath(sp)
+
+    def _apply_system_env(self) -> None:
+        """标准 Linux 布局（conda / apt）：share/qgis、lib/qgis/plugins。
+
+        conda 的 QGIS python 包在 ``share/qgis/python``（``import qgis`` 时
+        conda 已把该路径放进 sys.path，这里再补一次幂等）。
+        """
+        p = self.qgis_base  # 即环境根（$CONDA_PREFIX 或 /usr）
+        os.environ["QGIS_PREFIX_PATH"] = str(p)
+        os.environ["PROJ_DATA"] = str(p / "share" / "proj")
+        os.environ["PROJ_LIB"] = str(p / "share" / "proj")
+        os.environ["GDAL_DATA"] = str(p / "share" / "gdal")
+        os.environ["QT_PLUGIN_PATH"] = str(p / "plugins")
+        os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = str(p / "plugins" / "platforms")
+        os.environ["PATH"] = f"{p / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}"
+        for sp in (p / "share" / "qgis" / "python", self.plugins):
             self._append_syspath(sp)
 
     def init_plugins(self) -> None:

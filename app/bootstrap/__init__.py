@@ -185,8 +185,13 @@ def _build_qgis_runtime(cfg: AppConfig) -> QgisRuntime:
     if prefix:
         base = Path(prefix)
         if (base / "apps" / "qgis").exists():
-            return QgisRuntime.for_prod()          # 完整 QGIS 安装布局
-        return QgisRuntime.for_portable(base)      # 扁平便携包
+            return QgisRuntime.for_prod()          # 完整 QGIS 安装布局（OSGeo4W）
+        if (base / "proj.db").is_file():
+            return QgisRuntime.for_portable(base)  # 扁平便携包
+        if (base / "share" / "qgis").is_dir():
+            return QgisRuntime.for_system(base)    # conda/apt 标准 Linux 布局
+        # 无法识别布局：退回 dev 配置（含报错路径），保持旧行为
+        logger.warning("QGIS_PREFIX 无法识别布局: %s", base)
     if cfg.env == "prod":
         return QgisRuntime.for_prod()
     if cfg.qgis.install_path is None:
