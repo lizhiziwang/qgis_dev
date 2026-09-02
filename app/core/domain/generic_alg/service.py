@@ -105,8 +105,8 @@ class GenericAlgService:
         # 注入 OUTPUT 占位符（按 destination 类型）
         primary_output = self._primary_destination(alg)
         if primary_output is not None:
-            params[primary_output.name()] = (
-                job.output_path or f"memory:{job.output_name}"
+            params[primary_output.name()] = self._destination_value(
+                job, primary_output
             )
 
         logger.info(
@@ -191,6 +191,48 @@ class GenericAlgService:
         name = value.name() if hasattr(value, "name") else str(value)
         return f"{primary_output.name()}={name}"
 
+    def _destination_value(self, job: GenericAlgJob, dest_param) -> str:
+        """决定传给算法的 ``OUTPUT`` 值。
+
+        - 用户填了 output_path → 直接用（结果从路径 reload 成图层）
+        - native / QGIS 内建算法 → ``memory:<名称>``（支持内存 sink，
+          results 直接返回图层对象）
+        - GDAL 算法 → 临时文件路径：QGIS 3.44 的 GDAL 算法对
+          ``memory:`` destination 会原样透传字符串且**不写任何数据**
+          （结果直接丢失），必须改成临时文件再加载成图层
+        """
+        if job.output_path:
+            return job.output_path
+        if not job.algo_id.startswith("gdal:"):
+            return f"memory:{job.output_name}"
+        return self._temp_output_path(dest_param, job)
+
+    @staticmethod
+    def _temp_output_path(dest_param, job: GenericAlgJob) -> str:
+        """为 GDAL 算法生成临时输出文件路径（带合法扩展名）。"""
+        import tempfile
+
+        from qgis.core import QgsProcessingParameterRasterDestination
+
+        ext = ""
+        for attr in ("defaultFileExtension", "fileExtension"):
+            if hasattr(dest_param, attr):
+                try:
+                    ext = str(getattr(dest_param, attr)() or "")
+                except Exception:  # noqa: BLE001
+                    ext = ""
+                if ext:
+                    break
+        if not ext:
+            # 拿不到扩展名时按目的地类型兜底
+            ext = (
+                "tif"
+                if isinstance(dest_param, QgsProcessingParameterRasterDestination)
+                else "gpkg"
+            )
+        out_dir = Path(tempfile.mkdtemp(prefix="qgis_dev_alg_"))
+        return str(out_dir / f"{job.output_name}.{ext}")
+
     def _wrap_destination_result(self, results: dict, dest_param, job: GenericAlgJob):
         """按 destination 参数类型把 ``results["OUTPUT"]`` 包装成图层或路径 dict。
 
@@ -224,6 +266,19 @@ class GenericAlgService:
                     f"{job.algo_id} 输出图层无效：{name}"
                 )
             return value
+
+        # QGIS 3.44 的 GDAL 算法对 memory: destination 原样透传字符串且
+        # 不落盘（数据丢失）。正常流程已被 _destination_value 换成临时文件
+        # 路径，这里只兜底：若 project 里恰好有同名图层则复用，否则报错。
+        if isinstance(value, str) and value.startswith("memory:"):
+            from qgis.core import QgsProject
+
+            hits = QgsProject.instance().mapLayersByName(job.output_name)
+            if hits:
+                return hits[0]
+            raise RuntimeError(
+                f"{job.algo_id} 输出图层未生成：GDAL 算法不支持 memory 输出（{value}）"
+            )
 
         if isinstance(value, str):
             if isinstance(dest_param, (QgsProcessingParameterRasterDestination,)):
