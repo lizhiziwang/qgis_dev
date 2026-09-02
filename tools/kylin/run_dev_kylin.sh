@@ -1,13 +1,12 @@
 #!/usr/bin/env bash
 # 麒麟环境直接跑源码版（python app/main.py），QGIS 环境与打包版一致。
 #
-# 背景：config/app.yaml 的 qgis.install_path 是 Windows 开发机路径
-# （D:/zsh/app/qgis4.2），Linux 真机直接用 python app/main.py 会因
-# PROJ_DATA / GDAL_DATA / QGIS_PREFIX_PATH 无效导致 initQgis 部分失败，
-# 浏览器缺少 PostgreSQL / XYZ 切片 / ArcGIS REST 等节点。
-#
-# 本脚本把 QGIS_PREFIX 指到 conda 环境根（标准 Linux 布局），bootstrap
-# 检测到 share/qgis 布局后走 QgisRuntime.for_system()，路径全部正确。
+# 背景：config/app.yaml 的 qgis.install_path 默认是 Windows 开发机路径
+# （D:/zsh/app/qgis4.2），Linux 真机直接跑会因路径无效导致 initQgis
+# 部分失败、浏览器缺少 PostgreSQL / XYZ 切片 / ArcGIS REST 等节点。
+# 现在 bootstrap 已支持自动探测（检测到 install_path 不存在时自动找
+# conda/系统 QGIS），**不 export 也能跑**；本脚本再显式把 QGIS_PREFIX
+# 指到 conda 环境根，省去每次启动的探测开销，结果一致且更稳。
 #
 # 用法: bash tools/kylin/run_dev_kylin.sh
 set -e
