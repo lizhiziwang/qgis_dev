@@ -113,7 +113,11 @@ class GenericAlgService:
         logger.info(
             "执行算法 %s：输出=%s",
             job.algo_id,
-            job.output_path or f"memory:{job.output_name}",
+            (
+                params[primary_output.name()]
+                if primary_output is not None
+                else "无输出"
+            ),
         )
         results = processing.run(
             job.algo_id,
