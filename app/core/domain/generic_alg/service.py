@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Optional, TYPE_CHECKING
 
 from app.core.domain.geom_cleanup import copy_with_widened_string_fields
