@@ -29,10 +29,16 @@ map:
     zmax: 18
 
 qgis:
-  # dev 模式硬编码；prod 模式不读这里
-  install_path: D:/zsh/app/qgis4.2
-  python_path: D:/zsh/app/qgis4.2/apps/qgis/python
-  bin_path: D:/zsh/app/qgis4.2/bin
+  # dev 模式；prod 模式不读这里（路径走 QGIS_PREFIX）。
+  #
+  # 值支持 ${VAR} / ${VAR:-默认} 环境变量引用：
+  #   - Windows 本地开发：不设变量，走默认 D:/zsh/app/qgis4.2（OSGeo4W 布局）
+  #   - 麒麟源码运行：export QGIS_INSTALL_PATH=$CONDA_PREFIX 后自动生效；
+  #     或什么都不设——bootstrap 检测到路径不存在时自动探测 conda/系统 QGIS
+  install_path: ${QGIS_INSTALL_PATH:-D:/zsh/app/qgis4.2}
+  # python_path / bin_path 仅兼容旧配置保留；bootstrap 一律从 install_path 推导
+  python_path: ${QGIS_INSTALL_PATH:-D:/zsh/app/qgis4.2}/apps/qgis/python
+  bin_path: ${QGIS_INSTALL_PATH:-D:/zsh/app/qgis4.2}/bin
 
 paths:
   resource: resource

@@ -194,11 +194,56 @@ def _build_qgis_runtime(cfg: AppConfig) -> QgisRuntime:
         logger.warning("QGIS_PREFIX 无法识别布局: %s", base)
     if cfg.env == "prod":
         return QgisRuntime.for_prod()
+    if cfg.qgis.install_path is None or not cfg.qgis.install_path.exists():
+        # Linux 上 config 的 install_path 是 Windows 路径（D:/... 不存在）
+        # → 自动探测 conda/系统 QGIS，免去手设环境变量
+        detected = _detect_linux_qgis()
+        if detected is not None:
+            logger.info(
+                "config qgis.install_path 无效（%s），自动探测到 QGIS: %s",
+                cfg.qgis.install_path,
+                detected.qgis_base,
+            )
+            return detected
     if cfg.qgis.install_path is None:
         raise RuntimeError(
             "dev 模式需要 config/app.yaml 里 qgis.install_path"
         )
     return QgisRuntime.for_dev(cfg.qgis.install_path)
+
+
+def _detect_linux_qgis() -> Optional[QgisRuntime]:
+    """Linux 下自动探测 QGIS（conda 环境优先，其次系统 apt 安装）。
+
+    只在 config 的 install_path 无效（如 Windows 路径）且未设 QGIS_PREFIX
+    时调用；探测成功返回 :class:`QgisRuntime`（标准 Linux 布局），否则 None。
+    """
+    if os.name == "nt":
+        return None
+    candidates: list[Path] = []
+    env = os.environ.get("CONDA_PREFIX")
+    if env:
+        candidates.append(Path(env))
+    for base in (
+        Path.home() / "miniconda3" / "envs",
+        Path.home() / "anaconda3" / "envs",
+        Path("/opt/conda/envs"),
+        Path("/opt/miniconda3/envs"),
+        Path("/opt/anaconda3/envs"),
+    ):
+        candidates.append(base / "qgis_new")
+    candidates.append(Path("/usr"))  # apt 安装的系统 QGIS
+    seen: set[Path] = set()
+    for base in candidates:
+        if base in seen or not base.is_dir():
+            continue
+        seen.add(base)
+        # 标准 Linux 布局校验：share/qgis（python 包）+ share/proj（proj.db）
+        if (base / "share" / "qgis").is_dir() and (
+            base / "share" / "proj" / "proj.db"
+        ).is_file():
+            return QgisRuntime.for_system(base)
+    return None
 
 
 def _ensure_qgis_application(qgis: QgisRuntime):

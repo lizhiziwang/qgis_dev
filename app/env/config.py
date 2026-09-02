@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import os
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional
 
 import yaml
+
+# 环境变量引用：${VAR} 或 ${VAR:-默认值}（空变量也走默认值）
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?}")
 
 
 @dataclass(frozen=True)
@@ -160,7 +165,25 @@ class AuthConfig:
         )
 
 
+def _expand_env(s: str) -> str:
+    """展开 ``${VAR}`` / ``${VAR:-默认}`` 环境变量引用。
+
+    用于让同一份 ``config/app.yaml`` 在 Windows 开发机与麒麟真机都能用：
+    麒麟上设 ``QGIS_INSTALL_PATH=$CONDA_PREFIX`` 即覆盖默认的 Windows 路径。
+    """
+    def _repl(m: re.Match) -> str:
+        var, default = m.group(1), m.group(2)
+        v = os.environ.get(var)
+        if v:
+            return v
+        return default if default is not None else ""
+
+    return _ENV_REF.sub(_repl, s)
+
+
 def _to_path(v: Any) -> Optional[Path]:
     if v is None:
         return None
+    if isinstance(v, str):
+        v = _expand_env(v)
     return Path(v)
