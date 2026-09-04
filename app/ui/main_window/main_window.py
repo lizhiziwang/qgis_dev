@@ -91,6 +91,7 @@ _NEW_VECTOR_FORMATS = (
     ("CSV 表格", "csv", "CSV"),
 )
 
+
 class MainWindow(FramelessMixin, QMainWindow):
     """主窗口。"""
 
@@ -213,6 +214,14 @@ class MainWindow(FramelessMixin, QMainWindow):
         # 点击图层树即自动设为编辑目标（与 QGIS 桌面一致）：
         # 用户期望点完一层就能在工具条点"开始编辑"
         self.layer_dock.layer_clicked.connect(self._on_layer_clicked_in_dock)
+        # 头部工具条：样式面板 / 添加图层组 / 删除 / 全部展开 / 全部折叠 / 上移 / 下移
+        self.layer_dock.style_panel_requested.connect(self._on_header_style_panel)
+        self.layer_dock.add_group_requested.connect(self._on_add_layer_group)
+        self.layer_dock.remove_requested.connect(self._on_header_remove)
+        self.layer_dock.expand_all_requested.connect(self._on_header_expand_all)
+        self.layer_dock.collapse_all_requested.connect(self._on_header_collapse_all)
+        self.layer_dock.move_up_requested.connect(lambda: self._on_move_layer_node(-1))
+        self.layer_dock.move_down_requested.connect(lambda: self._on_move_layer_node(1))
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.layer_dock)
 
         # 2. 数据浏览器
@@ -237,6 +246,7 @@ class MainWindow(FramelessMixin, QMainWindow):
             "analyse": self._on_analyse,
             "swipe": self._on_swipe,
             "qmap_compare": self._on_qmap_compare,
+            "online_basemap": self._on_online_basemap,
             "zoom_full": self._on_zoom_full,
             "refresh": self._on_refresh,
             "test": self._on_test,
@@ -361,6 +371,20 @@ class MainWindow(FramelessMixin, QMainWindow):
         self.status_bar_builder = StatusBar(self)
         self.status_bar_builder.build()
 
+    # ------------------------------------------------------------ 图层加载指示
+
+    def _begin_layer_loading(self, text: str) -> None:
+        """图层加载开始：状态栏右侧亮起 QGIS 式转圈指示（配平计数）。"""
+        builder = getattr(self, "status_bar_builder", None)
+        if builder is not None:
+            builder.show_loading(text)
+
+    def _end_layer_loading(self) -> None:
+        """图层加载结束（成功 / 失败都调）：状态栏指示熄灭。"""
+        builder = getattr(self, "status_bar_builder", None)
+        if builder is not None:
+            builder.hide_loading()
+
     # ===================================================== 自定义标题栏（方案 A）
 
     def _build_chrome(self) -> None:
@@ -443,12 +467,14 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def _on_select_point(self) -> None:
         from app.ui.tools.select_feature import PointSelectTool
+
         self._select_point_tool = PointSelectTool(self.canvas)
         self.canvas.setMapTool(self._select_point_tool)
         self.tool_bar_builder.set_active("select_point")
 
     def _on_select_box(self) -> None:
         from app.ui.tools.select_feature import RectSelectTool
+
         self._select_box_tool = RectSelectTool(self.canvas)
         self.canvas.setMapTool(self._select_box_tool)
         self.tool_bar_builder.set_active("select_box")
@@ -465,6 +491,7 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def _on_identify(self) -> None:
         from app.ui.tools.find_feature import FindFeatureTool
+
         self._find_feature_tool = FindFeatureTool(self.canvas, parent=self)
         self.canvas.setMapTool(self._find_feature_tool)
         self.tool_bar_builder.set_active("identify")
@@ -486,6 +513,7 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def _on_quality(self) -> None:
         from app.ui.dialogs.check_viewer import CheckViewerDialog
+
         dlg = CheckViewerDialog(self, "")
         dlg.show()
 
@@ -496,6 +524,27 @@ class MainWindow(FramelessMixin, QMainWindow):
             self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._analyse_dock)
         self._analyse_dock.show()
         self._analyse_dock.raise_()
+
+    def _on_online_basemap(self) -> None:
+        """在线底图：懒建右侧 Dock，按独立清单文件刷新列表。"""
+        from app.ui.docks.online_basemap_dock import OnlineBasemapDock
+
+        dock = getattr(self, "_online_basemap_dock", None)
+        if dock is None:
+            dock = OnlineBasemapDock(
+                self,
+                on_add=self._add_online_basemap,
+                on_add_template=self._add_online_basemap_template,
+                on_add_custom=self._add_custom_basemap,
+                on_manage_keys=self._manage_basemap_keys,
+                on_edit=self._edit_online_basemap,
+                on_delete=self._delete_online_basemap,
+            )
+            self._online_basemap_dock = dock
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        dock.set_layers(self._online_basemap_defs())
+        dock.show()
+        dock.raise_()
 
     def _on_swipe(self) -> None:
         """卷帘对比：分屏会话已存续则直接恢复（不弹窗）；否则弹窗选栅格激活。
@@ -508,9 +557,7 @@ class MainWindow(FramelessMixin, QMainWindow):
             self.canvas.setMapTool(tool)
             self.tool_bar_builder.set_active("swipe")
             return
-        if not any(
-            isinstance(l, QgsRasterLayer) for l in self.project.mapLayers().values()
-        ):
+        if not any(isinstance(l, QgsRasterLayer) for l in self.project.mapLayers().values()):
             QMessageBox.information(self, "提示", "请先加载至少一个栅格图层")
             return
         from app.ui.dialogs.swipe_compare import SwipeCompareDialog
@@ -537,9 +584,7 @@ class MainWindow(FramelessMixin, QMainWindow):
         if session is not None and session.is_active:
             session.stop()
             self.tool_bar_builder.set_session_active("qmap_compare", False)
-            self.messageBar.pushMessage(
-                "已停止地图对比", level=Qgis.MessageLevel.Info, duration=3
-            )
+            self.messageBar.pushMessage("已停止地图对比", level=Qgis.MessageLevel.Info, duration=3)
             return
         if not self.project.mapLayers():
             QMessageBox.information(self, "提示", "请先加载至少一个图层")
@@ -591,6 +636,7 @@ class MainWindow(FramelessMixin, QMainWindow):
             import threading
 
             from app.server.cli import main as server_main
+
             threading.Thread(target=server_main, daemon=True).start()
             self.messageBar.pushMessage("已启动服务（8000）", level=Qgis.MessageLevel.Info, duration=3)
         except Exception as e:  # noqa: BLE001
@@ -617,9 +663,7 @@ class MainWindow(FramelessMixin, QMainWindow):
             self.project_dock = ProjectDock(self)
             self.project_dock.render_requested.connect(self._show_style_editor)
             self.project_dock.label_requested.connect(self._show_label_settings)
-            self.project_dock.layer_context_menu_requested.connect(
-                self._on_project_dock_context_menu
-            )
+            self.project_dock.layer_context_menu_requested.connect(self._on_project_dock_context_menu)
             self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.project_dock)
         self._on_project_create(name)
         self.project_dock.show()
@@ -697,7 +741,13 @@ class MainWindow(FramelessMixin, QMainWindow):
         )
         if not path:
             return
-        if self.project.read(path):
+        # QgsProject.read 会同步读入工程里所有图层（大工程较慢）→ 期间亮起加载指示
+        self._begin_layer_loading(f"正在打开图层：{os.path.basename(path)}")
+        try:
+            opened = self.project.read(path)
+        finally:
+            self._end_layer_loading()
+        if opened:
             self.canvas.setDestinationCrs(self.project.crs())
             self.canvas.refreshAllLayers()
             self.setWindowTitle(f"{self._app_name} - {self.project.title()}")
@@ -714,42 +764,404 @@ class MainWindow(FramelessMixin, QMainWindow):
                     self._ref_group = child
             if getattr(self, "project_dock", None) is not None:
                 if self._data_group is not None and self._ref_group is not None:
-                    self.project_dock.set_project(
-                        self.project.title(), self._data_group, self._ref_group
-                    )
+                    self.project_dock.set_project(self.project.title(), self._data_group, self._ref_group)
                 else:
                     self.project_dock.reset()
             self.messageBar.pushMessage(f"已打开工程：{path}", level=Qgis.MessageLevel.Info, duration=3)
         else:
             QMessageBox.warning(self, "打开失败", f"无法打开工程：{path}")
 
-    def _load_config_base_tile(self):
-        """读取配置并加载默认底图（新建工程时恢复天地图底图）。返回图层或 ``None``。"""
+    def _map_config_path(self):
+        """``config/app.yaml`` 实际路径（``QGIS_DEV_CONFIG`` 可覆盖），读/写共用。"""
         import os
         from pathlib import Path
 
+        from app.infra.fs.paths import Paths
+
+        return Path(os.environ.get("QGIS_DEV_CONFIG") or Paths.default().config_file("app.yaml"))
+
+    def _load_map_config(self):
+        """读取并解析 ``config/app.yaml``；失败返回 ``None``（不抛、只记日志）。"""
+        try:
+            from app.env.config import AppConfig
+
+            return AppConfig.from_file(self._map_config_path())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("读取配置文件失败：%s", exc, exc_info=True)
+            return None
+
+    def _load_config_base_tile(self):
+        """读取配置并加载默认底图（新建工程时恢复天地图底图）。返回图层或 ``None``。"""
+        self._begin_layer_loading("正在加载默认底图…")
         try:
             from app.core.domain.basemap import add_base_tile_layer
-            from app.env.config import AppConfig
-            from app.infra.fs.paths import Paths
 
-            cfg_path = Path(
-                os.environ.get("QGIS_DEV_CONFIG")
-                or Paths.default().config_file("app.yaml")
-            )
-            cfg = AppConfig.from_file(cfg_path)
+            cfg = self._load_map_config()
+            if cfg is None:
+                return None
             layer = add_base_tile_layer(cfg.map, project=self.project)
             if layer is not None:
-                self.messageBar.pushMessage(
-                    f"已加载底图：{layer.name()}", level=Qgis.MessageLevel.Info, duration=2
-                )
+                self.messageBar.pushMessage(f"已加载底图：{layer.name()}", level=Qgis.MessageLevel.Info, duration=2)
             return layer
         except Exception as exc:  # noqa: BLE001
             self.messageBar.pushMessage(f"底图加载失败：{exc}", level=Qgis.MessageLevel.Critical, duration=5)
             return None
+        finally:
+            self._end_layer_loading()
+
+    def _online_basemaps_config_path(self):
+        """``online_basemap_config.yaml`` 实际路径（与 app.yaml 同目录）。
+
+        在线底图清单独立于 ``config/app.yaml``（键/底图仍在 app.yaml，清单在此
+        固定名文件）；QGIS_DEV_CONFIG 指向哪份 app.yaml，清单就跟到同目录。
+        """
+        return self._map_config_path().with_name("online_basemap_config.yaml")
+
+    def _online_basemap_defs(self):
+        """读取独立清单文件里的在线底图（文件缺失 / 读取失败返回空列表）。"""
+        try:
+            from app.env.config import load_online_basemaps
+
+            return load_online_basemaps(self._online_basemaps_config_path())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("读取在线底图清单失败：%s", exc, exc_info=True)
+            return []
+
+    @staticmethod
+    def _basemap_conflicts_with(d, others) -> bool:
+        """``d`` 与 ``others`` 里任一条同源 → ``True``（添加去重 / 编辑撞名共用）。
+
+        同源判定：``type`` 相同 + ``url`` 经 :func:`canonical_basemap_url` 归一后
+        相同 + ``layers`` 相同（两个 WMS 可能共享服务 url 但 layers 不同；xyz
+        layers 为空 → 等价于 url 判重）。url 归一把老配置内嵌真实 tk 的 url 与
+        ``{tk}`` 模板判等时互认（tk=cb75… == tk={tk}），去重/撞名不失效。
+        """
+        from app.core.domain.basemap import canonical_basemap_url
+
+        if not d.url:
+            return False
+        return any(
+            (x.type or "xyz") == (d.type or "xyz")
+            and canonical_basemap_url(x.url) == canonical_basemap_url(d.url)
+            and x.layers == d.layers
+            for x in others
+        )
+
+    def _add_online_basemap_template(self, d) -> bool:
+        """把一条内置模板/自定义底图写回 ``online_basemap_config.yaml`` 并刷新树。
+
+        右键「添加在线底图」/「添加自定义底图」的回调：Dock 只负责把条目递给
+        本方法，真正持久化（文本追加到独立清单文件）与刷新 Dock 树在这里做；
+        同源（url 相同）条目已存在则只提示不重复加。返回是否成功。
+        """
+        try:
+            from app.env.config import (
+                append_online_basemap_to_yaml,
+                load_online_basemaps,
+            )
+
+            path = self._online_basemaps_config_path()
+            current = load_online_basemaps(path)  # 缺失/空 = 空清单（可从模板加）
+            if self._basemap_conflicts_with(d, current):
+                self.messageBar.pushMessage(
+                    f"该底图已在在线底图清单中：{d.name}",
+                    level=Qgis.MessageLevel.Info,
+                    duration=2,
+                )
+                return True
+            append_online_basemap_to_yaml(path, d)
+            # 写回后重读并刷新 dock 树（新增条目立刻出现在分组里）
+            dock = getattr(self, "_online_basemap_dock", None)
+            if dock is not None:
+                dock.set_layers(self._online_basemap_defs())
+            self.messageBar.pushMessage(
+                f"已添加在线底图：{d.name}（已写入 online_basemap_config.yaml）",
+                level=Qgis.MessageLevel.Info,
+                duration=3,
+            )
+            logger.info("添加在线底图类型：%s", d.name)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.error("添加在线底图类型失败 %s：%s", getattr(d, "name", d), exc, exc_info=True)
+            self.messageBar.pushMessage(
+                f"添加在线底图失败：{exc}",
+                level=Qgis.MessageLevel.Critical,
+                duration=5,
+            )
+            return False
+
+    def _add_custom_basemap(self) -> bool:
+        """Dock 右键「添加自定义底图」：弹窗配置后走模板同一条持久化路径。
+
+        弹窗组装好 :class:`OnlineBasemapDef`（type=xyz/arcgis/arcgisfeature/wms/wmts），
+        委托 :meth:`_add_online_basemap_template` 写回 ``online_basemap_config.yaml`` 并
+        刷新 Dock 树（去重 / messageBar / 异常处理全复用）。取消返回 False。
+        按已定决策**不**加载画布——自定义底图先进树，双击再出图。
+        """
+        from app.ui.dialogs.custom_basemap import CustomBasemapDialog
+
+        dlg = CustomBasemapDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        return self._add_online_basemap_template(dlg.basemap_def())
+
+    def _manage_basemap_keys(self) -> bool:
+        """Dock 右键「管理 Key」：弹窗集中管理 provider key，写回 ``map.keys``。
+
+        弹窗预填当前 ``map.keys``（天地图 tk / 高德预留字段），确定后经
+        :func:`set_map_keys` **文本写回** ``config/app.yaml`` 的 ``map.keys``
+        （只动本段，URL 仍保持 ``{tk}`` 占位，注释/其余排版保留）。取消返回
+        False。改 key 只影响**新建/重载**的图层（已加载图层 source 已焊死），
+        文案已如实提示。
+        """
+        from app.env.config import set_map_keys
+        from app.ui.dialogs.manage_keys import ManageKeysDialog
+
+        cfg = self._load_map_config()
+        if cfg is None:
+            self.messageBar.pushMessage(
+                "地图服务 Key 管理：配置文件读取失败",
+                level=Qgis.MessageLevel.Critical,
+                duration=5,
+            )
+            return False
+        dlg = ManageKeysDialog(self, cfg.map.keys)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return False
+        new_keys = dlg.keys()
+        try:
+            set_map_keys(self._map_config_path(), new_keys)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("写回 map.keys 失败：%s", exc, exc_info=True)
+            self.messageBar.pushMessage(
+                f"保存地图服务 Key 失败：{exc}",
+                level=Qgis.MessageLevel.Critical,
+                duration=5,
+            )
+            return False
+        self.messageBar.pushMessage(
+            "已保存地图服务 Key：新建 / 下次加载的底图即生效（已加载底图需重载）",
+            level=Qgis.MessageLevel.Info,
+            duration=3,
+        )
+        logger.info(
+            "已更新地图服务 Key：tianditu_tk=%s gaode_key=%s",
+            "***" if new_keys.tianditu_tk else "",
+            "***" if new_keys.gaode_key else "",
+        )
+        return True
+
+    def _edit_online_basemap(self, d) -> bool:
+        """Dock 叶子右键「编辑连接」：弹窗编辑清单条目，确定后文本写回并刷新树。
+
+        对话框（:class:`EditBasemapDialog`）复用「添加自定义底图」的字段并预填现有
+        条目（名称/分组/类型/url/类型参数/反盗链 Referer），就近提供 API key 编辑——
+        key 真值仍**集中管理**（url 里 ``{tk}`` / ``{gaode_key}`` 占位符引用
+        ``map.keys``，改一处全站生效），确定后分两处落盘：
+
+        - 清单条目经 :func:`update_online_basemap_in_yaml` **原位文本替换**回
+          ``online_basemap_config.yaml``（注释/其余条目保留）并刷新 Dock 树；
+        - key 有改动（或老配置内嵌 tk 被迁移成占位符）时，真值经
+          :func:`set_map_keys` 只动 ``app.yaml`` 的 ``keys`` 段。
+
+        改后的连接下次双击才按新参数出图（工程里已加载的旧图层不受影响，需移除后
+        重新「添加到画布」）。与清单里其它条目撞源（同 type+归一 url+layers）则
+        拒绝保存只提示。返回是否成功。取消返回 False。
+        """
+        try:
+            from app.env.config import (
+                load_online_basemaps,
+                set_map_keys,
+                update_online_basemap_in_yaml,
+            )
+            from app.ui.dialogs.edit_basemap import EditBasemapDialog
+
+            cfg = self._load_map_config()
+            if cfg is None:
+                self.messageBar.pushMessage(
+                    "编辑在线底图：配置文件读取失败",
+                    level=Qgis.MessageLevel.Critical,
+                    duration=5,
+                )
+                return False
+            path = self._online_basemaps_config_path()
+            current = load_online_basemaps(path)
+            if d not in current:
+                self.messageBar.pushMessage(
+                    "在线底图清单已变化（找不到该连接），请刷新后重试",
+                    level=Qgis.MessageLevel.Warning,
+                    duration=3,
+                )
+                return False
+
+            dlg = EditBasemapDialog(self, def_=d, keys=cfg.map.keys)
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return False
+            new_def = dlg.basemap_def()
+            key_override = dlg.keys_override()
+            if new_def == d and key_override is None:
+                self.messageBar.pushMessage("在线底图未做修改", level=Qgis.MessageLevel.Info, duration=2)
+                return True
+            if new_def != d and self._basemap_conflicts_with(new_def, [x for x in current if x != d]):
+                self.messageBar.pushMessage(
+                    f"编辑后与清单中已有底图同源：{new_def.name}（未保存）",
+                    level=Qgis.MessageLevel.Warning,
+                    duration=3,
+                )
+                return False
+
+            # 先写 key（集中真值，可能被 url 占位符引用），再原位替换清单条目
+            if key_override is not None:
+                set_map_keys(self._map_config_path(), key_override)
+            if new_def != d:
+                update_online_basemap_in_yaml(path, d, new_def)
+                dock = getattr(self, "_online_basemap_dock", None)
+                if dock is not None:
+                    dock.set_layers(self._online_basemap_defs())
+
+            parts = []
+            if new_def != d:
+                parts.append(f"已更新在线底图：{new_def.name}")
+            if key_override is not None:
+                parts.append("服务 Key 已同步（新建 / 重载底图生效）")
+            self.messageBar.pushMessage("；".join(parts), level=Qgis.MessageLevel.Info, duration=3)
+            logger.info(
+                "更新在线底图连接：%s → %s%s",
+                d.name,
+                new_def.name if new_def != d else d.name,
+                "（key 同步）" if key_override is not None else "",
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.error("编辑在线底图失败 %s：%s", getattr(d, "name", d), exc, exc_info=True)
+            self.messageBar.pushMessage(
+                f"编辑在线底图失败：{exc}",
+                level=Qgis.MessageLevel.Critical,
+                duration=5,
+            )
+            return False
+
+    def _delete_online_basemap(self, d) -> bool:
+        """Dock 叶子右键「删除连接」：确认后从清单文件移除条目并刷新 Dock 树。
+
+        删除是**破坏性**操作，确认弹窗（Modal QMessageBox）归 MainWindow 所有——
+        Dock 只把要删的条目递给本方法。只移除 ``online_basemap_config.yaml`` 里的
+        配置条目：工程里**已加载**的底图图层不受影响（source 已焊死），但下次无法
+        再从列表添加该连接。找不到 ``d``（清单被外部改动）或确认取消都不落盘。
+        返回是否成功删除（取消 / 失败为 False）。
+        """
+        try:
+            from app.env.config import load_online_basemaps, remove_online_basemap_from_yaml
+
+            path = self._online_basemaps_config_path()
+            current = load_online_basemaps(path)
+            if d not in current:
+                self.messageBar.pushMessage(
+                    "在线底图清单已变化（找不到该连接），请刷新后重试",
+                    level=Qgis.MessageLevel.Warning,
+                    duration=3,
+                )
+                return False
+            ret = QMessageBox.question(
+                self,
+                "删除在线底图",
+                f"确定从在线底图清单中删除「{d.name}」吗？\n\n"
+                "已加载到工程的图层不受影响，删除后将无法再从列表添加该连接。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if ret != QMessageBox.StandardButton.Yes:
+                return False
+
+            remove_online_basemap_from_yaml(path, d)
+            dock = getattr(self, "_online_basemap_dock", None)
+            if dock is not None:
+                dock.set_layers(self._online_basemap_defs())
+            self.messageBar.pushMessage(
+                f"已删除在线底图：{d.name}",
+                level=Qgis.MessageLevel.Info,
+                duration=3,
+            )
+            logger.info("删除在线底图连接：%s", d.name)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.error("删除在线底图失败 %s：%s", getattr(d, "name", d), exc, exc_info=True)
+            self.messageBar.pushMessage(
+                f"删除在线底图失败：{exc}",
+                level=Qgis.MessageLevel.Critical,
+                duration=5,
+            )
+            return False
+
+    def _add_online_basemap(self, tile) -> bool:
+        """把一条在线底图配置加进工程「参考图层」分组顶部。
+
+        ``type`` 分派：xyz 瓦片 / ArcGIS 影像服务（栅格）/ ArcGIS 要素服务
+        （FeatureServer 矢量）/ OGC WMS / WMTS（见
+        basemap 模块 :func:`build_online_basemap_layer`）。带 ``referer`` 的
+        xyz 行先装全局 Referer 预处理（连接串 referer= 不总是生效，见 basemap
+        模块 docstring）；工程里已有同源图层则只提示、不重复加。
+        返回是否成功，供 :class:`OnlineBasemapDock` 回调。
+
+        期间状态栏亮起「正在加载图层」指示（含 FeatureServer 矢量整层拉取的
+        长等待），try/finally 保证成功 / 失败都熄灭。
+        """
+        self._begin_layer_loading(f"正在加载图层：{tile.name}")
+        try:
+            from app.core.domain.basemap import (
+                build_online_basemap_layer,
+                install_referer_preprocessor,
+            )
+
+            if tile.referer:
+                install_referer_preprocessor(tile.referer)
+            # 树里叶子 url 仍为 {tk} 占位：在 uri 构造边界读最新 map.keys 替换，
+            # 让刚改过的 key 对下一次添加立即生效（config 模型里的 url 恒为占位符）
+            cfg = self._load_map_config()
+            keys = cfg.map.keys if cfg is not None else None
+            layer = build_online_basemap_layer(tile, keys)
+            if layer is None:
+                self.messageBar.pushMessage(
+                    f"在线底图加载失败：{tile.name}",
+                    level=Qgis.MessageLevel.Critical,
+                    duration=5,
+                )
+                return False
+            # 同源图层已存在（xyz 连接串相同）→ 去重，只提示不重复加
+            uri = layer.source()
+            for lyr in self.project.mapLayers().values():
+                if lyr.source() == uri:
+                    self.messageBar.pushMessage(
+                        f"该底图已在工程中：{tile.name}",
+                        level=Qgis.MessageLevel.Info,
+                        duration=2,
+                    )
+                    return True
+            self.project.addMapLayer(layer, False)
+            group = getattr(self, "_ref_group", None) or self.project.layerTreeRoot()
+            group.insertLayer(0, layer)  # 参考分组顶部 = 默认底图之上、数据之下
+            self.canvas.refreshAllLayers()
+            self.messageBar.pushMessage(
+                f"已添加在线底图：{tile.name}",
+                level=Qgis.MessageLevel.Info,
+                duration=2,
+            )
+            logger.info("添加在线底图：%s", tile.name)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.error("添加在线底图失败 %s：%s", getattr(tile, "name", tile), exc, exc_info=True)
+            self.messageBar.pushMessage(
+                f"添加在线底图失败：{exc}",
+                level=Qgis.MessageLevel.Critical,
+                duration=5,
+            )
+            return False
+        finally:
+            self._end_layer_loading()
 
     def _on_open_file(self) -> None:
         from app.ui.common.widgets import open_file_dir
+
         path = open_file_dir(
             self,
             is_dir=False,
@@ -765,6 +1177,7 @@ class MainWindow(FramelessMixin, QMainWindow):
         from qgis.core import QgsVectorLayer
 
         ext = os.path.splitext(file_path)[1].lower()
+        self._begin_layer_loading(f"正在加载图层：{os.path.basename(file_path)}")
         try:
             if ext == ".gdb":
                 ogr.RegisterAll()
@@ -791,6 +1204,8 @@ class MainWindow(FramelessMixin, QMainWindow):
             self.canvas.refreshAllLayers()
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "加载错误", f"文件加载失败：{e}")
+        finally:
+            self._end_layer_loading()
 
     # ===================================================== 浏览器事件
 
@@ -803,15 +1218,19 @@ class MainWindow(FramelessMixin, QMainWindow):
         if not item or not isinstance(item, QgsLayerItem):
             return
         uri, name, provider = item.uri(), item.name(), item.providerKey()
-        vlayer = QgsVectorLayer(uri, name, provider)
-        if vlayer.isValid():
-            vlayer.path_c = item.path()
-            self._add_layer_to_project(vlayer)
-            return
-        rlayer = QgsRasterLayer(uri, name, provider)
-        if rlayer.isValid():
-            rlayer.path_c = item.path()
-            self._add_layer_to_project(rlayer)
+        self._begin_layer_loading(f"正在加载图层：{name}")
+        try:
+            vlayer = QgsVectorLayer(uri, name, provider)
+            if vlayer.isValid():
+                vlayer.path_c = item.path()
+                self._add_layer_to_project(vlayer)
+                return
+            rlayer = QgsRasterLayer(uri, name, provider)
+            if rlayer.isValid():
+                rlayer.path_c = item.path()
+                self._add_layer_to_project(rlayer)
+        finally:
+            self._end_layer_loading()
 
     def _on_browser_context_menu(self, pos) -> None:
         from qgis.PyQt.QtWidgets import QMenu
@@ -835,9 +1254,7 @@ class MainWindow(FramelessMixin, QMainWindow):
             context.setMessageBar(self.messageBar)
             for provider in registry.providers():
                 try:
-                    provider.populateContextMenu(
-                        item, menu, selectedItems=[item], context=context
-                    )
+                    provider.populateContextMenu(item, menu, selectedItems=[item], context=context)
                 except Exception:  # noqa: BLE001
                     continue
         except Exception:  # noqa: BLE001
@@ -859,16 +1276,14 @@ class MainWindow(FramelessMixin, QMainWindow):
                 # .gdb 是数据集目录：只在库里新增图层，不在目录里塞零散文件
                 if is_gdb:
                     act = menu.addAction("新增图层")
-                    act.triggered.connect(
-                        lambda checked=False: self._on_browser_add_gdb_layer(item)
-                    )
+                    act.triggered.connect(lambda checked=False: self._on_browser_add_gdb_layer(item))
                 else:
                     new_menu = menu.addMenu("新建")
                     for name, ext, driver in _NEW_VECTOR_FORMATS:
                         act = new_menu.addAction(name)
                         act.triggered.connect(
-                            lambda checked=False, nm=name, ex=ext, dr=driver: (
-                                self._on_browser_create_vector(item, nm, ex, dr)
+                            lambda checked=False, nm=name, ex=ext, dr=driver: self._on_browser_create_vector(
+                                item, nm, ex, dr
                             )
                         )
                 menu.addSeparator()
@@ -910,9 +1325,7 @@ class MainWindow(FramelessMixin, QMainWindow):
             self.messageBar.pushCritical("新建图层", f"创建失败：{errmsg}")
             return
         item.refresh()
-        self.messageBar.pushSuccess(
-            "新建图层", f"已创建 {os.path.basename(path)}"
-        )
+        self.messageBar.pushSuccess("新建图层", f"已创建 {os.path.basename(path)}")
         logger.info("新建矢量文件：%s（驱动=%s）", path, driver)
 
     def _on_browser_add_gdb_layer(self, item) -> None:
@@ -932,17 +1345,13 @@ class MainWindow(FramelessMixin, QMainWindow):
         layer_name = layer_name.strip()
         geom_names = ("点", "线", "面")
         geom_defs = {"点": "Point", "线": "LineString", "面": "Polygon"}
-        geom_text, ok = QInputDialog.getItem(
-            self, "新增图层", "几何类型：", geom_names, 0, False
-        )
+        geom_text, ok = QInputDialog.getItem(self, "新增图层", "几何类型：", geom_names, 0, False)
         if not ok:
             return
         crs = self.project.crs()
         if not crs.isValid():
             crs = QgsCoordinateReferenceSystem("EPSG:4490")
-        layer = QgsVectorLayer(
-            f"{geom_defs[geom_text]}?crs={crs.authid()}", layer_name, "memory"
-        )
+        layer = QgsVectorLayer(f"{geom_defs[geom_text]}?crs={crs.authid()}", layer_name, "memory")
         opts = QgsVectorFileWriter.SaveVectorOptions()
         opts.driverName = "OpenFileGDB"
         opts.layerName = layer_name
@@ -1094,20 +1503,13 @@ class MainWindow(FramelessMixin, QMainWindow):
         paste_style.triggered.connect(lambda: self._paste_layer_style(self._selected_layer))
         sub_style.addAction(paste_style)
         # 工程分组：移动图层归属（创建工程后才显示）
-        if (
-            getattr(self, "_data_group", None) is not None
-            and getattr(self, "_ref_group", None) is not None
-        ):
+        if getattr(self, "_data_group", None) is not None and getattr(self, "_ref_group", None) is not None:
             menu.addSeparator()
             act_to_ref = QAction("移到参考图层", self)
-            act_to_ref.triggered.connect(
-                lambda: self._move_layer_to_group(self._selected_layer, self._ref_group)
-            )
+            act_to_ref.triggered.connect(lambda: self._move_layer_to_group(self._selected_layer, self._ref_group))
             menu.addAction(act_to_ref)
             act_to_data = QAction("移到数据图层", self)
-            act_to_data.triggered.connect(
-                lambda: self._move_layer_to_group(self._selected_layer, self._data_group)
-            )
+            act_to_data.triggered.connect(lambda: self._move_layer_to_group(self._selected_layer, self._data_group))
             menu.addAction(act_to_data)
         # 移除 / 导出 / 属性
         menu.addSeparator()
@@ -1140,8 +1542,10 @@ class MainWindow(FramelessMixin, QMainWindow):
             center = ext.center()
             half = 0.001
             ext = QgsRectangle(
-                center.x() - half, center.y() - half,
-                center.x() + half, center.y() + half,
+                center.x() - half,
+                center.y() - half,
+                center.x() + half,
+                center.y() + half,
             )
         dest_crs = self.canvas.mapSettings().destinationCrs()
         if layer.crs() != dest_crs:
@@ -1177,9 +1581,7 @@ class MainWindow(FramelessMixin, QMainWindow):
             return
         if isinstance(layer, QgsVectorLayer):
             geom = QgsWkbTypes.displayString(layer.wkbType())
-            copy = QgsVectorLayer(
-                f"{geom}?crs={layer.crs().authid()}", f"{layer.name()}_副本", "memory"
-            )
+            copy = QgsVectorLayer(f"{geom}?crs={layer.crs().authid()}", f"{layer.name()}_副本", "memory")
             dp = copy.dataProvider()
             dp.addAttributes(layer.fields().toList())
             copy.updateFields()
@@ -1269,7 +1671,7 @@ class MainWindow(FramelessMixin, QMainWindow):
             return
         node = self.project.layerTreeRoot().findLayer(layer)
         if node is not None and node.parent() is not group:
-            group.addLayer(layer)          # 先挂新节点，保证图层仍在树里
+            group.addLayer(layer)  # 先挂新节点，保证图层仍在树里
             node.parent().takeChild(node)  # 再摘原节点（bridge 不会删图层）
             self.messageBar.pushMessage(
                 f"已把 {layer.name()} 移到「{group.name()}」", level=Qgis.MessageLevel.Info, duration=2
@@ -1351,7 +1753,11 @@ class MainWindow(FramelessMixin, QMainWindow):
             qgis_tb = getattr(self, "qgis_digitizing_toolbar", None)
             if qgis_tb is not None:
                 qgis_tb.set_layer(self.edit_layer)  # 仅记录图层，不开按钮
-            self.messageBar.pushMessage(f"已设 {self._selected_layer.name()} 为编辑图层，点击「开始编辑」生效", level=Qgis.MessageLevel.Info, duration=3)
+            self.messageBar.pushMessage(
+                f"已设 {self._selected_layer.name()} 为编辑图层，点击「开始编辑」生效",
+                level=Qgis.MessageLevel.Info,
+                duration=3,
+            )
 
     def _on_layer_clicked_in_dock(self, index) -> None:
         """用户在图层树点击一层：自动同步 ``_selected_layer`` / ``edit_layer``。
@@ -1359,8 +1765,10 @@ class MainWindow(FramelessMixin, QMainWindow):
         这样点击任意矢量图层后，工具条上的"开始编辑"立即可用，
         不必再走右键 → "设为编辑图层"。
         """
+        # 注意：本构建没有 ``indexToNode``，只有 ``index2node``（两者都有
+        # 的版本里行为一致）；index 直接来自 view 的模型，无需再 map。
         try:
-            node = self.layer_dock.view.indexToNode(index)
+            node = self.layer_dock.view.index2node(index)
         except Exception:  # noqa: BLE001
             return
         if node is None:
@@ -1388,6 +1796,209 @@ class MainWindow(FramelessMixin, QMainWindow):
         qgis_tb = getattr(self, "qgis_digitizing_toolbar", None)
         if qgis_tb is not None:
             qgis_tb.set_layer(layer)
+
+    # ---------------------------------------------------- 图层树头部工具
+
+    def _current_dock_node(self):
+        """图层树当前选中节点；图例项自动上溯到所在图层节点。
+
+        返回 None 表示没有选中项。
+        """
+        from qgis.core import QgsLayerTreeGroup
+
+        view = self.layer_dock.view
+        node = None
+        try:
+            node = view.currentNode()
+        except Exception:  # noqa: BLE001
+            node = None
+        if node is None:
+            try:
+                index = view.currentIndex()
+                if index.isValid():
+                    node = view.index2node(index)
+            except Exception:  # noqa: BLE001
+                node = None
+        if node is None:
+            return None
+        # 图例项（symbol 行）的父是图层节点，不是组：上溯到图层节点为止
+        while node.parent() is not None and not isinstance(node.parent(), QgsLayerTreeGroup):
+            node = node.parent()
+        return node
+
+    def _on_header_style_panel(self) -> None:
+        """头部「打开图层样式面板」：给当前选中图层打开样式编辑。
+
+        本应用无常驻样式 Dock，与图层右键菜单一致复用模态样式编辑器
+        （:meth:`_show_style_editor`）。
+        """
+        try:
+            layer = self.layer_dock.view.currentLayer()
+        except Exception:  # noqa: BLE001
+            layer = None
+        if layer is None:
+            layer = getattr(self, "_selected_layer", None)
+        if layer is None:
+            self.messageBar.pushMessage(
+                "请先在图层列表中选择要设置样式的图层",
+                level=Qgis.MessageLevel.Warning,
+                duration=3,
+            )
+            return
+        self._show_style_editor(layer)
+
+    def _on_header_remove(self) -> None:
+        """头部「删除图层/组」：当前选中节点（图层或组）。
+
+        - 选中图层 → 直接走 :meth:`_remove_layer`
+        - 选中组 → 确认后递归移除组里全部图层（图层清空组自然消失）
+        """
+        from qgis.core import QgsLayerTreeGroup, QgsLayerTreeLayer
+
+        node = self._current_dock_node()
+        if node is None:
+            self.messageBar.pushMessage(
+                "请先在图层列表中选择要删除的图层或组",
+                level=Qgis.MessageLevel.Warning,
+                duration=3,
+            )
+            return
+
+        if isinstance(node, QgsLayerTreeLayer):
+            layer = node.layer()
+            if layer is not None:
+                self._remove_layer(layer)
+            return
+
+        if isinstance(node, QgsLayerTreeGroup):
+            # findLayers 默认递归收集所有子图层（嵌套子组下的也算）
+            layers = [c.layer() for c in node.findLayers() if c.layer() is not None]
+            if not layers:
+                self.messageBar.pushMessage("选中的图层组为空", level=Qgis.MessageLevel.Info, duration=2)
+                return
+            ret = QMessageBox.question(
+                self,
+                "删除图层组",
+                f"确定删除「{node.name()}」及其 {len(layers)} 个图层吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if ret != QMessageBox.StandardButton.Yes:
+                return
+            for layer in layers:
+                self._remove_layer(layer)
+            return
+
+        # 图例项等其它节点：当作无效选择
+        self.messageBar.pushMessage(
+            "请选择图层或图层组再删除",
+            level=Qgis.MessageLevel.Warning,
+            duration=3,
+        )
+
+    def _on_header_expand_all(self) -> None:
+        """头部「全部展开」：展开整个图层树。"""
+        self.layer_dock.view.expandAll()
+
+    def _on_header_collapse_all(self) -> None:
+        """头部「全部折叠」：折叠整个图层树（保留根节点）。"""
+        self.layer_dock.view.collapseAll()
+
+    def _on_add_layer_group(self) -> None:
+        """新建图层组（与 QGIS 一致）：选中分组 → 建在该组最顶；
+
+        选中图层 → 建在所在分组最顶；未选中 → 建在根最顶。新建后选中并尝试
+        就地重命名（失败则保留默认名）。
+        """
+        from qgis.core import QgsLayerTreeGroup
+
+        node = self._current_dock_node()
+        if isinstance(node, QgsLayerTreeGroup):
+            parent = node
+        elif node is not None and isinstance(node.parent(), QgsLayerTreeGroup):
+            parent = node.parent()
+        else:
+            parent = self.project.layerTreeRoot()
+
+        # 默认名去重（父分组内查重）
+        base = "新建图层组"
+        name = base
+        i = 2
+        while parent.findGroup(name) is not None:
+            name = f"{base} {i}"
+            i += 1
+
+        group = QgsLayerTreeGroup(name)
+        parent.insertChildNode(0, group)
+        view = self.layer_dock.view
+        # QGIS 行为：新建组后选中并直接进入重命名。两者都只在视图已聚焦时做
+        # （未显示/未聚焦的视图上强设“当前节点”或开编辑器，会在该节点随后被
+        # 移除时令 Qt 持有失效持久索引，触发堆损坏 0xc0000374）。
+        if not view.hasFocus():
+            self.messageBar.pushMessage(f"已新建图层组：{name}", level=Qgis.MessageLevel.Info, duration=2)
+            return
+        try:
+            index = view.node2index(group)
+            if index.isValid():
+                view.setCurrentIndex(index)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            index = view.node2index(group)
+            if index.isValid():
+                view.edit(index)
+        except Exception:  # noqa: BLE001
+            pass
+        self.messageBar.pushMessage(f"已新建图层组：{name}", level=Qgis.MessageLevel.Info, duration=2)
+
+    def _on_move_layer_node(self, delta: int) -> None:
+        """上移 / 下移当前选中的图层或组（仅在同分组内重排）。
+
+        QGIS 4.x 的 ``takeChild(node: QgsLayerTreeNode) -> bool`` 是 **detach**
+        操作（从 tree 摘下节点但**不删** layer），bridge 不会因此把 layer 从
+        project 中删掉。``insertChildNode`` 在看到节点还挂在同 group 时会
+        直接返回 false（拒收），所以必须先 ``takeChild`` 再 ``insertChildNode``。
+
+        注意：``takeChild`` 在本构建**只接 ``QgsLayerTreeNode``**，没有
+        ``takeChild(int)`` 重载——之前尝试按 index 摘会抛
+        ``TypeError: argument 1 has unexpected type 'int'``。
+        """
+        from qgis.core import QgsLayerTreeGroup
+
+        node = self._current_dock_node()
+        if node is None or node.parent() is None:
+            self.messageBar.pushMessage(
+                "请先在图层列表中选择要移动的图层或组",
+                level=Qgis.MessageLevel.Warning,
+                duration=3,
+            )
+            return
+        parent = node.parent()
+        if not isinstance(parent, QgsLayerTreeGroup):
+            return
+        siblings = parent.children()
+        try:
+            pos = siblings.index(node)
+        except ValueError:
+            return
+        new_pos = pos + delta
+        if not 0 <= new_pos < len(siblings):
+            return  # 已在顶/底
+        # takeChild 接受 node 引用，detach 节点（layer 仍在 project 里）；
+        # 立即 insertChildNode 挂回新位置——bridge 不会干 layer。
+        parent.takeChild(node)
+        parent.insertChildNode(min(new_pos, len(parent.children())), node)
+        view = self.layer_dock.view
+        try:
+            view.setCurrentNode(node)
+        except Exception:  # noqa: BLE001
+            pass
+        verb = "上移" if delta < 0 else "下移"
+        self.messageBar.pushMessage(
+            f"已{verb}：{getattr(node, 'name', lambda: '')()}",
+            level=Qgis.MessageLevel.Info,
+            duration=2,
+        )
 
     # ---------------------------------------------------- 绘图工具回调（保留兼容）
 
@@ -1418,6 +2029,7 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def _open_execute_sql(self) -> None:
         from app.ui.dialogs.execute_sql import ExecuteSqlDialog
+
         if self._selected_layer is None:
             return
         dlg = ExecuteSqlDialog(self._selected_layer, self)
@@ -1441,9 +2053,7 @@ class MainWindow(FramelessMixin, QMainWindow):
         try:
             from qgis._gui import QgsVectorLayerProperties
 
-            dlg = QgsVectorLayerProperties(
-                canvas=self.canvas, lyr=layer, messageBar=self.messageBar, parent=self
-            )
+            dlg = QgsVectorLayerProperties(canvas=self.canvas, lyr=layer, messageBar=self.messageBar, parent=self)
             dlg.setWindowIcon(Icons.app())
             dlg.setWindowTitle(f"标注设置 - {layer.name()}")
             self._select_properties_page(dlg, ("标注", "Labels"))
@@ -1474,11 +2084,13 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def _open_style_file(self, layer) -> None:
         from app.ui.dialogs.style_io import StyleOpenDialog
+
         dlg = StyleOpenDialog(layer, self)
         dlg.show()
 
     def _save_style(self, layer) -> None:
         from app.ui.dialogs.style_io import StyleSaveDialog
+
         dlg = StyleSaveDialog(layer, self)
         dlg.exec()
 
@@ -1501,6 +2113,7 @@ class MainWindow(FramelessMixin, QMainWindow):
     def _open_layer_properties(self, layer) -> None:
         try:
             from qgis._gui import QgsVectorLayerProperties
+
             dlg = QgsVectorLayerProperties(canvas=self.canvas, lyr=layer, messageBar=self.messageBar, parent=self)
             dlg.setWindowIcon(Icons.app())
             dlg.exec()
@@ -1533,10 +2146,11 @@ class MainWindow(FramelessMixin, QMainWindow):
             if hasattr(self, "messageBar"):
                 self.messageBar.pushWarning("流程编辑器", f"打开失败：{exc}")
 
-
     def _show_attribute_dock(self, layer, filter_str: str = "1=1", show_ids: list = None) -> None:
         if not hasattr(self, "current_attribute_dock") or self.current_attribute_dock is None:
-            self.current_attribute_dock = AttributeDock(layer, page_size=50, parent=self, filter_str=filter_str, show_ids=show_ids)
+            self.current_attribute_dock = AttributeDock(
+                layer, page_size=50, parent=self, filter_str=filter_str, show_ids=show_ids
+            )
             self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.current_attribute_dock)
             self.current_attribute_dock.show()
         else:

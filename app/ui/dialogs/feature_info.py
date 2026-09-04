@@ -44,14 +44,16 @@ class FeatureInfoDialog(BaseDialog):
         icon_lbl = QLabel()
         icon_lbl.setPixmap(QIcon.fromTheme("layer-vector-point").pixmap(QSize(32, 32)))
         title.addWidget(icon_lbl)
-        if self.result.is_raster:
+        if self.result.is_raster and not self.result.attributes:
             subtitle = "栅格像元识别"
         else:
-            subtitle = f"要素 ID: {self.feature.id()}"
-        title.addWidget(QLabel(
-            f"<h3 style='margin:0'>{self.layer.name()}</h3>"
-            f"<p style='margin:0; color:{t.text_secondary}'>{subtitle}</p>"
-        ))
+            subtitle = f"要素 ID: {self._display_fid()}"
+        title.addWidget(
+            QLabel(
+                f"<h3 style='margin:0'>{self.layer.name()}</h3>"
+                f"<p style='margin:0; color:{t.text_secondary}'>{subtitle}</p>"
+            )
+        )
         title.addStretch()
         layout.addLayout(title)
 
@@ -71,27 +73,58 @@ class FeatureInfoDialog(BaseDialog):
         layout.addLayout(btn)
         self.setLayout(main_layout := layout)
 
+    def _display_fid(self) -> str:
+        """标题里的要素号：富化结果取 OBJECTID，矢量结果取 feature.id()。"""
+        if self.result.attributes:
+            oid = next(
+                (v for k, v in self.result.attributes.items() if str(k).lower() == "objectid"),
+                None,
+            )
+            if oid is not None:
+                return str(oid)
+        if self.feature is not None:
+            try:
+                return str(self.feature.id())
+            except Exception:  # noqa: BLE001
+                pass
+        return "-"
+
     def _load_info(self) -> None:
-        if self.result.is_raster:
+        if self.result.is_raster and not self.result.attributes:
             self._load_raster_info()
             return
         t = ThemeManager.instance().current()
+        result = self.result
+        attrs = dict(result.attributes)
+        if attrs:
+            items = list(attrs.items())
+            header = f"属性字段（共 {len(items)} 个）："
+        else:
+            fields = list(self.layer.fields())
+            items = [(f.name(), self.feature.attribute(f.name())) for f in fields] if self.feature is not None else []
+            header = f"属性字段（共 {len(fields)} 个）："
         info = "<div style='line-height:1.6; width:100%; box-sizing:border-box;'>"
-        info += f"<p><strong>属性字段（共 {len(self.layer.fields())} 个）：</strong></p>"
+        info += f"<p><strong>{header}</strong></p>"
         info += """
         <table style='width:100%; border-collapse:collapse; table-layout:auto;'>
             <colgroup><col style='width: 35%;' /><col style='width: 65%;' /></colgroup>
         """
-        info += f"""
+        geom = self.feature.geometry() if self.feature is not None else None
+        if geom is not None and not geom.isEmpty():
+            try:
+                wkt = geom.asWkt()
+                info += f"""
             <tr><td style='padding:8px; border-bottom:1px solid {t.panel_border};'>几何文本</td>
-                <td style='padding:8px; border-bottom:1px solid {t.panel_border};'>{self.feature.geometry().asWkt()}</td></tr>
+                <td style='padding:8px; border-bottom:1px solid {t.panel_border};'>{wkt}</td></tr>
         """
-        for i, (field, value) in enumerate(zip(self.layer.fields(), self.feature.attributes())):
+            except Exception:  # noqa: BLE001
+                pass
+        for i, (name, value) in enumerate(items):
             bg = t.panel_bg if i % 2 == 0 else t.input_bg
             val = str(value) if value is not None else f"<span style='color:{t.text_secondary}'>无</span>"
             info += (
                 f"<tr style='background-color:{bg}'>"
-                f"<td style='padding:8px; border-bottom:1px solid {t.panel_border};'>{field.name()}</td>"
+                f"<td style='padding:8px; border-bottom:1px solid {t.panel_border};'>{name}</td>"
                 f"<td style='padding:8px; border-bottom:1px solid {t.panel_border};'>{val}</td></tr>"
             )
         info += "</table></div>"
@@ -138,19 +171,25 @@ class FeatureInfoDialog(BaseDialog):
 
     def _copy(self) -> None:
         result = self.result
-        if result.is_raster:
+        attrs = dict(result.attributes)
+        if result.is_raster and not attrs:
             plain = f"图层: {result.layer.name()}\n"
             for name, value in result.raster_values.items():
                 plain += f"  {name}: {value}\n"
             QApplication.clipboard().setText(plain)
             return
-        plain = f"图层: {self.layer.name()}\n要素ID: {self.feature.id()}\n"
-        if self.feature.geometry().type() == QgsWkbTypes.PointGeometry:
-            p = self.feature.geometry().asPoint()  # QGIS4: asPointXY 已移除
-            plain += f"  X: {p.x():.6f}\n  Y: {p.y():.6f}\n"
+        plain = f"图层: {self.layer.name()}\n要素ID: {self._display_fid()}\n"
+        if self.feature is not None and not self.feature.geometry().isEmpty():
+            if self.feature.geometry().type() == QgsWkbTypes.PointGeometry:
+                p = self.feature.geometry().asPoint()  # QGIS4: asPointXY 已移除
+                plain += f"  X: {p.x():.6f}\n  Y: {p.y():.6f}\n"
         plain += "\n属性信息:\n"
-        for f, v in zip(self.layer.fields(), self.feature.attributes()):
-            plain += f"  {f.name()}: {v}\n"
+        if attrs:
+            for name, value in attrs.items():
+                plain += f"  {name}: {value}\n"
+        elif self.feature is not None:
+            for f, v in zip(self.layer.fields(), self.feature.attributes()):
+                plain += f"  {f.name()}: {v}\n"
         QApplication.clipboard().setText(plain)
 
     def closeEvent(self, event) -> None:

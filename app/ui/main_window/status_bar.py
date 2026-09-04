@@ -1,9 +1,26 @@
-"""状态栏：鼠标坐标 + 比例尺 + 投影选择器。"""
+"""状态栏：鼠标坐标 + 比例尺 + 投影选择器 + 图层加载指示。
+
+图层加载指示是 QGIS 风格的那个 busy 效果：状态栏最左侧转圈图标 + 「正在加载
+图层…」文本，由 :meth:`StatusBar.show_loading` / :meth:`hide_loading` 控制
+（MainWindow 在加载文件 / 浏览器图层 / 在线底图等入口调用，加载期间亮起、
+结束即熄灭）。可嵌套：并发多个加载时计数配平，全部结束才隐藏。
+"""
 
 from __future__ import annotations
 
-from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtWidgets import QLabel, QMainWindow
+from qgis.PyQt.QtCore import QEventLoop, Qt, QTimer
+from qgis.PyQt.QtWidgets import QApplication, QHBoxLayout, QLabel, QMainWindow, QWidget
+
+#: 图层加载指示的旋转帧（转圈动画字符序列）
+_LOADING_FRAMES = ("◐", "◓", "◑", "◒")
+#: 旋转帧切换间隔（ms）
+_LOADING_INTERVAL_MS = 120
+#: 未指定图层名时的默认加载提示
+_LOADING_DEFAULT_TEXT = "正在加载图层…"
+#: 画布渲染超过该时长才亮指示（避免普通缩放/平移快速重绘时闪烁）
+_RENDER_BUSY_DELAY_MS = 250
+#: 画布渲染 busy 的文本
+_RENDER_BUSY_TEXT = "正在渲染图层…"
 
 
 class StatusBar:
@@ -14,10 +31,15 @@ class StatusBar:
         self.status_bar = main_window.statusBar()
 
     def build(self) -> None:
-        """组装状态栏：左侧消息栏，右侧 鼠标坐标 + 比例尺 + 投影选择器。"""
+        """组装状态栏：左侧消息栏 + 加载指示，右侧 鼠标坐标 + 比例尺 + 投影选择器。
+
+        加载指示平时隐藏，图层加载时由 :meth:`show_loading` 亮起（见模块
+        docstring）；按需求先放在最左侧（普通部件区，消息之后、坐标比例尺等
+        永久部件之前）。
+        """
         from qgis.gui import QgsProjectionSelectionWidget, QgsScaleWidget
 
-        self.status_bar.showMessage("就绪")
+        # self.status_bar.showMessage("就绪")
 
         # 鼠标坐标（最左侧永久部件，随鼠标移动实时更新）
         self.coord_label = self._build_coordinate_label()
@@ -45,9 +67,7 @@ class StatusBar:
         proj_selector.setMaximumWidth(200)
         # CRS 由 MainWindow 注入前先隐藏 ProjectCrs 选项
         try:
-            proj_selector.setOptionVisible(
-                proj_selector.CrsOption.ProjectCrs, False
-            )
+            proj_selector.setOptionVisible(proj_selector.CrsOption.ProjectCrs, False)
         except Exception:  # noqa: BLE001
             pass
         # 拿当前工程 CRS：MainWindow 装配顺序在 _build_status_bar 之前已
@@ -67,6 +87,119 @@ class StatusBar:
 
         project.crsChanged.connect(_sync_proj_selector)
         self.status_bar.addPermanentWidget(proj_selector)
+
+        # 图层加载指示：转圈 + 文本，平时隐藏（show_loading 时亮起）。
+        # 用 addWidget 放普通部件区（状态栏左侧）；addPermanentWidget 会挤到最右。
+        (
+            self.loading_widget,
+            self.loading_spinner,
+            self.loading_text,
+        ) = self._build_loading_indicator()
+        self._loading_depth = 0
+        self._loading_frame = 0
+        self._loading_timer = QTimer(self.status_bar)
+        self._loading_timer.setInterval(_LOADING_INTERVAL_MS)
+        self._loading_timer.timeout.connect(self._spin_loading)
+        self.status_bar.addWidget(self.loading_widget)
+
+        # 画布渲染 busy：首帧渲染 / 大图层重绘超过阈值时亮起指示。
+        # 在线底图 FeatureServer 这类“添加很快、首帧渲染 20~30s”的场景全靠
+        # 这里兜底（渲染在 QGIS 后台线程，UI 事件循环照常跑，转圈能真正动起来）。
+        self._rendering = False
+        self._render_busy = False
+        try:
+            canvas = self.main_window.canvas
+            canvas.renderStarting.connect(self._on_canvas_render_started)
+            canvas.renderComplete.connect(self._on_canvas_render_finished)
+            # 兜底：渲染被中断（平移/缩放取消旧渲染）时 mapCanvasRefreshed 也会发，
+            # 用它保证 _rendering 标志最终复位，避免指示卡住不熄。
+            canvas.mapCanvasRefreshed.connect(self._on_canvas_render_finished)
+        except Exception:  # noqa: BLE001
+            # 个别 QGIS 版本无对应信号：退化为纯手动 show/hide 指示
+            pass
+
+    # ------------------------------------------------------------ 图层加载指示
+
+    @property
+    def is_loading(self) -> bool:
+        """是否正在显示图层加载指示（部件未隐藏 且 旋转动画在跑）。"""
+        return not self.loading_widget.isHidden() and self._loading_timer.isActive()
+
+    def show_loading(self, text: str = "") -> None:
+        """开始显示图层加载指示（左侧大号转圈 + 文本）；与 :meth:`hide_loading` 配对。
+
+        可嵌套（多个图层并发加载）：内部计数，全部结束时才隐藏——避免 A 先加载完
+        时把还在加载中的 B 的指示一并关掉。
+        """
+        self._loading_depth += 1
+        if text:
+            self.loading_text.setText(text)
+        self.loading_widget.show()
+        if not self._loading_timer.isActive():
+            self._spin_loading()
+            self._loading_timer.start()
+        # 立即让出一次事件循环把部件画出来。调用方（文件打开、在线底图构建等）
+        # 随后常是主线程同步阻塞——不主动刷一次 paint 的话，重绘要等阻塞结束、
+        # 指示已被 hide 之后才轮到，效果就是“加载效果不出现”。
+        # 注意用全限定枚举名（PyQt6/QGIS 4.2 无 QEventLoop.ExcludeUserInputEvents
+        # 非限定别名，PyQt5 两者都有；全限定名两者通用）。
+        QApplication.processEvents(QEventLoop.ProcessEventsFlag.ExcludeUserInputEvents)
+
+    def hide_loading(self) -> None:
+        """结束一层加载；计数归零才隐藏指示并停掉旋转动画。"""
+        if self._loading_depth > 0:
+            self._loading_depth -= 1
+        if self._loading_depth == 0:
+            self._loading_timer.stop()
+            self.loading_widget.hide()
+
+    # ---- 画布渲染 busy（异步渲染的兜底指示）----
+
+    def _on_canvas_render_started(self) -> None:
+        """画布开始渲染：延迟探测，渲染很快结束（<阈值）就不亮，避免闪烁。"""
+        self._rendering = True
+        QTimer.singleShot(_RENDER_BUSY_DELAY_MS, self._maybe_show_render_busy)
+
+    def _maybe_show_render_busy(self) -> None:
+        """渲染超过阈值仍在跑 → 亮起指示（UI 事件循环未阻塞，转圈动画正常）。"""
+        try:
+            if self._rendering and not self._render_busy:
+                self._render_busy = True
+                self.show_loading(_RENDER_BUSY_TEXT)
+        except RuntimeError:
+            # 延时探测触发时宿主窗口可能已销毁（测试/快速关闭场景）
+            pass
+
+    def _on_canvas_render_finished(self, *args) -> None:
+        """渲染结束 / 被刷新打断：复位标志并熄灭指示。"""
+        try:
+            self._rendering = False
+            if self._render_busy:
+                self._render_busy = False
+                self.hide_loading()
+        except RuntimeError:
+            pass
+
+    def _spin_loading(self) -> None:
+        """旋转帧推进（QTimer 回调，转圈动画）。"""
+        self._loading_frame = (self._loading_frame + 1) % len(_LOADING_FRAMES)
+        self.loading_spinner.setText(_LOADING_FRAMES[self._loading_frame])
+
+    def _build_loading_indicator(self):
+        """左侧加载指示部件：大号转圈图标 + 文本，默认隐藏。"""
+        widget = QWidget(self.status_bar)
+        layout = QHBoxLayout(widget)
+        layout.setContentsMargins(10, 0, 6, 0)
+        layout.setSpacing(6)
+        spinner = QLabel(_LOADING_FRAMES[0])
+        # 旋转符号放大（原 9~11px → 22px，约一倍）并加粗，确保加载期间一眼可见
+        spinner.setStyleSheet("color: #2f6fb3; font-weight: bold; font-size: 22px;")
+        text = QLabel(_LOADING_DEFAULT_TEXT)
+        text.setStyleSheet("color: #333; font-weight: bold;")
+        layout.addWidget(spinner)
+        layout.addWidget(text)
+        widget.hide()
+        return widget, spinner, text
 
     def _build_coordinate_label(self) -> QLabel:
         """鼠标位置坐标标签：跟随画布 xyCoordinates 信号更新。"""

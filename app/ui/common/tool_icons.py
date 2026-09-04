@@ -40,6 +40,7 @@ _GLYPHS: dict[str, str] = {
     "test": "",                # flask 烧瓶
     "swipe": "",              # columns 竖向分割（卷帘对比）
     "qmap_compare": "",       # object-group 图层组（地图对比：分割/放大镜/镜像）
+    "online_basemap": "",     # map 地图轮廓（在线底图，避免与 zoom_full 的 globe 撞）
     "space_query_point": "",   # map-marker 定位大头针
     "space_query_line": "",    # route 路线（线查询）
     "space_query_polygon": "", # draw-polygon 多边形（面查询）

@@ -1,0 +1,63 @@
+# 在线底图清单（Dock「在线底图」树的数据源；独立于 app.yaml）
+# ---------------------------------------------------------------------------
+# 双击条目 / 叶子右键「添加到画布」→ 把图层加进工程「参考图层」分组。
+# Dock 空白处 / 分组 / 叶子右键「添加在线底图」→ 从**内置模板**
+# （app/core/domain/online_basemap_templates.py，含高德四图层）选一条写回本清单、
+# 并加进 Dock 树。Dock 右键「添加自定义底图」→ 弹窗配置自定义服务，同样写回本清单：
+#   type 取值 xyz（瓦片模板，默认）/ arcgis（ArcGIS REST 影像服务）/
+#   arcgisfeature（ArcGIS FeatureServer 矢量要素）/ wms|wmts（OGC 服务，
+#   额外写 layers/styles/format/crs，wmts 加 tile_matrix_set）。
+#   注意：非 xyz 类型**不写** zmin/zmax/referer（仅 xyz 瓦片用）。
+# 写回是文本追加（自动补在清单末尾），本文件其余注释/排版原样保留。
+# url 里的参数分隔符用普通 &（连接串内部会自动转义），别写成 &amp;。
+# 天地图 URL 里的 tk 用 {tk} 占位符，真实 key 见 app.yaml 的 map.keys（换 key 只改那里）。
+
+- group: 天地图
+  name: 天地图·影像
+  type: xyz
+  url: "https://t0.tianditu.gov.cn/img_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=img&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILECOL={x}&TILEROW={y}&TILEMATRIX={z}&tk={tk}"
+  referer: "https://www.tianditu.gov.cn/"
+  zmin: 0
+  zmax: 18
+
+- group: 天地图
+  name: 天地图·矢量
+  type: xyz
+  url: "https://t0.tianditu.gov.cn/vec_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=vec&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILECOL={x}&TILEROW={y}&TILEMATRIX={z}&tk={tk}"
+  referer: "https://www.tianditu.gov.cn/"
+  zmin: 0
+  zmax: 18
+
+- group: 天地图
+  name: 天地图·标注
+  type: xyz
+  url: "https://t0.tianditu.gov.cn/cva_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=cva&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILECOL={x}&TILEROW={y}&TILEMATRIX={z}&tk={tk}"
+  referer: "https://www.tianditu.gov.cn/"
+  zmin: 0
+  zmax: 18
+
+- group: 高德地图
+  name: 高德·影像
+  type: xyz
+  url: https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}
+  zmin: 1
+  zmax: 19
+
+- group: 高德地图
+  name: 高德·矢量
+  type: xyz
+  url: https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}
+  zmin: 3
+  zmax: 19
+
+- group: 高德地图
+  name: 高德·路网
+  type: xyz
+  url: https://webst01.is.autonavi.com/appmaptile?style=8&x={x}&y={y}&z={z}
+  zmin: 3
+  zmax: 19
+
+- group: 自定义底图
+  name: arcgis
+  type: arcgis
+  url: http://127.0.0.1:6080/arcgis/rest/services/%E6%B1%9F%E8%A5%BF%E7%9C%81%E5%8E%BF%E7%BA%A7%E8%A1%8C%E6%94%BF%E5%8C%BA%E5%9F%9F/MapServer

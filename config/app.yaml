@@ -18,16 +18,26 @@ auth:
   password: admin
 
 map:
+  # 底图服务 API Key（provider 集中管理）：各底图 URL 用占位符引用本段真值，
+  # 构建 QGIS 图层时才替换（见 basemap.apply_key_placeholders）：
+  #   天地图 {tk}        → tianditu_tk
+  #   高德   {gaode_key} → gaode_key（预留：当前高德走公开地址，URL 未引用本字段）
+  # 换 key 只改这里一处（不用再改各处 URL / 模板）；新建或重载底图后生效。
+  keys:
+    tianditu_tk: cb75b0d8a671ec1acbf32c6835be5c65
+    gaode_key: ""
   # 启动后自动加载的 XYZ 底图；enabled: false 则不加载
   base_tile:
     enabled: true
     name: 天地图影像
     type: xyz
-    url: "https://t0.tianditu.gov.cn/img_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=img&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILECOL={x}&TILEROW={y}&TILEMATRIX={z}&tk=cb75b0d8a671ec1acbf32c6835be5c65"
+    url: "https://t0.tianditu.gov.cn/img_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=img&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILECOL={x}&TILEROW={y}&TILEMATRIX={z}&tk={tk}"
     referer: "https://www.tianditu.gov.cn/"
     zmin: 0
     zmax: 18
 
+  # 在线底图清单已独立到同目录 online_basemap_config.yaml（Dock「在线底图」树的数据源，
+  # type 取值 / 写回方式见该文件注释头）。map.keys 与 base_tile 仍在本文件。
 qgis:
   # dev 模式；prod 模式不读这里（路径走 QGIS_PREFIX）。
   #

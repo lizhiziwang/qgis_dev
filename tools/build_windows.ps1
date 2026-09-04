@@ -102,3 +102,7 @@ Write-Host "  B U I L D   C O M P L E T E ! " -ForegroundColor Green
 Write-Host "=================================" -ForegroundColor Green
 Write-Host "Portable app: $DistPath"
 Write-Host "Run: $DistPath/$AppName.exe"
+
+
+conda create -n qgis_build -c conda-forge python=3.10 qgis pyqt pyinstaller networkx scipy fastapi uvicorn pydantic pyyaml psycopg2 -y
+conda create -n qgis_build -c python=3.10

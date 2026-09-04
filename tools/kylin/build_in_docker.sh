@@ -18,7 +18,6 @@ if ! conda env list | grep -q "/$ENV_NAME$"; then
         fastapi uvicorn pydantic pyyaml psycopg2 \
         -y
 fi
-
 conda activate "$ENV_NAME"
 python --version
 python -c "import qgis; print('qgis', qgis.__version__)"

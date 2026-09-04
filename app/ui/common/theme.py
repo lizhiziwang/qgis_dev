@@ -412,6 +412,27 @@ def window_qss(t: Theme) -> str:
         border-right: 1px solid {t.border};
         padding: 4px;
     }}
+
+    /* 图层树 Dock 头部工具条：背景用 toolbar_bg 与工具条一致、底边 1px 分隔线
+       与树视图分隔；按钮 hover/pressed 用 toolbar 系列色，避免 app_qss 默认的
+       btn 系列（按钮底色更深）显得过重。样式集中在这里管理，切主题自动跟随。 */
+    QWidget#LayerDockHeader {{
+        background-color: {t.toolbar_bg};
+        border-bottom: 1px solid {t.border};
+    }}
+    QWidget#LayerDockHeader QToolButton {{
+        border: none;
+        background-color: transparent;
+        border-radius: 2px;
+        padding: 0px;
+        color: {t.menu_text};
+    }}
+    QWidget#LayerDockHeader QToolButton:hover {{
+        background-color: {t.toolbar_hover};
+    }}
+    QWidget#LayerDockHeader QToolButton:pressed {{
+        background-color: {t.toolbar_pressed};
+    }}
     """
 
 
