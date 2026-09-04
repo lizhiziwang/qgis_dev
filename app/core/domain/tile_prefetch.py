@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import math
 import threading
+import time
 from collections import OrderedDict, deque
 from typing import Optional
 
@@ -59,6 +60,11 @@ class _PrefetchWorker(threading.Thread):
 
     主线程随时可 :meth:`submit` 替换待渲染列表（只保留最新一轮），线程安全
     由 ``Condition`` 保证；单个 extent 渲染失败只记 debug 日志，不影响主流程。
+
+    支持 ``completion_event``：当一轮（队列从非空变空）渲染完成时，worker
+    会调用 ``event.set()``（threading.Event 跨线程安全）通知主线程。
+    调用方负责管理 event 生命周期；连续 ``submit`` 时旧 event 即便被 set 也
+    会被覆盖（这里 set 后调用方可能已丢弃旧 event，无副作用）。
     """
 
     def __init__(self, project) -> None:
@@ -68,17 +74,28 @@ class _PrefetchWorker(threading.Thread):
         self._queue: deque = deque()
         self._cv = threading.Condition()
         self._running = True
+        self._completion_event: Optional[threading.Event] = None
 
-    def submit(self, items, template_settings) -> None:
+    def submit(
+        self,
+        items,
+        template_settings,
+        completion_event: Optional[threading.Event] = None,
+    ) -> None:
         """替换待渲染列表为 ``items``（[(layer, extent), ...]），并刷新渲染模板。
 
         ``template_settings`` 是画布 ``mapSettings()`` 的拷贝：xyz provider 只在
         层的源 CRS（EPSG:3857）下正确选瓦片，画布设置里已带好重投影所需的
         图层变换/变换上下文，直接复用才能保证预热的瓦片与画布将要请求的一致。
+
+        ``completion_event`` 可选：传入则当本轮（队列从非空变空）渲染完成时
+        触发 ``event.set()``，供 :class:`ZoomTileGuard` 等需要知道何时可解冻
+        画布的调用方使用。
         """
         with self._cv:
             self._template = template_settings
             self._queue = deque(items)
+            self._completion_event = completion_event
             self._cv.notify()
 
     def stop(self) -> None:
@@ -99,6 +116,12 @@ class _PrefetchWorker(threading.Thread):
                 self._render_one(*item)
             except Exception as exc:  # noqa: BLE001
                 logger.debug("tile prefetch render failed: %s", exc)
+            # 检查是否本轮已结束（队列空 → 调用方可以解除冻结）
+            with self._cv:
+                queue_empty = not self._queue
+                evt = self._completion_event
+            if queue_empty and evt is not None:
+                evt.set()  # threading.Event 跨线程安全
 
     def _render_one(self, layer, extent) -> None:
         from qgis.core import QgsMapRendererCustomPainterJob, QgsMapSettings
@@ -307,4 +330,178 @@ def _extent_key(extent) -> str:
     )
 
 
-__all__ = ["TilePrefetcher"]
+class ZoomTileGuard(QObject):
+    """缩放时后台预取当前视口瓦片，瓦片到齐后 refresh() 重绘——不冻结画布。
+
+    背景与设计权衡
+    --------------
+    :class:`TilePrefetcher` 解决的是"平移/缩放后**下一次**视口的白屏"
+    （renderComplete 后预热 8 个邻居）。但**当前这一次**缩放本身仍要走
+    "渲染→等瓦片→白屏"的流程——用户体感"缩放后总要白一下"。
+
+    早一版（commit ``fc9fee7`` 之后的实现）用 ``canvas.freeze(True)`` 保留旧帧、
+    瓦片到齐再 ``freeze(False) + refresh()`` 出新帧。物理上就是"先回退到旧帧、
+    再突然跳到新帧"，是个明显的 snap——用户反馈不平滑。
+
+    现版（2026-09-04）：**拿掉 freeze**，只做后台预取 + 完成后 ``refresh()``。
+    流程：
+    1. ``canvas.extentsChanged`` → 启动 200ms 防抖（连续缩放时合并）
+    2. 防抖到期 → 后台离屏渲染当前视口（单 extent，``completion_event``）
+    3. 预取完成 → ``canvas.refresh()``（瓦片已在缓存，重绘不阻塞网络）
+    4. 兜底：预取超时（2s）或失败 → 直接 ``refresh()``
+       （接受白屏，不让画布永远等）
+
+    视觉上：画布先出当前 extent（瓦片未到时该位置是白的，**不会被回退到旧
+    帧**），瓦片就绪后 refresh 把它填上——连续的、没有 snap。如果白屏明显，
+    再考虑用占位灰代替纯白（见 ``QgsRasterLayer`` 的 backgroundColor/placeholder）。
+
+    worker 实例**独立**于 TilePrefetcher 的 worker：
+    - :meth:`_PrefetchWorker.submit` 替换队列语义下，共享会让邻居预热被
+      当前预热打断（行为正确但不利分析）
+    - 多一个 daemon 线程空闲挂 ``Condition``，开销可忽略
+
+    QGIS 4.2 PyQt6 API 注意（已实测 / 已踩坑）
+    ------------------------------------------
+    - 信号是 ``extentsChanged``（带 s），不是 ``extentChanged``（代码库里
+      swipe.py:347、qmap_compare.py:437 等都是这个写法）
+    - 仍**不**监听 ``renderComplete``：预取完成时主动 ``canvas.refresh()``，
+      renderComplete 仍可能为之前已 in-flight 的渲染触发，与本类逻辑无冲突
+    """
+
+    _DEBOUNCE_MS = 200       # 缩放空闲后才预取（连续滚动时合并）
+    _POLL_MS = 50            # 主线程轮询完成事件的间隔
+    _TIMEOUT_MS = 2000       # 预取硬超时（避免画布永远不刷新）
+
+    def __init__(
+        self,
+        canvas,
+        project=None,
+        parent: Optional[QObject] = None,
+    ) -> None:
+        super().__init__(parent)
+        self._canvas = canvas
+        self._project = project
+        self._seq = 0                      # 取消旧预取用
+        self._pending_seq: int = 0         # 当前正在等待的批次
+        self._pending_event: Optional[threading.Event] = None
+        self._started_at: Optional[float] = None
+        self._worker: Optional[_PrefetchWorker] = None
+        # 防抖：缩放空闲 200ms 才调度预取
+        self._debounce = QTimer(self)
+        self._debounce.setSingleShot(True)
+        self._debounce.setInterval(self._DEBOUNCE_MS)
+        self._debounce.timeout.connect(self._on_idle)
+        # 轮询：worker 完成 / 超时
+        self._poll = QTimer(self)
+        self._poll.setInterval(self._POLL_MS)
+        self._poll.timeout.connect(self._on_poll)
+        # 监听缩放（extent 变化包括 zoom 和 pan，都需要拦截；QGIS 4 是 extentsChanged 带 s）
+        canvas.extentsChanged.connect(self._on_extents_changed)
+        canvas.destroyed.connect(self.shutdown)
+
+    # ----------------------------------------------------------- 事件
+
+    def _on_extents_changed(self) -> None:
+        canvas = self._canvas
+        if canvas is None:
+            return
+        # 取消进行中的预取：seq++ 让旧 event 即使 set 也不被采纳
+        self._seq += 1
+        self._pending_seq = self._seq
+        self._pending_event = None
+        # 停掉旧轮询（_on_idle 触发后会 start）—— 节省 CPU，连续缩放时不空转
+        if self._poll.isActive():
+            self._poll.stop()
+        self._debounce.start()  # 重置防抖
+
+    def _on_idle(self) -> None:
+        """缩放空闲 200ms：取当前视口 → 预取 → 启动轮询。"""
+        canvas = self._canvas
+        if canvas is None:
+            return
+        try:
+            from qgis.core import QgsMapSettings
+
+            settings = canvas.mapSettings()
+            extent = settings.extent()
+            if not extent or extent.width() <= 0 or extent.height() <= 0:
+                return
+            layers = [l for l in settings.layers() if _is_xyz_layer(l)]
+            if not layers:
+                return  # 没 XYZ 层就不预取（无瓦片可拉）
+            # 自己持有 worker（不与 TilePrefetcher 共享——见类 docstring）
+            if self._worker is None:
+                self._worker = _PrefetchWorker(self._project or canvas.project())
+                self._worker.start()
+            self._seq += 1
+            current_seq = self._seq
+            self._pending_seq = current_seq
+            evt = threading.Event()
+            self._pending_event = evt
+            self._started_at = time.monotonic()
+            self._worker.submit(
+                [(layers[0], extent)],
+                QgsMapSettings(settings),
+                completion_event=evt,
+            )
+            self._poll.start()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("zoom tile guard prefetch failed: %s", exc)
+
+    def _on_poll(self) -> None:
+        """轮询：worker 完成 / 超时 → refresh（仅当批次匹配当前 seq）。
+
+        注意：用户继续缩放时 ``_on_extents_changed`` 会把 ``_pending_event``
+        置 None 并 stop timer，所以本方法只在"当前确实有进行中的预取"时
+        执行有意义的逻辑；这里不再额外 stop timer（_on_extents_changed 已经处理）。
+        """
+        if self._pending_event is None:
+            return
+        if not self._pending_event.is_set():
+            if self._started_at is not None and \
+               (time.monotonic() - self._started_at) * 1000 > self._TIMEOUT_MS:
+                logger.debug("zoom tile guard prefetch 超时，强制 refresh")
+                self._pending_event = None
+                self._pending_seq = 0
+                self._poll.stop()
+                self._refresh()
+            return
+        # event set
+        if self._pending_seq != self._seq:
+            # 用户已再次缩放，忽略这次完成，等下一次 idle
+            self._pending_event = None
+            return
+        self._pending_event = None
+        self._pending_seq = 0
+        self._poll.stop()
+        self._refresh()
+
+    def _refresh(self) -> None:
+        """触发一次画布重绘（瓦片已在缓存，渲染不阻塞网络）。
+
+        无 freeze 后，``_unfreeze`` 这个名字不再合适；改名 ``_refresh`` 体现
+        语义——只是让画布用缓存里的瓦片再画一次。
+        """
+        canvas = self._canvas
+        self._started_at = None
+        if canvas is None:
+            return
+        try:
+            canvas.refresh()
+        except Exception:  # noqa: BLE001
+            logger.debug("canvas.refresh() 失败（已忽略）")
+
+    # ----------------------------------------------------------- 清理
+
+    def shutdown(self) -> None:
+        """停 timer + worker 并解绑（画布销毁时自动调用；也可手动调）。"""
+        self._debounce.stop()
+        self._poll.stop()
+        if self._worker is not None:
+            self._worker.stop()
+            self._worker.join(timeout=2.0)
+            self._worker = None
+        self._canvas = None
+
+
+__all__ = ["TilePrefetcher", "ZoomTileGuard"]

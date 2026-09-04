@@ -130,9 +130,13 @@ class MainWindow(FramelessMixin, QMainWindow):
         self.bridge.setAutoSetupOnFirstLayer(True)
         # 后台瓦片预热：天地图 XYZ 底图拖动/放大后白屏的修复（渲染完成 →
         # 后台离屏预取四周 8 个相邻视口的瓦片进缓存，平移时命中缓存不白屏）
-        from app.core.domain.tile_prefetch import TilePrefetcher
+        from app.core.domain.tile_prefetch import TilePrefetcher, ZoomTileGuard
 
         self._tile_prefetcher = TilePrefetcher(self.canvas, project=self.project, parent=self)
+        # 缩放白屏防护：extentsChanged 时冻结画布 + 预取当前视口瓦片 + 解冻重绘，
+        # 消除"缩放后总要白一下"的卡顿感（与 TilePrefetcher 互补：TilePrefetcher
+        # 负责邻居预热用于平移，ZoomTileGuard 负责当前缩放不白屏）
+        self._zoom_tile_guard = ZoomTileGuard(self.canvas, project=self.project, parent=self)
         self._build_central_widget()
 
         # ---- 画布左上角缩放工具（覆盖层）----
@@ -693,10 +697,15 @@ class MainWindow(FramelessMixin, QMainWindow):
                 self.digitizing_toolbar.set_edit_target(None)
         self.project.clear()
 
-        # 重建分组：数据图层 + 参考图层
+        # 重建分组：参考图层（底图）+ 数据图层（用户数据）。
+        # **顺序敏感**：QGIS 按 layer tree 索引升序渲染——索引 0 先画、最后索引
+        # 画在最上面。所以参考图层（底图）必须建在根分组**底部**（先渲染），
+        # 数据图层建在**顶部**（后渲染、盖在底图上）。若顺序反了，缩放/平移时
+        # 底图会被排到最后渲染，慢速矢量图层会拖住它——表现为"等矢量画完才出
+        # 底图"。``addGroup`` 是 append，所以建组顺序直接决定渲染顺序。
         root = self.project.layerTreeRoot()
-        self._data_group = root.addGroup("数据图层")
         self._ref_group = root.addGroup("参考图层")
+        self._data_group = root.addGroup("数据图层")
 
         # 工程名 + 坐标系（project.clear() 会把 CRS 重置回默认）
         self.project.setTitle(name)
@@ -762,6 +771,15 @@ class MainWindow(FramelessMixin, QMainWindow):
                     self._data_group = child
                 elif child.name() == "参考图层":
                     self._ref_group = child
+            # 老工程可能把"参考图层"建在数据图层之上（索引更大、后渲染），
+            # 缩放时底图会被慢速矢量图层拖住。强制把参考图层挪到根分组最底，
+            # 与 ``_on_project_create`` 的建组顺序一致。``insertChildNode`` 在
+            # 同父节点上移动已存在的子节点时只重排不重发 willRemoveChildren 给
+            # bridge（group 节点不挂 layer，bridge 不关心）。
+            if self._ref_group is not None:
+                root = self.project.layerTreeRoot()
+                if root.children().index(self._ref_group) != 0:
+                    root.insertChildNode(0, self._ref_group)
             if getattr(self, "project_dock", None) is not None:
                 if self._data_group is not None and self._ref_group is not None:
                     self.project_dock.set_project(self.project.title(), self._data_group, self._ref_group)
@@ -1963,9 +1981,17 @@ class MainWindow(FramelessMixin, QMainWindow):
         ``project.removeMapLayer(layer)`` 把 layer 从工程中抹掉——肉眼看上去
         就是"图层消失"。
 
-        正确顺序：先 ``insertChildNode(new_pos, cloned)``（layer 立刻在新位置
-        有 node），再 ``removeChildNode(node)``（bridge 收到 willRemoveChildren
-        时检查到 layer 还有 cloned 那个 node 挂着，**不**删 layer，只删旧 node）。
+        正确顺序：先 ``insertChildNode`` 把克隆挂到新位置（layer 立刻在新位置
+        有 node），再 ``removeChildNode`` 删旧 node（bridge 收到
+        willRemoveChildren 时检查到 layer 还有 cloned 那个 node 挂着，**不**删
+        layer，只删旧 node）。**insert 位置要按方向偏移一格**：
+
+        - ``delta < 0``（上移）：原节点在 ``new_pos`` 之后，插到 ``new_pos`` 即
+          落在目标位置之前，删原节点后自然到位。
+        - ``delta > 0``（下移）：原节点在 ``new_pos`` 之前还占着位，插到
+          ``new_pos`` 会被推到原节点**之后**的目标位，删原节点后又落回原
+          ``pos``——下移等于没动。必须插到 ``new_pos + 1``（end-append 越界由
+          上面 ``new_pos < len(siblings)`` 已挡住）。
 
         clone 是新对象，``view.setCurrentNode`` / messageBar 都用 cloned。
         """
@@ -1992,8 +2018,11 @@ class MainWindow(FramelessMixin, QMainWindow):
             return  # 已在顶/底
 
         cloned = node.clone()
-        # 1) 先把克隆挂到新位置（layer 立即在树里有 node，bridge 不会干 layer）
-        parent.insertChildNode(min(new_pos, len(parent.children())), cloned)
+        # 1) 先把克隆挂到新位置（layer 立即在树里有 node，bridge 不会干 layer）。
+        #    下移时原节点还占着 ``pos``，insert 必须跳到 ``new_pos + 1``，
+        #    否则删旧节点后 cloned 落回 ``pos``，下移等于没动（见 docstring）。
+        insert_pos = new_pos + (1 if delta > 0 else 0)
+        parent.insertChildNode(insert_pos, cloned)
         # 2) 再删旧 node（bridge 收到 willRemoveChildren 时发现 layer 还有
         #    cloned 引用，只摘旧 node，不删 layer）
         parent.removeChildNode(node)
@@ -2170,6 +2199,14 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:
         try:
+            # ZoomTileGuard 先停：冻结期间若直接关窗，worker 线程还在跑离屏渲染，
+            # 关窗口会触发 QPainter/QImage 析构，可能撞上 native 崩溃。
+            guard = getattr(self, "_zoom_tile_guard", None)
+            if guard is not None:
+                try:
+                    guard.shutdown()
+                except Exception:  # noqa: BLE001
+                    pass
             self.project.clear()
         finally:
             self._clear_global_messagebar()
