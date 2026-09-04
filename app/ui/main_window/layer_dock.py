@@ -120,7 +120,7 @@ class LayerDock(QDockWidget):
         header_layout = QHBoxLayout(self.header_bar)
         # 紧凑：上下贴边，左右留 4px，按钮间距 1px
         header_layout.setContentsMargins(4, 0, 4, 0)
-        header_layout.setSpacing(1)
+        header_layout.setSpacing(2)
         for attr, icon_key, signal_name, tip in _HEADER_SPECS:
             btn = QToolButton(self.header_bar)
             btn.setAutoRaise(True)

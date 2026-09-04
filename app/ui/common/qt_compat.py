@@ -18,21 +18,22 @@ from qgis.PyQt.QtCore import QPoint
 def global_pos(event) -> QPoint:
     """事件在全局坐标系下的位置（标题栏拖动 / 手动 resize 用）。
 
-    Qt6: ``QMouseEvent.globalPosition()``（QPointF）；Qt5: ``globalPos()``（QPoint）。
+    Qt6: ``QMouseEvent.globalPosition()`` 是**方法**，调用后返回 QPointF；
+    Qt5: ``globalPos()``（QPoint）。
     """
     gp = getattr(event, "globalPosition", None)
     if gp is not None:
-        return gp.toPoint()
-    return event.globalPos()
+        return gp().toPoint()  # Qt6：先调用 globalPosition()
+    return event.globalPos()  # Qt5：QMouseEvent.globalPos() 直接返回 QPoint
 
 
 def event_pos(event) -> QPoint:
     """事件在接收控件本地坐标系下的位置（drop / 边缘命中检测用）。
 
-    Qt6: ``position()``（QMouseEvent / QDropEvent / QWheelEvent 均有）；
-    Qt5: ``pos()``（QMouseEvent / QDropEvent / QWheelEvent 均返回 ``QPoint``）。
+    Qt6: ``position()`` 是**方法**，调用后返回 QPointF；Qt5: ``pos()``
+    （QPoint）。Qt6 的 QDropEvent 已无 ``pos()``，必须走 ``position()``。
     """
     p = getattr(event, "position", None)
     if p is not None:
-        return p.toPoint()
-    return event.pos()
+        return p().toPoint()  # Qt6：先调用 position()
+    return event.pos()  # Qt5：QMouseEvent/QDropEvent/QWheelEvent.pos() 返回 QPoint
