@@ -1954,14 +1954,20 @@ class MainWindow(FramelessMixin, QMainWindow):
     def _on_move_layer_node(self, delta: int) -> None:
         """上移 / 下移当前选中的图层或组（仅在同分组内重排）。
 
-        QGIS 4.x 的 ``takeChild(node: QgsLayerTreeNode) -> bool`` 是 **detach**
-        操作（从 tree 摘下节点但**不删** layer），bridge 不会因此把 layer 从
-        project 中删掉。``insertChildNode`` 在看到节点还挂在同 group 时会
-        直接返回 false（拒收），所以必须先 ``takeChild`` 再 ``insertChildNode``。
+        严格按 QGIS 桌面 ``qgslayertreeviewdefaultactions.cpp`` 里
+        ``moveToTop / moveToBottom`` 的写法：**clone + insert + remove** 三步走，
+        **不是** ``takeChild + insertChildNode``。
 
-        注意：``takeChild`` 在本构建**只接 ``QgsLayerTreeNode``**，没有
-        ``takeChild(int)`` 重载——之前尝试按 index 摘会抛
-        ``TypeError: argument 1 has unexpected type 'int'``。
+        为何不能直接 takeChild：``takeChild`` 不会发 ``willRemoveChildren`` 信号，
+        ``QgsLayerTreeRegistryBridge`` 收不到"将要删节点"的钩子，于是直接
+        ``project.removeMapLayer(layer)`` 把 layer 从工程中抹掉——肉眼看上去
+        就是"图层消失"。
+
+        正确顺序：先 ``insertChildNode(new_pos, cloned)``（layer 立刻在新位置
+        有 node），再 ``removeChildNode(node)``（bridge 收到 willRemoveChildren
+        时检查到 layer 还有 cloned 那个 node 挂着，**不**删 layer，只删旧 node）。
+
+        clone 是新对象，``view.setCurrentNode`` / messageBar 都用 cloned。
         """
         from qgis.core import QgsLayerTreeGroup
 
@@ -1984,18 +1990,22 @@ class MainWindow(FramelessMixin, QMainWindow):
         new_pos = pos + delta
         if not 0 <= new_pos < len(siblings):
             return  # 已在顶/底
-        # takeChild 接受 node 引用，detach 节点（layer 仍在 project 里）；
-        # 立即 insertChildNode 挂回新位置——bridge 不会干 layer。
-        parent.takeChild(node)
-        parent.insertChildNode(min(new_pos, len(parent.children())), node)
+
+        cloned = node.clone()
+        # 1) 先把克隆挂到新位置（layer 立即在树里有 node，bridge 不会干 layer）
+        parent.insertChildNode(min(new_pos, len(parent.children())), cloned)
+        # 2) 再删旧 node（bridge 收到 willRemoveChildren 时发现 layer 还有
+        #    cloned 引用，只摘旧 node，不删 layer）
+        parent.removeChildNode(node)
+
         view = self.layer_dock.view
         try:
-            view.setCurrentNode(node)
+            view.setCurrentNode(cloned)
         except Exception:  # noqa: BLE001
             pass
         verb = "上移" if delta < 0 else "下移"
         self.messageBar.pushMessage(
-            f"已{verb}：{getattr(node, 'name', lambda: '')()}",
+            f"已{verb}：{getattr(cloned, 'name', lambda: '')()}",
             level=Qgis.MessageLevel.Info,
             duration=2,
         )
