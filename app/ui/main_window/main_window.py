@@ -70,7 +70,6 @@ from app.ui.docks.project_dock import ProjectDock
 from app.ui.docks.tools_dock import ToolsDock
 from app.ui.main_window.browser_dock import BrowserDock
 from app.ui.main_window.draw_toolbar import DigitizingToolbar
-from app.ui.main_window.qgis_digitizing_toolbar import QgisDigitizingToolbar
 from app.ui.main_window.snapping_toolbar import QgisSnappingToolbar
 from app.ui.main_window.layer_dock import LayerDock
 from app.ui.main_window.status_bar import StatusBar
@@ -269,23 +268,9 @@ class MainWindow(FramelessMixin, QMainWindow):
             editing_layer_getter=lambda: self.edit_layer,
         )
 
-        # DigitizingToolbar 编辑态切换 → 同步给 QGIS 复用版工具条
-        self.digitizing_toolbar.editing_state_changed.connect(self._on_editing_state_changed)
-
-        # QGIS 原生捕捉工具条（点/线/面/矩形/圆，基于 QgsMapToolCapture 系列，
-        # 与自定义版 DigitizingToolbar 平行）——捕捉完成走
-        # _on_qgis_draw_finished → DigitizingToolbar.finish_draw 同一套
-        # 建要素 + 属性框流程；按钮随编辑态 / 图层几何类型启用
-        self.qgis_digitizing_toolbar = QgisDigitizingToolbar(
-            self,
-            self.canvas,
-            editing_layer_getter=lambda: self.edit_layer,
-            on_finished=self._on_qgis_draw_finished,
-        )
-
         # 磁性捕捉工具条：吸附配置写入 QgsProject.snappingConfig() 并同步到
-        # 画布 snapping utils，QGIS 原生捕捉工具（QgsMapToolCapture 系列）
-        # 画图时自动吸附已有要素顶点/边——无需改动任何绘制工具
+        # 画布 snapping utils；自定义绘制工具（添加点/线/面/矩形/圆）取点时经
+        # snapped_map_point 吸附已有要素顶点/边——开关/类型/容差/模式全由这里控制
         self.snapping_toolbar = QgisSnappingToolbar(
             self,
             self.canvas,
@@ -323,7 +308,6 @@ class MainWindow(FramelessMixin, QMainWindow):
             ("查看", [self._view_toolbar]),
             ("编辑", [
                 self.digitizing_toolbar.digitizing_toolbar,
-                self.qgis_digitizing_toolbar.toolbar,
                 self.snapping_toolbar.toolbar,
             ]),
             ("通用", [self.tool_bar]),
@@ -1748,12 +1732,6 @@ class MainWindow(FramelessMixin, QMainWindow):
                     self.digitizing_toolbar.set_edit_target(None)
                 except Exception:  # noqa: BLE001
                     pass
-            qgis_tb = getattr(self, "qgis_digitizing_toolbar", None)
-            if qgis_tb is not None:
-                try:
-                    qgis_tb.disable_all_buttons()
-                except Exception:  # noqa: BLE001
-                    pass
             snap_tb = getattr(self, "snapping_toolbar", None)
             if snap_tb is not None:
                 try:
@@ -1792,10 +1770,6 @@ class MainWindow(FramelessMixin, QMainWindow):
             # 切到"已指定编辑图层"态：开始编辑可用、停止/保存禁用、按图层类型启用添加要素
             if hasattr(self, "digitizing_toolbar"):
                 self.digitizing_toolbar.set_edit_target(self.edit_layer)
-            # QGIS 复用版按钮：进编辑态时才启用（与 drawing_state 联动）
-            qgis_tb = getattr(self, "qgis_digitizing_toolbar", None)
-            if qgis_tb is not None:
-                qgis_tb.set_layer(self.edit_layer)  # 仅记录图层，不开按钮
             snap_tb = getattr(self, "snapping_toolbar", None)
             if snap_tb is not None:
                 snap_tb.set_current_layer(self.edit_layer)
@@ -1839,9 +1813,6 @@ class MainWindow(FramelessMixin, QMainWindow):
         self.edit_layer = layer
         if hasattr(self, "digitizing_toolbar"):
             self.digitizing_toolbar.set_edit_target(layer)
-        qgis_tb = getattr(self, "qgis_digitizing_toolbar", None)
-        if qgis_tb is not None:
-            qgis_tb.set_layer(layer)
         snap_tb = getattr(self, "snapping_toolbar", None)
         if snap_tb is not None:
             snap_tb.set_current_layer(layer)
@@ -2076,21 +2047,6 @@ class MainWindow(FramelessMixin, QMainWindow):
         """DrawManager.finished 信号：跳到 DigitizingToolbar.finish_draw。"""
         if hasattr(self, "digitizing_toolbar"):
             self.digitizing_toolbar.finish_draw(geometry)
-
-    def _on_qgis_draw_finished(self, geometry) -> None:
-        """QgisDigitizingToolbar 走的是独立的 DrawManager，finished 信号也跳到同一处。"""
-        if getattr(self, "digitizing_toolbar", None) is not None:
-            self.digitizing_toolbar.finish_draw(geometry)
-
-    def _on_editing_state_changed(self, editing: bool) -> None:
-        """DigitizingToolbar 的开始/停止编辑切换 → 同步给 QGIS 复用版工具条。"""
-        qgis_tb = getattr(self, "qgis_digitizing_toolbar", None)
-        if qgis_tb is None:
-            return
-        if editing:
-            qgis_tb.enable_buttons_for_layer(self.edit_layer)
-        else:
-            qgis_tb.disable_all_buttons()
 
     def _open_attribute_table(self) -> None:
         if self._selected_layer is None:

@@ -19,8 +19,6 @@ if TYPE_CHECKING:
     from qgis.core import QgsGeometry, QgsVectorLayer
     from qgis.gui import QgsMapCanvas, QgsRubberBand
 
-    from .tools.qgis.base import BaseQgsDrawTool
-
 from qgis.PyQt.QtCore import QObject, pyqtSignal
 from qgis.core import QgsWkbTypes
 from qgis.gui import QgsRubberBand
@@ -81,64 +79,16 @@ class DrawManager(QObject):
         self._active.cancelled.connect(self._on_cancelled)
         return self._active
 
-    def enable_qgis_draw_tool(
-        self,
-        geometry_type: str,
-        *,
-        cad_dock_widget=None,
-        is_buffer: bool = False,
-        distance: float = 0.0,
-    ) -> "BaseQgsDrawTool":
-        """激活指定类型的 **QGIS 复用版** 绘制工具。
-
-        与 :meth:`enable_draw_tool` 的区别：
-
-        - 本方法走 :mod:`app.core.domain.drawing.tools.qgis` 的内置工具，
-          自动获得 QGIS 的捕捉 / 撤销 / 高级数字化能力。
-        - 返回 :class:`BaseQgsDrawTool` 包装器（不是 :class:`ActiveDraw`）；
-          其 ``tool`` 属性才是真正的 :class:`QgsMapTool`。
-        - 仍然支持 ``is_buffer`` / ``distance`` 参数（在 finished 后处理）。
-        - ``cad_dock_widget``：QGIS 4.2 起 :class:`QgsMapToolCapture` 构造必需
-          的真实 :class:`qgis.gui.QgsAdvancedDigitizingDockWidget`（可为 None，
-          工具会自建）；矩形/圆等回退工具忽略它。
-        """
-        from .tools.qgis import get_qgis_tool_class
-
-        if self._active is not None or self._active_tool is not None:
-            self.clear_draw_tool()
-
-        cls = get_qgis_tool_class(geometry_type)
-        wrapper = cls(
-            self.canvas,
-            cad_dock_widget=cad_dock_widget,
-            is_buffer=is_buffer,
-            distance=distance,
-        )
-        self._active_tool = wrapper
-        # QGIS 内置工具才是真正 setMapTool 的对象
-        self.canvas.setMapTool(wrapper.tool)
-        # 包装器的 finished 信号直接透传到 manager.finished
-        wrapper.finished.connect(self.finished)
-        return wrapper
-
     def clear_draw_tool(self) -> None:
-        """清掉当前激活的绘制工具。
-
-        同时兼容两类工具：
-
-        - **自定义版**（:class:`BaseDrawTool`）：``_active_tool`` 本身就是
-          :class:`QgsMapTool`，可以直接 ``unsetMapTool``。
-        - **QGIS 复用版**（:class:`BaseQgsDrawTool`）：``_active_tool`` 是 Python
-          wrapper，需要走它的 ``tool`` 属性拿到真正的 :class:`QgsMapTool`。
-        """
+        """清掉当前激活的绘制工具。"""
         if self._active_tool is not None:
             try:
                 if hasattr(self._active_tool, "cleanup"):
                     self._active_tool.cleanup()
             except Exception:  # noqa: BLE001
                 pass
-            # wrapper.cleanup() 已经走 _safe_unset_tool，重复调用无害；
-            # 这里再保护性调一次，确保任何清理路径都被覆盖
+            # 保护性 unset：_active_tool 可能是带 .tool 属性的 wrapper
+            #（历史兼容），也可能就是 QgsMapTool 本身
             try:
                 real_tool = getattr(self._active_tool, "tool", self._active_tool)
                 self.canvas.unsetMapTool(real_tool)

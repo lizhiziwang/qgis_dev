@@ -2,18 +2,19 @@
 
 用途
 ----
-给画布上的 :class:`QgsMapToolCapture` 等 QGIS 原生捕捉工具提供"吸附"配置：
-画新要素时，鼠标会自动吸到已有要素的**顶点 / 边**，容差与单位可调。
-对应 QGIS 桌面 View → Toolbars → Snapping Toolbar 的功能。
+给画布绘制（自定义“添加点/线/面/矩形/圆”工具 + 画布上的各种数字化操作）提供
+“吸附”配置：画新要素时，鼠标会自动吸到已有要素的**顶点 / 边**，容差与
+单位可调。对应 QGIS 桌面 View → Toolbars → Snapping Toolbar 的功能。
 
 实现边界
 --------
-QGIS 4.2 不导出"整根内置捕捉工具条"组件，只能按公开 API 拼装：
+QGIS 4.2 不导出“整根内置捕捉工具条”组件，只能按公开 API 拼装：
 
 - 开关 / 类型 / 容差 / 单位 → 写入 :class:`QgsProject` 的 ``snappingConfig()``
 - 再 ``QgsMapCanvasSnappingUtils.setConfig(...)`` 同步到画布 ——
-  ``QgsMapToolCapture`` 画图时从 ``canvas.snappingUtils()`` 读取并吸附，
-  因此**无需改动任何既有绘制工具**。
+  自定义绘制工具落点前经 ``snapped_map_point``（见
+  ``app/core/domain/drawing/tools/snap.py``）从 ``canvas.snappingUtils()``
+  吸附一次，因此开关/类型/容差/模式全由本工具条一处控制。
 
 模式语义（与 QGIS 桌面一致）：
 - **所有图层**：容差 / 类型作用于全部矢量图层

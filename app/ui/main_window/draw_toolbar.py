@@ -21,7 +21,7 @@
                                                                      +--stop_edit_fun(切换其它图层)--> [无编辑图层]
 
 :attr:`editing_state_changed` 信号在状态切换时发出，供 :class:`MainWindow`
-转发给 :class:`QgisDigitizingToolbar` 等其它工具条同步。
+同步磁性捕捉等其它工具条。
 """
 
 from __future__ import annotations
