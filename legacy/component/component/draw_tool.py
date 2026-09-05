@@ -1,6 +1,6 @@
 import math
 
-from PyQt5.QtCore import Qt, pyqtSignal
+from PyQt5.QtCore import Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import QToolBar, QToolButton, QMenu, QAction, QMessageBox
 from qgis._core import QgsFeature, QgsGeometry, QgsWkbTypes, QgsPointXY, QgsEditorWidgetSetup, QgsVectorLayerUtils, \
@@ -202,7 +202,16 @@ class Draw:
             self.clear_draw_tool()
             return
 
-        # 4. 创建要素并绑定几何
+        # 3. 若当前图层恰好单选了一个要素 → 视为“重绘替换原要素”：只把新几何
+        #    写回该要素（changeGeometry 保留 fid、属性原样，**不新增、不弹属性
+        #    框**）——与线分割/融合“编辑原要素”约束一致，GPKG 等强 fid 数据源
+        #    上也能干净提交；无选中 / 多选则维持下方“新增要素”流程。
+        sel = layer.selectedFeatureIds()
+        if len(sel) == 1:
+            self._edit_selected_geometry(layer, next(iter(sel)), geometry, draw_geom_name)
+            return
+
+        # 4. 新增流程：创建要素并绑定几何
         feature = QgsVectorLayerUtils.createFeature(layer, geometry)
         feature.setGeometry(geometry)
 
@@ -210,6 +219,34 @@ class Draw:
         dialog.setWindowTitle(f"编辑{draw_geom_name}要素属性")
 
         dialog.show()
+
+    def _edit_selected_geometry(self, layer, fid, geometry: QgsGeometry, geom_name: str):
+        """重绘替换：把新几何写回选中的原要素（保留 fid 与属性，不新增）。"""
+        if not layer.isEditable():
+            QMessageBox.warning(self.parent, "警告", "请先点击「开始编辑」再修改要素几何！")
+            return
+        feat = layer.getFeature(fid)
+        if not feat.isValid():
+            QMessageBox.warning(self.parent, "警告", "选中的要素已不存在，请重新选择！")
+            layer.removeSelection()
+            return
+        # 一个撤销步骤：只改几何（属性原样保留），提交到强 fid 数据源也干净
+        layer.beginEditCommand("修改要素几何")
+        try:
+            if not layer.changeGeometry(fid, geometry):
+                raise RuntimeError("changeGeometry 失败")
+        except RuntimeError as e:
+            layer.cancelEditCommand()
+            QMessageBox.warning(self.parent, "警告", f"几何写入失败：{e}")
+            return
+        layer.endEditCommand()
+        # 画布外刷新（事件栈内不直接 refresh，推迟到出栈后）
+        canvas = getattr(self.parent, "canvas", None)
+        if canvas is not None:
+            QTimer.singleShot(0, canvas.refresh)
+        QMessageBox.information(
+            self.parent, "提示", f"已更新选中的{geom_name}要素几何（Ctrl+Z 可撤销）。"
+        )
 
 class BaseDrawTool(QgsMapTool):
     finish = pyqtSignal(QgsGeometry)
