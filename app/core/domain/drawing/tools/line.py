@@ -42,7 +42,7 @@ class LineDrawTool(BaseDrawTool):
             return
         if not self.temp_points:
             return
-        point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pixelPoint())
+        point = snapped_map_point(self.canvas, event, wait_index=False)
         self.line_rubber_band2.reset(QgsWkbTypes.LineGeometry)
         self.line_rubber_band2.addPoint(self.temp_points[-1])
         self.line_rubber_band2.addPoint(point)

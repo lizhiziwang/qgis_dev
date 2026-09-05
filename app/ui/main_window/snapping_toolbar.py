@@ -77,9 +77,12 @@ class QgisSnappingToolbar(QObject):
         #: 「当前图层」模式的吸附目标（由外部 set_current_layer 维护）
         self._current_layer: "Optional[QgsVectorLayer]" = None
 
-        # ---- 接管画布吸附（QgsMapToolCapture 从 canvas.snappingUtils() 读）----
+        # ---- 接管画布吸附（自定义绘制工具从 canvas.snappingUtils() 读）----
+        # 注意：画布默认返回基础 QgsSnappingUtils（不随画布刷新维护 locator、
+        # 无 isIndexing）——必须换成 QgsMapCanvasSnappingUtils（QGIS 桌面同款：
+        # 内部监听画布刷新按配置建索引），吸附才真正可用。
         utils = canvas.snappingUtils()
-        if utils is None:
+        if not isinstance(utils, QgsMapCanvasSnappingUtils):
             utils = QgsMapCanvasSnappingUtils(canvas)
             canvas.setSnappingUtils(utils)
         self._utils = utils
@@ -232,10 +235,37 @@ class QgisSnappingToolbar(QObject):
     # ============================================================== 公共 API
 
     def set_current_layer(self, layer: "Optional[QgsVectorLayer]") -> None:
-        """更新「当前图层」模式的吸附目标（编辑/选中图层变化时调用）。"""
+        """更新吸附目标图层（编辑/选中图层变化时调用）。
+
+        除了「当前图层」模式的个体设置外，还会把该图层注册为 snapping utils
+        的**额外吸附层**（extra snap layer）：QgsMapCanvasSnappingUtils 的目标
+        层列表依赖画布渲染/刷新时序（独立应用里不可靠，实测 layers() 恒空），
+        显式注册后其 locator 立即参与吸附——即使画布从未渲染，首击 relaxed
+        也会同步建好索引并命中。
+        """
+        prev = self._current_layer
         self._current_layer = layer
-        if (self._mode_combo.currentData() or Qgis.SnappingMode.AllLayers) == Qgis.SnappingMode.AdvancedConfiguration:
+        if prev is not None and prev is not layer:
+            try:
+                self._utils.removeExtraSnapLayer(prev)
+            except Exception:  # noqa: BLE001
+                pass
+        if layer is not None:
+            try:
+                self._utils.addExtraSnapLayer(layer)
+            except Exception:  # noqa: BLE001
+                pass
+        if (
+            self._mode_combo.currentData() or Qgis.SnappingMode.AllLayers
+        ) == Qgis.SnappingMode.AdvancedConfiguration:
             self._apply()
+        # 预建吸附索引：图层切换后用户即将画图，先触发一次（extra 已注册，
+        # 这次 relaxed 即会把 locator 索引建好），用户首击即可命中
+        if layer is not None and self._enable_btn.isChecked():
+            try:
+                self._utils.snapToMap(self.canvas.extent().center(), None, True)
+            except Exception:  # noqa: BLE001
+                pass
 
     def set_enabled(self, enabled: bool) -> None:
         """程序化开关吸附（等价于点工具条上的「捕捉」按钮）。"""

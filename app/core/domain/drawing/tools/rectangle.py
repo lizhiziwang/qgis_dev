@@ -39,7 +39,7 @@ class RectangleDrawTool(BaseDrawTool):
                 return
             if not self.temp_points:
                 return
-            point = snapped_map_point(self.canvas, event)
+            point = snapped_map_point(self.canvas, event, wait_index=False)
             if len(self.temp_points) > 1:
                 self.temp_points = [self.temp_points[0]]
             self.temp_points.append(QgsPointXY(point.x(), point.y()))
