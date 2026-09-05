@@ -14,6 +14,7 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
 
 from .base import BaseDrawTool
+from .snap import snapped_map_point
 
 
 class RectangleDrawTool(BaseDrawTool):
@@ -38,7 +39,7 @@ class RectangleDrawTool(BaseDrawTool):
                 return
             if not self.temp_points:
                 return
-            point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pixelPoint())
+            point = snapped_map_point(self.canvas, event)
             if len(self.temp_points) > 1:
                 self.temp_points = [self.temp_points[0]]
             self.temp_points.append(QgsPointXY(point.x(), point.y()))
@@ -53,7 +54,7 @@ class RectangleDrawTool(BaseDrawTool):
         if not self.is_over:
             if event.button() == Qt.MouseButton.LeftButton:
                 self.is_over = False
-                point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pixelPoint())
+                point = snapped_map_point(self.canvas, event)
                 self.temp_points.append(QgsPointXY(point.x(), point.y()))
             else:
                 self.is_over = True

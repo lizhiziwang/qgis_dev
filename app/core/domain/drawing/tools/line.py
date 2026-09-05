@@ -14,6 +14,7 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QMessageBox
 
 from .base import BaseDrawTool
+from .snap import snapped_map_point
 
 
 class LineDrawTool(BaseDrawTool):
@@ -51,7 +52,7 @@ class LineDrawTool(BaseDrawTool):
         try:
             if event.button() == Qt.MouseButton.LeftButton:
                 self.is_over = False
-                point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pixelPoint())
+                point = snapped_map_point(self.canvas, event)
                 self.temp_points.append(QgsPointXY(point.x(), point.y()))
                 self._update_rubber_band()
             elif event.button() == Qt.MouseButton.RightButton:

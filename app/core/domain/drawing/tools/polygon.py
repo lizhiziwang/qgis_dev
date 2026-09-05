@@ -12,8 +12,10 @@ from qgis.core import QgsGeometry, QgsPointXY, QgsWkbTypes
 from qgis.gui import QgsRubberBand
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QMessageBox
+from qgis.PyQt.QtGui import QColor
 
 from .base import BaseDrawTool
+from .snap import snapped_map_point
 
 
 class PolygonDrawTool(BaseDrawTool):
@@ -54,7 +56,7 @@ class PolygonDrawTool(BaseDrawTool):
     def canvasPressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
             self.is_over = False
-            point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pixelPoint())
+            point = snapped_map_point(self.canvas, event)
             self.temp_points.append(QgsPointXY(point.x(), point.y()))
             self._update_rubber_band()
         elif event.button() == Qt.MouseButton.RightButton:

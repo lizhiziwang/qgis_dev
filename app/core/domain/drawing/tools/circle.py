@@ -21,6 +21,7 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
 
 from .base import BaseDrawTool
+from .snap import snapped_map_point
 
 
 class CircleDrawTool(BaseDrawTool):
@@ -56,7 +57,7 @@ class CircleDrawTool(BaseDrawTool):
             pass
 
     def canvasPressEvent(self, event) -> None:  # noqa: N802
-        point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pixelPoint())
+        point = snapped_map_point(self.canvas, event)
         if event.button() == Qt.MouseButton.LeftButton:
             if not self.temp_points:
                 self.temp_points.append(QgsPointXY(point.x(), point.y()))

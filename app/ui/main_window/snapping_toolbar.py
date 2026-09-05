@@ -220,6 +220,14 @@ class QgisSnappingToolbar(QObject):
         self.project.setSnappingConfig(cfg)
         self._utils.setConfig(cfg)
 
+        if enabled:
+            # 预建吸附索引：QGS snapping 首次 snapToMap 才异步建索引
+            # （首次点击可能 miss）；开启吸附时先触发一次，用户首击即可命中
+            try:
+                self._utils.snapToMap(self.canvas.extent().center(), None, True)
+            except Exception:  # noqa: BLE001
+                pass
+
     # ============================================================== 公共 API
 
     def set_current_layer(self, layer: "Optional[QgsVectorLayer]") -> None:
