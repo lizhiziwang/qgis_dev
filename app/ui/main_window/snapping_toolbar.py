@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 
 from qgis.core import Qgis, QgsSnappingConfig
 from qgis.gui import QgsMapCanvasSnappingUtils
-from qgis.PyQt.QtCore import QObject
+from qgis.PyQt.QtCore import QObject, QTimer
 from qgis.PyQt.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
@@ -86,6 +86,12 @@ class QgisSnappingToolbar(QObject):
             utils = QgsMapCanvasSnappingUtils(canvas)
             canvas.setSnappingUtils(utils)
         self._utils = utils
+
+        # 图层增删时同步吸附目标清单（extra snap layers）——QgsMapCanvasSnappingUtils
+        # 的自动目标层列表依赖画布渲染/刷新时序，独立应用里不可靠，必须显式注册
+        self.project.layersAdded.connect(self._on_project_layers_changed)
+        self.project.layersRemoved.connect(self._on_project_layers_changed)
+        self.canvas.layersChanged.connect(self._on_project_layers_changed)
 
         self._build_toolbar()
         self._init_from_project()
@@ -223,6 +229,8 @@ class QgisSnappingToolbar(QObject):
 
         self.project.setSnappingConfig(cfg)
         self._utils.setConfig(cfg)
+        # 同步吸附目标清单（所有图层→画布全部矢量层；当前图层→目标层）
+        self._sync_extra_layers()
 
         if enabled:
             # 预建吸附索引：QGS snapping 首次 snapToMap 才异步建索引
@@ -232,40 +240,80 @@ class QgisSnappingToolbar(QObject):
             except Exception:  # noqa: BLE001
                 pass
 
+    def _sync_extra_layers(self) -> None:
+        """把吸附目标图层显式注册为 snapping utils 的 extra snap layers。
+
+        QgsMapCanvasSnappingUtils 自动推导的目标层列表依赖画布渲染/刷新时序
+        （独立应用里实测 ``layers()`` 恒空），吸附会永不命中；显式注册后其
+        locator 立即参与吸附——relaxed 首调即同步建好索引并命中，与渲染/事件
+        循环无关，offscreen 与真机行为一致。
+
+        - **所有图层**：注册画布上全部矢量图层
+        - **当前图层**：注册目标（编辑/选中）图层
+        """
+        try:
+            mode = self._mode_combo.currentData() or Qgis.SnappingMode.AllLayers
+            targets: "list[QgsVectorLayer]" = []
+            if mode == Qgis.SnappingMode.AdvancedConfiguration:
+                target = self._current_layer or self._editing_layer_getter()
+                if target is not None and target.type() == target.VectorLayer:
+                    targets.append(target)
+            else:
+                for layer in self.canvas.layers():
+                    if layer.type() == layer.VectorLayer:
+                        targets.append(layer)
+            want = {id(t) for t in targets}
+            have = {id(l) for l in self._utils.getExtraSnapLayers() if l is not None}
+            if want == have:
+                return
+            for old in list(self._utils.getExtraSnapLayers()):
+                try:
+                    self._utils.removeExtraSnapLayer(old)
+                except Exception:  # noqa: BLE001
+                    pass
+            # 清掉内部 locator 缓存：removeExtraSnapLayer 只摘出 extra 清单，已建
+            # 的 locator（含索引）仍会参与 snapToMap → 切模式/换目标后串层吸附
+            try:
+                self._utils.clearAllLocators()
+            except Exception:  # noqa: BLE001
+                pass
+            for target in targets:
+                try:
+                    self._utils.addExtraSnapLayer(target)
+                except Exception:  # noqa: BLE001
+                    pass
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_project_layers_changed(self, *_args) -> None:
+        """工程/画布图层增删 → 下一事件循环 tick 重算吸附目标清单。
+
+        QTimer.singleShot 是为了让 layersRemoved 信号链完整走完，避免遍历到
+        半移除状态的图层。
+        """
+        QTimer.singleShot(0, self._sync_extra_layers)
+
     # ============================================================== 公共 API
 
     def set_current_layer(self, layer: "Optional[QgsVectorLayer]") -> None:
         """更新吸附目标图层（编辑/选中图层变化时调用）。
 
-        除了「当前图层」模式的个体设置外，还会把该图层注册为 snapping utils
-        的**额外吸附层**（extra snap layer）：QgsMapCanvasSnappingUtils 的目标
-        层列表依赖画布渲染/刷新时序（独立应用里不可靠，实测 layers() 恒空），
-        显式注册后其 locator 立即参与吸附——即使画布从未渲染，首击 relaxed
-        也会同步建好索引并命中。
+        除了更新「当前图层」模式的个体设置外，还会同步 extra snap layer 注册
+        （见 :meth:`_sync_extra_layers`），保证目标层 locator 立即参与吸附。
         """
-        prev = self._current_layer
         self._current_layer = layer
-        if prev is not None and prev is not layer:
-            try:
-                self._utils.removeExtraSnapLayer(prev)
-            except Exception:  # noqa: BLE001
-                pass
-        if layer is not None:
-            try:
-                self._utils.addExtraSnapLayer(layer)
-            except Exception:  # noqa: BLE001
-                pass
         if (
             self._mode_combo.currentData() or Qgis.SnappingMode.AllLayers
         ) == Qgis.SnappingMode.AdvancedConfiguration:
             self._apply()
-        # 预建吸附索引：图层切换后用户即将画图，先触发一次（extra 已注册，
-        # 这次 relaxed 即会把 locator 索引建好），用户首击即可命中
-        if layer is not None and self._enable_btn.isChecked():
-            try:
-                self._utils.snapToMap(self.canvas.extent().center(), None, True)
-            except Exception:  # noqa: BLE001
-                pass
+        else:
+            # 所有图层模式：目标清单不变（画布全部矢量层），只补暖调用预建索引
+            self._sync_extra_layers()
+            if layer is not None and self._enable_btn.isChecked():
+                try:
+                    self._utils.snapToMap(self.canvas.extent().center(), None, True)
+                except Exception:  # noqa: BLE001
+                    pass
 
     def set_enabled(self, enabled: bool) -> None:
         """程序化开关吸附（等价于点工具条上的「捕捉」按钮）。"""
