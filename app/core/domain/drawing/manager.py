@@ -85,6 +85,7 @@ class DrawManager(QObject):
         self,
         geometry_type: str,
         *,
+        cad_dock_widget=None,
         is_buffer: bool = False,
         distance: float = 0.0,
     ) -> "BaseQgsDrawTool":
@@ -97,6 +98,9 @@ class DrawManager(QObject):
         - 返回 :class:`BaseQgsDrawTool` 包装器（不是 :class:`ActiveDraw`）；
           其 ``tool`` 属性才是真正的 :class:`QgsMapTool`。
         - 仍然支持 ``is_buffer`` / ``distance`` 参数（在 finished 后处理）。
+        - ``cad_dock_widget``：QGIS 4.2 起 :class:`QgsMapToolCapture` 构造必需
+          的真实 :class:`qgis.gui.QgsAdvancedDigitizingDockWidget`（可为 None，
+          工具会自建）；矩形/圆等回退工具忽略它。
         """
         from .tools.qgis import get_qgis_tool_class
 
@@ -104,7 +108,12 @@ class DrawManager(QObject):
             self.clear_draw_tool()
 
         cls = get_qgis_tool_class(geometry_type)
-        wrapper = cls(self.canvas, is_buffer=is_buffer, distance=distance)
+        wrapper = cls(
+            self.canvas,
+            cad_dock_widget=cad_dock_widget,
+            is_buffer=is_buffer,
+            distance=distance,
+        )
         self._active_tool = wrapper
         # QGIS 内置工具才是真正 setMapTool 的对象
         self.canvas.setMapTool(wrapper.tool)

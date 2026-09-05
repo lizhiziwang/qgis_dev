@@ -19,8 +19,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from typing import Optional
+
     from qgis.core import QgsGeometry
-    from qgis.gui import QgsMapCanvas, QgsMapTool
+    from qgis.gui import QgsAdvancedDigitizingDockWidget, QgsMapCanvas, QgsMapTool
 
 from qgis.PyQt.QtCore import QObject, QTimer, pyqtSignal
 
@@ -35,6 +37,7 @@ class BaseQgsDrawTool(QObject):
         self,
         canvas: "QgsMapCanvas",
         *,
+        cad_dock_widget: "Optional[QgsAdvancedDigitizingDockWidget]" = None,
         is_buffer: bool = False,
         distance: float = 0.0,
     ) -> None:
@@ -42,6 +45,9 @@ class BaseQgsDrawTool(QObject):
         # 链可能跳过了我们（如果它们同时继承其它 QObject 派生类）。
         QObject.__init__(self)
         self.canvas = canvas
+        #: 共享的 Advanced Digitizing Dock（QGIS 4.2 捕捉工具必需）；
+        #: 矩形/圆等回退工具不需要它，仅透传保存。
+        self.cad_dock_widget = cad_dock_widget
         self.is_buffer = bool(is_buffer)
         self.distance = float(distance)
         self.geom = None  # type: ignore[assignment]

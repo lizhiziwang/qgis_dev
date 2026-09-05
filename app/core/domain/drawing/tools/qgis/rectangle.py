@@ -13,8 +13,10 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
+    from typing import Optional
+
     from qgis.core import QgsGeometry
-    from qgis.gui import QgsMapCanvas
+    from qgis.gui import QgsAdvancedDigitizingDockWidget, QgsMapCanvas
 
 from .base import BaseQgsDrawTool
 from app.core.domain.drawing.tools.rectangle import RectangleDrawTool
@@ -27,10 +29,17 @@ class QGISRectangleDrawTool(BaseQgsDrawTool):
         self,
         canvas: "QgsMapCanvas",
         *,
+        cad_dock_widget: "Optional[QgsAdvancedDigitizingDockWidget]" = None,
         is_buffer: bool = False,
         distance: float = 0.0,
     ) -> None:
-        BaseQgsDrawTool.__init__(self, canvas, is_buffer=is_buffer, distance=distance)
+        BaseQgsDrawTool.__init__(
+            self,
+            canvas,
+            cad_dock_widget=cad_dock_widget,
+            is_buffer=is_buffer,
+            distance=distance,
+        )
         # 自定义工具自身就是 QgsMapTool 子类；draw_manager=None 时自建 rubber_band
         self._inner = RectangleDrawTool(
             canvas,

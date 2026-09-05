@@ -49,6 +49,10 @@ class QgisDigitizingToolbar:
         self._on_finished = on_finished
 
         self.draw_manager: Optional[DrawManager] = None
+        # QGIS 4.2 起 QgsMapToolCapture 构造必需的 Advanced Digitizing Dock
+        # （见 app/core/domain/drawing/tools/qgis/capture.py 模块注释）；
+        # 首次激活捕捉工具时创建并复用，保持 CAD 状态一致。
+        self._cad_dock: Optional[object] = None
 
         # 每个按钮的 enable 状态（默认全 disabled，按编辑态 + 图层几何类型启用）
         self._buttons: dict[str, QToolButton] = {}
@@ -60,15 +64,15 @@ class QgisDigitizingToolbar:
     # ============================================================== 装配
 
     def _build_toolbar(self) -> None:
-        self.toolbar = QToolBar("QGIS 数字化")
+        self.toolbar = QToolBar("QGIS 捕捉")
         self.toolbar.setObjectName("QgisDigitizingToolbar")
 
         for label, geom_type in [
-            ("Q-点", "point"),
-            ("Q-线", "line"),
-            ("Q-面", "polygon"),
-            ("Q-矩形", "rectangle"),
-            ("Q-圆", "circle"),
+            ("捕捉-点", "point"),
+            ("捕捉-线", "line"),
+            ("捕捉-面", "polygon"),
+            ("捕捉-矩形", "rectangle"),
+            ("捕捉-圆", "circle"),
         ]:
             btn = QToolButton()
             btn.setText(label)
@@ -122,7 +126,23 @@ class QgisDigitizingToolbar:
     # ============================================================== 激活工具
 
     def enable_qgis_tool(self, geom_type: str) -> None:
-        """激活指定类型的 QGIS 复用工具。"""
+        """激活指定类型的 QGIS 捕捉（复用）工具。"""
+        # QGIS 4.2 捕捉工具依赖 Advanced Digitizing Dock（非 None）
+        if self._cad_dock is None:
+            from qgis.gui import QgsAdvancedDigitizingDockWidget
+
+            self._cad_dock = QgsAdvancedDigitizingDockWidget(self.canvas)
+
+        # 捕捉坐标按画布当前图层换算（QgsMapToolEdit::currentLayer）；
+        # 把编辑图层设为当前图层，几何才能落到编辑图层 CRS，
+        # CapturePoint 也不会因空图层做坐标换算而崩溃。
+        layer = self._editing_layer_getter() or self._layer
+        if layer is not None:
+            try:
+                self.canvas.setCurrentLayer(layer)
+            except Exception:  # noqa: BLE001
+                pass
+
         # 懒创建 DrawManager（与自定义版 DigitizingToolbar 保持一致）
         if self.draw_manager is None:
             self.draw_manager = DrawManager(
@@ -132,9 +152,16 @@ class QgisDigitizingToolbar:
             if self._on_finished is not None:
                 self.draw_manager.finished.connect(self._on_finished)
 
-        self.draw_manager.enable_qgis_draw_tool(geom_type)
+        self.draw_manager.enable_qgis_draw_tool(geom_type, cad_dock_widget=self._cad_dock)
+        name = {
+            "point": "点",
+            "line": "线",
+            "polygon": "面",
+            "rectangle": "矩形",
+            "circle": "圆",
+        }.get(geom_type, geom_type)
         QMessageBox.information(
             self.main_window,
             "提示",
-            f"已激活「QGIS {geom_type}」工具，点击画布绘制！",
+            f"已激活「捕捉-{name}」工具（QGIS 原生捕捉）：左键加点，右键结束，Esc 取消本次绘制；完成后弹属性框",
         )

@@ -70,6 +70,8 @@ from app.ui.docks.project_dock import ProjectDock
 from app.ui.docks.tools_dock import ToolsDock
 from app.ui.main_window.browser_dock import BrowserDock
 from app.ui.main_window.draw_toolbar import DigitizingToolbar
+from app.ui.main_window.qgis_digitizing_toolbar import QgisDigitizingToolbar
+from app.ui.main_window.snapping_toolbar import QgisSnappingToolbar
 from app.ui.main_window.layer_dock import LayerDock
 from app.ui.main_window.status_bar import StatusBar
 from app.ui.main_window.tool_bar import ToolBar
@@ -270,13 +272,26 @@ class MainWindow(FramelessMixin, QMainWindow):
         # DigitizingToolbar 编辑态切换 → 同步给 QGIS 复用版工具条
         self.digitizing_toolbar.editing_state_changed.connect(self._on_editing_state_changed)
 
-        # QGIS 复用版数字化工具条（点/线/面/矩形/圆，与自定义版平行）
-        # self.qgis_digitizing_toolbar = QgisDigitizingToolbar(
-        #     self,
-        #     self.canvas,
-        #     editing_layer_getter=lambda: self.edit_layer,
-        #     on_finished=self._on_qgis_draw_finished,
-        # )
+        # QGIS 原生捕捉工具条（点/线/面/矩形/圆，基于 QgsMapToolCapture 系列，
+        # 与自定义版 DigitizingToolbar 平行）——捕捉完成走
+        # _on_qgis_draw_finished → DigitizingToolbar.finish_draw 同一套
+        # 建要素 + 属性框流程；按钮随编辑态 / 图层几何类型启用
+        self.qgis_digitizing_toolbar = QgisDigitizingToolbar(
+            self,
+            self.canvas,
+            editing_layer_getter=lambda: self.edit_layer,
+            on_finished=self._on_qgis_draw_finished,
+        )
+
+        # 磁性捕捉工具条：吸附配置写入 QgsProject.snappingConfig() 并同步到
+        # 画布 snapping utils，QGIS 原生捕捉工具（QgsMapToolCapture 系列）
+        # 画图时自动吸附已有要素顶点/边——无需改动任何绘制工具
+        self.snapping_toolbar = QgisSnappingToolbar(
+            self,
+            self.canvas,
+            self.project,
+            editing_layer_getter=lambda: self.edit_layer,
+        )
 
         # 创建平移工具（保留引用避免被 GC）
         self._pan_tool = QgsMapToolPan(self.canvas)
@@ -306,7 +321,11 @@ class MainWindow(FramelessMixin, QMainWindow):
         for label, toolbars in (
             ("文件", [self._file_toolbar]),
             ("查看", [self._view_toolbar]),
-            ("编辑", [self.digitizing_toolbar.digitizing_toolbar]),
+            ("编辑", [
+                self.digitizing_toolbar.digitizing_toolbar,
+                self.qgis_digitizing_toolbar.toolbar,
+                self.snapping_toolbar.toolbar,
+            ]),
             ("通用", [self.tool_bar]),
         ):
             self._tab_toolbars[tab_bar.addTab(label)] = toolbars
@@ -1735,6 +1754,12 @@ class MainWindow(FramelessMixin, QMainWindow):
                     qgis_tb.disable_all_buttons()
                 except Exception:  # noqa: BLE001
                     pass
+            snap_tb = getattr(self, "snapping_toolbar", None)
+            if snap_tb is not None:
+                try:
+                    snap_tb.set_current_layer(None)
+                except Exception:  # noqa: BLE001
+                    pass
 
         # 真正从 project 摘掉
         self.project.removeMapLayer(layer_id)
@@ -1771,6 +1796,9 @@ class MainWindow(FramelessMixin, QMainWindow):
             qgis_tb = getattr(self, "qgis_digitizing_toolbar", None)
             if qgis_tb is not None:
                 qgis_tb.set_layer(self.edit_layer)  # 仅记录图层，不开按钮
+            snap_tb = getattr(self, "snapping_toolbar", None)
+            if snap_tb is not None:
+                snap_tb.set_current_layer(self.edit_layer)
             self.messageBar.pushMessage(
                 f"已设 {self._selected_layer.name()} 为编辑图层，点击「开始编辑」生效",
                 level=Qgis.MessageLevel.Info,
@@ -1814,6 +1842,9 @@ class MainWindow(FramelessMixin, QMainWindow):
         qgis_tb = getattr(self, "qgis_digitizing_toolbar", None)
         if qgis_tb is not None:
             qgis_tb.set_layer(layer)
+        snap_tb = getattr(self, "snapping_toolbar", None)
+        if snap_tb is not None:
+            snap_tb.set_current_layer(layer)
 
     # ---------------------------------------------------- 图层树头部工具
 
