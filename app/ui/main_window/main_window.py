@@ -22,6 +22,8 @@ from qgis.PyQt.QtCore import QEvent, QPoint, Qt
 from qgis.PyQt.QtGui import QAction, QCloseEvent, QColor, QKeySequence
 from qgis.PyQt.QtWidgets import (
     QDialog,
+    QDialogButtonBox,
+    QLabel,
     QListWidget,
     QMainWindow,
     QMenu,
@@ -43,6 +45,7 @@ from qgis.core import (
     QgsRasterLayer,
     QgsRectangle,
     QgsStyle,
+    QgsVectorDataProvider,
     QgsVectorLayer,
     QgsWkbTypes,
 )
@@ -266,6 +269,8 @@ class MainWindow(FramelessMixin, QMainWindow):
             self,
             self.canvas,
             editing_layer_getter=lambda: self.edit_layer,
+            # 点「开始编辑」时弹窗选层（不再由图层树右键/点击预设编辑图层）
+            edit_layer_chooser=self._choose_edit_layer,
         )
 
         # 磁性捕捉工具条：吸附配置写入 QgsProject.snappingConfig() 并同步到
@@ -1460,13 +1465,16 @@ class MainWindow(FramelessMixin, QMainWindow):
     def _build_layer_context_menu(self, layer, global_pos: QPoint) -> None:
         """QGIS 式图层右键菜单（图层树与工程 Dock 共用）。
 
-        菜单项统一作用在 ``self._selected_layer`` 上；各动作方法（缩放/设编辑/
-        移分组/属性表/样式/移除/导出/属性）读的都是这个字段，所以进入时先
-        把它指向当前右键的图层。
+        菜单项统一作用在 ``self._selected_layer`` 上；各动作方法（缩放/移分组/
+        属性表/样式/移除/导出/属性）读的都是这个字段，所以进入时先把它指向
+        当前右键的图层。
 
-        布局贴近 QGIS 原生图层面板：缩放至图层 / 放大至选中要素 → 设为编辑图层
-        → 打开属性表 / 执行SQL（仅矢量）→ 重命名 / 复制图层 → 样式（含
-        复制/粘贴样式）→ 移到分组 → 移除 / 导出 / 属性。
+        「设为编辑图层」入口已移除：编辑图层统一由点「开始编辑」时的弹窗选择
+        （见 :meth:`_choose_edit_layer`）。
+
+        布局贴近 QGIS 原生图层面板：缩放至图层 / 放大至选中要素 → 打开属性表 /
+        执行SQL（仅矢量）→ 重命名 / 复制图层 → 样式（含复制/粘贴样式）→ 移到
+        分组 → 移除 / 导出 / 属性。
         """
         if layer is None:
             return
@@ -1482,10 +1490,6 @@ class MainWindow(FramelessMixin, QMainWindow):
             act_sel = QAction("放大至选中要素", self)
             act_sel.triggered.connect(lambda: self._zoom_to_selection(self._selected_layer))
             menu.addAction(act_sel)
-        # 设编辑
-        act_edit = QAction("设为编辑图层", self)
-        act_edit.triggered.connect(self._set_edit_layer)
-        menu.addAction(act_edit)
         # 属性表 / SQL（栅格没有要素/表，不显示）
         if is_vector:
             menu.addSeparator()
@@ -1752,38 +1756,103 @@ class MainWindow(FramelessMixin, QMainWindow):
         except Exception:  # noqa: BLE001
             pass
 
-    def _set_edit_layer(self) -> None:
-        """仅"指定编辑图层"：不真正进入编辑态，让用户点工具条「开始编辑」。
+    def _choose_edit_layer(self) -> "Optional[QgsVectorLayer]":
+        """「开始编辑」的选层弹窗：列出工程中可添加要素的矢量图层供选择。
 
-        与工具条上的 :meth:`DigitizingToolbar.start_edit_fun` 拆分职责：
+        只负责**选择并返回**（取消返回 None）——把选中层落地为编辑目标
+        （edit_layer / 停旧层 / 工具条 / 磁性捕捉联动）由工具条的
+        :meth:`DigitizingToolbar.start_edit_fun` 统一调用
+        :meth:`_apply_edit_target` 完成，避免职责散落。
 
-        - 本方法负责：记录 ``self.edit_layer``、刷新"开始编辑"按钮
-        - 工具条的"开始编辑"才真正 ``layer.startEditing()``
+        编辑图层入口已收敛到这里——图层树右键「设为编辑图层」与点击自动预设
+        均已移除。
         """
-        if self._selected_layer and isinstance(self._selected_layer, QgsVectorLayer):
-            # 如果之前有别的图层在编辑，先停掉（避免遗留脏 buffer）
-            prev = self.edit_layer
-            if prev is not None and prev is not self._selected_layer and prev.isEditable():
-                self.editing_service.stop(prev, save=False)
-
-            self.edit_layer = self._selected_layer
-            # 切到"已指定编辑图层"态：开始编辑可用、停止/保存禁用、按图层类型启用添加要素
-            if hasattr(self, "digitizing_toolbar"):
-                self.digitizing_toolbar.set_edit_target(self.edit_layer)
-            snap_tb = getattr(self, "snapping_toolbar", None)
-            if snap_tb is not None:
-                snap_tb.set_current_layer(self.edit_layer)
-            self.messageBar.pushMessage(
-                f"已设 {self._selected_layer.name()} 为编辑图层，点击「开始编辑」生效",
-                level=Qgis.MessageLevel.Info,
-                duration=3,
+        candidates = [
+            layer
+            for layer in self.project.mapLayers().values()
+            if isinstance(layer, QgsVectorLayer)
+            and not layer.readOnly()
+            and bool(
+                layer.dataProvider()
+                and layer.dataProvider().capabilities()
+                & QgsVectorDataProvider.Capability.AddFeatures
             )
+        ]
+        if not candidates:
+            QMessageBox.information(
+                self, "提示", "工程中没有可编辑的矢量图层，请先加载数据"
+            )
+            return None
+        # 默认高亮：当前编辑图层 → 图层树选中项 → 第一个
+        if self.edit_layer in candidates:
+            default = self.edit_layer
+        elif self._selected_layer in candidates:
+            default = self._selected_layer
+        else:
+            default = candidates[0]
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("选择编辑图层")
+        dlg.resize(380, 420)
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel("请选择需要编辑的图层："))
+        list_widget = QListWidget(dlg)
+        for layer in candidates:
+            list_widget.addItem(layer.name())
+        list_widget.setCurrentRow(candidates.index(default))
+        layout.addWidget(list_widget)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        layout.addWidget(buttons)
+        picked = None
+
+        def on_ok() -> None:
+            nonlocal picked
+            row = list_widget.currentRow()
+            if 0 <= row < len(candidates):
+                picked = candidates[row]
+            dlg.accept()
+
+        buttons.accepted.connect(on_ok)
+        buttons.rejected.connect(dlg.reject)
+        list_widget.itemDoubleClicked.connect(lambda *_: on_ok())
+        dlg.exec()
+        return picked
+
+    def _apply_edit_target(self, layer: "Optional[QgsVectorLayer]") -> None:
+        """把 ``layer`` 设为编辑目标图层并联动工具条 / 磁性捕捉。
+
+        仅指定目标（记录 ``self.edit_layer`` + 刷新按钮），不进入编辑态；真正的
+        ``layer.startEditing()`` 由工具条的「开始编辑」执行。若之前有别的图层在
+        编辑，先停掉（避免遗留脏 buffer）。
+        """
+        if layer is None or not isinstance(layer, QgsVectorLayer):
+            return
+        # 如果之前有别的图层在编辑，先停掉（避免遗留脏 buffer）
+        prev = self.edit_layer
+        if prev is not None and prev is not layer and prev.isEditable():
+            self.editing_service.stop(prev, save=False)
+
+        self.edit_layer = layer
+        if hasattr(self, "digitizing_toolbar"):
+            self.digitizing_toolbar.set_edit_target(layer)
+        snap_tb = getattr(self, "snapping_toolbar", None)
+        if snap_tb is not None:
+            snap_tb.set_current_layer(layer)
+        self.messageBar.pushMessage(
+            f"已选 {layer.name()} 为编辑图层",
+            level=Qgis.MessageLevel.Info,
+            duration=3,
+        )
 
     def _on_layer_clicked_in_dock(self, index) -> None:
-        """用户在图层树点击一层：自动同步 ``_selected_layer`` / ``edit_layer``。
+        """用户在图层树点击一层：仅记录为 ``_selected_layer``。
 
-        这样点击任意矢量图层后，工具条上的"开始编辑"立即可用，
-        不必再走右键 → "设为编辑图层"。
+        不再自动设为编辑图层——编辑图层统一在点「开始编辑」时弹窗选择
+        （见 :meth:`_choose_edit_layer`），避免"点了哪层就编辑哪层"的隐式切换。
         """
         # 注意：本构建没有 ``indexToNode``，只有 ``index2node``（两者都有
         # 的版本里行为一致）；index 直接来自 view 的模型，无需再 map。
@@ -1800,22 +1869,7 @@ class MainWindow(FramelessMixin, QMainWindow):
         layer = layer_getter()
         if layer is None:
             return
-
         self._selected_layer = layer
-        # 非矢量图层（栅格 / mesh 等）也只做选择，不进入编辑目标
-        if not isinstance(layer, QgsVectorLayer):
-            return
-        # 如果旧 edit_layer 还在 editing，先退出
-        prev = self.edit_layer
-        if prev is not None and prev is not layer and prev.isEditable():
-            self.editing_service.stop(prev, save=False)
-
-        self.edit_layer = layer
-        if hasattr(self, "digitizing_toolbar"):
-            self.digitizing_toolbar.set_edit_target(layer)
-        snap_tb = getattr(self, "snapping_toolbar", None)
-        if snap_tb is not None:
-            snap_tb.set_current_layer(layer)
 
     # ---------------------------------------------------- 图层树头部工具
 

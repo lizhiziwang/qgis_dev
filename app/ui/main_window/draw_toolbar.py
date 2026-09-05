@@ -4,7 +4,9 @@
 
 - 工具条平铺 9 个文本按钮（不用下拉菜单）：
   开始编辑 / 停止编辑 / 保存编辑 / 融合几何 / 要素编辑 / 线分割 ｜ 添加点 / 添加线 / 添加面
-- 默认全部 disabled；外部 :meth:`set_edit_target` 启用"开始编辑"按钮。
+- 「开始编辑」**恒可用**：点击弹出图层选择框（:attr:`_edit_layer_chooser`，
+  由 :class:`MainWindow` 注入），选中图层即成为编辑目标并进入编辑态——
+  不再依赖图层树右键 / 点击预设编辑图层（那些入口已移除）。
 - 几何类型按当前 layer 启用对应按钮（点 layer 只能点，线 layer 只能线）；
   「要素编辑」需处于编辑态（点击要素编辑其几何，见
   :class:`app.ui.tools.feature_edit.FeatureEditTool`）；「线分割」需处于编辑态
@@ -15,10 +17,10 @@
 
 ::
 
-    [无编辑图层] --set_edit_target--> [已指定编辑图层] --start_edit_fun--> [编辑中]
-                                                                     |
-                                                                     +--stop_edit_fun--> [已指定编辑图层]
-                                                                     +--stop_edit_fun(切换其它图层)--> [无编辑图层]
+    [未编辑] --start_edit_fun(弹窗选层)--> [编辑中]
+        ^                                        |
+        +----------------stop_edit_fun-----------+
+        编辑中再点「开始编辑」→ 重新弹窗换层，继续 [编辑中]
 
 :attr:`editing_state_changed` 信号在状态切换时发出，供 :class:`MainWindow`
 同步磁性捕捉等其它工具条。
@@ -66,6 +68,7 @@ class DigitizingToolbar(QObject):
         main_window: QMainWindow,
         canvas: QgsMapCanvas,
         editing_layer_getter=None,
+        edit_layer_chooser=None,
     ) -> None:
         # QObject.__init__ 必须显式调用（QObject 没有无参 __init__，会自动绑定 parent）
         QObject.__init__(self)
@@ -73,6 +76,12 @@ class DigitizingToolbar(QObject):
         self.canvas = canvas
         # 编辑图层 getter：返回当前 ``edit_layer`` 或 None
         self._editing_layer_getter = editing_layer_getter or (lambda: None)
+        #: 选编辑图层回调（MainWindow 注入）：点「开始编辑」先弹窗让用户选目标
+        #: 图层，返回选中的图层或 None（取消）。仅负责选择——把选中层落地为
+        #: 编辑目标（edit_layer / 停旧层 / 工具条联动）由 :meth:`start_edit_fun`
+        #: 调用 main_window 的 ``_apply_edit_target`` 完成。为 None 时回退到当前
+        #: getter 的值（老行为，供测试 / 直连使用）。
+        self._edit_layer_chooser = edit_layer_chooser
         # 业务层 DrawManager（懒创建）
         self.draw_manager: DrawManager | None = None
         # 临时点 + 共享 rubber_band（与旧 Draw 一致）
@@ -117,7 +126,7 @@ class DigitizingToolbar(QObject):
         self.split_feature_action = QAction("线分割", self.digitizing_toolbar)
         self.split_feature_action.triggered.connect(self.enable_split_tool)
 
-        # 默认禁用（与旧版一致：edit_layer is None 时全 disable）
+        # 初始态：编辑动作全禁用（「开始编辑」例外——恒可用，点击弹窗选层）
         self._set_edit_actions_enabled(False)
 
         self.digitizing_toolbar.addAction(self.start_edit)
@@ -192,12 +201,28 @@ class DigitizingToolbar(QObject):
     # ============================================================== 编辑器菜单回调
 
     def start_edit_fun(self) -> None:
-        """开始编辑：真正调 ``layer.startEditing()``，切换按钮状态。"""
+        """开始编辑：先弹窗选择目标图层（若有 chooser），再真正
+        ``layer.startEditing()`` 并切换按钮状态。
+        """
         layer = self._current_layer()
+        chooser = self._edit_layer_chooser
+        if chooser is not None:
+            # 弹窗选层（纯选择，见 main_window._choose_edit_layer）；取消返回
+            # None → 不做任何事
+            layer = chooser()
+            if layer is None:
+                return
+            # 落地为编辑目标：edit_layer / 停旧层 / 工具条 / 捕捉联动。
+            # 若 chooser 本身已同步过（getter 已指向选中层）则跳过，幂等安全。
+            if self._current_layer() is not layer:
+                applier = getattr(self.main_window, "_apply_edit_target", None)
+                if callable(applier):
+                    applier(layer)
         if layer is None or layer.type() != layer.VectorLayer:
             return
         if layer.isEditable():
-            # 已经在编辑态：保持现状即可（按钮状态以 _editing 为准）
+            # 已在编辑态（通常是换层后选回同一层）：保持现状即可
+            # （按钮状态以 _editing 为准）
             if not self._editing:
                 self._editing = True
                 self._set_edit_actions_enabled(True, editing_now=True)
@@ -457,21 +482,22 @@ class DigitizingToolbar(QObject):
         return self._editing_layer_getter()
 
     def _set_edit_actions_enabled(self, enabled: bool, *, editing_now: bool = False) -> None:
-        """编辑器 3 个按钮（开始/停止/保存）的整体启用状态。
+        """编辑器按钮整体启用状态（「开始编辑」恒可用，其余按编辑状态）。
 
-        :param enabled: False → 3 个全禁用（默认态）。
-        :param editing_now: True → 处于编辑态：开始编辑禁用、停止/保存启用。
-                            False → 仅指定了编辑图层：开始编辑启用、停止/保存禁用。
+        :param enabled: False → 停止/保存/融合/要素编辑/线分割 全禁用（初始默认态）；
+            「开始编辑」仍可用——点击会弹窗选层，无需预先指定目标图层。
+        :param editing_now: True → 编辑中：停止/保存/融合/要素编辑/线分割 启用；
+            False → 未编辑：仅「开始编辑」可用。
         """
+        # 「开始编辑」恒可用：无目标图层也能点（弹窗选层）；编辑中也能点（换层）
+        self.start_edit.setEnabled(True)
         if not enabled:
-            self.start_edit.setEnabled(False)
             self.stop_edit.setEnabled(False)
             self.save_edit.setEnabled(False)
             self.merge_geometry_action.setEnabled(False)
             self.feature_edit_action.setEnabled(False)
             self.split_feature_action.setEnabled(False)
             return
-        self.start_edit.setEnabled(not editing_now)
         self.stop_edit.setEnabled(editing_now)
         self.save_edit.setEnabled(editing_now)
         # 融合几何 / 要素编辑 / 线分割 要求编辑态：编辑中才可用
