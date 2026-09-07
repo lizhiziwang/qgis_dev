@@ -255,6 +255,7 @@ class MainWindow(FramelessMixin, QMainWindow):
             "swipe": self._on_swipe,
             "qmap_compare": self._on_qmap_compare,
             "online_basemap": self._on_online_basemap,
+            "data_manage": self._on_data_manage,
             "zoom_full": self._on_zoom_full,
             "refresh": self._on_refresh,
             "test": self._on_test,
@@ -557,6 +558,38 @@ class MainWindow(FramelessMixin, QMainWindow):
         dock.set_layers(self._online_basemap_defs())
         dock.show()
         dock.raise_()
+
+    def _on_data_manage(self) -> None:
+        """数据管理：懒建底部 Dock（本地数据库注册目录分级展示）。
+
+        「+ 新建连接」打开选库弹窗（本地数据库 Tab，见
+        :mod:`app.ui.dialogs.add_connection`），成功后把新连接追加进左树并
+        联动右侧数据表；创建数据 / 导入 / 刷新由 Dock 内部占位记日志
+        （后续版本接入真实功能）。
+        """
+        from app.ui.docks.data_manage_dock import DataManageDock
+
+        dock = getattr(self, "_data_manage_dock", None)
+        if dock is None:
+            dock = DataManageDock(
+                self,
+                on_add_connection=self._on_dm_add_connection,
+            )
+            self._data_manage_dock = dock
+            self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+        dock.show()
+        dock.raise_()
+
+    def _on_dm_add_connection(self) -> None:
+        """数据管理「+ 新建连接」：弹窗选本地 sqlite 库文件并加入树。"""
+        from app.ui.dialogs.add_connection import AddConnectionDialog
+
+        dlg = AddConnectionDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        dock = getattr(self, "_data_manage_dock", None)
+        if dock is not None:
+            dock.add_connection(dlg.connection())
 
     def _on_swipe(self) -> None:
         """卷帘对比：分屏会话已存续则直接恢复（不弹窗）；否则弹窗选栅格激活。

@@ -86,6 +86,7 @@ class ToolBar:
             ("卷帘对比", "swipe"),
             ("地图对比", "qmap_compare"),
             ("在线底图", "online_basemap"),
+            ("数据管理", "data_manage"),
             ("全图", "zoom_full"),
             ("刷新", "refresh"),
             ("测试", "test"),

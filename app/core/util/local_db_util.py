@@ -1162,6 +1162,71 @@ class local_db_util:
             pass
         return {"spatial": s, "dict": d, "image": v}
 
+
+# ---------------------------------------------------------------------------
+# 本地库目录/展示辅助(数据管理「本地数据库」用)
+# ---------------------------------------------------------------------------
+
+#: 注册类别顺序(树/表展示顺序): 矢量 → 字典 → 影像
+_CATEGORY_ORDER: tuple[str, ...] = ("spatial", "dict", "image")
+#: 注册类别 -> 展示标签(矢量/字典/影像)
+_CATEGORY_LABEL = {"spatial": "矢量", "dict": "字典", "image": "影像"}
+#: 注册类别 -> 行数单位(矢量要素 / 字典行 / 影像瓦片)
+_CATEGORY_UNIT = {"spatial": "要素", "dict": "条", "image": "瓦片"}
+
+
+def describe_local_db(db_path: str | Path) -> dict[str, Any]:
+    """打开现有本地库, 返回三类已注册图层目录(供数据管理树/表展示)。
+
+    类别表名清单即 ``local_db_util.query_all_table_name()`` 的原始输出
+    (按 user_relation 注册顺序); counts 为逐表 ``COUNT(*)`` 的行数, 表已删/
+    打不开的表记 ``None``。整个过程只读, 不会创建文件 / 写入任何内容。
+
+    Args:
+        db_path: 已存在的 sqlite / spatialite 库文件路径。
+
+    Returns:
+        ``{"categories": {"spatial": [...], "dict": [...], "image": [...]},
+        "counts": {表名: 行数|None}}``。
+
+    Raises:
+        ValueError: 文件不存在 / 不是有效的 SQLite 数据库。
+    """
+    p = Path(db_path)
+    if not p.is_file():
+        raise ValueError(f"文件不存在: {p}")
+    try:
+        db = local_db_util(p)
+        try:
+            cats = db.query_all_table_name()
+        finally:
+            db.conn.close()
+    except sqlite3.Error as exc:
+        raise ValueError(
+            f"不是有效的 SQLite 数据库文件: {p.name}"
+        ) from exc
+
+    names = [n for key in _CATEGORY_ORDER for n in cats.get(key, [])]
+    counts: dict[str, Any] = {}
+    if names:
+        try:
+            conn = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True)
+            try:
+                for n in names:
+                    try:
+                        counts[n] = conn.execute(
+                            f"SELECT COUNT(*) FROM {_quote_ident(n)}"
+                        ).fetchone()[0]
+                    except sqlite3.Error:
+                        counts[n] = None
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            # 连只读通道都打不开(锁/权限)时全部标 None, 不让展示失败
+            counts = {n: None for n in names}
+    return {"categories": cats, "counts": counts}
+
+
 if __name__ == '__main__':
     db = local_db_util(db_path=Path(r"D:\zsh\code\py\qgis_dev\scripts\test_spatial.db"), load_spatialite=True)
 
