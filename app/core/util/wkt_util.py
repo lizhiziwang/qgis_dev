@@ -286,7 +286,101 @@ def to_wkt(
     raise ValueError(f"无法识别的几何类型: {type(geometry).__name__}")
 
 
-__all__ = ["arcgis_geometry_to_wkt", "to_wkt"]
+def _gj_pt(pt: Any) -> tuple[Any, Any, Any]:
+    """GeoJSON 坐标点(数组) → ``(x, y, z|None)``。"""
+    seq = list(pt)
+    if len(seq) < 2:
+        raise ValueError(f"GeoJSON 坐标点数不足,收到: {pt!r}")
+    return seq[0], seq[1], (seq[2] if len(seq) > 2 else None)
+
+
+def _gj_flat_pts(parts: Any) -> list[tuple[Any, Any, Any]]:
+    """把任意深度的 GeoJSON ``coordinates`` 展平为坐标点列表(算 z 一致性用)。"""
+    out: list[tuple[Any, Any, Any]] = []
+    stack = [parts]
+    while stack:
+        node = stack.pop()
+        if node and isinstance(node[0], (int, float)):
+            out.append(_gj_pt(node))
+        elif isinstance(node, list):
+            stack.extend(node)
+    return out
+
+
+def geojson_geometry_to_wkt(
+    geometry: dict[str, Any] | None,
+    *,
+    include_z: bool = False,
+    detect_holes: bool = True,
+) -> str | None:
+    """GeoJSON 几何(RFC 7946 字典) → WKT 文本。
+
+    支持 ``Point`` / ``MultiPoint`` / ``LineString`` / ``MultiLineString`` /
+    ``Polygon`` / ``MultiPolygon`` / ``GeometryCollection``。坐标按原样输出
+    (GeoJSON 约定为经度在前,不在此处做轴序转换)。面数据坐标本身就是
+    ``[外环, 洞1, ...]`` 顺序,不依赖包含关系推断。
+
+    Args:
+        geometry: GeoJSON 几何对象,None 返回 None。
+        include_z: 为 True 且所有坐标点都有第 3 维时才输出带 Z 的 WKT。
+        detect_holes: 保留以与 :func:`arcgis_geometry_to_wkt` 签名一致;
+            GeoJSON 的环顺序已明确,此参数不影响结果。
+
+    Returns:
+        WKT 文本或 None。
+    """
+    if geometry is None:
+        return None
+    if not isinstance(geometry, dict):
+        raise ValueError(f"GeoJSON 几何必须是字典,收到: {type(geometry).__name__}")
+    gtype = geometry.get("type")
+    coords = geometry.get("coordinates")
+    if not isinstance(gtype, str):
+        raise ValueError(f"GeoJSON 几何缺少 type,收到: {geometry!r}")
+
+    all_pts = _gj_flat_pts(coords) if coords else []
+    use_z = include_z and bool(all_pts) and all(pt[2] is not None for pt in all_pts)
+
+    def pts_of(data: Any) -> list[tuple[Any, Any, Any]]:
+        return [_gj_pt(p) for p in data]
+
+    if gtype == "Point":
+        return _keyword("POINT", use_z) + " " + _fmt_ring(pts_of([coords]), use_z)
+    if gtype == "LineString":
+        return _keyword("LINESTRING", use_z) + " " + _fmt_ring(pts_of(coords), use_z)
+    if gtype == "Polygon":
+        rings = [pts_of(r) for r in coords]
+        return _keyword("POLYGON", use_z) + " " + _polygon_content(rings, use_z)
+    if gtype in ("MultiPoint", "MultiLineString"):
+        parts = [
+            _fmt_ring(pts_of([c]), use_z) if gtype == "MultiPoint" else _fmt_ring(pts_of(c), use_z)
+            for c in coords
+        ]
+        base = "MULTIPOINT" if gtype == "MultiPoint" else "MULTILINESTRING"
+        if len(parts) == 1:
+            return _keyword("POINT" if gtype == "MultiPoint" else "LINESTRING", use_z) + " " + parts[0]
+        return _keyword(base, use_z) + " (" + ",".join(parts) + ")"
+    if gtype == "MultiPolygon":
+        contents = [_polygon_content([pts_of(r) for r in poly], use_z) for poly in coords]
+        if len(contents) == 1:
+            return _keyword("POLYGON", use_z) + " " + contents[0]
+        return _keyword("MULTIPOLYGON", use_z) + " (" + ",".join(contents) + ")"
+    if gtype == "GeometryCollection":
+        parts = [
+            geojson_geometry_to_wkt(g, include_z=include_z) or ""
+            for g in (geometry.get("geometries") or [])
+        ]
+        parts = [p for p in parts if p]
+        if not parts:
+            return None
+        if len(parts) == 1:
+            return parts[0]
+        gc_z = include_z and all(" Z " in p for p in parts)
+        return _keyword("GEOMETRYCOLLECTION", gc_z) + " (" + ",".join(parts) + ")"
+    raise ValueError(f"无法识别的 GeoJSON 类型: {gtype!r}")
+
+
+__all__ = ["arcgis_geometry_to_wkt", "geojson_geometry_to_wkt", "to_wkt"]
 
 
 if __name__ == '__main__':
