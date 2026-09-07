@@ -532,6 +532,44 @@ def app_qss(t: Theme) -> str:
     QSpinBox:focus, QDateTimeEdit:focus, QDateEdit:focus, QDoubleSpinBox:focus {{
         border-color: {t.input_focus};
     }}
+    QSpinBox, QDoubleSpinBox {{
+        padding-right: 22px;
+    }}
+    QSpinBox::up-button, QDoubleSpinBox::up-button {{
+        subcontrol-origin: border;
+        subcontrol-position: top right;
+        width: 20px;
+        height: 14px;
+        border-left: 1px solid {t.input_border};
+        border-bottom: 1px solid {t.input_border};
+        background-color: {t.btn_bg};
+    }}
+    QSpinBox::down-button, QDoubleSpinBox::down-button {{
+        subcontrol-origin: border;
+        subcontrol-position: bottom right;
+        width: 20px;
+        height: 14px;
+        border-left: 1px solid {t.input_border};
+        background-color: {t.btn_bg};
+    }}
+    QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
+    QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
+        background-color: {t.btn_hover};
+    }}
+    QSpinBox::up-button:pressed, QDoubleSpinBox::up-button:pressed,
+    QSpinBox::down-button:pressed, QDoubleSpinBox::down-button:pressed {{
+        background-color: {t.btn_pressed};
+    }}
+    QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
+        image: url({_arrow_url(t.menu_text, up=True)});
+        width: 10px;
+        height: 8px;
+    }}
+    QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
+        image: url({_arrow_url(t.menu_text, up=False)});
+        width: 10px;
+        height: 8px;
+    }}
     QLineEdit:disabled, QComboBox:disabled {{
         background-color: {t.panel_bg};
         color: {t.text_secondary};
