@@ -13,7 +13,6 @@ from qgis.gui import QgsRubberBand
 from qgis.PyQt.QtCore import Qt
 
 from .base import BaseDrawTool
-from .snap import snapped_map_point
 
 
 class PointDrawTool(BaseDrawTool):
@@ -26,16 +25,17 @@ class PointDrawTool(BaseDrawTool):
         self.rubber_band.setColor(Qt.GlobalColor.red)
         self.rubber_band.setWidth(2)
 
+    def canvasMoveEvent(self, event) -> None:  # noqa: N802
+        """移动即预览：让磁吸指示器实时反馈吸到顶点还是边。"""
+        self.snapped_point(event, wait_index=False)
+
     def canvasReleaseEvent(self, event) -> None:  # noqa: N802 —— QGIS 命名
-        point = snapped_map_point(self.canvas, event)
+        point = self.snapped_point(event)
         geometry = QgsGeometry.fromPointXY(QgsPointXY(point.x(), point.y()))
         self.geom = geometry
         self.rubber_band.addPoint(point)
         self.rubber_band.show()
-        if self.draw_manager is not None:
-            self.draw_manager.finish_draw(geometry)
-        else:
-            self.finish_draw()
+        self.commit_geometry(geometry)
 
     def cleanup(self) -> None:
         super().cleanup()

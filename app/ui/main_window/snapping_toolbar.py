@@ -21,9 +21,11 @@ QGIS 4.2 不导出“整根内置捕捉工具条”组件，只能按公开 API 
 - **当前图层**：只吸附当前选中的编辑图层（内部用 AdvancedConfiguration +
   单图层 IndividualLayerSettings 实现，不依赖画布 active-layer 管道）
 
-注意：4.2 的吸附类型枚举没有"交点(Intersection)"（已被 QGIS 移除），
-且磁吸标记 :class:`QgsSnapIndicator` 需要外部喂 match（QGIS 桌面由内部
-app 代码驱动），自建应用里先不接——不影响吸附本身生效。
+注意：4.2 的吸附类型枚举没有"交点(Intersection)"（已被 QGIS 移除）。
+磁吸标记 :class:`QgsSnapIndicator` 需要外部喂 match（QGIS 桌面由内部 app
+代码驱动）；本应用由自定义绘制工具驱动（见 ``drawing/tools/base.py`` 的
+``BaseDrawTool.snapped_point``）——鼠标移动时把吸附 match 喂给指示器，吸到
+顶点/边分别显示不同图标，吸不到则隐藏。
 """
 
 from __future__ import annotations

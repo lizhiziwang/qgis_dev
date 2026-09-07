@@ -21,7 +21,6 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
 
 from .base import BaseDrawTool
-from .snap import snapped_map_point
 
 
 class CircleDrawTool(BaseDrawTool):
@@ -42,9 +41,11 @@ class CircleDrawTool(BaseDrawTool):
 
     def canvasMoveEvent(self, event) -> None:  # noqa: N802
         try:
+            # 先取吸附点并更新磁吸指示器：圆心落下前也实时显示吸到顶点/边；
+            # 半径端点同样吸附，与「捕捉对圆也生效」保持一致
+            point = self.snapped_point(event, wait_index=False)
             if not self.temp_points:
                 return
-            point = self.canvas.getCoordinateTransform().toMapCoordinates(event.pixelPoint())
             center = self.temp_points[0]
             self.radius = math.hypot(point.x() - center.x(), point.y() - center.y())
             circle = QgsCircle.fromCenterDiameter(
@@ -57,18 +58,14 @@ class CircleDrawTool(BaseDrawTool):
             pass
 
     def canvasPressEvent(self, event) -> None:  # noqa: N802
-        point = snapped_map_point(self.canvas, event)
+        point = self.snapped_point(event)
         if event.button() == Qt.MouseButton.LeftButton:
             if not self.temp_points:
                 self.temp_points.append(QgsPointXY(point.x(), point.y()))
             else:
                 self.temp_points[0] = QgsPointXY(point.x(), point.y())
         elif event.button() == Qt.MouseButton.RightButton:
-            if self.draw_manager is not None:
-                self.draw_manager.finish_draw(self.geom)
-            else:
-                self.temp_points.clear()
-                self.finish_draw()
+            self.commit_geometry(self.geom)
 
     def _update_rubber_band(self) -> None:
         if self.geom is not None and not self.geom.isEmpty():

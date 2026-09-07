@@ -266,35 +266,61 @@ class DigitizingToolbar(QObject):
         return True
 
     def stop_edit_fun(self) -> None:
-        """停止编辑：弹"是否保存"对话框。"""
+        """停止编辑：先取消当前激活的绘制/编辑工具，再弹「是否保存」对话框。
+
+        无论用户之后选「是 / 否」，编辑一旦停止都不该让画布继续挂着一个激活的
+        绘制工具，工具条也不该停留在「编辑中」可用态——所以：
+         1. **先** ``clear_draw_tool()`` 取消激活工具（旧实现放在最后，中途异常 /
+            状态残留会让工具继续挂活）；
+         2. 状态复位放在 ``finally``——即使提交 / 回滚对某些数据源抛异常，也保证
+            按钮 / 编辑标志一定复位，不会出现「点『否』后停止编辑按钮仍可用」。
+        """
         layer = self._current_layer()
         if layer is None or not layer.isEditable():
+            # 没有在编辑：兜底清掉可能残留的激活工具/橡皮筋，保持干净
+            self._exit_editing_state(layer)
             return
-        buffer = layer.editBuffer()
-        if buffer is not None:
-            reply = QMessageBox.warning(
-                self.main_window,
-                "警告",
-                "是否保存编辑的内容！",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.Yes,
-            )
-            if reply == QMessageBox.StandardButton.Yes:
-                layer.commitChanges(stopEditing=True)
-            else:
-                layer.rollBack()
-                layer.commitChanges(stopEditing=True)
+        # 先取消激活工具：不管有没有画完，停止编辑前工具都要退出
+        self.clear_draw_tool()
 
+        try:
+            if layer.editBuffer() is not None:
+                reply = QMessageBox.warning(
+                    self.main_window,
+                    "警告",
+                    "是否保存编辑的内容！",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes,
+                )
+                if reply == QMessageBox.StandardButton.Yes:
+                    layer.commitChanges(stopEditing=True)
+                else:
+                    # 否 → 放弃改动并结束编辑。rollBack() 本身就会结束编辑会话
+                    # （QGIS 4.2 实测 isEditable 立即变 False），不必再补一次
+                    # commitChanges(stopEditing=True)。
+                    layer.rollBack()
+        finally:
+            # 无论 Yes/No/提交异常，都切回「已指定编辑图层」态并清掉工具残留
+            self._exit_editing_state(layer)
+
+    def _exit_editing_state(self, layer: "QgsVectorLayer | None") -> None:
+        """离开编辑态后的统一状态复位（停编辑 / 外部停编兜底共用）。
+
+        - 编辑标志置 False，发出 :pyattr:`editing_state_changed`(False)；
+        - 停止 / 保存 / 融合 / 要素编辑 / 线分割 禁用，「开始编辑」保持可用；
+        - 「添加要素」按 ``layer`` 类型保持启用（layer 仍是目标编辑图层，但未处于
+          editing 态；若要严格只在 editing 态可用，把 ``_set_add_buttons_for_geometry``
+          那几行改为全禁用即可）。
+        """
+        self.clear_draw_tool()
         self._editing = False
-        # 切回"已指定编辑图层"态：开始编辑可用，停止/保存禁用
+        # 切回「已指定编辑图层」态：开始编辑可用，停止/保存禁用
         self._set_edit_actions_enabled(True, editing_now=False)
-        # "添加要素"按钮保持启用（layer 仍是 target，但未进入 editing 态）
-        # ——若要严格只在 editing 态可用，把下面这行注释掉
+        # 「添加要素」按钮保持启用（layer 仍是 target，但未进入 editing 态）
         if layer is not None and layer.type() == layer.VectorLayer:
             self._set_add_buttons_for_geometry(layer.geometryType())
         else:
             self._set_add_buttons_for_geometry(-1)
-        self.clear_draw_tool()
         self.editing_state_changed.emit(False)
 
     def _save_edits(self) -> None:
@@ -524,41 +550,43 @@ class DigitizingToolbar(QObject):
         dlg.show()
 
     def clear_draw_tool(self) -> None:
-        """清掉激活工具 + 共享 rubber_band + 临时点（与旧版一致）。"""
-        if getattr(self, "merge_tool", None) is not None:
+        """清掉激活工具 + 共享 rubber_band + 临时点（与旧版一致）。
+
+        关键：除 ``unsetMapTool`` 外，对带 ``cleanup()`` 的工具先调 ``cleanup()``
+        ——``BaseDrawTool.cleanup`` 会隐藏工具自己的 rubber_band / 磁吸标记等
+        画布残留（旧实现只 unset，停编辑 / 切工具后绘制预览、吸附标记仍会留在
+        画布上）。
+        """
+        def _drop(attr_name: str) -> None:
+            tool = getattr(self, attr_name, None)
+            if tool is None:
+                return
+            if hasattr(tool, "cleanup"):
+                try:
+                    tool.cleanup()
+                except Exception:  # noqa: BLE001
+                    pass
             try:
-                self.canvas.unsetMapTool(self.merge_tool)
-            except Exception:
+                self.canvas.unsetMapTool(tool)
+            except Exception:  # noqa: BLE001
                 pass
-            self.merge_tool = None
-        if getattr(self, "feature_edit_tool", None) is not None:
+            setattr(self, attr_name, None)
+
+        _drop("merge_tool")
+        _drop("feature_edit_tool")
+        _drop("attribute_entry_tool")
+        _drop("split_tool")
+        _drop("active_tool")
+        # 业务层 draw_manager 的共享 rubber_band / temp_points 也一并清掉
+        if self.draw_manager is not None:
             try:
-                self.canvas.unsetMapTool(self.feature_edit_tool)
-            except Exception:
+                self.draw_manager.clear_draw_tool()
+            except Exception:  # noqa: BLE001
                 pass
-            self.feature_edit_tool = None
-        if getattr(self, "attribute_entry_tool", None) is not None:
-            try:
-                self.canvas.unsetMapTool(self.attribute_entry_tool)
-            except Exception:
-                pass
-            self.attribute_entry_tool = None
-        if getattr(self, "split_tool", None) is not None:
-            try:
-                self.canvas.unsetMapTool(self.split_tool)
-            except Exception:
-                pass
-            self.split_tool = None
-        if self.active_tool is not None:
-            try:
-                self.canvas.unsetMapTool(self.active_tool)
-            except Exception:
-                pass
-            self.active_tool = None
         if self.rubber_band is not None:
             try:
                 self.rubber_band.reset()
-            except Exception:
+            except Exception:  # noqa: BLE001
                 pass
             self.rubber_band = None
         self.temp_points.clear()

@@ -15,7 +15,6 @@ from qgis.PyQt.QtWidgets import QMessageBox
 from qgis.PyQt.QtGui import QColor
 
 from .base import BaseDrawTool
-from .snap import snapped_map_point
 
 
 class PolygonDrawTool(BaseDrawTool):
@@ -42,11 +41,13 @@ class PolygonDrawTool(BaseDrawTool):
         self.line_rubber_band.setLineStyle(Qt.PenStyle.DashLine)
 
     def canvasMoveEvent(self, event) -> None:  # noqa: N802
+        # 先取吸附点并更新磁吸指示器（含「上一笔已画完、正准备画下一笔」的状态：
+        # is_over=True 时也要实时显示吸到顶点/边，不能提前 return）
+        point = self.snapped_point(event, wait_index=False)
         if self.is_over:
             return
         if not self.temp_points:
             return
-        point = snapped_map_point(self.canvas, event, wait_index=False)
         self.line_rubber_band.reset(QgsWkbTypes.LineGeometry)
         self.line_rubber_band.addPoint(self.temp_points[0])
         self.line_rubber_band.addPoint(point)
@@ -56,7 +57,7 @@ class PolygonDrawTool(BaseDrawTool):
     def canvasPressEvent(self, event) -> None:  # noqa: N802
         if event.button() == Qt.MouseButton.LeftButton:
             self.is_over = False
-            point = snapped_map_point(self.canvas, event)
+            point = self.snapped_point(event)
             self.temp_points.append(QgsPointXY(point.x(), point.y()))
             self._update_rubber_band()
         elif event.button() == Qt.MouseButton.RightButton:
@@ -68,11 +69,7 @@ class PolygonDrawTool(BaseDrawTool):
                     self.temp_points.append(self.temp_points[0])
                 geometry = QgsGeometry.fromPolygonXY([self.temp_points])
                 self.geom = geometry
-                if self.draw_manager is not None:
-                    self.draw_manager.finish_draw(geometry)
-                else:
-                    self.temp_points.clear()
-                    self.finish_draw()
+                self.commit_geometry(geometry)
             else:
                 QMessageBox.warning(self.canvas, "警告", "面要素至少需要 3 个节点！")
                 if self.draw_manager is not None:

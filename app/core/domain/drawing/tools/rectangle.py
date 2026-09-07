@@ -14,7 +14,6 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
 
 from .base import BaseDrawTool
-from .snap import snapped_map_point
 
 
 class RectangleDrawTool(BaseDrawTool):
@@ -35,11 +34,13 @@ class RectangleDrawTool(BaseDrawTool):
 
     def canvasMoveEvent(self, event) -> None:  # noqa: N802
         try:
+            # 先取吸附点并更新磁吸指示器（含「上一笔已画完、正准备画下一笔」的
+            # 状态：is_over=True 时也要实时显示吸到顶点/边，不能提前 return）
+            point = self.snapped_point(event, wait_index=False)
             if self.is_over:
                 return
             if not self.temp_points:
                 return
-            point = snapped_map_point(self.canvas, event, wait_index=False)
             if len(self.temp_points) > 1:
                 self.temp_points = [self.temp_points[0]]
             self.temp_points.append(QgsPointXY(point.x(), point.y()))
@@ -54,15 +55,11 @@ class RectangleDrawTool(BaseDrawTool):
         if not self.is_over:
             if event.button() == Qt.MouseButton.LeftButton:
                 self.is_over = False
-                point = snapped_map_point(self.canvas, event)
+                point = self.snapped_point(event)
                 self.temp_points.append(QgsPointXY(point.x(), point.y()))
             else:
                 self.is_over = True
-                if self.draw_manager is not None:
-                    self.draw_manager.finish_draw(self.geom)
-                else:
-                    self.temp_points.clear()
-                    self.finish_draw()
+                self.commit_geometry(self.geom)
 
     def _update_rubber_band(self) -> None:
         if len(self.temp_points) < 2:
