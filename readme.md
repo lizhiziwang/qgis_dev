@@ -232,3 +232,8 @@ app.ui  ←  表现层（MainWindow + docks + dialogs + tools），只发信号�
 | 5. FastAPI + 离线 | ✅ | `app.server` 独立进程 + `core/data/*` |
 | 6. 便携打包 | ✅ | `tools/` 统一 spec + ps1/sh + `launch_qgis` 便携启动器 + 免装 QGIS |
 | 7. 流程编排 | ✅ | `app.core.domain.flow`（类型/模型/拓扑/序列化/执行器/算法库）+ `app.ui.flow_editor`（画布/参数面板/日志）+ 菜单与工具 dock 入口 |
+
+
+还需要安装
+
+D:\zsh\app\qgis4.2\bin\python-qgis.bat -m pip install pysqlite3

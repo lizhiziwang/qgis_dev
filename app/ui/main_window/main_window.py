@@ -1248,12 +1248,15 @@ class MainWindow(FramelessMixin, QMainWindow):
         try:
             vlayer = QgsVectorLayer(uri, name, provider)
             if vlayer.isValid():
-                vlayer.path_c = item.path()
+                # path_c 存**容器路径**（供“执行SQL”按文件打开）：item.path()
+                # 对 gdb/gpkg 子图层是 ``容器|layername=层名`` 的 QGIS URI，
+                # ogr.Open 不认，剥掉 | 及之后所有 provider 选项
+                vlayer.path_c = uri.split("|", 1)[0]
                 self._add_layer_to_project(vlayer)
                 return
             rlayer = QgsRasterLayer(uri, name, provider)
             if rlayer.isValid():
-                rlayer.path_c = item.path()
+                rlayer.path_c = uri.split("|", 1)[0]
                 self._add_layer_to_project(rlayer)
         finally:
             self._end_layer_loading()
@@ -1435,7 +1438,8 @@ class MainWindow(FramelessMixin, QMainWindow):
             if not layer.isValid():
                 continue
             if u.providerKey == "ogr":
-                layer.path_c = u.uri
+                # 容器路径（剥 |layername= 等 provider 选项），供“执行SQL”按文件打开
+                layer.path_c = u.uri.split("|", 1)[0]
             self._add_layer_to_project(layer)
         event.acceptProposedAction()
 

@@ -2,14 +2,19 @@
 
 按旧版设计：
 
-- 工具条平铺 9 个文本按钮（不用下拉菜单）：
-  开始编辑 / 停止编辑 / 保存编辑 / 融合几何 / 要素编辑 / 线分割 ｜ 添加点 / 添加线 / 添加面
+- 工具条平铺 10 个文本按钮（不用下拉菜单）：
+  开始编辑 / 停止编辑 / 保存编辑 / 融合几何 / 要素编辑 / 属性录入 / 线分割 ｜
+  添加点 / 添加线 / 添加面
 - 「开始编辑」**恒可用**：点击弹出图层选择框（:attr:`_edit_layer_chooser`，
   由 :class:`MainWindow` 注入），选中图层即成为编辑目标并进入编辑态——
   不再依赖图层树右键 / 点击预设编辑图层（那些入口已移除）。
 - 几何类型按当前 layer 启用对应按钮（点 layer 只能点，线 layer 只能线）；
   「要素编辑」需处于编辑态（点击要素编辑其几何，见
-  :class:`app.ui.tools.feature_edit.FeatureEditTool`）；「线分割」需处于编辑态
+  :class:`app.ui.tools.feature_edit.FeatureEditTool`）；「属性录入」**不需**
+  先开编辑——激活时若目标图层未编辑会自动进入编辑态（点击要素 → 右侧
+  Dock 编辑属性后确认，见
+  :class:`app.ui.docks.attribute_entry_dock.AttributeEntryDock`）；
+  「线分割」需处于编辑态
   （双击选要素后左键画切割线、右键完成分割，见
   :class:`app.ui.tools.split_feature.SplitFeatureTool`）。
 
@@ -91,6 +96,9 @@ class DigitizingToolbar(QObject):
         self.merge_tool = None
         self.feature_edit_tool = None
         self.split_tool = None
+        #: 属性录入工具实例（防 GC）与右侧 Dock（懒建单实例）
+        self.attribute_entry_tool = None
+        self._attribute_entry_dock = None
 
         # 当前是否处于编辑态（start_edit_fun 成功后 True，stop_edit_fun 后 False）
         self._editing = False
@@ -122,6 +130,11 @@ class DigitizingToolbar(QObject):
         self.feature_edit_action = QAction("要素编辑", self.digitizing_toolbar)
         self.feature_edit_action.triggered.connect(self.enable_feature_edit)
 
+        # ---- 属性录入（恒可用：无需编辑态，激活时自动开始编辑）----
+        #     点击要素 → 右侧 Dock 改属性
+        self.attribute_entry_action = QAction("属性录入", self.digitizing_toolbar)
+        self.attribute_entry_action.triggered.connect(self.enable_attribute_entry)
+
         # ---- 线分割（需处于编辑态；双击选要素 → 画切割线 → 右键分割）----
         self.split_feature_action = QAction("线分割", self.digitizing_toolbar)
         self.split_feature_action.triggered.connect(self.enable_split_tool)
@@ -134,6 +147,7 @@ class DigitizingToolbar(QObject):
         self.digitizing_toolbar.addAction(self.save_edit)
         self.digitizing_toolbar.addAction(self.merge_geometry_action)
         self.digitizing_toolbar.addAction(self.feature_edit_action)
+        self.digitizing_toolbar.addAction(self.attribute_entry_action)
         self.digitizing_toolbar.addAction(self.split_feature_action)
 
         # 分隔两组
@@ -220,24 +234,36 @@ class DigitizingToolbar(QObject):
                     applier(layer)
         if layer is None or layer.type() != layer.VectorLayer:
             return
+        if not self._ensure_editing(layer):
+            return
+
+    def _ensure_editing(self, layer: QgsVectorLayer) -> bool:
+        """确保 ``layer`` 进入编辑态并同步工具条状态机。
+
+        - 已在编辑态：若状态机未同步（第三方/其它入口先开编辑）则补齐同步；
+        - 未编辑：调用 ``layer.startEditing()``，成功后同步按钮组并发出
+          :pyattr:`editing_state_changed`。
+
+        供「开始编辑」「属性录入」（自动开编辑）共用。
+
+        :returns: 是否处于（已进入）编辑态。
+        """
         if layer.isEditable():
-            # 已在编辑态（通常是换层后选回同一层）：保持现状即可
-            # （按钮状态以 _editing 为准）
             if not self._editing:
                 self._editing = True
                 self._set_edit_actions_enabled(True, editing_now=True)
                 self._set_add_buttons_for_geometry(layer.geometryType())
-            return
+            return True
 
         ok = layer.startEditing()
         if not ok:
             QMessageBox.warning(self.main_window, "警告", "无法开始编辑！")
-            return
-
+            return False
         self._editing = True
         self._set_edit_actions_enabled(True, editing_now=True)
         self._set_add_buttons_for_geometry(layer.geometryType())
         self.editing_state_changed.emit(True)
+        return True
 
     def stop_edit_fun(self) -> None:
         """停止编辑：弹"是否保存"对话框。"""
@@ -405,6 +431,61 @@ class DigitizingToolbar(QObject):
             "已激活「线分割」工具：左键双击要素选中后，按住左键画切割线、右键完成分割；Esc 取消 / 退出",
         )
 
+    def enable_attribute_entry(self) -> None:
+        """激活「属性录入」工具：点击要素 → 右侧 Dock 编辑其属性。
+
+        不需要预先「开始编辑」：目标图层若尚未进入编辑态，这里自动开启
+        （与「开始编辑」同一条状态机：``startEditing`` + 按钮组同步 + 发
+        :pyattr:`editing_state_changed`）。无编辑目标时先弹图层选择框。
+        """
+        layer = self._current_layer()
+        chooser = self._edit_layer_chooser
+        if layer is None and chooser is not None:
+            # 弹窗选层（纯选择；取消返回 None → 不做任何事）
+            layer = chooser()
+            if layer is None:
+                return
+            # 落地为编辑目标：edit_layer / 停旧层 / 工具条 / 捕捉联动
+            if self._current_layer() is not layer:
+                applier = getattr(self.main_window, "_apply_edit_target", None)
+                if callable(applier):
+                    applier(layer)
+        if layer is None or layer.type() != layer.VectorLayer:
+            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            return
+        # 属性录入不需要用户先「开始编辑」：自动进入编辑态
+        if not self._ensure_editing(layer):
+            return
+        # 清掉可能激活的绘制 / 融合 / 要素编辑 / 分割工具，避免并存
+        self.clear_draw_tool()
+
+        from app.ui.docks.attribute_entry_dock import AttributeEntryDock
+        from app.ui.tools.attribute_entry import AttributeEntryTool
+
+        # 懒建右侧 Dock（单实例；关闭后再次激活时重新显示）
+        dock = self._attribute_entry_dock
+        if dock is None:
+            dock = AttributeEntryDock(self.main_window)
+            self.main_window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+            self._attribute_entry_dock = dock
+
+        self.attribute_entry_tool = AttributeEntryTool(
+            self.canvas,
+            editing_layer_getter=self._editing_layer_getter,
+            on_feature=dock.load_feature,
+            hint=lambda text: self.main_window.messageBar.pushMessage(
+                text, level=Qgis.MessageLevel.Info, duration=2
+            ),
+        )
+        self.canvas.setMapTool(self.attribute_entry_tool)
+        dock.show()
+        dock.raise_()
+        QMessageBox.information(
+            self.main_window,
+            "提示",
+            "已激活「属性录入」工具：点击图层上的要素，在右侧面板修改其属性；确认后保存，Esc 退出",
+        )
+
     def finish_draw(self, geometry: QgsGeometry) -> None:
         """绘制完成：校验 + 创建要素 + 弹属性对话框（与旧版 finish_draw 行为一致）。"""
         if geometry is None:
@@ -456,6 +537,12 @@ class DigitizingToolbar(QObject):
             except Exception:
                 pass
             self.feature_edit_tool = None
+        if getattr(self, "attribute_entry_tool", None) is not None:
+            try:
+                self.canvas.unsetMapTool(self.attribute_entry_tool)
+            except Exception:
+                pass
+            self.attribute_entry_tool = None
         if getattr(self, "split_tool", None) is not None:
             try:
                 self.canvas.unsetMapTool(self.split_tool)
@@ -489,8 +576,10 @@ class DigitizingToolbar(QObject):
         :param editing_now: True → 编辑中：停止/保存/融合/要素编辑/线分割 启用；
             False → 未编辑：仅「开始编辑」可用。
         """
-        # 「开始编辑」恒可用：无目标图层也能点（弹窗选层）；编辑中也能点（换层）
+        # 「开始编辑」「属性录入」恒可用：无目标图层也能点（弹窗选层）；
+        # 属性录入无需编辑态——激活时自动进入（见 enable_attribute_entry）
         self.start_edit.setEnabled(True)
+        self.attribute_entry_action.setEnabled(True)
         if not enabled:
             self.stop_edit.setEnabled(False)
             self.save_edit.setEnabled(False)

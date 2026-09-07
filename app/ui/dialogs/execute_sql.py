@@ -146,6 +146,22 @@ class VectorLayerTableModel(QAbstractTableModel):
 
 #: 后台工作线程每攒够这么多行就冲刷一批（结果渐进显示，避免一次性内存峰值）
 STREAM_CHUNK = 5000
+
+
+def _container_path(layer) -> str:
+    """矢量图层 → 供 ``ogr.Open`` 的**容器路径**。
+
+    ``layer.path_c``（若被设置）或 ``layer.source()`` 可能是 QGIS 数据源
+    URI——浏览器双击 / 画布拖拽载入的 gdb/gpkg 子图层形如
+    ``D:/xxx.gdb|layername=要素类名``，而 ``ogr.Open`` 只认容器路径，
+    ``|layername=`` 是 QGIS provider 选项、GDAL 并不认识（直接 Open 会抛
+    “does not exist … not recognized as a supported dataset name”）。
+    这里把 ``|`` 及之后的所有 provider 选项剥掉，得到容器本身。
+    """
+    uri = getattr(layer, "path_c", None) or layer.source()
+    if not uri:
+        return ""
+    return uri.split("|", 1)[0]
 #: 冲刷时间下限（秒）：单条行转换慢时仍能按时刷新状态栏
 FLUSH_INTERVAL = 0.1
 #: 模型按需读取的行缓存上限。QTableView 只渲染可视行（几百行），缓存 500 行
@@ -255,7 +271,10 @@ class ExecuteSqlDialog(BaseDialog):
         sql_frame = QFrame()
         sql_layout = QVBoxLayout(sql_frame)
         self.sql_input = QTextEdit()
-        self.sql_input.setText(f"select * from {self.layer.name().split('.')[0]} limit 1000")
+        # OGR SQL 在**容器**上执行，FROM 用的是容器内层名；双引号包裹并转义
+        # 内部引号，防层名含空格/特殊字符时解析失败
+        _tbl = self.layer.name().split(".")[0].replace('"', '""')
+        self.sql_input.setText(f'select * from "{_tbl}" limit 1000')
         self.sql_input.setMinimumHeight(40)
         self.sql_input.setMaximumHeight(150)
         sql_layout.addWidget(self.sql_input)
@@ -318,7 +337,20 @@ class ExecuteSqlDialog(BaseDialog):
         if not sql:
             QMessageBox.warning(self, "警告", "请输入 SQL 查询！")
             return
-        path = self.layer.path_c
+        path = _container_path(self.layer)
+        # 仅支持本地文件/容器数据源（shp / gpkg / gdb / geojson …）：
+        # 内存图层、postgres 等连接源 ogr.Open 打不开，弹窗而非抛 GDAL 错
+        if (
+            self.layer.providerType() != "ogr"
+            or not path
+            or not (os.path.isfile(path) or os.path.isdir(path))
+        ):
+            QMessageBox.warning(
+                self,
+                "警告",
+                "仅支持本地文件数据源（shp / gpkg / gdb / geojson 等）的 SQL 查询",
+            )
+            return
         self._table_model.set_schema([])  # 清空旧结果
         self.execute_btn.setEnabled(False)
         self.execute_btn.setText("查询中…")
