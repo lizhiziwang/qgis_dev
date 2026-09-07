@@ -23,6 +23,29 @@ if ($cfgContent -match 'install_path:\s*(.+)') {
     exit 1
 }
 
+# install_path 支持 bash 风格 ${VAR} / ${VAR:-默认} 环境变量引用（语义与
+# app/env/config.py 的 _expand_env 一致，避免同一份 yaml 在 Win/麒麟 上维护两处）。
+# 必须在 Join-Path 前展开，否则字面量 "${QGIS_INSTALL_PATH:-...}" 会把
+# ${QGIS_INSTALL_PATH 误当盘符，报 DriveNotFoundException。
+function Expand-EnvRef {
+    param([string]$Value)
+    # 去掉 YAML 行内注释（" # " 后内容）；路径本身不会包含该分隔
+    $Value = ($Value -split '\s+#')[0].Trim()
+    $pattern = '\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}'
+    $evaluator = {
+        param($m)
+        $var = $m.Groups[1].Value
+        $hasDefault = $m.Groups[2].Success
+        $default = $m.Groups[2].Value
+        $v = [Environment]::GetEnvironmentVariable($var)
+        if ($v) { return $v }
+        if ($hasDefault) { return $default }
+        return ''
+    }
+    return [regex]::Replace($Value, $pattern, $evaluator)
+}
+$QGISInstall = Expand-EnvRef $QGISInstall
+
 $PythonLauncher = Join-Path $QGISInstall "bin/python-qgis.bat"
 if (-not (Test-Path $PythonLauncher)) {
     Write-Error "未找到 Python launcher: $PythonLauncher"
@@ -102,7 +125,3 @@ Write-Host "  B U I L D   C O M P L E T E ! " -ForegroundColor Green
 Write-Host "=================================" -ForegroundColor Green
 Write-Host "Portable app: $DistPath"
 Write-Host "Run: $DistPath/$AppName.exe"
-
-
-conda create -n qgis_build -c conda-forge python=3.10 qgis pyqt pyinstaller networkx scipy fastapi uvicorn pydantic pyyaml psycopg2 -y
-conda create -n qgis_build -c python=3.10

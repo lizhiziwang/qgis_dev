@@ -11,6 +11,7 @@
 """
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -18,6 +19,23 @@ from pathlib import Path
 SPEC_DIR = Path(SPECPATH).resolve()
 PROJECT_ROOT = SPEC_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+
+# install_path 值支持 bash 风格 ${VAR} / ${VAR:-默认} 环境变量引用（语义与
+# app/env/config.py 的 _expand_env 一致，保证 Linux/Windows 共用同一份 yaml）；
+# 直接传给 Path() 会把字面量当相对路径，导致 PyInstaller 找不到 DLL。
+_ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
+
+
+def _expand_env(s: str) -> str:
+    def _repl(m: "re.Match") -> str:
+        var, default = m.group(1), m.group(2)
+        v = os.environ.get(var)
+        if v:
+            return v
+        return default if default is not None else ""
+
+    return _ENV_REF.sub(_repl, s)
+
 
 # 读 yaml 配置
 try:
@@ -31,7 +49,7 @@ IS_WIN = sys.platform == "win32"
 if IS_WIN:
     # ------------------------------------------------------------------ Windows
     # OSGeo4W 布局：config/app.yaml 的 qgis.install_path 指向安装根（D:/zsh/app/qgis4.2）
-    QGIS_INSTALL = cfg.get("qgis", {}).get("install_path", "D:/zsh/app/qgis4.2")
+    QGIS_INSTALL = _expand_env(cfg.get("qgis", {}).get("install_path", "D:/zsh/app/qgis4.2"))
     QGIS_PYTHON = Path(QGIS_INSTALL) / "apps" / "qgis" / "python"
     QGIS_BIN = Path(QGIS_INSTALL) / "apps" / "qgis" / "bin"
     MAIN_BIN = Path(QGIS_INSTALL) / "bin"
