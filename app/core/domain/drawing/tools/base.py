@@ -74,6 +74,11 @@ class BaseDrawTool(QgsMapTool):
         self.is_buffer = is_buffer
         self.distance = float(distance)
         self.geom = None  # type: ignore[assignment]
+        #: 最近一次取点的吸附 match（:class:`QgsPointLocator.Match` 或 None），
+        #: 追踪（:meth:`traced_vertex`）用来判断该顶点是否吸到已有要素
+        self._last_snap_match = None
+        #: 上一个已落顶点是否吸到已有要素（追踪起点资格）
+        self._prev_vertex_snapped = False
 
         # 磁吸预览（指示器按画布共享，见 _snap_indicator_for；无实例字段）
 
@@ -120,9 +125,47 @@ class BaseDrawTool(QgsMapTool):
         """
         match = snapped_match(self.canvas, event, wait_index=wait_index)
         self._set_snap_match(match)
+        self._last_snap_match = match
         if match is not None:
             return match.point()
         return self.canvas.getCoordinateTransform().toMapCoordinates(event.pixelPoint())
+
+    def traced_vertex(self, point: "QgsPointXY") -> "list[QgsPointXY]":
+        """追踪钩子：落顶点前调用，返回应插在本顶点之前的追踪中间点。
+
+        语义与 QGIS 桌面追踪一致：**上一个顶点**与本顶点都吸附到已有要素时，
+        两点间沿已有要素几何的最短路径自动采进几何（见
+        :mod:`app.core.domain.drawing.tools.trace`）。任一端未吸附 / 追踪未
+        开启 / 无路径 → 返回空（降级为普通取点）。
+
+        调用顺序约定（线 / 面工具左键落点）::
+
+            point = self.snapped_point(event)
+            for p in self.traced_vertex(point):
+                self.temp_points.append(p)
+            self.temp_points.append(point)
+
+        本方法内部同时把「本顶点是否吸附」登记为下一个顶点的追踪起点资格。
+        """
+        extension: "list[QgsPointXY]" = []
+        snapped_now = (
+            self._last_snap_match is not None
+            and self._last_snap_match.isValid()
+        )
+        if (
+            snapped_now
+            and self._prev_vertex_snapped
+            and self.temp_points
+        ):
+            try:
+                from app.core.domain.drawing.tools.trace import trace_between
+
+                extension = trace_between(self.canvas, self.temp_points[-1], point)
+            except Exception:  # noqa: BLE001 —— 追踪失败降级为不插点
+                logger.exception("追踪取点失败")
+                extension = []
+        self._prev_vertex_snapped = snapped_now
+        return extension
 
     def commit_geometry(self, geometry) -> None:
         """一笔绘制完成：先收起磁吸标记，再按是否挂 draw_manager 派发。

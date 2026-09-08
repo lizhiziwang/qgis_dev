@@ -61,6 +61,9 @@ class PolygonDrawTool(BaseDrawTool):
         if event.button() == Qt.MouseButton.LeftButton:
             self.is_over = False
             point = self.snapped_point(event)
+            # 追踪：前后两顶点都吸附到已有要素时自动采进沿边中间点
+            for traced in self.traced_vertex(point):
+                self.temp_points.append(traced)
             self.temp_points.append(QgsPointXY(point.x(), point.y()))
             self._update_rubber_band()
         elif event.button() == Qt.MouseButton.RightButton:

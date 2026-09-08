@@ -311,8 +311,6 @@ class MainWindow(FramelessMixin, QMainWindow):
 
         layout.addWidget(self.canvas)
 
-        layout.addWidget(self.canvas)
-
         crs = QgsCoordinateReferenceSystem("EPSG:4490")
         self.project.setCrs(crs)
         self.canvas.setDestinationCrs(crs)

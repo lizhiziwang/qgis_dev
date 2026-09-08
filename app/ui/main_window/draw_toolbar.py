@@ -3,8 +3,8 @@
 按旧版设计：
 
 - 工具条平铺文本按钮（不用下拉菜单）：
-  开始编辑 / 停止编辑 / 保存编辑 / 融合几何 / 要素编辑 / 属性录入 / 线分割 /
-  面分割 / 分解 ｜ 添加点 / 添加线 / 添加面
+  开始编辑 / 停止编辑 / 保存编辑 / 撤销 / 重做 / 融合几何 / 要素编辑 / 属性录入 /
+  线分割 / 面分割 / 挖洞 / 补洞 / 分解 ｜ 添加点 / 添加线 / 添加面
 - 「开始编辑」**恒可用**：点击弹出图层选择框（:attr:`_edit_layer_chooser`，
   由 :class:`MainWindow` 注入），选中图层即成为编辑目标并进入编辑态——
   不再依赖图层树右键 / 点击预设编辑图层（那些入口已移除）。
@@ -61,7 +61,7 @@ from qgis.PyQt.QtWidgets import (
 from app.core.domain.drawing import DrawManager
 from app.core.domain.drawing.tools import get_tool_class
 from app.infra.logging import get_logger
-from app.infra.messagebar import send  
+from app.infra.messagebar import send
 
 logger = get_logger(__name__)
 
@@ -106,10 +106,15 @@ class DigitizingToolbar(QObject):
         #: unsetMapTool 不会自动回退前一个工具，不记录的话停止编辑后画布会
         #: 变成“无任何工具”，点画布无反应）。
         self._previous_map_tool = None
+        #: 挂了 ``canUndoChanged`` / ``canRedoChanged`` 的撤销栈（与停编钩子同
+        #: 生命周期）：撤销 / 重做按钮的可用态实时跟随栈变化
+        self._undo_stack_hook = None
         self.merge_tool = None
         self.feature_edit_tool = None
         self.split_tool = None
         self.split_polygon_tool = None
+        self.dig_hole_tool = None
+        self.fill_hole_tool = None
         #: 属性录入工具实例（防 GC）与右侧 Dock（懒建单实例）
         self.attribute_entry_tool = None
         self._attribute_entry_dock = None
@@ -117,9 +122,9 @@ class DigitizingToolbar(QObject):
         # 当前是否处于编辑态（start_edit_fun 成功后 True，stop_edit_fun 后 False）
         self._editing = False
         #: 当前激活的工具种类："point"/"line"/"polygon"/"merge"/"feature"/
-        #: "split"/"split_polygon"/"attr_entry"，None=未激活（「分解」是一次性
-        #: 动作，不占用激活态）。工具按钮的勾选/互斥、日志都以它为唯一依据
-        #: （_refresh_button_states 统一推导，不再散点 setChecked）
+        #: "split"/"split_polygon"/"dig_hole"/"fill_hole"/"attr_entry"，None=未
+        #: 激活（「分解」是一次性动作，不占用激活态）。工具按钮的勾选/互斥、
+        #: 日志都以它为唯一依据（_refresh_button_states 统一推导）
         self._active_kind: str | None = None
         #: 挂了 ``editingStopped`` 兜底钩子的图层：外部入口（属性表 Dock「停止
         #: 编辑」/ 切图层停旧层 / 关工程等）结束编辑时不走 :meth:`stop_edit_fun`，
@@ -175,11 +180,33 @@ class DigitizingToolbar(QObject):
             lambda checked=False: self.enable_split_tool(checked)
         )
 
+        # ---- 撤销 / 重做（编辑中且栈上有对应步骤时可用；同 Ctrl+Z / Ctrl+Shift+Z）----
+        self.undo_action = QAction("撤销", self.digitizing_toolbar)
+        self.undo_action.setToolTip("撤销上一步编辑（Ctrl+Z）")
+        self.undo_action.triggered.connect(self.undo_last_edit)
+        self.redo_action = QAction("重做", self.digitizing_toolbar)
+        self.redo_action.setToolTip("重做最近被撤销的编辑（Ctrl+Shift+Z / Ctrl+Y）")
+        self.redo_action.triggered.connect(self.redo_last_edit)
+
         # ---- 面分割（需处于编辑态；画多边形切割区域 → 双击分割）----
         self.split_polygon_action = QAction("面分割", self.digitizing_toolbar)
         self.split_polygon_action.setCheckable(True)
         self.split_polygon_action.triggered.connect(
             lambda checked=False: self.enable_split_polygon_tool(checked)
+        )
+
+        # ---- 挖洞（需处于编辑态且为面图层；画挖除区域 → 双击挖成洞）----
+        self.dig_hole_action = QAction("挖洞", self.digitizing_toolbar)
+        self.dig_hole_action.setCheckable(True)
+        self.dig_hole_action.triggered.connect(
+            lambda checked=False: self.enable_dig_hole(checked)
+        )
+
+        # ---- 补洞（需处于编辑态且为面图层；点击洞的内部填补）----
+        self.fill_hole_action = QAction("补洞", self.digitizing_toolbar)
+        self.fill_hole_action.setCheckable(True)
+        self.fill_hole_action.triggered.connect(
+            lambda checked=False: self.enable_fill_hole(checked)
         )
 
         # ---- 分解（需处于编辑态；一次性动作：选中多部件要素 → 拆成单部件）----
@@ -192,11 +219,15 @@ class DigitizingToolbar(QObject):
         self.digitizing_toolbar.addAction(self.start_edit)
         self.digitizing_toolbar.addAction(self.stop_edit)
         self.digitizing_toolbar.addAction(self.save_edit)
+        self.digitizing_toolbar.addAction(self.undo_action)
+        self.digitizing_toolbar.addAction(self.redo_action)
         self.digitizing_toolbar.addAction(self.merge_geometry_action)
         self.digitizing_toolbar.addAction(self.feature_edit_action)
         self.digitizing_toolbar.addAction(self.attribute_entry_action)
         self.digitizing_toolbar.addAction(self.split_feature_action)
         self.digitizing_toolbar.addAction(self.split_polygon_action)
+        self.digitizing_toolbar.addAction(self.dig_hole_action)
+        self.digitizing_toolbar.addAction(self.fill_hole_action)
         self.digitizing_toolbar.addAction(self.explode_action)
 
         # 分隔两组
@@ -229,6 +260,8 @@ class DigitizingToolbar(QObject):
             "feature": self.feature_edit_action,
             "split": self.split_feature_action,
             "split_polygon": self.split_polygon_action,
+            "dig_hole": self.dig_hole_action,
+            "fill_hole": self.fill_hole_action,
             "attr_entry": self.attribute_entry_action,
         }
 
@@ -678,6 +711,136 @@ class DigitizingToolbar(QObject):
             "双击完成分割；右键取消多边形，Esc 退出",
         )
 
+    def enable_dig_hole(self, checked: bool = True) -> None:
+        """激活「挖洞」工具：在面要素上画挖除区域，双击把该区域挖成洞。
+
+        ``checked=False``(再点一次已按下的按钮) → 取消激活。
+        """
+        if not checked:
+            self.clear_draw_tool()
+            return
+        layer = self._current_layer()
+        if layer is None or layer.type() != layer.VectorLayer:
+            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            return
+        if not layer.isEditable():
+            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            return
+        if layer.geometryType() != QgsWkbTypes.PolygonGeometry:
+            QMessageBox.warning(self.main_window, "警告", "挖洞只支持面图层")
+            return
+        # 清掉可能激活的其它工具，避免并存
+        self.clear_draw_tool()
+
+        from app.ui.tools.dig_hole import DigHoleTool
+
+        self.dig_hole_tool = DigHoleTool(
+            self.canvas,
+            editing_layer_getter=self._editing_layer_getter,
+            hint=lambda text: self.main_window.messageBar.pushMessage(
+                text, level=Qgis.MessageLevel.Info, duration=2
+            ),
+        )
+        self._activate_map_tool(self.dig_hole_tool)
+        self._mark_active("dig_hole")
+        QMessageBox.information(
+            self.main_window,
+            "提示",
+            "已激活「挖洞」工具：在面要素上左键画挖除区域（支持捕捉），"
+            "双击把该区域挖成洞；右键取消区域，Esc 退出",
+        )
+
+    def enable_fill_hole(self, checked: bool = True) -> None:
+        """激活「补洞」工具：在面要素洞的内部单击，删除该内环（几何恢复实心）。
+
+        ``checked=False``(再点一次已按下的按钮) → 取消激活。
+        """
+        if not checked:
+            self.clear_draw_tool()
+            return
+        layer = self._current_layer()
+        if layer is None or layer.type() != layer.VectorLayer:
+            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            return
+        if not layer.isEditable():
+            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            return
+        if layer.geometryType() != QgsWkbTypes.PolygonGeometry:
+            QMessageBox.warning(self.main_window, "警告", "补洞只支持面图层")
+            return
+        # 清掉可能激活的其它工具，避免并存
+        self.clear_draw_tool()
+
+        from app.ui.tools.fill_hole import FillHoleTool
+
+        self.fill_hole_tool = FillHoleTool(
+            self.canvas,
+            editing_layer_getter=self._editing_layer_getter,
+            hint=lambda text: self.main_window.messageBar.pushMessage(
+                text, level=Qgis.MessageLevel.Info, duration=2
+            ),
+        )
+        self._activate_map_tool(self.fill_hole_tool)
+        self._mark_active("fill_hole")
+        QMessageBox.information(
+            self.main_window,
+            "提示",
+            "已激活「补洞」工具：在面要素洞的内部单击填补（挖洞产生的洞、内环均可）；Esc 退出",
+        )
+
+    # ============================================================== 编辑撤销 / 重做
+
+    def undo_last_edit(self) -> None:
+        """「撤销」按钮：同画布 Ctrl+Z，对当前编辑图层撤销一步（MainWindow 实现）。"""
+        fn = getattr(self.main_window, "_undo_edit", None)
+        if not callable(fn):
+            QMessageBox.information(self.main_window, "提示", "当前窗口不支持撤销")
+            return
+        fn()
+
+    def redo_last_edit(self) -> None:
+        """「重做」按钮：同画布 Ctrl+Shift+Z / Ctrl+Y，重做一步（MainWindow 实现）。"""
+        fn = getattr(self.main_window, "_redo_edit", None)
+        if not callable(fn):
+            QMessageBox.information(self.main_window, "提示", "当前窗口不支持重做")
+            return
+        fn()
+
+    def _on_undo_availability(self, *_args) -> None:
+        """撤销栈 ``canUndoChanged`` / ``canRedoChanged`` → 刷新按钮可用态。"""
+        self._refresh_button_states()
+
+    def _connect_undo_stack(self, layer: QgsVectorLayer | None) -> None:
+        """把 ``layer`` 撤销栈的可用态信号接到按钮刷新（与停编钩子同生命周期）。"""
+        self._disconnect_undo_stack()
+        if layer is None or layer.type() != layer.VectorLayer:
+            return
+        try:
+            stack = layer.undoStack()
+        except RuntimeError:
+            return
+        if stack is None:
+            return
+        try:
+            stack.canUndoChanged.connect(self._on_undo_availability)
+            stack.canRedoChanged.connect(self._on_undo_availability)
+            self._undo_stack_hook = stack
+        except Exception:  # noqa: BLE001
+            self._undo_stack_hook = None
+            logger.exception("连接撤销栈信号失败: %s", layer.name())
+
+    def _disconnect_undo_stack(self) -> None:
+        """断开当前挂着的撤销栈信号（目标切换 / 停止编辑）。"""
+        stack = self._undo_stack_hook
+        self._undo_stack_hook = None
+        if stack is None:
+            return
+        for sig in ("canUndoChanged", "canRedoChanged"):
+            try:
+                getattr(stack, sig).disconnect(self._on_undo_availability)
+            except Exception:  # noqa: BLE001 —— 栈销毁 / 未连接等收尾场景属正常
+                pass
+
     def explode_features(self) -> None:
         """「分解」一次性动作：把选择工具选中的多部件要素拆成多个单部件要素。
 
@@ -785,7 +948,8 @@ class DigitizingToolbar(QObject):
         #     "提示",
         #     "已激活「属性录入」工具：点击图层上的要素，在右侧面板修改其属性；确认后保存，Esc 退出",
         # )
-        send("info", "已激活「属性录入」工具：点击图层上的要素，在右侧面板修改其属性；确认后保存，Esc 退出", duration=3) 
+        send("info", "已激活「属性录入」工具：点击图层上的要素，在右侧面板修改其属性；确认后保存，Esc 退出", duration=3)
+
     def _to_layer_geometry(self, layer: QgsVectorLayer, geometry: QgsGeometry) -> QgsGeometry:
         """绘制几何(画布坐标系) → 图层坐标系。
 
@@ -891,6 +1055,8 @@ class DigitizingToolbar(QObject):
         _drop("attribute_entry_tool")
         _drop("split_tool")
         _drop("split_polygon_tool")
+        _drop("dig_hole_tool")
+        _drop("fill_hole_tool")
         _drop("active_tool")
         # 业务层 draw_manager 的共享 rubber_band / temp_points 也一并清掉
         if self.draw_manager is not None:
@@ -921,13 +1087,15 @@ class DigitizingToolbar(QObject):
         self._active_kind = None
         self._refresh_button_states()
         logger.info(
-            "工具清理完成: mapTool=%s active_tool=%s merge=%s feature=%s split=%s split_polygon=%s attr_entry=%s",
+            "工具清理完成: mapTool=%s active_tool=%s merge=%s feature=%s split=%s split_polygon=%s dig_hole=%s fill_hole=%s attr_entry=%s",
             type(self.canvas.mapTool()).__name__ if self.canvas.mapTool() is not None else None,
             self.active_tool,
             self.merge_tool,
             self.feature_edit_tool,
             self.split_tool,
             self.split_polygon_tool,
+            self.dig_hole_tool,
+            self.fill_hole_tool,
             self.attribute_entry_tool,
         )
 
@@ -961,6 +1129,8 @@ class DigitizingToolbar(QObject):
         图层再连当前图层，同一时刻只挂一个钩子。
         """
         self._disconnect_edit_stop_hook()
+        # 撤销栈信号与停编钩子同生命周期：目标图层切换时一并换绑
+        self._connect_undo_stack(layer)
         if layer is None or layer.type() != layer.VectorLayer:
             return
         try:
@@ -973,6 +1143,8 @@ class DigitizingToolbar(QObject):
 
     def _disconnect_edit_stop_hook(self) -> None:
         """断开当前图层的 ``editingStopped`` 钩子（目标切换 / 钩子已触发）。"""
+        # 撤销栈信号与停编钩子同生命周期：一并断开
+        self._disconnect_undo_stack()
         layer = self._edit_stop_hook_layer
         self._edit_stop_hook_layer = None
         if layer is None:
@@ -1021,6 +1193,9 @@ class DigitizingToolbar(QObject):
           * 「开始编辑」「属性录入」恒可用(属性录入激活时自动进编辑态)；
           * 「停止编辑 / 保存编辑 / 融合几何 / 要素编辑 / 线分割 / 面分割 /
             分解」仅编辑中可用；
+          * 「挖洞 / 补洞」仅编辑中且图层为面时可用；
+          * 「撤销 / 重做」仅编辑中且当前图层撤销栈上有对应步骤
+            （实时跟随 canUndoChanged / canRedoChanged）；
           * 「添加点/线/面」仅编辑中且图层几何匹配时可用；
 
         - checked(勾选=工具正激活)：仅激活工具对应的按钮按下，其余弹起。
@@ -1032,6 +1207,8 @@ class DigitizingToolbar(QObject):
         layer = self._current_layer()
         is_vec = layer is not None and layer.type() == layer.VectorLayer
         editing = bool(is_vec and layer.isEditable())
+        # 几何类型提前算：挖洞 / 补洞 / 「添加X」都要按类型区分可用性
+        g_type = layer.geometryType() if is_vec else -1
 
         # 「开始编辑」恒可用(点击弹窗选层)；「属性录入」恒可用(激活时自动开编辑)
         self.start_edit.setEnabled(True)
@@ -1047,8 +1224,21 @@ class DigitizingToolbar(QObject):
             self.explode_action,
         ):
             action.setEnabled(editing)
+        # 挖洞 / 补洞：编辑中且为面图层才可用
+        self.dig_hole_action.setEnabled(editing and g_type == QgsWkbTypes.PolygonGeometry)
+        self.fill_hole_action.setEnabled(editing and g_type == QgsWkbTypes.PolygonGeometry)
+        # 撤销 / 重做：编辑中且当前图层撤销栈上有对应步骤
+        can_undo = can_redo = False
+        if editing:
+            try:
+                stack = layer.undoStack()
+                can_undo = bool(stack is not None and stack.canUndo())
+                can_redo = bool(stack is not None and stack.canRedo())
+            except RuntimeError:
+                can_undo = can_redo = False  # 图层销毁中
+        self.undo_action.setEnabled(can_undo)
+        self.redo_action.setEnabled(can_redo)
         # 「添加X」：编辑中且与图层几何匹配才可用
-        g_type = layer.geometryType() if is_vec else -1
         self.add_point_action.setEnabled(editing and g_type == QgsWkbTypes.PointGeometry)
         self.add_line_action.setEnabled(editing and g_type == QgsWkbTypes.LineGeometry)
         self.add_polygon_action.setEnabled(editing and g_type == QgsWkbTypes.PolygonGeometry)

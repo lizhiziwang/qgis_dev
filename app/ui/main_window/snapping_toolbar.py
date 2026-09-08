@@ -47,6 +47,8 @@ from qgis.PyQt.QtWidgets import (
     QToolButton,
 )
 
+from app.core.domain.drawing.tools.trace import set_tracing_enabled
+
 #: 默认吸附设置（新工程 / 未保存过吸附配置时套用，开箱即用）
 _DEFAULT_TOLERANCE_PX = 12.0
 _DEFAULT_UNITS = Qgis.MapToolUnit.Pixels
@@ -129,6 +131,17 @@ class QgisSnappingToolbar(QObject):
         self._edge_btn.toggled.connect(self._apply)
         self.toolbar.addWidget(self._edge_btn)
 
+        # 追踪（Tracing）：画线/画面时前后两顶点都吸到已有要素 → 自动采进沿边路径
+        self._trace_btn = QToolButton()
+        self._trace_btn.setText("追踪")
+        self._trace_btn.setCheckable(True)
+        self._trace_btn.setToolTip(
+            "开启追踪（类似 QGIS 追踪功能）：画线/画面时，前后两个顶点都吸到已有"
+            "要素上，两点之间会自动沿已有要素几何采点（需先开启捕捉）"
+        )
+        self._trace_btn.toggled.connect(self._on_trace_toggled)
+        self.toolbar.addWidget(self._trace_btn)
+
         self.toolbar.addSeparator()
 
         # 模式：所有图层 / 当前图层
@@ -204,6 +217,9 @@ class QgisSnappingToolbar(QObject):
     def _apply(self) -> None:
         """把控件状态写入 project 吸附配置 + 画布 snapping utils。"""
         enabled = self._enable_btn.isChecked()
+        # 追踪依赖吸附 match（两端点须吸到已有要素）→ 捕捉关闭时强制退出追踪
+        if not enabled and self._trace_btn.isChecked():
+            self._trace_btn.setChecked(False)
         mode = self._mode_combo.currentData() or Qgis.SnappingMode.AllLayers
         type_flag = self._type_flag()
         tolerance = self._tolerance_spin.value()
@@ -241,6 +257,10 @@ class QgisSnappingToolbar(QObject):
                 self._utils.snapToMap(self.canvas.extent().center(), None, True)
             except Exception:  # noqa: BLE001
                 pass
+
+    def _on_trace_toggled(self, checked: bool) -> None:
+        """「追踪」开关 → 按画布登记追踪状态（绘制工具取点时读取）。"""
+        set_tracing_enabled(self.canvas, checked)
 
     def _sync_extra_layers(self) -> None:
         """把吸附目标图层显式注册为 snapping utils 的 extra snap layers。

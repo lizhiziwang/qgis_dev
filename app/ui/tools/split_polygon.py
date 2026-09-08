@@ -131,7 +131,7 @@ class SplitPolygonTool(QgsMapTool):
         self._add_vertex(event, wait_index=True)
 
     def canvasDoubleClickEvent(self, event) -> None:  # noqa: N802
-        """左键双击：把双击点收作末点（防单击已加过）后闭合多边形并分割。"""
+        """左键双击：把双击点收作末点（防单击已加过）后闭合多边形并执行切割动作。"""
         if event.button() != Qt.MouseButton.LeftButton:
             return
         pt = self._snapped_pt(event, wait_index=True)
@@ -141,7 +141,7 @@ class SplitPolygonTool(QgsMapTool):
         if not self._pts or self._px_distance(self._pts[-1], pt) >= self.MIN_SPACING_PX:
             self._pts.append(pt)
         self._preview_pt = None
-        self._finish_split()
+        self._run_cutter_action()
 
     def canvasMoveEvent(self, event) -> None:  # noqa: N802
         """鼠标移动：预览端点跟手 + 磁吸标记实时反馈（不等待索引防卡顿）。"""
@@ -182,37 +182,11 @@ class SplitPolygonTool(QgsMapTool):
 
     # -------------------------------------------------- 分割
 
-    def _finish_split(self) -> None:
-        """双击完成：闭合多边形，把被它切开的要素分割（切出部分成新要素）。"""
-        layer = self._current_layer()
-        if layer is None:
-            return
-        # 顶点去重（吸附可能把相邻点吸到同一位置）
-        cleaned: list[QgsPointXY] = []
-        for pt in self._pts:
-            if cleaned and self._px_distance(cleaned[-1], pt) < self.MIN_SPACING_PX:
-                continue
-            cleaned.append(pt)
-        # 首尾吸到同一点时闭合环会退化 → 去尾留首
-        if len(cleaned) > 1 and self._px_distance(cleaned[0], cleaned[-1]) < self.MIN_SPACING_PX:
-            cleaned.pop()
-        if len(cleaned) < 3:
-            self._hint("请先左键画一个多边形（至少 3 个顶点），再双击完成分割")
-            self._clear_polygon()
-            return
-        if not layer.isEditable():
-            self._hint("图层未处于编辑态，无法面分割")
-            return
-        if self._geom_type_is_point(layer):
-            self._hint("点图层无法面分割，请切换到线 / 面图层")
-            return
-
-        cutter = self._build_cutter(cleaned)
+    def _run_cutter_action(self) -> None:
+        """双击完成：闭合多边形并执行切割动作（子类重写以改变语义，默认面分割）。"""
+        layer, cutter = self._prepare_cutter()
         if cutter is None:
-            self._hint("切割多边形无效（顶点退化），请重新绘制")
-            self._clear_polygon()
             return
-
         # 用切割面（已换算到图层 CRS）找被覆盖的要素 → 逐个切
         fids = intersect_features(layer, cutter, layer.crs())
         fids = [fid for fid in fids if layer.getFeature(fid).isValid()]
@@ -236,8 +210,12 @@ class SplitPolygonTool(QgsMapTool):
             self._hint("多边形未切开任何要素：请把多边形画在要素上（部分覆盖），双击分割")
             self._clear_polygon()
             return
+        self._commit_split(layer, plans)
 
-        # 一个撤销步骤：换几何 + 重算面积字段 + 新增切出要素
+    def _commit_split(
+        self, layer: QgsVectorLayer, plans: list[tuple[int, QgsGeometry, QgsGeometry, list]]
+    ) -> None:
+        """写入一个撤销命令：原要素换剩余几何 + 面积字段重算 + 切出部分成新要素。"""
         layer.beginEditCommand("面分割")
         new_fids: list[int] = []
         try:
@@ -276,6 +254,42 @@ class SplitPolygonTool(QgsMapTool):
         self._clear_polygon()
         # 双击事件栈内不直接 refresh（仓库约束），推迟出栈后再刷新
         QTimer.singleShot(0, self._safe_refresh)
+
+    def _prepare_cutter(self) -> "tuple[QgsVectorLayer, QgsGeometry] | tuple[None, None]":
+        """双击后的公共准备：校验 + 顶点去重 + 构建图层 CRS 的切割面。
+
+        校验失败 / 多边形无效时给出提示、清空多边形并返回 ``(None, None)``；
+        成功返回 ``(编辑图层, 切割面)``。
+        """
+        layer = self._current_layer()
+        if layer is None:
+            return None, None
+        # 顶点去重（吸附可能把相邻点吸到同一位置）
+        cleaned: list[QgsPointXY] = []
+        for pt in self._pts:
+            if cleaned and self._px_distance(cleaned[-1], pt) < self.MIN_SPACING_PX:
+                continue
+            cleaned.append(pt)
+        # 首尾吸到同一点时闭合环会退化 → 去尾留首
+        if len(cleaned) > 1 and self._px_distance(cleaned[0], cleaned[-1]) < self.MIN_SPACING_PX:
+            cleaned.pop()
+        if len(cleaned) < 3:
+            self._hint("请先左键画一个多边形（至少 3 个顶点），再双击完成")
+            self._clear_polygon()
+            return None, None
+        if not layer.isEditable():
+            self._hint("图层未处于编辑态，无法执行该操作")
+            return None, None
+        if self._geom_type_is_point(layer):
+            self._hint("点图层不支持该操作，请切换到线 / 面图层")
+            return None, None
+
+        cutter = self._build_cutter(cleaned)
+        if cutter is None:
+            self._hint("多边形无效（顶点退化），请重新绘制")
+            self._clear_polygon()
+            return None, None
+        return layer, cutter
 
     def _measure(self, layer: QgsVectorLayer, geometry: QgsGeometry) -> float:
         """判定"切到多少"的度量：面图层用面积、线图层用长度（点图层无意义）。"""
