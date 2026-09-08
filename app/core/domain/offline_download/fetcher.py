@@ -229,55 +229,212 @@ def fetch_feature_sqlite(
     scope_wgs84: tuple[float, float, float, float],
     ctx: FetchContext,
 ) -> dict:
-    """REST 分页拉全量要素（按空间范围过滤）→ 写 SpatiaLite ``矢量.db``。
+    """REST 拉全量要素（按空间范围过滤）→ 写 SpatiaLite ``矢量.db``。
 
-    与项目本地库约定一致（app/core/util/local_db_util）：SQLite 数据库装载
-    mod_spatialite 建空间图层；此处用 OGR ``SQLite`` 驱动 ``SPATIALITE=YES``
-    建库写表（QGIS 官方 GDAL 无 FileGDB 写驱动，SpatiaLite 读/写都稳定）。
+    复用项目 util 三件套（与数据管理/本地库完全同源）：
+    - ``arcgis_server_util.ArcGISServer``：图层元信息 + 分页拉取（原生
+      ``{"attributes":…, "geometry":…}``，几何在图层 SR）；
+    - ``local_db_util.create_arcgis_layer``：建 shape 几何列空间表（MULTIPOLYGON
+      等，自动建空间索引、注册 user_relation）；
+    - ``local_db_util.batch_add_vector_data``：ST_GeomFromText 批量写几何。
     """
-    meta = _feature_service_meta(item, ctx)
-    wkid = meta["wkid"]
-    max_records = int(meta.get("maxRecordCount") or 1000)
-    page_size = min(max(1, max_records), 2000)
+    url = _arcgis_sublayer(item)
+    from app.core.util.arcgis_server_util import ArcGISServer
+    from app.core.util.local_db_util import local_db_util
+
+    client = ArcGISServer(timeout=max(10.0, float(ctx.timeout or 30)))
+    layer_meta = client.layer_metadata(url)
+    src_sr = layer_meta.get("sourceSpatialReference") or layer_meta.get("spatialReference") or {}
+    wkid = int(src_sr.get("latestWkid") or src_sr.get("wkid") or 4326)
+    if wkid in (102100, 102113):
+        wkid = 3857
+    # 建表统一多部件类型（与 batch_add 自动 ST_Multi 归一匹配）
+    geom_type = _spatialite_geom_name({"geometryType": layer_meta.get("geometryType")})
 
     db = os.path.join(stage_root, SQLITE_CONTAINER)
-    ds = _open_vector_sqlite_writer(db, item, meta)
-    ly = ds.GetLayerByName(item.target)
-    if ly is None:
-        raise FetchError(f"SpatiaLite 读取图层失败：{item.target}")
-
-    offset = 0
-    total = 0
-    params = _scope_query_params(scope_wgs84, wkid)
-    while True:
-        ctx.check()
-        params.update(
-            {
-                "where": "1=1",
-                "outFields": "*",
-                "returnGeometry": "true",
-                "resultOffset": str(offset),
-                "resultRecordCount": str(page_size),
-                "f": "geojson",
-            }
+    lib = local_db_util(db, load_spatialite=True)
+    try:
+        lib.create_arcgis_layer(
+            layer_meta,
+            table_name=item.target,
+            geometry_column="shape",
+            geometry_type=geom_type,
+            srid=wkid,
+            overwrite=True,
         )
-        body = _http_json(_arcgis_query_endpoint(meta["url"]), params, ctx)
-        feats = body.get("features") or []
-        if not feats:
-            break
-        for gj in feats:
-            _append_vector_feature(ly, gj, wkid)
-        total += len(feats)
-        ctx.report(len(feats) * 96)
-        ctx.log(f"「{item.label}」分页 {offset}-{offset + len(feats)}（累计 {total}）")
-        offset += len(feats)
-        if len(feats) < page_size:
-            break
-    ly.SyncToDisk()
-    ly = None  # noqa: F841 先释放图层，再关数据源（写盘顺序）
-    ds = None
+
+        scope_extra = _scope_query_params(scope_wgs84, wkid)
+        done = [0]
+
+        def _on_progress(fetched, total):
+            ctx.report((fetched - done[0]) * 96)
+            done[0] = fetched
+
+        features = client.query_all_features(
+            url,
+            where="1=1",
+            out_fields="*",
+            out_sr=wkid,
+            extra=scope_extra,
+            progress=_on_progress,
+        )
+        ctx.check()
+        total = 0
+        for start in range(0, len(features), 1000):
+            chunk = features[start : start + 1000]
+            total += lib.batch_add_vector_data(item.target, chunk)
+            ctx.check()
+        lib.conn.commit()
+    finally:
+        try:
+            lib.conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+    if total:
+        _verify_geometry_blob(db, item.target)
     ctx.log(f"「{item.label}」写入 SpatiaLite {SQLITE_CONTAINER} 完成：{total} 要素")
     return {"feature_count": total, "crs": f"EPSG:{wkid}"}
+
+
+class _VectorSink:
+    """SpatiaLite 矢量写入器（mod_spatialite 原生建表，OGR 只用于几何换算）。"""
+
+    _TYPE_MAP = {
+        "esriFieldTypeOID": "INTEGER",
+        "esriFieldTypeInteger": "INTEGER",
+        "esriFieldTypeSmallInteger": "INTEGER",
+        "esriFieldTypeDouble": "REAL",
+        "esriFieldTypeSingle": "REAL",
+        "esriFieldTypeDate": "TEXT",
+        "esriFieldTypeString": "TEXT",
+    }
+
+    def __init__(self, db: str, table: str, meta: dict) -> None:
+        import sqlite3
+
+        self.table = table
+        self.conn = sqlite3.connect(db)
+        try:
+            self.conn.enable_load_extension(True)
+            self.conn.load_extension("mod_spatialite")
+        except sqlite3.OperationalError as exc:
+            raise FetchError(
+                f"无法加载 mod_spatialite（{exc}）。请用带 SpatiaLite 的 QGIS python 运行后重新下载。"
+            ) from exc
+        self._wkid = int(meta.get("wkid") or 4490)
+        self._wkb_target = _ogr_geom_type(meta)
+        self._fields = [f for f in meta.get("fields", []) if str(f.get("name") or "")]
+        self._create(table, meta)
+
+    # ---------------------------------------------------------- 建表
+
+    def _create(self, table: str, meta: dict) -> None:
+        q = _quote_ident
+        cols = ['"fid" INTEGER PRIMARY KEY AUTOINCREMENT']
+        for fld in self._fields:
+            name = str(fld["name"])
+            if name.lower() in ("fid", "shape"):
+                continue
+            cols.append(f"{q(name)} {self._TYPE_MAP.get(str(fld.get('type')), 'TEXT')}")
+        self.conn.execute(f"SELECT InitSpatialMetadata(1)")
+        self.conn.execute(f'DROP TABLE IF EXISTS {q(table)}')
+        self.conn.execute(f"CREATE TABLE {q(table)} ({', '.join(cols)})")
+        gt = _spatialite_geom_name(meta)
+        self.conn.execute(
+            f"SELECT AddGeometryColumn('{table}', 'shape', {self._wkid}, '{gt}', 2)"
+        )
+        attrs = [str(f["name"]) for f in self._fields]
+        self._attrs = [a for a in attrs if a.lower() not in ("fid", "shape")]
+        placeholders = ", ".join("?" for _ in self._attrs) + ", ST_GeomFromText(?, ?)"
+        col_names = ", ".join(q(a) for a in self._attrs) + ", " + q("shape")
+        self._insert_sql = (
+            f"INSERT INTO {q(table)} ({col_names}) VALUES ({placeholders})"
+        )
+        self.conn.commit()
+
+    def write(self, gj: dict, wkid: int) -> None:
+        props = gj.get("properties") or {}
+        values = [props.get(a) for a in self._attrs]
+        geom_gj = gj.get("geometry")
+        wkt = None
+        if geom_gj is not None:
+            from osgeo import ogr, osr
+
+            geom = ogr.CreateGeometryFromJson(json.dumps(geom_gj))
+            if geom is not None:
+                if wkid not in (4326, 4490):
+                    tgt = osr.SpatialReference()
+                    tgt.ImportFromEPSG(wkid)
+                    try:
+                        tgt.SetAxisMappingStrategy(osr.OAMS_TRADITIONAL_GIS_ORDER)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    geom.TransformTo(tgt)
+                geom = _coerce_geom_type(geom, self._wkb_target)
+                if geom is not None:
+                    wkt = geom.ExportToWkt()
+        self.conn.execute(self._insert_sql, values + [wkt, self._wkid])
+
+    def commit(self) -> None:
+        self.conn.commit()
+
+    def close(self) -> None:
+        try:
+            self.conn.commit()
+            self.conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def _verify_geometry_blob(db: str, table: str) -> None:
+    """自检 shape 几何列是 BLOB 而非文本。
+
+    OGR 在运行时加载不到 libspatialite 时会把几何**降级存成 WKT 文本**（列类型
+    TEXT），这样 QGIS/数据管理能读到属性但无图形。发现文本降级直接报明确错误，
+    不再静默产出“有数据没图形”的库。
+    """
+    import sqlite3
+
+    try:
+        con = sqlite3.connect(f"file:{db.replace(os.sep, '/')}?mode=ro", uri=True)
+        try:
+            declared = {
+                r[1]: (r[2] or "").upper()
+                for r in con.execute(f'PRAGMA table_info("{table}")')
+            }
+            shape_type = declared.get("shape", "")
+            if "TEXT" in shape_type:
+                raise FetchError(
+                    f"几何列 shape 被写成了文本（当前环境无法加载 libspatialite，OGR 把几何"
+                    "降级为 WKT）。请用带 SpatiaLite 的 QGIS python 运行应用后重新下载。"
+                )
+        finally:
+            con.close()
+    except FetchError:
+        raise
+    except Exception:  # noqa: BLE001  自检失败不阻断主流程
+        pass
+
+
+def _quote_ident(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _spatialite_geom_name(meta: dict) -> str:
+    """由 ArcGIS geometryType 生成 SpatiaLite AddGeometryColumn 类型名。
+
+    与 :func:`_ogr_geom_type` 的 numeric 归一**严格一致**（该函数对 Polygon/
+    Polyline 恒返回 Multi 类型）：多边形 → MULTIPOLYGON、线 → MULTILINESTRING，
+    避免建 POLYGON 列却写 MULTIPOLYGON 触发 geometry 约束。
+    """
+    g = str(meta.get("geometryType") or "").lower()
+    if "point" in g:
+        return "MULTIPOINT" if "multi" in g else "POINT"
+    if "polyline" in g:
+        return "MULTILINESTRING"
+    if "polygon" in g:
+        return "MULTIPOLYGON"
+    return "GEOMETRY"
 
 
 def _feature_service_meta(item: FetchItem, ctx: FetchContext) -> dict:
@@ -362,7 +519,10 @@ def _open_vector_sqlite_writer(db: str, item: FetchItem, meta: dict):
     except Exception:  # noqa: BLE001
         pass
     geom = _ogr_geom_type(meta)
-    lyr = ds.CreateLayer(item.target, sr, geom)
+    # 几何列名统一为 shape：项目本地库约定（gdb_to_postgis 同款
+    # `-lco GEOMETRY_NAME=shape`，local_db_util 用 ST_AsText(shape) 读写）。
+    # OGR 默认会建 GEOMETRY（大写）且与 SpatiaLite 元数据列名不一致，必须显式对齐。
+    lyr = ds.CreateLayer(item.target, sr, geom, options=["GEOMETRY_NAME=shape"])
     if lyr is None:
         raise FetchError(f"SpatiaLite 创建图层失败：{item.target}")
     for fld in meta.get("fields", []):

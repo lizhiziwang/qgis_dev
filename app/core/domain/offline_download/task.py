@@ -99,6 +99,11 @@ class OfflineDownloadTask(QObject):
             self._prepare_estimates()
 
             layout.ensure_stage(self.plan)
+            # 整库重建：同 job 重试/续跑会残留旧表、geometry_columns 与空间索引，
+            # 重写时 OGR AddGeometryColumn 撞重复列、CreateSpatialIndex 撞旧索引。
+            db_file = os.path.join(self.plan.stage_root, layout.SQLITE_CONTAINER)
+            if os.path.exists(db_file):
+                os.remove(db_file)
             precheck = self._disk_precheck()
             if precheck:
                 raise RuntimeError(precheck)
