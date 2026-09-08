@@ -11,7 +11,8 @@
 
     {"kind": "local", "name": "<文件名>", "path": "<绝对路径>",
      "categories": {"spatial": [...], "dict": [...], "image": [...]},
-     "counts": {表名: 行数|None}}
+     "counts": {表名: 行数|None},
+     "meta": {表名: 元信息 dict}}  # 几何类型/坐标系/字段列表, 见 describe_local_db
 
 服务器连接待后续版本实现，不在本对话框收集字段。
 """
@@ -207,6 +208,7 @@ class AddConnectionDialog(BaseDialog):
             "path": self._path,
             "categories": self._catalog["categories"],
             "counts": self._catalog["counts"],
+            "meta": self._catalog["meta"],
         }
 
 

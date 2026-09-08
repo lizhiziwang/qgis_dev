@@ -55,6 +55,9 @@ from qgis.PyQt.QtWidgets import (
 
 from app.core.domain.drawing import DrawManager
 from app.core.domain.drawing.tools import get_tool_class
+from app.infra.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class DigitizingToolbar(QObject):
@@ -93,6 +96,10 @@ class DigitizingToolbar(QObject):
         self.temp_points: list = []
         self.rubber_band = None
         self.active_tool = None
+        #: 激活本工具条的地图工具前、画布正在用的工具；clear 后恢复（QGIS 的
+        #: unsetMapTool 不会自动回退前一个工具，不记录的话停止编辑后画布会
+        #: 变成“无任何工具”，点画布无反应）。
+        self._previous_map_tool = None
         self.merge_tool = None
         self.feature_edit_tool = None
         self.split_tool = None
@@ -102,6 +109,14 @@ class DigitizingToolbar(QObject):
 
         # 当前是否处于编辑态（start_edit_fun 成功后 True，stop_edit_fun 后 False）
         self._editing = False
+        #: 当前激活的工具种类："point"/"line"/"polygon"/"merge"/"feature"/
+        #: "split"/"attr_entry"，None=未激活。工具按钮的勾选/互斥、日志都
+        #: 以它为唯一依据（_refresh_button_states 统一推导，不再散点 setChecked）
+        self._active_kind: str | None = None
+        #: 挂了 ``editingStopped`` 兜底钩子的图层：外部入口（属性表 Dock「停止
+        #: 编辑」/ 切图层停旧层 / 关工程等）结束编辑时不走 :meth:`stop_edit_fun`，
+        #: 靠本钩子统一清工具并复位状态（见 :meth:`_on_editing_stopped`）。
+        self._edit_stop_hook_layer = None
 
         self._build_toolbar()
 
@@ -124,23 +139,36 @@ class DigitizingToolbar(QObject):
 
         # ---- 融合几何（需处于编辑态）----
         self.merge_geometry_action = QAction("融合几何", self.digitizing_toolbar)
-        self.merge_geometry_action.triggered.connect(self.enable_merge_tool)
+        self.merge_geometry_action.setCheckable(True)
+        # checkable 动作的 triggered 会带勾选态：True=激活，False=再点一次取消激活
+        self.merge_geometry_action.triggered.connect(
+            lambda checked=False: self.enable_merge_tool(checked)
+        )
 
         # ---- 要素编辑（需处于编辑态；点击要素编辑其几何）----
         self.feature_edit_action = QAction("要素编辑", self.digitizing_toolbar)
-        self.feature_edit_action.triggered.connect(self.enable_feature_edit)
+        self.feature_edit_action.setCheckable(True)
+        self.feature_edit_action.triggered.connect(
+            lambda checked=False: self.enable_feature_edit(checked)
+        )
 
         # ---- 属性录入（恒可用：无需编辑态，激活时自动开始编辑）----
         #     点击要素 → 右侧 Dock 改属性
         self.attribute_entry_action = QAction("属性录入", self.digitizing_toolbar)
-        self.attribute_entry_action.triggered.connect(self.enable_attribute_entry)
+        self.attribute_entry_action.setCheckable(True)
+        self.attribute_entry_action.triggered.connect(
+            lambda checked=False: self.enable_attribute_entry(checked)
+        )
 
         # ---- 线分割（需处于编辑态；双击选要素 → 画切割线 → 右键分割）----
         self.split_feature_action = QAction("线分割", self.digitizing_toolbar)
-        self.split_feature_action.triggered.connect(self.enable_split_tool)
+        self.split_feature_action.setCheckable(True)
+        self.split_feature_action.triggered.connect(
+            lambda checked=False: self.enable_split_tool(checked)
+        )
 
-        # 初始态：编辑动作全禁用（「开始编辑」例外——恒可用，点击弹窗选层）
-        self._set_edit_actions_enabled(False)
+        # ---- 初始态：编辑动作全禁用（「开始编辑」例外——恒可用，点击弹窗选层）
+        #     最后统一由 _refresh_button_states 推导，这里只组装不动状态
 
         self.digitizing_toolbar.addAction(self.start_edit)
         self.digitizing_toolbar.addAction(self.stop_edit)
@@ -155,20 +183,39 @@ class DigitizingToolbar(QObject):
 
         # ---- 添加要素 ----
         self.add_point_action = QAction("添加点", self.digitizing_toolbar)
-        self.add_point_action.triggered.connect(lambda: self.enable_draw_tool("point"))
+        self.add_point_action.setCheckable(True)
+        self.add_point_action.triggered.connect(
+            lambda checked=False: self.enable_draw_tool("point", checked)
+        )
         self.add_line_action = QAction("添加线", self.digitizing_toolbar)
-        self.add_line_action.triggered.connect(lambda: self.enable_draw_tool("line"))
+        self.add_line_action.setCheckable(True)
+        self.add_line_action.triggered.connect(
+            lambda checked=False: self.enable_draw_tool("line", checked)
+        )
         self.add_polygon_action = QAction("添加面", self.digitizing_toolbar)
-        self.add_polygon_action.triggered.connect(lambda: self.enable_draw_tool("polygon"))
+        self.add_polygon_action.setCheckable(True)
+        self.add_polygon_action.triggered.connect(
+            lambda checked=False: self.enable_draw_tool("polygon", checked)
+        )
 
-        # 默认禁用
-        self.add_point_action.setEnabled(False)
-        self.add_line_action.setEnabled(False)
-        self.add_polygon_action.setEnabled(False)
+        # 工具按钮 ↔ 激活状态标识：勾选由 _refresh_button_states 统一推导
+        # （同一时刻只有一个激活工具按钮处于按下态）
+        self._tool_action_map = {
+            "point": self.add_point_action,
+            "line": self.add_line_action,
+            "polygon": self.add_polygon_action,
+            "merge": self.merge_geometry_action,
+            "feature": self.feature_edit_action,
+            "split": self.split_feature_action,
+            "attr_entry": self.attribute_entry_action,
+        }
 
         self.digitizing_toolbar.addAction(self.add_point_action)
         self.digitizing_toolbar.addAction(self.add_line_action)
         self.digitizing_toolbar.addAction(self.add_polygon_action)
+
+        # 初始态由统一出口推导（无目标图层 → 仅「开始编辑」/「属性录入」可用）
+        self._refresh_button_states()
 
         # 挂到主窗口
         self.main_window.addToolBar(self.digitizing_toolbar)
@@ -185,32 +232,29 @@ class DigitizingToolbar(QObject):
         """
         target = layer if layer is not None else self._current_layer()
         if target is None:
-            self._set_edit_actions_enabled(False)
-            self._set_add_buttons_for_geometry(-1)
+            self._disconnect_edit_stop_hook()
+            self._refresh_button_states()
             return
         if target.type() != target.VectorLayer:
-            self._set_edit_actions_enabled(False)
-            self._set_add_buttons_for_geometry(-1)
+            self._disconnect_edit_stop_hook()
+            self._refresh_button_states()
             return
 
-        # 进入"已指定编辑图层"态：开始编辑可用，按图层几何类型启用"添加要素"
-        self._set_edit_actions_enabled(True, editing_now=False)
-        self._set_add_buttons_for_geometry(target.geometryType())
+        # 进入"已指定编辑图层"态：按钮可用性统一由 _refresh_button_states 按图层
+        # 是否已进入编辑态推导(编辑中 → 停止/保存/融合等 + 对应几何的"添加X"可用)
+        # 任意入口（含属性表 Dock 等外部服务）结束本图层编辑时都能兜底清理
+        self._connect_edit_stop_hook(target)
+        self._refresh_button_states()
 
     def refresh_for_current_layer(self) -> None:
         """根据当前 ``edit_layer`` 重新刷一遍按钮状态（应对切图层等场景）。"""
         layer = self._current_layer()
         if layer is None or layer.type() != layer.VectorLayer:
-            self._set_edit_actions_enabled(False)
-            self._set_add_buttons_for_geometry(-1)
-            return
-        if layer.isEditable():
-            # 当前已经在编辑态，保持按钮可用状态
-            self._set_edit_actions_enabled(True, editing_now=True)
-            self._set_add_buttons_for_geometry(layer.geometryType())
+            self._disconnect_edit_stop_hook()
         else:
-            self._set_edit_actions_enabled(True, editing_now=False)
-            self._set_add_buttons_for_geometry(layer.geometryType())
+            # 目标图层变化时把停编钩子挪到新图层（幂等）
+            self._connect_edit_stop_hook(layer)
+        self._refresh_button_states()
 
     # ============================================================== 编辑器菜单回调
 
@@ -248,11 +292,12 @@ class DigitizingToolbar(QObject):
 
         :returns: 是否处于（已进入）编辑态。
         """
+        # 挂停编钩子：本工具条开始的编辑，不管之后由谁结束都能兜底清理工具
+        self._connect_edit_stop_hook(layer)
         if layer.isEditable():
             if not self._editing:
                 self._editing = True
-                self._set_edit_actions_enabled(True, editing_now=True)
-                self._set_add_buttons_for_geometry(layer.geometryType())
+                self._refresh_button_states()
             return True
 
         ok = layer.startEditing()
@@ -260,8 +305,7 @@ class DigitizingToolbar(QObject):
             QMessageBox.warning(self.main_window, "警告", "无法开始编辑！")
             return False
         self._editing = True
-        self._set_edit_actions_enabled(True, editing_now=True)
-        self._set_add_buttons_for_geometry(layer.geometryType())
+        self._refresh_button_states()
         self.editing_state_changed.emit(True)
         return True
 
@@ -272,16 +316,29 @@ class DigitizingToolbar(QObject):
         绘制工具，工具条也不该停留在「编辑中」可用态——所以：
          1. **先** ``clear_draw_tool()`` 取消激活工具（旧实现放在最后，中途异常 /
             状态残留会让工具继续挂活）；
-         2. 状态复位放在 ``finally``——即使提交 / 回滚对某些数据源抛异常，也保证
-            按钮 / 编辑标志一定复位，不会出现「点『否』后停止编辑按钮仍可用」。
+         2. 会话是否结束以**图层真实编辑态**为准，复位放在 ``finally``——提交 /
+            回滚真正结束编辑才切回「已指定编辑图层」态（编辑按钮禁用）。
+
+        「是」路径必须检查 ``commitChanges`` 的返回值：保存失败（返回 False /
+        抛异常，如数据源约束 / 锁等）时图层**仍处于编辑态**，不能假装已停止——
+        否则会复现「点『是』后编辑按钮仍可用但 ``_editing`` 已置 False」的状态机
+        脱节（按钮可用性由 ``layer.isEditable()`` 推导，会话没结束就一直是可用）。
+        此时弹窗告知失败原因并保持「编辑中」状态一致，用户可修正后重试，或再次
+        点「停止编辑」选「否」放弃。
         """
         layer = self._current_layer()
+        logger.info(
+            "停止编辑入口: layer=%s editable=%s active_tool=%s",
+            getattr(layer, "name", lambda: None)(),
+            layer.isEditable() if layer is not None else None,
+            self.active_tool,
+        )
+        # 先取消激活工具：不管有没有画完，停止编辑前工具都要退出
+        self.clear_draw_tool()
         if layer is None or not layer.isEditable():
             # 没有在编辑：兜底清掉可能残留的激活工具/橡皮筋，保持干净
             self._exit_editing_state(layer)
             return
-        # 先取消激活工具：不管有没有画完，停止编辑前工具都要退出
-        self.clear_draw_tool()
 
         try:
             if layer.editBuffer() is not None:
@@ -293,35 +350,80 @@ class DigitizingToolbar(QObject):
                     QMessageBox.StandardButton.Yes,
                 )
                 if reply == QMessageBox.StandardButton.Yes:
-                    layer.commitChanges(stopEditing=True)
+                    try:
+                        saved = layer.commitChanges(stopEditing=True)
+                    except Exception:  # noqa: BLE001
+                        # 某些数据源提交时会抛异常（库锁等）；按「保存失败」处理，
+                        # 会话是否仍在编辑由 finally 按 isEditable 兜底判断
+                        logger.exception("停止编辑提交异常: layer=%s", layer.name())
+                        saved = False
+                    logger.info("停止编辑提交结果: layer=%s saved=%s", layer.name(), saved)
+                    if not saved:
+                        # 保存失败：图层仍在编辑态，不能假装已退出。明确提示原因，
+                        # 保持「编辑中」状态一致（编辑按钮仍可用是正确行为）
+                        QMessageBox.warning(
+                            self.main_window,
+                            "保存失败",
+                            "保存编辑失败，更改尚未写入数据源，仍处于编辑状态！\n"
+                            "请修正问题后重新保存，或再次点击「停止编辑」选择「否」放弃更改。\n\n"
+                            f"失败原因：\n{self._commit_error_text(layer)}",
+                        )
                 else:
                     # 否 → 放弃改动并结束编辑。rollBack() 本身就会结束编辑会话
                     # （QGIS 4.2 实测 isEditable 立即变 False），不必再补一次
                     # commitChanges(stopEditing=True)。
                     layer.rollBack()
         finally:
-            # 无论 Yes/No/提交异常，都切回「已指定编辑图层」态并清掉工具残留
-            self._exit_editing_state(layer)
+            if layer is not None and layer.isEditable():
+                # 提交失败 / 异常（或回滚失败）→ 会话仍在：保持「编辑中」状态机
+                # 一致（按钮可用、不误发退出信号），只刷新一次按钮
+                self._refresh_button_states()
+            else:
+                # 提交 / 回滚成功真正结束编辑：切回「已指定编辑图层」态并清工具残留
+                self._exit_editing_state(layer)
 
-    def _exit_editing_state(self, layer: "QgsVectorLayer | None") -> None:
+    def _commit_error_text(self, layer: QgsVectorLayer) -> str:
+        """把图层最近一次 commitChanges 的错误整理成可读文本。
+
+        commitErrors() 拿不到（异常路径 / 空列表）时给通用兜底提示，避免弹窗空白。
+        """
+        try:
+            errors = layer.commitErrors()
+        except Exception:  # noqa: BLE001
+            logger.exception("读取提交错误失败: layer=%s", layer.name())
+            errors = []
+        if errors:
+            return "\n".join(f"- {e}" for e in errors)
+        return "- 未知错误（详见日志）"
+
+    def _exit_editing_state(self, layer: QgsVectorLayer | None) -> None:
         """离开编辑态后的统一状态复位（停编辑 / 外部停编兜底共用）。
 
-        - 编辑标志置 False，发出 :pyattr:`editing_state_changed`(False)；
-        - 停止 / 保存 / 融合 / 要素编辑 / 线分割 禁用，「开始编辑」保持可用；
-        - 「添加要素」按 ``layer`` 类型保持启用（layer 仍是目标编辑图层，但未处于
-          editing 态；若要严格只在 editing 态可用，把 ``_set_add_buttons_for_geometry``
-          那几行改为全禁用即可）。
+        - 编辑标志置 False；仅在确实从「编辑中」切走时发
+          :pyattr:`editing_state_changed`(False)（外部停编兜底
+          :meth:`_on_editing_stopped` 在 commitChanges/rollBack 同步触发时
+          可能已先复位，避免重复发信号）；
+        - 工具全部解除，按钮状态统一由 :meth:`_refresh_button_states` 按
+          「是否仍在编辑」推导：离开编辑态后「停止/保存/融合/要素编辑/线分割」
+          与「添加要素」全禁用并取消勾选(需重新「开始编辑」才恢复可用)。
         """
+        was_editing = self._editing
+        logger.debug(
+            "离开编辑态复位: layer=%s was_editing=%s active_tool=%s",
+            getattr(layer, "name", lambda: None)(),
+            was_editing,
+            self.active_tool,
+        )
+        # 工具解除 → 编辑标志复位 → 统一刷新按钮（顺序：clear 内部已刷新一次，
+        # 这里在 _editing 复位后再刷，保证退出编辑态时按钮一定是禁用+未勾选)
         self.clear_draw_tool()
         self._editing = False
-        # 切回「已指定编辑图层」态：开始编辑可用，停止/保存禁用
-        self._set_edit_actions_enabled(True, editing_now=False)
-        # 「添加要素」按钮保持启用（layer 仍是 target，但未进入 editing 态）
-        if layer is not None and layer.type() == layer.VectorLayer:
-            self._set_add_buttons_for_geometry(layer.geometryType())
-        else:
-            self._set_add_buttons_for_geometry(-1)
-        self.editing_state_changed.emit(False)
+        self._refresh_button_states()
+        # 只在确实从「编辑中」切走时发信号：停编路径里 :meth:`_on_editing_stopped`
+        # 兜底可能已先复位过（commitChanges/rollBack 同步触发 editingStopped），
+        # 避免重复发 False 造成二次状态切换
+        if was_editing:
+            self.editing_state_changed.emit(False)
 
     def _save_edits(self) -> None:
         """仅保存编辑，不停止。"""
@@ -331,11 +433,29 @@ class DigitizingToolbar(QObject):
 
     # ============================================================== 添加要素菜单回调
 
-    def enable_draw_tool(self, geom_type: str) -> None:
+    def enable_draw_tool(self, geom_type: str, checked: bool = True) -> None:
         """激活指定类型的绘制工具（点/线/面）。
 
-        共享 ``temp_points`` / ``rubber_band`` 与子工具协同（与旧版一致）。
+        ``checked`` 来自 checkable 按钮的 triggered 勾选态：
+
+        - ``False``(用户再点一次已按下的「添加X」按钮) → 取消激活：清工具、
+          取消勾选，画布恢复(第二次点击就是"关闭工具"，不再重复激活)；
+        - ``True`` → 激活。未处于编辑态时不允许激活(弹「请先开始编辑！」)，
+          避免停编辑后点按钮又在非可编辑图层上画出红点。
         """
+        if not checked:
+            # Qt 已把按钮取消勾选；这里清掉画布上对应的工具
+            logger.info("按钮取消激活绘制工具: %s", geom_type)
+            self.clear_draw_tool()
+            return
+        # 只有处于编辑态才能画要素(与融合/要素编辑等工具一致)；停编辑后按钮
+        # 已禁用，这里兜底挡住直接调用
+        layer = self._current_layer()
+        if layer is None or layer.type() != layer.VectorLayer or not layer.isEditable():
+            # 拒绝激活：Qt 已把按钮勾上，按统一状态刷新弹掉勾选
+            self._refresh_button_states()
+            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            return
         # 先清除旧工具
         self.clear_draw_tool()
 
@@ -363,15 +483,22 @@ class DigitizingToolbar(QObject):
             self.canvas,
             draw_manager=self.draw_manager,
         )
-        self.canvas.setMapTool(self.active_tool)
+        self._activate_map_tool(self.active_tool)
+        self._mark_active(geom_type)
         QMessageBox.information(
             self.main_window,
             "提示",
             f"已激活「添加{geom_type}」工具，点击画布绘制！",
         )
 
-    def enable_merge_tool(self) -> None:
-        """激活融合几何工具：右键选要素，左键双击融合。"""
+    def enable_merge_tool(self, checked: bool = True) -> None:
+        """激活融合几何工具：右键选要素，左键双击融合。
+
+        ``checked=False``(再点一次已按下的按钮) → 取消激活。
+        """
+        if not checked:
+            self.clear_draw_tool()
+            return
         layer = self._current_layer()
         if layer is None or layer.type() != layer.VectorLayer:
             QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
@@ -391,15 +518,22 @@ class DigitizingToolbar(QObject):
                 text, level=Qgis.MessageLevel.Info, duration=2
             ),
         )
-        self.canvas.setMapTool(self.merge_tool)
+        self._activate_map_tool(self.merge_tool)
+        self._mark_active("merge")
         QMessageBox.information(
             self.main_window,
             "提示",
             "已激活「融合几何」工具：右键选择要素，双击融合；Esc 退出",
         )
 
-    def enable_feature_edit(self) -> None:
-        """激活「要素编辑」工具：点击矢量要素编辑其几何（顶点级）。"""
+    def enable_feature_edit(self, checked: bool = True) -> None:
+        """激活「要素编辑」工具：点击矢量要素编辑其几何（顶点级）。
+
+        ``checked=False``(再点一次已按下的按钮) → 取消激活。
+        """
+        if not checked:
+            self.clear_draw_tool()
+            return
         layer = self._current_layer()
         if layer is None or layer.type() != layer.VectorLayer:
             QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
@@ -419,15 +553,22 @@ class DigitizingToolbar(QObject):
                 text, level=Qgis.MessageLevel.Info, duration=2
             ),
         )
-        self.canvas.setMapTool(self.feature_edit_tool)
+        self._activate_map_tool(self.feature_edit_tool)
+        self._mark_active("feature")
         QMessageBox.information(
             self.main_window,
             "提示",
             "已激活「要素编辑」工具：点击要素进入几何编辑（拖动顶点 / 双击边加顶点 / 右键删顶点）；Esc 退出",
         )
 
-    def enable_split_tool(self) -> None:
-        """激活「线分割」工具：先左键双击选中要素，再画切割线右键分割。"""
+    def enable_split_tool(self, checked: bool = True) -> None:
+        """激活「线分割」工具：先左键双击选中要素，再画切割线右键分割。
+
+        ``checked=False``(再点一次已按下的按钮) → 取消激活。
+        """
+        if not checked:
+            self.clear_draw_tool()
+            return
         layer = self._current_layer()
         if layer is None or layer.type() != layer.VectorLayer:
             QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
@@ -450,26 +591,34 @@ class DigitizingToolbar(QObject):
                 text, level=Qgis.MessageLevel.Info, duration=2
             ),
         )
-        self.canvas.setMapTool(self.split_tool)
+        self._activate_map_tool(self.split_tool)
+        self._mark_active("split")
         QMessageBox.information(
             self.main_window,
             "提示",
             "已激活「线分割」工具：左键双击要素选中后，按住左键画切割线、右键完成分割；Esc 取消 / 退出",
         )
 
-    def enable_attribute_entry(self) -> None:
+    def enable_attribute_entry(self, checked: bool = True) -> None:
         """激活「属性录入」工具：点击要素 → 右侧 Dock 编辑其属性。
 
         不需要预先「开始编辑」：目标图层若尚未进入编辑态，这里自动开启
         （与「开始编辑」同一条状态机：``startEditing`` + 按钮组同步 + 发
         :pyattr:`editing_state_changed`）。无编辑目标时先弹图层选择框。
+
+        ``checked=False``(再点一次已按下的按钮) → 取消激活。
         """
+        if not checked:
+            self.clear_draw_tool()
+            return
         layer = self._current_layer()
         chooser = self._edit_layer_chooser
         if layer is None and chooser is not None:
             # 弹窗选层（纯选择；取消返回 None → 不做任何事）
             layer = chooser()
             if layer is None:
+                # 取消选层：Qt 已把按钮勾上，按统一状态刷新弹掉
+                self._refresh_button_states()
                 return
             # 落地为编辑目标：edit_layer / 停旧层 / 工具条 / 捕捉联动
             if self._current_layer() is not layer:
@@ -477,10 +626,12 @@ class DigitizingToolbar(QObject):
                 if callable(applier):
                     applier(layer)
         if layer is None or layer.type() != layer.VectorLayer:
+            self._refresh_button_states()
             QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
             return
         # 属性录入不需要用户先「开始编辑」：自动进入编辑态
         if not self._ensure_editing(layer):
+            self._refresh_button_states()
             return
         # 清掉可能激活的绘制 / 融合 / 要素编辑 / 分割工具，避免并存
         self.clear_draw_tool()
@@ -503,7 +654,8 @@ class DigitizingToolbar(QObject):
                 text, level=Qgis.MessageLevel.Info, duration=2
             ),
         )
-        self.canvas.setMapTool(self.attribute_entry_tool)
+        self._activate_map_tool(self.attribute_entry_tool)
+        self._mark_active("attr_entry")
         dock.show()
         dock.raise_()
         QMessageBox.information(
@@ -550,13 +702,21 @@ class DigitizingToolbar(QObject):
         dlg.show()
 
     def clear_draw_tool(self) -> None:
-        """清掉激活工具 + 共享 rubber_band + 临时点（与旧版一致）。
+        """取消激活本工具条挂到画布的工具，并清掉共享 rubber_band + 临时点。
 
-        关键：除 ``unsetMapTool`` 外，对带 ``cleanup()`` 的工具先调 ``cleanup()``
-        ——``BaseDrawTool.cleanup`` 会隐藏工具自己的 rubber_band / 磁吸标记等
-        画布残留（旧实现只 unset，停编辑 / 切工具后绘制预览、吸附标记仍会留在
-        画布上）。
+        保证「停止编辑 / 切换工具 / 取消」后画布不再挂着任何本工具条的激活
+        工具（``active_tool`` / 融合 / 要素编辑 / 属性录入 / 线分割）：
+
+        - 对带 ``cleanup()`` 的工具先调 ``cleanup()``，隐藏工具自己的
+          rubber_band / 磁吸标记等画布残留（旧实现只 unset，停编辑 / 切工具后
+          绘制预览、吸附标记仍会留在画布上）；
+        - unset 时处理带 ``.tool`` 属性的 wrapper（兼容历史实现）；
+        - QGIS 的 ``unsetMapTool`` 不会自动回退前一个工具，画布若已无任何工具
+          则恢复激活前记录的工具（如平移），避免停止编辑后画布"失能"。
         """
+        # 收集本次卸下的真实 QgsMapTool（unset 静默失败时据此判断画布残留）
+        dropped_real_tools: list = []
+
         def _drop(attr_name: str) -> None:
             tool = getattr(self, attr_name, None)
             if tool is None:
@@ -564,12 +724,16 @@ class DigitizingToolbar(QObject):
             if hasattr(tool, "cleanup"):
                 try:
                     tool.cleanup()
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception:
+                    logger.exception("清理工具 %s(%s) 的 cleanup 失败", attr_name, type(tool).__name__)
             try:
-                self.canvas.unsetMapTool(tool)
-            except Exception:  # noqa: BLE001
-                pass
+                # wrapper 兼容：工具可能是带 .tool 的对象（历史实现），也可能
+                # 就是 QgsMapTool 本身；unset 用真实的地图工具实例才有效
+                real_tool = getattr(tool, "tool", tool)
+                dropped_real_tools.append(real_tool)
+                self.canvas.unsetMapTool(real_tool)
+            except Exception:
+                logger.exception("从画布卸下工具 %s(%s) 失败", attr_name, type(tool).__name__)
             setattr(self, attr_name, None)
 
         _drop("merge_tool")
@@ -581,49 +745,158 @@ class DigitizingToolbar(QObject):
         if self.draw_manager is not None:
             try:
                 self.draw_manager.clear_draw_tool()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:
+                logger.exception("清除业务层 DrawManager 工具失败")
         if self.rubber_band is not None:
             try:
                 self.rubber_band.reset()
-            except Exception:  # noqa: BLE001
-                pass
+            except Exception:
+                logger.exception("清除共享绘制预览橡皮筋失败")
             self.rubber_band = None
         self.temp_points.clear()
+        # 画布已无任何工具（或 unset 静默失败、仍挂着我们刚卸下的工具）时恢复
+        # 激活前的工具（QGIS 不自动回退）；外部工具不受影响（不覆盖）。
+        current_tool = self.canvas.mapTool()
+        still_ours = current_tool is not None and any(
+            current_tool is t for t in dropped_real_tools
+        )
+        if self._previous_map_tool is not None and (current_tool is None or still_ours):
+            try:
+                self.canvas.setMapTool(self._previous_map_tool)
+            except Exception:
+                logger.exception("恢复激活前画布工具 %s 失败", type(self._previous_map_tool).__name__)
+        self._previous_map_tool = None
+        # 工具实例已全部卸下：激活种类复位 + 统一刷新按钮（勾选全弹起）
+        self._active_kind = None
+        self._refresh_button_states()
+        logger.info(
+            "工具清理完成: mapTool=%s active_tool=%s merge=%s feature=%s split=%s attr_entry=%s",
+            type(self.canvas.mapTool()).__name__ if self.canvas.mapTool() is not None else None,
+            self.active_tool,
+            self.merge_tool,
+            self.feature_edit_tool,
+            self.split_tool,
+            self.attribute_entry_tool,
+        )
 
     # ============================================================== 内部
+
+    def _activate_map_tool(self, tool) -> None:
+        """把工具挂到画布并记录激活前的画布工具（供 clear 后恢复）。
+
+        工具条里各 ``enable_*`` 激活前都会先 ``clear_draw_tool()``（此时
+        ``_previous_map_tool`` 已复位并可能已把画布工具恢复回去），所以这里记到
+        的就是"用户最后用的常规工具"（平移 / 选择等），停止编辑后能还原。
+        """
+        self._previous_map_tool = self.canvas.mapTool()
+        self.canvas.setMapTool(tool)
+        logger.debug(
+            "激活画布工具: %s (激活前=%s editable=%s)",
+            type(getattr(tool, "tool", tool)).__name__,
+            type(self._previous_map_tool).__name__ if self._previous_map_tool is not None else None,
+            self._editing,
+        )
+
+    def _connect_edit_stop_hook(self, layer: QgsVectorLayer | None) -> None:
+        """把 ``layer`` 的 ``editingStopped`` 接到本工具条的兜底清理。
+
+        属性表 Dock「停止编辑」/ 切图层停旧层 / 关工程等外部入口结束编辑时只
+        调各自的 commit/rollBack，不经过 :meth:`stop_edit_fun`——QGIS 在
+        提交/回滚结束编辑时发 ``editingStopped``，本工具条在信号里统一解除
+        激活工具并复位按钮状态，避免「属性框取消后再停编，绘制工具仍挂在画布」。
+
+        未编辑的图层也照连：之后由外部开启再结束编辑同样能兜底。先断开上一
+        图层再连当前图层，同一时刻只挂一个钩子。
+        """
+        self._disconnect_edit_stop_hook()
+        if layer is None or layer.type() != layer.VectorLayer:
+            return
+        try:
+            layer.editingStopped.connect(self._on_editing_stopped)
+            self._edit_stop_hook_layer = layer
+            logger.debug("已挂接图层 editingStopped 钩子: %s", layer.name())
+        except Exception:
+            self._edit_stop_hook_layer = None
+            logger.exception("连接图层 editingStopped 钩子失败: %s", layer.name())
+
+    def _disconnect_edit_stop_hook(self) -> None:
+        """断开当前图层的 ``editingStopped`` 钩子（目标切换 / 钩子已触发）。"""
+        layer = self._edit_stop_hook_layer
+        self._edit_stop_hook_layer = None
+        if layer is None:
+            return
+        try:
+            layer.editingStopped.disconnect(self._on_editing_stopped)
+        except Exception:
+            # 图层销毁 / 信号已被触发自动断开等场景会抛异常，属正常收尾
+            logger.warning(
+                "断开图层 editingStopped 钩子失败(收尾场景属正常): %s", layer.name(), exc_info=True
+            )
+
+    def _on_editing_stopped(self) -> None:
+        """任意入口结束编辑的兜底：解除激活工具并复位工具条状态。
+
+        commitChanges / rollBack 结束编辑时会同步发 ``editingStopped``（含
+        :meth:`stop_edit_fun` 自己走的提交路径）；这里统一处理后，后续
+        :meth:`_exit_editing_state` 因 ``_editing`` 已复位而不会重复发信号。
+        """
+        self._disconnect_edit_stop_hook()
+        layer = self._current_layer()
+        logger.info(
+            "editingStopped 钩子触发(外部停编兜底): layer=%s active_tool=%s mapTool=%s",
+            getattr(layer, "name", lambda: None)(),
+            self.active_tool,
+            type(self.canvas.mapTool()).__name__ if self.canvas.mapTool() is not None else None,
+        )
+        self._exit_editing_state(layer)
 
     def _current_layer(self) -> QgsVectorLayer | None:
         return self._editing_layer_getter()
 
-    def _set_edit_actions_enabled(self, enabled: bool, *, editing_now: bool = False) -> None:
-        """编辑器按钮整体启用状态（「开始编辑」恒可用，其余按编辑状态）。
+    def _mark_active(self, kind: str) -> None:
+        """激活成功后登记激活工具种类并同步按钮（勾选本按钮、互斥其余）。
 
-        :param enabled: False → 停止/保存/融合/要素编辑/线分割 全禁用（初始默认态）；
-            「开始编辑」仍可用——点击会弹窗选层，无需预先指定目标图层。
-        :param editing_now: True → 编辑中：停止/保存/融合/要素编辑/线分割 启用；
-            False → 未编辑：仅「开始编辑」可用。
+        只改状态 + 触发统一刷新；真正挂画布 / 弹提示由各 ``enable_*`` 完成。
         """
-        # 「开始编辑」「属性录入」恒可用：无目标图层也能点（弹窗选层）；
-        # 属性录入无需编辑态——激活时自动进入（见 enable_attribute_entry）
+        self._active_kind = kind
+        self._refresh_button_states()
+
+    def _refresh_button_states(self) -> None:
+        """统一按钮状态出口：由「目标图层 / 是否编辑中 / 激活工具」推导全部按钮。
+
+        - enabled(能否点击)：
+
+          * 「开始编辑」「属性录入」恒可用(属性录入激活时自动进编辑态)；
+          * 「停止编辑 / 保存编辑 / 融合几何 / 要素编辑 / 线分割」仅编辑中可用；
+          * 「添加点/线/面」仅编辑中且图层几何匹配时可用；
+
+        - checked(勾选=工具正激活)：仅激活工具对应的按钮按下，其余弹起。
+
+        所有入口(开始/停止编辑、切图层、激活/清除/切换工具)只改状态字段后调
+        本方法，不再散点手工 setEnabled/setChecked，避免按钮状态与真实状态脱节
+        (历史 bug：工具已清除但「添加面」按钮仍呈激活/高亮态)。
+        """
+        layer = self._current_layer()
+        is_vec = layer is not None and layer.type() == layer.VectorLayer
+        editing = bool(is_vec and layer.isEditable())
+
+        # 「开始编辑」恒可用(点击弹窗选层)；「属性录入」恒可用(激活时自动开编辑)
         self.start_edit.setEnabled(True)
         self.attribute_entry_action.setEnabled(True)
-        if not enabled:
-            self.stop_edit.setEnabled(False)
-            self.save_edit.setEnabled(False)
-            self.merge_geometry_action.setEnabled(False)
-            self.feature_edit_action.setEnabled(False)
-            self.split_feature_action.setEnabled(False)
-            return
-        self.stop_edit.setEnabled(editing_now)
-        self.save_edit.setEnabled(editing_now)
-        # 融合几何 / 要素编辑 / 线分割 要求编辑态：编辑中才可用
-        self.merge_geometry_action.setEnabled(editing_now)
-        self.feature_edit_action.setEnabled(editing_now)
-        self.split_feature_action.setEnabled(editing_now)
-
-    def _set_add_buttons_for_geometry(self, g_type: int) -> None:
-        """按 ``g_type`` 启用对应的"添加点/线/面"按钮；``g_type=-1`` 表示全禁用。"""
-        self.add_point_action.setEnabled(g_type == 0)
-        self.add_line_action.setEnabled(g_type == 1)
-        self.add_polygon_action.setEnabled(g_type == 2)
+        # 编辑操作：编辑中才可用
+        for action in (
+            self.stop_edit,
+            self.save_edit,
+            self.merge_geometry_action,
+            self.feature_edit_action,
+            self.split_feature_action,
+        ):
+            action.setEnabled(editing)
+        # 「添加X」：编辑中且与图层几何匹配才可用
+        g_type = layer.geometryType() if is_vec else -1
+        self.add_point_action.setEnabled(editing and g_type == QgsWkbTypes.PointGeometry)
+        self.add_line_action.setEnabled(editing and g_type == QgsWkbTypes.LineGeometry)
+        self.add_polygon_action.setEnabled(editing and g_type == QgsWkbTypes.PolygonGeometry)
+        # 勾选互斥：仅激活工具对应的按钮按下
+        for kind, action in self._tool_action_map.items():
+            action.setChecked(kind == self._active_kind)

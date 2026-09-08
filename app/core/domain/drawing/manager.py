@@ -24,7 +24,10 @@ from qgis.core import QgsWkbTypes
 from qgis.gui import QgsRubberBand
 from qgis.PyQt.QtCore import Qt
 
+from app.infra.logging import get_logger
 from .service import ActiveDraw, DrawingService
+
+logger = get_logger(__name__)
 
 
 class DrawManager(QObject):
@@ -86,14 +89,14 @@ class DrawManager(QObject):
                 if hasattr(self._active_tool, "cleanup"):
                     self._active_tool.cleanup()
             except Exception:  # noqa: BLE001
-                pass
+                logger.exception("清理绘制工具 %s 的 cleanup 失败", type(self._active_tool).__name__)
             # 保护性 unset：_active_tool 可能是带 .tool 属性的 wrapper
             #（历史兼容），也可能就是 QgsMapTool 本身
             try:
                 real_tool = getattr(self._active_tool, "tool", self._active_tool)
                 self.canvas.unsetMapTool(real_tool)
             except Exception:  # noqa: BLE001
-                pass
+                logger.exception("从画布卸下绘制工具 %s 失败", type(self._active_tool).__name__)
         self._active_tool = None
         if self._shared_rubber_band is not None:
             self._shared_rubber_band.reset()

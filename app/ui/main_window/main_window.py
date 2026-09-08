@@ -574,6 +574,7 @@ class MainWindow(FramelessMixin, QMainWindow):
             dock = DataManageDock(
                 self,
                 on_add_connection=self._on_dm_add_connection,
+                on_add_layer=self._on_dm_add_layer,
             )
             self._data_manage_dock = dock
             self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
@@ -590,6 +591,70 @@ class MainWindow(FramelessMixin, QMainWindow):
         dock = getattr(self, "_data_manage_dock", None)
         if dock is not None:
             dock.add_connection(dlg.connection())
+
+    def _on_dm_add_layer(self, db: dict, category: str, name: str) -> None:
+        """数据管理表格行双击：把注册表作为图层加入工程(仅矢量可入图)。
+
+        - 矢量(spatial): 经 :meth:`_open_local_table_layer` 打开为图层并加入工程;
+        - 字典 / 影像(无空间几何): 提示无法入图, 可到「执行SQL」查看记录。
+        """
+        from app.core.util.local_db_util import _CATEGORY_LABEL
+
+        path = str(db.get("path") or "")
+        label = _CATEGORY_LABEL.get(category, category)
+        if not path:
+            QMessageBox.warning(self, "数据管理", f"「{name}」缺少库文件路径, 无法加载。")
+            return
+        if category != "spatial":
+            QMessageBox.information(
+                self,
+                "数据管理",
+                f"「{name}」为{label}数据(无空间几何), 无法加入地图。\n"
+                f"可在「执行SQL」中按表查看记录。",
+            )
+            return
+        self._begin_layer_loading(f"正在加载图层：{name}")
+        try:
+            meta = (db.get("meta") or {}).get(name) or {}
+            layer = self._open_local_table_layer(path, name, meta)
+            if layer is None:
+                QMessageBox.warning(
+                    self,
+                    "数据管理",
+                    f"「{name}」无法作为地图图层打开\n(文件: {path})",
+                )
+                return
+            layer.path_c = path  # 容器路径, 供“执行SQL”按文件打开
+            self._add_layer_to_project(layer)
+            self.canvas.setExtent(layer.extent())
+            self.canvas.refreshAllLayers()
+            self.messageBar.pushMessage(
+                f"已加载图层：{name}",
+                level=Qgis.MessageLevel.Success,
+                duration=3,
+            )
+        finally:
+            self._end_layer_loading()
+
+    def _open_local_table_layer(self, path: str, name: str, meta: dict):
+        """把本地库中注册的矢量表打开为 :class:`QgsVectorLayer`.
+
+        OGR provider 优先(``路径|layername=表名`` 自动探测几何列); 不识别时
+        用 meta 的几何列 / SRID 走 spatialite provider。返回 valid layer 或 None。
+        """
+        from qgis.core import QgsDataSourceUri, QgsVectorLayer
+
+        layer = QgsVectorLayer(f"{path}|layername={name}", name, "ogr")
+        if layer.isValid():
+            return layer
+        geom_col = meta.get("geom_col")
+        if not geom_col:
+            return None
+        uri = QgsDataSourceUri()
+        uri.setDatabase(path)
+        uri.setDataSource("", name, str(geom_col), "", str(meta.get("srid") or ""))
+        layer = QgsVectorLayer(uri.uri(), name, "spatialite")
+        return layer if layer.isValid() else None
 
     def _on_swipe(self) -> None:
         """卷帘对比：分屏会话已存续则直接恢复（不弹窗）；否则弹窗选栅格激活。

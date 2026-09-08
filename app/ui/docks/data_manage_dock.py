@@ -8,7 +8,9 @@
 - ``.dm-tree``                        -> 左栏: 树头「数据库连接」+ QTreeWidget
   + 「新建连接」按钮
 - ``.dm-panel``                       -> 右栏: 标题行(选中库名 + 创建数据 /
-  导入 / 刷新按钮) + QTableWidget(数据表: 数据名称 / 类型 / 说明)
+  导入 / 刷新按钮) + QTableWidget(数据表: 数据名称 / 类型 / 几何类型 /
+  坐标系 / 说明, 全列可手动拖宽且自动撑满可用宽度, 行悬停显示字段列表
+  元信息, **双击行 → on_add_layer 回调**(把该注册表加入地图)
 - ``.dialog-footer``                  -> 底部按钮行(关闭)
 
 本地数据库展示以 ``local_db_util`` 的 ``query_all_table_name()`` 注册表为准
@@ -16,7 +18,8 @@
 「矢量 / 字典 / 影像」分组节点 → 注册表名叶子; 右侧面板列出选中库(或某类)
 的注册数据行(类型列=类别, 说明列=行数)。树尾固定「服务器数据库」占位节点
 (服务器连接暂搁置)。创建数据 / 导入 / 刷新仍为回调占位(未传时记日志),
-由 MainWindow 提供回调后接入。
+由 MainWindow 提供回调后接入; 双击数据表行触发 ``on_add_layer`` 回调, 由
+MainWindow 把该表作为图层加入工程(仅矢量可入图)。
 """
 
 from __future__ import annotations
@@ -24,7 +27,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import QEvent, Qt, QTimer
 from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
@@ -68,6 +71,7 @@ class DataManageDock(QDockWidget):
         on_create_data: Callable[[], None] | None = None,
         on_import: Callable[[], None] | None = None,
         on_refresh: Callable[[], None] | None = None,
+        on_add_layer: Callable[[dict, str, str], None] | None = None,
     ) -> None:
         super().__init__("数据管理", parent)
         #: 动作回调占位(未提供时点击只记日志)
@@ -75,6 +79,12 @@ class DataManageDock(QDockWidget):
         self._on_create_data = on_create_data
         self._on_import = on_import
         self._on_refresh = on_refresh
+        #: 双击表格行回调: (连接 dict, category, 表名) → 加入地图(由 MainWindow 提供)
+        self._on_add_layer = on_add_layer
+        #: 当前联动展示的库(双击行定位用)
+        self._current_db: dict | None = None
+        #: 列宽程序化调整中(防止信号重入)
+        self._fitting = False
         self.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
         self.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetClosable
@@ -161,17 +171,25 @@ class DataManageDock(QDockWidget):
         self.refresh_btn.clicked.connect(self._on_refresh_clicked)
         lay.addLayout(hd_row)
 
-        # 数据表
-        self.table = QTableWidget(0, 3)
-        self.table.setHorizontalHeaderLabels(["数据名称", "类型", "说明"])
+        # 数据表: 数据名称 | 类型 | 几何类型 | 坐标系 | 说明
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(
+            ["数据名称", "类型", "几何类型", "坐标系", "说明"]
+        )
         self.table.verticalHeader().setVisible(False)
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         header = self.table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        # 全列 Interactive: 用户可拖动表头手动调宽; 宽度不足视口时由
+        # ``_fill_available_width`` 按比例放大到撑满(仍可拖窄, 余量走滚动条)
+        header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        header.setMinimumSectionSize(48)
+        for col, width in ((0, 200), (1, 70), (2, 90), (3, 230), (4, 150)):
+            header.resizeSection(col, width)
+        self.table.itemDoubleClicked.connect(self._on_table_item_double_clicked)
+        # 表格尺寸变化(窗口/分隔条拖动) → 延迟横向撑满
+        self.table.installEventFilter(self)
         lay.addWidget(self.table, 1)
         return pane
 
@@ -195,8 +213,10 @@ class DataManageDock(QDockWidget):
 
             {"kind": "local", "name": str, "path": str,
              "categories": {"spatial": [表名…], "dict": [表名…], "image": [表名…]},
-             "counts": {表名: 行数|None}}
-        """
+             "counts": {表名: 行数|None},
+             "meta": {表名: {geom_label, geom_col, srid, crs, fields}}}  # 可省略
+
+        meta 缺省时表格「几何类型 / 坐标系」列显示 —(行 tooltip 无字段清单)。"""
         self._databases = list(databases)
         self._rebuild_tree()
 
@@ -278,21 +298,28 @@ class DataManageDock(QDockWidget):
 
     @staticmethod
     def _rows(db: dict, category: str | None = None) -> list[dict]:
-        """展平某库(可按类别过滤)的注册数据行: [{name, category, count}]."""
+        """展平某库(可按类别过滤)的注册数据行: [{name, category, count, meta}]。"""
         cats: dict = db.get("categories") or {}
         counts: dict = db.get("counts") or {}
+        metas: dict = db.get("meta") or {}
         out: list[dict] = []
         for cat in _CATEGORY_ORDER:
             if category is not None and cat != category:
                 continue
             for name in cats.get(cat) or []:
                 out.append(
-                    {"name": name, "category": cat, "count": counts.get(name)}
+                    {
+                        "name": name,
+                        "category": cat,
+                        "count": counts.get(name),
+                        "meta": metas.get(name) or {},
+                    }
                 )
         return out
 
     def _show_database(self, db: dict | None, *, category: str | None = None) -> None:
         """联动右侧面板: 更新标题并重建数据表 (db=None 显示空提示)."""
+        self._current_db = db
         if db is None:
             self.sel_name.setText("未连接本地数据库")
             self.sel_name.setToolTip("")
@@ -305,23 +332,65 @@ class DataManageDock(QDockWidget):
         for row in rows:
             r = self.table.rowCount()
             self.table.insertRow(r)
-            name_item = QTableWidgetItem(row["name"])
-            name_item.setData(_ROW_TAG_ROLE, f"{row['category']}\x00{row['name']}")
+            cat_label = _CATEGORY_LABEL.get(row["category"], row["category"])
+            meta = row["meta"]
+            geom_text = meta.get("geom_label") or "—"
+            crs_text = meta.get("crs") or "—"
             count = row["count"]
             desc = (
                 "—"
                 if count is None
                 else f"{count} {_CATEGORY_UNIT.get(row['category'], '')}"
             )
+            name_item = QTableWidgetItem(row["name"])
+            name_item.setData(_ROW_TAG_ROLE, f"{row['category']}\x00{row['name']}")
+            tip = self._row_tooltip(
+                row["name"], cat_label, geom_text, crs_text, desc, meta
+            )
             items = (
                 name_item,
-                QTableWidgetItem(_CATEGORY_LABEL.get(row["category"], row["category"])),
+                QTableWidgetItem(cat_label),
+                QTableWidgetItem(geom_text),
+                QTableWidgetItem(crs_text),
                 QTableWidgetItem(desc),
             )
             for item in items:
                 item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEditable)
+                item.setToolTip(tip)
             for col, item in enumerate(items):
                 self.table.setItem(r, col, item)
+        self._fill_available_width()
+
+    @staticmethod
+    def _row_tooltip(
+        name: str,
+        cat_label: str,
+        geom_text: str,
+        crs_text: str,
+        desc: str,
+        meta: dict,
+    ) -> str:
+        """表格行悬停提示: 基本项 + 字段列表(几何列标注; 超长截断)。"""
+        lines = [
+            f"数据名称: {name}",
+            f"类型: {cat_label}",
+            f"几何类型: {geom_text}",
+            f"坐标系: {crs_text}",
+            f"说明: {desc}",
+        ]
+        geom_col = meta.get("geom_col")
+        fields = list(meta.get("fields") or [])
+        if fields:
+            total = len(fields)
+            lines.append(f"字段 ({total}):")
+            for col, typ in fields[:30]:
+                marker = ""
+                if geom_col and col.lower() == str(geom_col).lower():
+                    marker = "  ← 几何列"
+                lines.append(f"  {col}: {typ}{marker}")
+            if total > 30:
+                lines.append(f"  … 其余 {total - 30} 个字段")
+        return "\n".join(lines)
 
     # ------------------------------------------------------------ 交互
 
@@ -347,6 +416,59 @@ class DataManageDock(QDockWidget):
         if isinstance(db, dict):
             # 数据库节点(本地连接 / 服务器占位): 显示全部
             self._show_database(db)
+
+    def eventFilter(self, obj, ev) -> bool:  # noqa: N802 —— Qt 命名
+        """表格尺寸变化(窗口 / 分隔条拖动)后延迟横向撑满(等布局稳定)."""
+        if obj is self.table and ev.type() == QEvent.Type.Resize:
+            QTimer.singleShot(0, self._fill_available_width)
+        return super().eventFilter(obj, ev)
+
+    def _fill_available_width(self) -> None:
+        """横向撑满可用宽度: 列宽总和小于视口时按比例放大(列仍可手动拖窄)."""
+        if self._fitting or self.table.columnCount() == 0:
+            return
+        header = self.table.horizontalHeader()
+        view = header.viewport().width()
+        if view <= 0:
+            return
+        cols = self.table.columnCount()
+        total = sum(header.sectionSize(c) for c in range(cols))
+        if total <= 0 or total >= view - 2 or view < cols * 48:
+            return
+        self._fitting = True
+        try:
+            factor = view / total
+            widths = [max(48, int(header.sectionSize(c) * factor)) for c in range(cols)]
+            widths[-1] = max(48, widths[-1] + view - sum(widths))
+            for c, w in enumerate(widths):
+                header.resizeSection(c, w)
+        finally:
+            self._fitting = False
+
+    def _on_table_item_double_clicked(self, item) -> None:
+        """表格行双击 → on_add_layer(db, category, 表名): 把该表加入地图.
+
+        未提供回调时记日志(占位); 槽内异常捕获防 native 崩溃。
+        """
+        if item is None:
+            return
+        col0 = self.table.item(item.row(), 0)
+        if col0 is None:
+            return
+        tag = col0.data(_ROW_TAG_ROLE)
+        if not isinstance(tag, str) or "\x00" not in tag:
+            return
+        cat, name = tag.split("\x00", 1)
+        db = self._current_db
+        if db is None:
+            return
+        if self._on_add_layer is None:
+            logger.debug("数据管理[加入地图]: 未接回调, %s/%s", cat, name)
+            return
+        try:
+            self._on_add_layer(db, cat, name)
+        except Exception as exc:  # 槽内异常会 native 崩溃
+            logger.error("数据管理[加入地图]回调异常: %s", exc, exc_info=True)
 
     def _on_add_connection_clicked(self) -> None:
         """「+ 新建连接」: 有回调交回调(MainWindow 弹窗后回填), 否则自己弹窗."""

@@ -14,7 +14,10 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QMessageBox
 from qgis.PyQt.QtGui import QColor
 
+from app.infra.logging import get_logger
 from .base import BaseDrawTool
+
+logger = get_logger(__name__)
 
 
 class PolygonDrawTool(BaseDrawTool):
@@ -89,4 +92,4 @@ class PolygonDrawTool(BaseDrawTool):
             self.rubber_band.hide()
             self.line_rubber_band.hide()
         except Exception:  # noqa: BLE001
-            pass
+            logger.exception("面绘制工具 cleanup 隐藏橡皮筋失败")

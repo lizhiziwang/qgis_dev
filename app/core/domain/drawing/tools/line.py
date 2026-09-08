@@ -13,7 +13,10 @@ from qgis.gui import QgsRubberBand
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QMessageBox
 
+from app.infra.logging import get_logger
 from .base import BaseDrawTool
+
+logger = get_logger(__name__)
 
 
 class LineDrawTool(BaseDrawTool):
@@ -84,4 +87,4 @@ class LineDrawTool(BaseDrawTool):
             self.line_rubber_band.hide()
             self.line_rubber_band2.hide()
         except Exception:  # noqa: BLE001
-            pass
+            logger.exception("线绘制工具 cleanup 隐藏橡皮筋失败")

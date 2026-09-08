@@ -25,7 +25,10 @@ from qgis.gui import QgsMapTool, QgsRubberBand
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QColor
 
+from app.infra.logging import get_logger
 from .snap import snapped_match
+
+logger = get_logger(__name__)
 
 #: 磁吸指示器构建失败的哨兵（QgsSnapIndicator 懒创建只尝试一次）
 _SNAP_INDICATOR_NONE = object()
@@ -142,7 +145,7 @@ class BaseDrawTool(QgsMapTool):
         try:
             self.hide_snap_indicator()
         except Exception:  # noqa: BLE001
-            pass
+            logger.exception("绘制工具 %s 收起磁吸标记失败", type(self).__name__)
         super().deactivate()
 
     def finish_draw(self) -> None:
@@ -155,16 +158,16 @@ class BaseDrawTool(QgsMapTool):
                 self.rubber_band_buffer.addGeometry(buffered)
             self.finished.emit(self.geom)
         except Exception:  # noqa: BLE001
-            pass
+            logger.exception("绘制工具 %s 完成回调失败", type(self).__name__)
 
     def cleanup(self) -> None:
         """清理资源（rubber_band、临时点等）。子类按需重写。"""
         try:
             self.hide_snap_indicator()
         except Exception:  # noqa: BLE001
-            pass
+            logger.exception("绘制工具 %s cleanup 收起磁吸标记失败", type(self).__name__)
         try:
             self.rubber_band_buffer.hide()
         except Exception:  # noqa: BLE001
-            pass
+            logger.exception("绘制工具 %s cleanup 隐藏缓冲橡皮筋失败", type(self).__name__)
 

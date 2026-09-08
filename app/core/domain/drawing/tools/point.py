@@ -12,7 +12,10 @@ from qgis.core import QgsGeometry, QgsPointXY, QgsWkbTypes
 from qgis.gui import QgsRubberBand
 from qgis.PyQt.QtCore import Qt
 
+from app.infra.logging import get_logger
 from .base import BaseDrawTool
+
+logger = get_logger(__name__)
 
 
 class PointDrawTool(BaseDrawTool):
@@ -42,4 +45,4 @@ class PointDrawTool(BaseDrawTool):
         try:
             self.rubber_band.hide()
         except Exception:  # noqa: BLE001
-            pass
+            logger.exception("点绘制工具 cleanup 隐藏橡皮筋失败")
