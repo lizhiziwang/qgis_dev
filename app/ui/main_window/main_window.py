@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sys
+from contextlib import suppress
 from typing import Optional
 
 from qgis.PyQt.QtCore import QEvent, QPoint, Qt
@@ -28,6 +29,7 @@ from qgis.PyQt.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QShortcut,
     QSizePolicy,
     QToolBar,
     QTreeWidget,
@@ -60,6 +62,7 @@ from qgis.gui import (
     QgsVectorLayerSaveAsDialog,
 )
 
+from app.core.domain.check.space_index import clear_spatial_index
 from app.core.domain.editing import LayerEditService
 from app.core.domain.query import SpaceQueryService
 from app.infra.fs.paths import Paths
@@ -189,7 +192,82 @@ class MainWindow(FramelessMixin, QMainWindow):
         # 画布底色跟随主题（默认浅色为白色）
         canvas.setCanvasColor(QColor(ThemeManager.instance().current().canvas_bg))
         canvas.enableAntiAliasing(True)
+        # ---- 编辑撤销 / 重做快捷键（Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y）----
+        # 编辑工具（点选/框选 Delete、要素编辑、融合、分割、属性录入）每个动作都
+        # 是一条 beginEditCommand…endEditCommand 记录，存在图层 undoStack；这里
+        # 把快捷键接到「当前编辑图层」的撤销/重做上（QGIS 删除选中同一套语义）。
+        # 作用域限定画布子树（WidgetWithChildrenShortcut）：焦点在画布时才生效，
+        # 不抢 dock / 对话框文本输入框的原生 Ctrl+Z（画布本身无文本输入）。
+        self._undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), canvas)
+        self._undo_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._undo_shortcut.activated.connect(self._undo_edit)
+        self._redo_shortcuts = [
+            QShortcut(QKeySequence(seq), canvas) for seq in ("Ctrl+Shift+Z", "Ctrl+Y")
+        ]
+        for redo_sc in self._redo_shortcuts:
+            redo_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            redo_sc.activated.connect(self._redo_edit)
         return canvas
+
+    # ===================================================== 编辑撤销 / 重做
+
+    def _undo_edit(self) -> None:
+        """Ctrl+Z：撤销当前编辑图层最近一个编辑命令。
+
+        目标图层取 :meth:`_first_editable_layer`（优先编辑目标，其次画布上任意
+        可编辑矢量图层）；执行后清空间索引缓存并推迟出栈刷新画布。
+        """
+        self._step_edit_stack(undo=True)
+
+    def _redo_edit(self) -> None:
+        """Ctrl+Y / Ctrl+Shift+Z：重做最近被撤销的编辑命令。"""
+        self._step_edit_stack(undo=False)
+
+    def _step_edit_stack(self, undo: bool) -> None:
+        """对优先编辑图层执行一步 undo / redo；无目标或无可用步骤则静默返回。"""
+        target = self._first_editable_layer()
+        if target is None:
+            return
+        stack = target.undoStack()
+        if stack is None:
+            return
+        if undo and not stack.canUndo():
+            return
+        if not undo and not stack.canRedo():
+            return
+        if undo:
+            stack.undo()
+        else:
+            stack.redo()
+        # undo/redo 可能恢复或再次删除要素 → 空间索引缓存失效，下次命中需重建
+        clear_spatial_index(target)
+        from qgis.PyQt.QtCore import QTimer
+
+        QTimer.singleShot(0, self._safe_edit_refresh)
+
+    def _first_editable_layer(self) -> QgsVectorLayer | None:
+        """撤销目标图层：优先 ``self.edit_layer``，否则画布上任一可编辑矢量图层。"""
+        if self._is_undoable(self.edit_layer):
+            return self.edit_layer
+        for layer in self.canvas.layers():
+            if self._is_undoable(layer):
+                return layer
+        return None
+
+    @staticmethod
+    def _is_undoable(layer) -> bool:
+        """目标资格：矢量图层、处于编辑态、且已有编辑命令栈。"""
+        return (
+            layer is not None
+            and isinstance(layer, QgsVectorLayer)
+            and layer.isEditable()
+            and layer.undoStack() is not None
+        )
+
+    def _safe_edit_refresh(self) -> None:
+        """undo/redo 后刷新画布（事件栈外执行；窗口已销毁时静默）。"""
+        with suppress(RuntimeError):
+            self.canvas.refresh()
 
     def _build_central_widget(self) -> None:
         central = QWidget(self)
