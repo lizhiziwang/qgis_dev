@@ -11,7 +11,8 @@
 - **右键点击顶点** → 删除该顶点（线至少保留 2 个顶点；面环至少保留
   4 个顶点、含闭合点，防止删成非法环）；
 - **点击空白处** → 退出当前要素编辑（清空高亮与手柄）；
-- **Esc** → 退出工具。
+- **Esc** → 退出工具；
+- **Delete** → 删除当前已载入（选中）的要素（需处于编辑态；整体一个可撤销命令）。
 
 支持点 / 线 / 面（含多部件、洞），几何坐标一律以**图层 CRS** 为基准：
 命中测试在画布像素空间做（容差 12px），落点换算成图层坐标后再改几何。
@@ -108,6 +109,8 @@ class FeatureEditTool(QgsMapTool):
             event.ignore()
             # 不在键盘事件栈内 unsetMapTool，推迟出栈
             QTimer.singleShot(0, self._quit)
+        elif event.key() == Qt.Key.Key_Delete:
+            self._delete_loaded_feature()
         else:
             super().keyPressEvent(event)
 
@@ -391,6 +394,41 @@ class FeatureEditTool(QgsMapTool):
         if changed:
             self._refresh_overlay()
         return True
+
+    # -------------------------------------------------- 删除选中要素
+
+    def _delete_loaded_feature(self) -> None:
+        """Delete 键：删除当前已载入（选中）的要素，整体一个撤销步骤。
+
+        与 QGIS 顶点编辑工具一致：编辑态下对已载入的要素按 ``Delete`` 删除
+        整个要素（而非顶点）。顶点拖拽过程中忽略 Delete，防止误删。删除后
+        清空高亮/手柄、清掉空间索引缓存，并推迟出栈刷新画布。
+        """
+        if self._drag_vid is not None:
+            return  # 正在拖拽顶点，忽略 Delete
+        if self._fid is None or self._geom is None:
+            return
+        layer = self._current_layer()
+        if layer is None or not layer.isEditable():
+            self._hint("图层未处于编辑态，无法删除要素")
+            return
+        fid = self._fid
+        layer.beginEditCommand("删除要素")
+        try:
+            ok = layer.deleteFeatures([fid])
+        except RuntimeError:
+            ok = False
+        if not ok:
+            layer.cancelEditCommand()
+            self._hint("删除要素失败：图层编辑 API 异常")
+            return
+        layer.endEditCommand()
+        self._clear_overlay()
+        # 要素已删，空间索引缓存失效 → 清掉让下次命中重建
+        clear_spatial_index(layer)
+        self._hint("已删除选中要素（可 Ctrl+Z 撤销）")
+        # 事件栈内不直接 refresh（仓库约束），推迟出栈
+        QTimer.singleShot(0, self._safe_refresh)
 
     # -------------------------------------------------- 命中测试（画布像素空间）
 

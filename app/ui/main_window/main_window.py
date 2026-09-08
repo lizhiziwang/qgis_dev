@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sys
+from contextlib import suppress
 from typing import Optional
 
 from qgis.PyQt.QtCore import QEvent, QPoint, Qt
@@ -28,8 +29,10 @@ from qgis.PyQt.QtWidgets import (
     QMainWindow,
     QMenu,
     QMessageBox,
+    QShortcut,
     QSizePolicy,
     QToolBar,
+    QToolButton,
     QTreeWidget,
     QVBoxLayout,
     QWidget,
@@ -55,15 +58,16 @@ from qgis.gui import (
     QgsMapCanvas,
     QgsMapToolPan,
     QgsMapToolZoom,
-    QgsMessageBar,
     QgsRendererPropertiesDialog,
     QgsVectorLayerSaveAsDialog,
 )
 
+from app.core.domain.check.space_index import clear_spatial_index
 from app.core.domain.editing import LayerEditService
 from app.core.domain.query import SpaceQueryService
 from app.infra.fs.paths import Paths
 from app.infra.logging import get_logger
+from app.infra.messagebar import FloatingMessageBar
 from app.ui.common.frameless import FramelessMixin
 from app.ui.common.icons import Icons
 from app.ui.common.theme import ThemeManager, toolbar_qss, window_qss
@@ -193,7 +197,82 @@ class MainWindow(FramelessMixin, QMainWindow):
         # 画布底色跟随主题（默认浅色为白色）
         canvas.setCanvasColor(QColor(ThemeManager.instance().current().canvas_bg))
         canvas.enableAntiAliasing(True)
+        # ---- 编辑撤销 / 重做快捷键（Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y）----
+        # 编辑工具（点选/框选 Delete、要素编辑、融合、分割、属性录入）每个动作都
+        # 是一条 beginEditCommand…endEditCommand 记录，存在图层 undoStack；这里
+        # 把快捷键接到「当前编辑图层」的撤销/重做上（QGIS 删除选中同一套语义）。
+        # 作用域限定画布子树（WidgetWithChildrenShortcut）：焦点在画布时才生效，
+        # 不抢 dock / 对话框文本输入框的原生 Ctrl+Z（画布本身无文本输入）。
+        self._undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), canvas)
+        self._undo_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+        self._undo_shortcut.activated.connect(self._undo_edit)
+        self._redo_shortcuts = [
+            QShortcut(QKeySequence(seq), canvas) for seq in ("Ctrl+Shift+Z", "Ctrl+Y")
+        ]
+        for redo_sc in self._redo_shortcuts:
+            redo_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
+            redo_sc.activated.connect(self._redo_edit)
         return canvas
+
+    # ===================================================== 编辑撤销 / 重做
+
+    def _undo_edit(self) -> None:
+        """Ctrl+Z：撤销当前编辑图层最近一个编辑命令。
+
+        目标图层取 :meth:`_first_editable_layer`（优先编辑目标，其次画布上任意
+        可编辑矢量图层）；执行后清空间索引缓存并推迟出栈刷新画布。
+        """
+        self._step_edit_stack(undo=True)
+
+    def _redo_edit(self) -> None:
+        """Ctrl+Y / Ctrl+Shift+Z：重做最近被撤销的编辑命令。"""
+        self._step_edit_stack(undo=False)
+
+    def _step_edit_stack(self, undo: bool) -> None:
+        """对优先编辑图层执行一步 undo / redo；无目标或无可用步骤则静默返回。"""
+        target = self._first_editable_layer()
+        if target is None:
+            return
+        stack = target.undoStack()
+        if stack is None:
+            return
+        if undo and not stack.canUndo():
+            return
+        if not undo and not stack.canRedo():
+            return
+        if undo:
+            stack.undo()
+        else:
+            stack.redo()
+        # undo/redo 可能恢复或再次删除要素 → 空间索引缓存失效，下次命中需重建
+        clear_spatial_index(target)
+        from qgis.PyQt.QtCore import QTimer
+
+        QTimer.singleShot(0, self._safe_edit_refresh)
+
+    def _first_editable_layer(self) -> QgsVectorLayer | None:
+        """撤销目标图层：优先 ``self.edit_layer``，否则画布上任一可编辑矢量图层。"""
+        if self._is_undoable(self.edit_layer):
+            return self.edit_layer
+        for layer in self.canvas.layers():
+            if self._is_undoable(layer):
+                return layer
+        return None
+
+    @staticmethod
+    def _is_undoable(layer) -> bool:
+        """目标资格：矢量图层、处于编辑态、且已有编辑命令栈。"""
+        return (
+            layer is not None
+            and isinstance(layer, QgsVectorLayer)
+            and layer.isEditable()
+            and layer.undoStack() is not None
+        )
+
+    def _safe_edit_refresh(self) -> None:
+        """undo/redo 后刷新画布（事件栈外执行；窗口已销毁时静默）。"""
+        with suppress(RuntimeError):
+            self.canvas.refresh()
 
     def _build_central_widget(self) -> None:
         central = QWidget(self)
@@ -201,9 +280,23 @@ class MainWindow(FramelessMixin, QMainWindow):
         layout = QVBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        # 消息栏
-        self.messageBar = QgsMessageBar()
+        # 消息栏：悬浮盖在地图画布顶部，不挤占画布空间。
+        self.messageBar = FloatingMessageBar(self.canvas)
+        self.messageBar.setObjectName("FloatingMessageBar")
         self.messageBar.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
+        # 悬浮 toast 外观：消息条自带浅底圆角卡片，文字盖在地图上也可读
+        # （该应用不引入 QGIS 桌面 qss，消息条/条目本身无样式，需自备）。
+        self.messageBar.setStyleSheet(
+            "#FloatingMessageBar {"
+            "  background-color: rgba(255, 255, 255, 240);"
+            "  border: 1px solid rgba(120, 120, 120, 120);"
+            "  border-radius: 6px;"
+            "}"
+            "#FloatingMessageBar QLabel { color: #202020; }"
+            "#FloatingMessageBar QToolButton {"
+            "  border: none; background: transparent; color: #606060;"
+            "}"
+        )
         # 把 messageBar 放到全局属性（兼容旧 sendMessageToTopParent）
         qgis_app = QgsApplication.instance()
         if qgis_app is not None:
@@ -211,7 +304,16 @@ class MainWindow(FramelessMixin, QMainWindow):
         # 窗口销毁时必须清理该属性，否则残留悬空 QgsMessageBar*，
         # 后续 send() 访问会 native access violation
         self.destroyed.connect(self._clear_global_messagebar)
-        layout.addWidget(self.messageBar)
+
+        # 显隐完全由消息条自己的“展示租约”驱动（见 app/infra/messagebar 的
+        # FloatingMessageBar）：
+        # 启动时从未 push → 保持隐藏；push → 显示，duration 秒后自动收起，
+        # 不依赖 QgsMessageBar 内部移除机制，空条不可能出现。
+        self._msg_active = False
+        self.messageBar.set_on_state(self._on_floating_message_state)
+        self.messageBar.hide()
+
+        layout.addWidget(self.canvas)
 
         layout.addWidget(self.canvas)
 
@@ -1515,29 +1617,68 @@ class MainWindow(FramelessMixin, QMainWindow):
         self.messageBar.pushSuccess("新增图层", f"已创建 {layer_name}")
         logger.info("GDB 新增图层：%s → %s", layer_name, gdb)
 
+    def _on_floating_message_state(self, active: bool) -> None:
+        """悬浮消息条显隐回调（由消息条自己的租约驱动）。
+
+        active=True：摆到画布顶部显示；False：整条隐藏。画布缩放时由
+        :meth:`eventFilter` 调用 :meth:`_relayout_floating_message_bar` 同步宽度。
+        """
+        self._msg_active = bool(active)
+        if active:
+            self._relayout_floating_message_bar()
+        else:
+            bar = getattr(self, "messageBar", None)
+            if bar is not None:
+                try:
+                    if not bar.isHidden():
+                        bar.hide()
+                except RuntimeError:
+                    pass  # 窗口关闭流程中 C++ 对象已销毁
+
+    def _relayout_floating_message_bar(self) -> None:
+        """把悬浮消息条摆到画布顶部（整宽覆盖、高度随内容），仅在有消息时。"""
+        bar = getattr(self, "messageBar", None)
+        canvas = getattr(self, "canvas", None)
+        if bar is None or canvas is None or not getattr(self, "_msg_active", False):
+            return
+        try:
+            # 顶部留 6px 边距、取画布整宽；高度按消息内容自适应
+            bar.setGeometry(6, 6, max(canvas.width() - 12, 0), bar.sizeHint().height())
+            bar.show()
+            bar.raise_()
+        except RuntimeError:
+            pass  # 窗口关闭流程中 C++ 对象已销毁
+
     # ---- 画布拖拽添加图层（数据浏览器拖出 → 画布 drop）----
 
     def eventFilter(self, watched, event) -> bool:
-        """画布拖拽拦截：把浏览器拖出的图层 URI 转给 :meth:`_on_canvas_drop`。
+        """画布拖拽拦截 + 画布缩放时同步悬浮消息条。
 
+        画布拖拽：把浏览器拖出的图层 URI 转给 :meth:`_on_canvas_drop`。
         原生 :class:`QgsMapCanvas` 的 drop 会把图层直接加进工程根节点，不进
         "数据图层"分组、也不设 ``path_c``，与双击行为不一致；这里拦下来复用
         同一套 ``_add_layer_to_project`` 路径。非图层 URI 的拖拽（如外部文件）
         放行给原生处理。
-        """
-        if getattr(self, "canvas", None) is watched and event.type() in (
-            QEvent.Type.DragEnter,
-            QEvent.Type.DragMove,
-            QEvent.Type.Drop,
-        ):
-            from qgis.core import QgsMimeDataUtils
 
-            if QgsMimeDataUtils.isUriList(event.mimeData()):
-                if event.type() == QEvent.Type.Drop:
-                    self._on_canvas_drop(event)
-                else:
-                    event.acceptProposedAction()
-                return True
+        悬浮消息条宽度随画布缩放（消息条处于显示状态时同步几何）。
+        """
+        canvas = getattr(self, "canvas", None)
+        if canvas is not None and watched is canvas:
+            if event.type() == QEvent.Type.Resize:
+                self._relayout_floating_message_bar()
+            if event.type() in (
+                QEvent.Type.DragEnter,
+                QEvent.Type.DragMove,
+                QEvent.Type.Drop,
+            ):
+                from qgis.core import QgsMimeDataUtils
+
+                if QgsMimeDataUtils.isUriList(event.mimeData()):
+                    if event.type() == QEvent.Type.Drop:
+                        self._on_canvas_drop(event)
+                    else:
+                        event.acceptProposedAction()
+                    return True
         return super().eventFilter(watched, event)
 
     def _on_canvas_drop(self, event) -> None:

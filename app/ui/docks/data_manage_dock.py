@@ -6,7 +6,8 @@
   右上角关闭按钮, 对应 HTML 的关闭键)
 - ``.dialog-body > .dm-split``        -> :class:`QSplitter`(水平两栏)
 - ``.dm-tree``                        -> 左栏: 树头「数据库连接」+ QTreeWidget
-  + 「新建连接」按钮(本地库 / 服务器连接均可入树)
+  + 「新建连接」按钮(本地库 / 服务器连接均可入树); 树固定**两个根节点**
+  「本地数据库」/「服务器数据库」, 连接作为对应根的子节点
 - ``.dm-panel``                       -> 右栏: 标题行(选中库名 + 创建数据 /
   导入 / 刷新按钮) + QTableWidget(数据表: 数据名称 / 类型 / 几何类型 /
   坐标系 / 说明, 全列可手动拖宽且自动撑满可用宽度, 行悬停显示字段列表
@@ -14,14 +15,14 @@
 - ``.dialog-footer``                  -> 底部按钮行(关闭)
 
 本地数据库展示以 ``local_db_util`` 的 ``query_all_table_name()`` 注册表为准
-(见 :mod:`app.core.util.local_db_util`), 树按类别分级: 连接文件节点 →
-「矢量 / 字典 / 影像」分组节点 → 注册表名叶子; 右侧面板列出选中库(或某类)
-的注册数据行(类型列=类别, 说明列=行数)。树尾为「服务器数据库」分组节点:
-服务器连接(PostgreSQL / Oracle / SQL Server, 来自「新建连接」对话框服务器页)
-挂在分组下, 右侧面板展示连接摘要 —— 表目录浏览待后续版本接入。创建数据 /
-导入 / 刷新仍为回调占位(未传时记日志), 由 MainWindow 提供回调后接入;
-双击数据表行触发 ``on_add_layer`` 回调, 由 MainWindow 把该表作为图层加入
-工程(仅矢量可入图)。
+(见 :mod:`app.core.util.local_db_util`), 树按类别分级: 「本地数据库」根 →
+连接节点(名称=文件名 stem)→「矢量 / 字典 / 影像」分组节点 → 注册表名叶子;
+右侧面板列出选中库(或某类)的注册数据行(类型列=类别, 说明列=行数)。
+「服务器数据库」根下挂服务器连接(PostgreSQL / Oracle / SQL Server, 来自
+「新建连接」对话框服务器页), 右侧面板展示连接摘要 —— 表目录浏览待后续
+版本接入。创建数据 / 导入 / 刷新仍为回调占位(未传时记日志), 由 MainWindow
+提供回调后接入; 双击数据表行触发 ``on_add_layer`` 回调, 由 MainWindow 把
+该表作为图层加入工程(仅矢量可入图)。
 """
 
 from __future__ import annotations
@@ -226,29 +227,54 @@ class DataManageDock(QDockWidget):
         self._rebuild_tree()
 
     def add_connection(self, db: dict) -> None:
-        """新建连接成功后入树并联动: kind=local 追加本地节点; kind=server 挂服务器分组."""
+        """新建连接成功后入树并联动: kind=local 挂「本地数据库」根下; kind=server 挂「服务器数据库」根下."""
         conn = dict(db)
         if conn.get("kind") == "server":
             self._server_connections.append(conn)
             self._rebuild_tree()
-            # 服务器分组紧跟本地节点之后; 刚加入的就是其最后一个子节点
-            group = self.tree.topLevelItem(len(self._databases))
-            child = group.child(group.childCount() - 1)
-            self.tree.setCurrentItem(child)
+            # 服务器根固定在第 1 个顶层节点; 刚加入的就是其最后一个子节点
+            root = self.tree.topLevelItem(1)
+            item = root.child(len(self._server_connections) - 1)
+            self._select_node(root, item)
             self._show_server_connection(conn)
             return
         self._databases.append(conn)
         self._rebuild_tree()
-        # 刚加入的本地节点位于本地区段末尾
-        item = self.tree.topLevelItem(len(self._databases) - 1)
-        self.tree.setCurrentItem(item)
+        # 本地根固定在第 0 个顶层节点; 刚加入的就是其最后一个子节点
+        root = self.tree.topLevelItem(0)
+        item = root.child(len(self._databases) - 1)
+        self._select_node(root, item)
         self._show_database(conn)
 
+    @staticmethod
+    def _select_node(root: QTreeWidgetItem, item: QTreeWidgetItem) -> None:
+        """展开根并选中节点(只改高亮, 不触发 itemClicked 信号)."""
+        root.setExpanded(True)
+        item.setExpanded(True)
+        root.treeWidget().setCurrentItem(item)
+
+    def _make_root(self, title: str, tooltip: str, scope: str) -> QTreeWidgetItem:
+        """构造粗体根节点; payload 记作用域(local/server), 点击只显示根名。"""
+        root = QTreeWidgetItem()
+        root.setText(0, title)
+        root.setToolTip(0, tooltip)
+        root.setData(0, _ROLE, {"scope": scope})
+        font = root.font(0)
+        font.setBold(True)
+        root.setFont(0, font)
+        return root
+
     def _rebuild_tree(self) -> None:
-        """重建左树: 本地连接节点在前(按类别分级), 末尾「服务器数据库」分组(含连接)."""
+        """重建左树: 固定两棵根节点「本地数据库」/「服务器数据库」,
+        本地/服务器连接作为各自根节点的子节点(连接内按类别分级)。"""
         self.tree.clear()
+
+        # 本地数据库根节点
+        local_root = self._make_root(
+            "本地数据库", "本地数据库连接 (SQLite / GeoPackage)", "local"
+        )
         for db in self._databases:
-            top = QTreeWidgetItem()
+            top = QTreeWidgetItem(local_root)
             top.setText(0, self._db_title(db))
             top.setToolTip(0, str(db.get("path", "")))
             font = top.font(0)
@@ -258,30 +284,35 @@ class DataManageDock(QDockWidget):
             self._append_category_groups(top, db)
             if top.childCount():
                 top.setExpanded(True)
-            self.tree.addTopLevelItem(top)
+        if local_root.childCount():
+            local_root.setExpanded(True)
+        self.tree.addTopLevelItem(local_root)
 
-        # 服务器数据库分组: 服务器连接(PostgreSQL/Oracle/SQL Server)挂在下面
-        server = QTreeWidgetItem()
-        server.setText(0, "服务器数据库")
-        server.setToolTip(0, "服务器数据库连接(PostgreSQL / Oracle / SQL Server)")
-        sfont = server.font(0)
-        sfont.setBold(True)
-        server.setFont(0, sfont)
-        server.setData(
-            0, _ROLE, {"db": {"kind": "server", "name": "服务器数据库"}}
+        # 服务器数据库根节点: 服务器连接(PostgreSQL/Oracle/SQL Server)挂在下面
+        server_root = self._make_root(
+            "服务器数据库",
+            "服务器数据库连接 (PostgreSQL / Oracle / SQL Server)",
+            "server",
         )
         for conn in self._server_connections:
-            child = QTreeWidgetItem(server)
+            child = QTreeWidgetItem(server_root)
             child.setText(0, self._server_title(conn))
             child.setToolTip(0, self._server_tooltip(conn))
             child.setData(0, _ROLE, {"db": conn})
-        if server.childCount():
-            server.setExpanded(True)
-        self.tree.addTopLevelItem(server)
+        if server_root.childCount():
+            server_root.setExpanded(True)
+        self.tree.addTopLevelItem(server_root)
 
+        # 收尾联动: 有本地库选第一个本地连接; 只有服务器连接选最后一个;
+        # 都没有则显示空提示
         if self._databases:
-            self.tree.setCurrentItem(self.tree.topLevelItem(0))
+            first = local_root.child(0)
+            self._select_node(local_root, first)
             self._show_database(self._databases[0])
+        elif self._server_connections:
+            last = server_root.child(len(self._server_connections) - 1)
+            self._select_node(server_root, last)
+            self._show_server_connection(self._server_connections[-1])
         else:
             self._show_database(None)
 
@@ -436,17 +467,22 @@ class DataManageDock(QDockWidget):
         """选中服务器连接: 右侧标题/摘要展示(表目录浏览待后续版本接入)."""
         self._current_db = None
         self.table.setRowCount(0)
-        if not conn.get("db_type") or not conn.get("name"):
-            # 「服务器数据库」分组头自身: 只显示分组名
-            self.sel_name.setText("服务器数据库")
-            self.sel_name.setToolTip("")
-            return
         self.sel_name.setText(self._server_title(conn))
         self.sel_name.setToolTip(self._server_tooltip(conn))
 
     def _on_tree_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         payload = item.data(0, _ROLE)
         if not isinstance(payload, dict):
+            return
+        scope = payload.get("scope")
+        if scope:
+            # 根节点(本地数据库 / 服务器数据库): 只显示根名, 数据区清空
+            self._current_db = None
+            self.table.setRowCount(0)
+            self.sel_name.setText(
+                "本地数据库" if scope == "local" else "服务器数据库"
+            )
+            self.sel_name.setToolTip("")
             return
         db = payload.get("db")
         if "name" in payload and isinstance(payload.get("name"), str) and db:
