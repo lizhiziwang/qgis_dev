@@ -277,14 +277,14 @@ class local_db_util:
 
         self.has_spatialite: bool = False
         # MBTiles 库不需要 mod_spatialite,跳过加载;只有 spatialite 库才尝试
-        if load_spatialite and self.kind == "spatialite":
-            # 扩展不可用时静默忽略——纯 sqlite / 编译期禁用了扩展加载都属正常
-            try:
-                self.conn.enable_load_extension(True)
-                self.conn.load_extension("mod_spatialite")
-                self.has_spatialite = True
-            except (sqlite3.OperationalError, AttributeError):
-                pass
+        # if load_spatialite and self.kind == "spatialite":
+        #     # 扩展不可用时静默忽略——纯 sqlite / 编译期禁用了扩展加载都属正常
+        #     try:
+        self.conn.enable_load_extension(True)
+        self.conn.load_extension("mod_spatialite")
+        self.has_spatialite = True
+            # except (sqlite3.OperationalError, AttributeError):
+            #     pass
 
         # 新建的库自动初始化 schema;已有库不动,避免覆盖业务数据
         if self.is_new:

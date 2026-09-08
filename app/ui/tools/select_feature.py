@@ -14,19 +14,24 @@
 注意：本 QGIS 构建里 ``QgsVectorLayer.select()`` 是**追加**语义，替换必须
 显式 ``selectByIds(fids, Qgis.SelectBehavior.SetSelection)``。
 
+编辑态删除：画布焦点下按 ``Delete`` 键 → 把**可编辑**图层（处于编辑态）上的
+选中要素整层删除（每层一个撤销步骤，可整体 ``Ctrl+Z`` 撤销；未处于编辑态的
+图层即使有选中也不动）。两个工具都继承 :meth:`SelectFeatureToolBase.keyPressEvent`。
+
 空间过滤复用 :func:`app.core.domain.check.query.intersect_features`
 （空间索引粗筛 + 精确相交），几何坐标从画布 CRS 变换到各图层 CRS。
 """
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import TYPE_CHECKING, List, Optional
 
 if TYPE_CHECKING:
     from qgis.core import QgsGeometry, QgsPointXY, QgsVectorLayer
     from qgis.gui import QgsMapCanvas
 
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QColor
 from qgis.core import (
     Qgis,
@@ -40,6 +45,10 @@ from qgis.core import (
 from qgis.gui import QgsMapTool, QgsRubberBand
 
 from app.core.domain.check.query import intersect_features
+from app.core.domain.check.space_index import clear_spatial_index
+from app.infra.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class SelectFeatureToolBase(QgsMapTool):
@@ -94,6 +103,54 @@ class SelectFeatureToolBase(QgsMapTool):
     def _map_point(self, event) -> "QgsPointXY":
         """事件像素坐标 → 画布 CRS 地图坐标。"""
         return self.canvas.getCoordinateTransform().toMapCoordinates(event.pixelPoint())
+
+    # -------------------------------------------------- 键盘
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 —— QGIS 命名
+        """Delete 键：删除可编辑图层上的选中要素（点选 / 框选共用）。"""
+        if event.key() == Qt.Key.Key_Delete:
+            self._delete_selected_editable()
+            return
+        super().keyPressEvent(event)
+
+    def _delete_selected_editable(self) -> None:
+        """删除所有「可编辑且有选中要素」的可见矢量图层上的选中要素。
+
+        与 QGIS「删除选中」对齐：只有处于编辑态（``layer.isEditable()``）的
+        图层才会被删，未编辑的图层即使有选中也不受影响。每个图层各包一个
+        撤销步骤（``beginEditCommand`` / ``deleteFeatures`` /
+        ``endEditCommand``），可整体 ``Ctrl+Z`` 撤销。删除成功后清掉该层
+        空间索引缓存（:func:`intersect_features` 内部缓存可能残留已删 fid，
+        不清会导致下次命中测试读到失效要素），并推迟出栈刷新画布。
+        """
+        deleted = 0
+        for layer in self._selectable_layers():
+            if not layer.isEditable():
+                continue
+            fids = layer.selectedFeatureIds()
+            if not fids:
+                continue
+            layer.beginEditCommand("删除选中要素")
+            try:
+                ok = layer.deleteFeatures(list(fids))
+            except RuntimeError:
+                ok = False
+            if not ok:
+                layer.cancelEditCommand()
+                logger.warning("Delete 键删除要素失败: layer=%s", layer.name())
+                continue
+            layer.endEditCommand()
+            # 删除要素 → 空间索引缓存失效 → 清掉让下次命中重建
+            clear_spatial_index(layer)
+            deleted += len(fids)
+        if deleted:
+            logger.info("Delete 键删除选中要素 %d 个", deleted)
+            # 仓库约束：事件栈内不直接 refresh，推迟出栈后再刷
+            QTimer.singleShot(0, self._safe_refresh)
+
+    def _safe_refresh(self) -> None:
+        with suppress(RuntimeError):
+            self.canvas.refresh()
 
 
 class PointSelectTool(SelectFeatureToolBase):

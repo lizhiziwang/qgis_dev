@@ -61,6 +61,7 @@ from qgis.PyQt.QtWidgets import (
 from app.core.domain.drawing import DrawManager
 from app.core.domain.drawing.tools import get_tool_class
 from app.infra.logging import get_logger
+from app.infra.messagebar import send  
 
 logger = get_logger(__name__)
 
@@ -506,10 +507,15 @@ class DigitizingToolbar(QObject):
         )
         self._activate_map_tool(self.active_tool)
         self._mark_active(geom_type)
-        QMessageBox.information(
-            self.main_window,
-            "提示",
-            f"已激活「添加{geom_type}」工具，点击画布绘制！",
+        # QMessageBox.information(
+        #     self.main_window,
+        #     "提示",
+        #     f"已激活「添加{geom_type}」工具，点击画布绘制！",
+        # )
+        send(
+            level='success',
+            message=f"已激活「添加{geom_type}」工具，点击画布绘制！",
+            duration=3
         )
 
     def enable_merge_tool(self, checked: bool = True) -> None:
@@ -541,11 +547,14 @@ class DigitizingToolbar(QObject):
         )
         self._activate_map_tool(self.merge_tool)
         self._mark_active("merge")
-        QMessageBox.information(
-            self.main_window,
-            "提示",
-            "已激活「融合几何」工具：右键选择要素，双击融合；Esc 退出",
-        )
+        # QMessageBox.information(
+        #     self.main_window,
+        #     "提示",
+        #     "已激活「融合几何」工具：右键选择要素，双击融合；Esc 退出",
+        # )
+        send(level='success',
+             message='已激活「融合几何」工具：右键选择要素，双击融合；Esc 退出',
+             duration=3)
 
     def enable_feature_edit(self, checked: bool = True) -> None:
         """激活「要素编辑」工具：点击矢量要素编辑其几何（顶点级）。
@@ -576,10 +585,15 @@ class DigitizingToolbar(QObject):
         )
         self._activate_map_tool(self.feature_edit_tool)
         self._mark_active("feature")
-        QMessageBox.information(
-            self.main_window,
-            "提示",
-            "已激活「要素编辑」工具：点击要素进入几何编辑（拖动顶点 / 双击边加顶点 / 右键删顶点）；Esc 退出",
+        # QMessageBox.information(
+        #     self.main_window,
+        #     "提示",
+        #     "已激活「要素编辑」工具：点击要素进入几何编辑（拖动顶点 / 双击边加顶点 / 右键删顶点）；Esc 退出",
+        # )
+        send(
+            level='success',
+            message='已激活「要素编辑」工具：点击要素进入几何编辑（拖动顶点 / 双击边加顶点 / 右键删顶点）；Esc 退出',
+            duration=3
         )
 
     def enable_split_tool(self, checked: bool = True) -> None:
@@ -614,10 +628,15 @@ class DigitizingToolbar(QObject):
         )
         self._activate_map_tool(self.split_tool)
         self._mark_active("split")
-        QMessageBox.information(
-            self.main_window,
-            "提示",
-            "已激活「线分割」工具：左键双击要素选中后，按住左键画切割线、右键完成分割；Esc 取消 / 退出",
+        # QMessageBox.information(
+        #     self.main_window,
+        #     "提示",
+        #     "已激活「线分割」工具：左键双击要素选中后，按住左键画切割线、右键完成分割；Esc 取消 / 退出",
+        # )
+        send(
+            level='info',
+            message="已激活「线分割」工具：左键双击要素选中后，按住左键画切割线、右键完成分割；Esc 取消 / 退出",
+            duration=3
         )
 
     def enable_split_polygon_tool(self, checked: bool = True) -> None:
@@ -761,12 +780,12 @@ class DigitizingToolbar(QObject):
         self._mark_active("attr_entry")
         dock.show()
         dock.raise_()
-        QMessageBox.information(
-            self.main_window,
-            "提示",
-            "已激活「属性录入」工具：点击图层上的要素，在右侧面板修改其属性；确认后保存，Esc 退出",
-        )
-
+        # QMessageBox.information(
+        #     self.main_window,
+        #     "提示",
+        #     "已激活「属性录入」工具：点击图层上的要素，在右侧面板修改其属性；确认后保存，Esc 退出",
+        # )
+        send("info", "已激活「属性录入」工具：点击图层上的要素，在右侧面板修改其属性；确认后保存，Esc 退出", duration=3) 
     def _to_layer_geometry(self, layer: QgsVectorLayer, geometry: QgsGeometry) -> QgsGeometry:
         """绘制几何(画布坐标系) → 图层坐标系。
 
