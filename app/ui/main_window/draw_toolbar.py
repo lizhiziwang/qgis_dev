@@ -2,9 +2,9 @@
 
 按旧版设计：
 
-- 工具条平铺 10 个文本按钮（不用下拉菜单）：
-  开始编辑 / 停止编辑 / 保存编辑 / 融合几何 / 要素编辑 / 属性录入 / 线分割 ｜
-  添加点 / 添加线 / 添加面
+- 工具条平铺文本按钮（不用下拉菜单）：
+  开始编辑 / 停止编辑 / 保存编辑 / 融合几何 / 要素编辑 / 属性录入 / 线分割 /
+  面分割 / 分解 ｜ 添加点 / 添加线 / 添加面
 - 「开始编辑」**恒可用**：点击弹出图层选择框（:attr:`_edit_layer_chooser`，
   由 :class:`MainWindow` 注入），选中图层即成为编辑目标并进入编辑态——
   不再依赖图层树右键 / 点击预设编辑图层（那些入口已移除）。
@@ -16,7 +16,12 @@
   :class:`app.ui.docks.attribute_entry_dock.AttributeEntryDock`）；
   「线分割」需处于编辑态
   （双击选要素后左键画切割线、右键完成分割，见
-  :class:`app.ui.tools.split_feature.SplitFeatureTool`）。
+  :class:`app.ui.tools.split_feature.SplitFeatureTool`）；
+  「面分割」需处于编辑态（在要素上左键画多边形切割区域、双击分割，见
+  :class:`app.ui.tools.split_polygon.SplitPolygonTool`）；
+  「分解」需处于编辑态（先把多部件要素用选择工具选中，点击后拆成多个
+  单部件要素，见 :func:`app.ui.tools.explode_parts.explode_features`——
+  一次性动作，非画布工具，不占用 checkable 状态）。
 
 状态机：
 
@@ -45,7 +50,7 @@ from qgis.core import (
     QgsWkbTypes,
 )
 from qgis.gui import QgsRubberBand
-from qgis.PyQt.QtCore import QObject, Qt, pyqtSignal
+from qgis.PyQt.QtCore import QObject, Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QAction, QColor
 from qgis.PyQt.QtWidgets import (
     QMainWindow,
@@ -103,6 +108,7 @@ class DigitizingToolbar(QObject):
         self.merge_tool = None
         self.feature_edit_tool = None
         self.split_tool = None
+        self.split_polygon_tool = None
         #: 属性录入工具实例（防 GC）与右侧 Dock（懒建单实例）
         self.attribute_entry_tool = None
         self._attribute_entry_dock = None
@@ -110,8 +116,9 @@ class DigitizingToolbar(QObject):
         # 当前是否处于编辑态（start_edit_fun 成功后 True，stop_edit_fun 后 False）
         self._editing = False
         #: 当前激活的工具种类："point"/"line"/"polygon"/"merge"/"feature"/
-        #: "split"/"attr_entry"，None=未激活。工具按钮的勾选/互斥、日志都
-        #: 以它为唯一依据（_refresh_button_states 统一推导，不再散点 setChecked）
+        #: "split"/"split_polygon"/"attr_entry"，None=未激活（「分解」是一次性
+        #: 动作，不占用激活态）。工具按钮的勾选/互斥、日志都以它为唯一依据
+        #: （_refresh_button_states 统一推导，不再散点 setChecked）
         self._active_kind: str | None = None
         #: 挂了 ``editingStopped`` 兜底钩子的图层：外部入口（属性表 Dock「停止
         #: 编辑」/ 切图层停旧层 / 关工程等）结束编辑时不走 :meth:`stop_edit_fun`，
@@ -167,6 +174,17 @@ class DigitizingToolbar(QObject):
             lambda checked=False: self.enable_split_tool(checked)
         )
 
+        # ---- 面分割（需处于编辑态；画多边形切割区域 → 双击分割）----
+        self.split_polygon_action = QAction("面分割", self.digitizing_toolbar)
+        self.split_polygon_action.setCheckable(True)
+        self.split_polygon_action.triggered.connect(
+            lambda checked=False: self.enable_split_polygon_tool(checked)
+        )
+
+        # ---- 分解（需处于编辑态；一次性动作：选中多部件要素 → 拆成单部件）----
+        self.explode_action = QAction("分解", self.digitizing_toolbar)
+        self.explode_action.triggered.connect(self.explode_features)
+
         # ---- 初始态：编辑动作全禁用（「开始编辑」例外——恒可用，点击弹窗选层）
         #     最后统一由 _refresh_button_states 推导，这里只组装不动状态
 
@@ -177,6 +195,8 @@ class DigitizingToolbar(QObject):
         self.digitizing_toolbar.addAction(self.feature_edit_action)
         self.digitizing_toolbar.addAction(self.attribute_entry_action)
         self.digitizing_toolbar.addAction(self.split_feature_action)
+        self.digitizing_toolbar.addAction(self.split_polygon_action)
+        self.digitizing_toolbar.addAction(self.explode_action)
 
         # 分隔两组
         self.digitizing_toolbar.addSeparator()
@@ -207,6 +227,7 @@ class DigitizingToolbar(QObject):
             "merge": self.merge_geometry_action,
             "feature": self.feature_edit_action,
             "split": self.split_feature_action,
+            "split_polygon": self.split_polygon_action,
             "attr_entry": self.attribute_entry_action,
         }
 
@@ -404,8 +425,8 @@ class DigitizingToolbar(QObject):
           :meth:`_on_editing_stopped` 在 commitChanges/rollBack 同步触发时
           可能已先复位，避免重复发信号）；
         - 工具全部解除，按钮状态统一由 :meth:`_refresh_button_states` 按
-          「是否仍在编辑」推导：离开编辑态后「停止/保存/融合/要素编辑/线分割」
-          与「添加要素」全禁用并取消勾选(需重新「开始编辑」才恢复可用)。
+          「是否仍在编辑」推导：离开编辑态后「停止/保存/融合/要素编辑/线分割/
+          面分割/分解」与「添加要素」全禁用并取消勾选(需重新「开始编辑」才恢复可用)。
         """
         was_editing = self._editing
         logger.debug(
@@ -599,6 +620,88 @@ class DigitizingToolbar(QObject):
             "已激活「线分割」工具：左键双击要素选中后，按住左键画切割线、右键完成分割；Esc 取消 / 退出",
         )
 
+    def enable_split_polygon_tool(self, checked: bool = True) -> None:
+        """激活「面分割」工具：在要素上画多边形切割区域，双击分割。
+
+        ``checked=False``(再点一次已按下的按钮) → 取消激活。
+        """
+        if not checked:
+            self.clear_draw_tool()
+            return
+        layer = self._current_layer()
+        if layer is None or layer.type() != layer.VectorLayer:
+            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            return
+        if not layer.isEditable():
+            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            return
+        if layer.geometryType() == QgsWkbTypes.PointGeometry:
+            QMessageBox.warning(self.main_window, "警告", "点图层无法分割，请选择线 / 面图层")
+            return
+        # 清掉可能激活的其它工具，避免并存
+        self.clear_draw_tool()
+
+        from app.ui.tools.split_polygon import SplitPolygonTool
+
+        self.split_polygon_tool = SplitPolygonTool(
+            self.canvas,
+            editing_layer_getter=self._editing_layer_getter,
+            hint=lambda text: self.main_window.messageBar.pushMessage(
+                text, level=Qgis.MessageLevel.Info, duration=2
+            ),
+        )
+        self._activate_map_tool(self.split_polygon_tool)
+        self._mark_active("split_polygon")
+        QMessageBox.information(
+            self.main_window,
+            "提示",
+            "已激活「面分割」工具：在要分割的要素上左键画多边形（支持捕捉），"
+            "双击完成分割；右键取消多边形，Esc 退出",
+        )
+
+    def explode_features(self) -> None:
+        """「分解」一次性动作：把选择工具选中的多部件要素拆成多个单部件要素。
+
+        不走画布工具、不占用勾选态；通过图层选择读取目标要素，写入一个
+        撤销命令（可整体 Ctrl+Z）。
+        """
+        layer = self._current_layer()
+        if layer is None or layer.type() != layer.VectorLayer:
+            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            return
+        if not layer.isEditable():
+            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            return
+        if not layer.selectedFeatureIds():
+            QMessageBox.warning(
+                self.main_window, "警告", "请先用选择工具选中要分解的多部件要素"
+            )
+            return
+
+        from app.ui.tools.explode_parts import explode_features as run_explode
+
+        result = run_explode(layer)
+        if result is None:
+            QMessageBox.warning(self.main_window, "警告", "分解失败（详见日志）")
+            return
+        changed, added = result
+        if changed == 0:
+            QMessageBox.information(self.main_window, "提示", "所选要素中没有多部件要素，无需分解")
+            return
+        QMessageBox.information(
+            self.main_window,
+            "提示",
+            f"已分解 {changed} 个多部件要素为 {changed + added} 个单部件要素（可 Ctrl+Z 撤销）",
+        )
+        # 事件栈内不直接 refresh（仓库约束），推迟出栈后再刷新
+        QTimer.singleShot(0, self._safe_refresh)
+
+    def _safe_refresh(self) -> None:
+        try:
+            self.canvas.refresh()
+        except RuntimeError:
+            pass
+
     def enable_attribute_entry(self, checked: bool = True) -> None:
         """激活「属性录入」工具：点击要素 → 右侧 Dock 编辑其属性。
 
@@ -733,7 +836,7 @@ class DigitizingToolbar(QObject):
         """取消激活本工具条挂到画布的工具，并清掉共享 rubber_band + 临时点。
 
         保证「停止编辑 / 切换工具 / 取消」后画布不再挂着任何本工具条的激活
-        工具（``active_tool`` / 融合 / 要素编辑 / 属性录入 / 线分割）：
+        工具（``active_tool`` / 融合 / 要素编辑 / 属性录入 / 线分割 / 面分割）：
 
         - 对带 ``cleanup()`` 的工具先调 ``cleanup()``，隐藏工具自己的
           rubber_band / 磁吸标记等画布残留（旧实现只 unset，停编辑 / 切工具后
@@ -768,6 +871,7 @@ class DigitizingToolbar(QObject):
         _drop("feature_edit_tool")
         _drop("attribute_entry_tool")
         _drop("split_tool")
+        _drop("split_polygon_tool")
         _drop("active_tool")
         # 业务层 draw_manager 的共享 rubber_band / temp_points 也一并清掉
         if self.draw_manager is not None:
@@ -798,12 +902,13 @@ class DigitizingToolbar(QObject):
         self._active_kind = None
         self._refresh_button_states()
         logger.info(
-            "工具清理完成: mapTool=%s active_tool=%s merge=%s feature=%s split=%s attr_entry=%s",
+            "工具清理完成: mapTool=%s active_tool=%s merge=%s feature=%s split=%s split_polygon=%s attr_entry=%s",
             type(self.canvas.mapTool()).__name__ if self.canvas.mapTool() is not None else None,
             self.active_tool,
             self.merge_tool,
             self.feature_edit_tool,
             self.split_tool,
+            self.split_polygon_tool,
             self.attribute_entry_tool,
         )
 
@@ -895,7 +1000,8 @@ class DigitizingToolbar(QObject):
         - enabled(能否点击)：
 
           * 「开始编辑」「属性录入」恒可用(属性录入激活时自动进编辑态)；
-          * 「停止编辑 / 保存编辑 / 融合几何 / 要素编辑 / 线分割」仅编辑中可用；
+          * 「停止编辑 / 保存编辑 / 融合几何 / 要素编辑 / 线分割 / 面分割 /
+            分解」仅编辑中可用；
           * 「添加点/线/面」仅编辑中且图层几何匹配时可用；
 
         - checked(勾选=工具正激活)：仅激活工具对应的按钮按下，其余弹起。
@@ -918,6 +1024,8 @@ class DigitizingToolbar(QObject):
             self.merge_geometry_action,
             self.feature_edit_action,
             self.split_feature_action,
+            self.split_polygon_action,
+            self.explode_action,
         ):
             action.setEnabled(editing)
         # 「添加X」：编辑中且与图层几何匹配才可用
