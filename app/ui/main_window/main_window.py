@@ -39,6 +39,7 @@ from qgis.core import (
     QgsApplication,
     QgsCoordinateReferenceSystem,
     QgsCoordinateTransform,
+    QgsCsException,
     QgsLayerTreeGroup,
     QgsMapLayerStyle,
     QgsProject,
@@ -582,7 +583,7 @@ class MainWindow(FramelessMixin, QMainWindow):
         dock.raise_()
 
     def _on_dm_add_connection(self) -> None:
-        """数据管理「+ 新建连接」：弹窗选本地 sqlite 库文件并加入树。"""
+        """数据管理「+ 新建连接」：弹窗选本地库文件或填服务器连接并加入树。"""
         from app.ui.dialogs.add_connection import AddConnectionDialog
 
         dlg = AddConnectionDialog(self)
@@ -626,8 +627,7 @@ class MainWindow(FramelessMixin, QMainWindow):
                 return
             layer.path_c = path  # 容器路径, 供“执行SQL”按文件打开
             self._add_layer_to_project(layer)
-            self.canvas.setExtent(layer.extent())
-            self.canvas.refreshAllLayers()
+            self._zoom_to_layer(layer)
             self.messageBar.pushMessage(
                 f"已加载图层：{name}",
                 level=Qgis.MessageLevel.Success,
@@ -1769,20 +1769,38 @@ class MainWindow(FramelessMixin, QMainWindow):
         dest_crs = self.canvas.mapSettings().destinationCrs()
         if layer.crs() != dest_crs:
             xform = QgsCoordinateTransform(layer.crs(), dest_crs, self.project)
-            ext = xform.transformBoundingBox(layer.extent())
+            try:
+                ext = xform.transformBoundingBox(layer.extent())
+            except QgsCsException:
+                # 脏数据(几何坐标范围与声明 CRS 不符)越界时回退到原始范围
+                logger.warning(
+                    "缩放到图层 %s 越界(%s→%s), 使用原始范围",
+                    layer.name(), layer.crs().authid(), dest_crs.authid(),
+                )
+                ext = layer.extent()
         else:
             ext = layer.extent()
         self.canvas.setExtent(ext)
         self.canvas.refresh()
 
     def zoom_to_layer_extent_transform(self, extent, source_crs) -> None:
-        """缩放到指定范围（属性表右键"缩放到要素"用），做 CRS 变换到画布坐标系。"""
+        """缩放到指定范围(属性表右键"缩放到要素"用), 做 CRS 变换到画布坐标系。
+
+        脏几何(坐标范围与声明 CRS 不符, 如把经纬度度值误存进投影图层)在反变换
+        时越界抛 ``QgsCsException`` —— 此时回退到原始范围直接缩放, 不崩溃。
+        """
         if extent is None or extent.isNull():
             return
         dest_crs = self.canvas.mapSettings().destinationCrs()
         if source_crs is not None and source_crs.isValid() and source_crs != dest_crs:
             xform = QgsCoordinateTransform(source_crs, dest_crs, self.project)
-            extent = xform.transformBoundingBox(extent)
+            try:
+                extent = xform.transformBoundingBox(extent)
+            except QgsCsException:
+                logger.warning(
+                    "缩放到要素越界(%s→%s), 使用原始范围",
+                    source_crs.authid(), dest_crs.authid(),
+                )
         self.canvas.setExtent(extent)
         self.canvas.refresh()
 

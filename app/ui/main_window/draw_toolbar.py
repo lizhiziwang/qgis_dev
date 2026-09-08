@@ -664,6 +664,31 @@ class DigitizingToolbar(QObject):
             "已激活「属性录入」工具：点击图层上的要素，在右侧面板修改其属性；确认后保存，Esc 退出",
         )
 
+    def _to_layer_geometry(self, layer: QgsVectorLayer, geometry: QgsGeometry) -> QgsGeometry:
+        """绘制几何(画布坐标系) → 图层坐标系。
+
+        绘制工具在画布上采集的是**画布 CRS** 坐标; 目标图层 CRS 不同时必须先
+        转换, 否则经纬度度值会被当作投影米直接写入图层 —— 新要素画不到正确
+        位置, 且右键缩放到该要素时反变换越界抛 ``QgsCsException``。
+        CRS 相同 / 无效 / 转换失败时原样返回。
+        """
+        src = self.canvas.mapSettings().destinationCrs()
+        dst = layer.crs()
+        if not src.isValid() or not dst.isValid() or src == dst:
+            return geometry
+        from qgis.core import QgsCoordinateTransform, QgsProject
+
+        geom = QgsGeometry(geometry)
+        try:
+            xform = QgsCoordinateTransform(
+                src, dst, self.canvas.project() or QgsProject.instance()
+            )
+            if geom.transform(xform) == Qgis.GeometryOperationResult.Success:
+                return geom
+        except Exception:
+            logger.exception("绘制几何坐标转换失败(%s→%s)", src.authid(), dst.authid())
+        return geometry
+
     def finish_draw(self, geometry: QgsGeometry) -> None:
         """绘制完成：校验 + 创建要素 + 弹属性对话框（与旧版 finish_draw 行为一致）。"""
         if geometry is None:
@@ -689,6 +714,9 @@ class DigitizingToolbar(QObject):
             )
             self.clear_draw_tool()
             return
+
+        # 绘制几何在画布坐标系, 目标图层 CRS 不同时先转换(投影图层如 4527 必需)
+        geometry = self._to_layer_geometry(layer, geometry)
 
         # 创建要素 + 弹属性对话框
         from qgis.core import QgsVectorLayerUtils

@@ -6,7 +6,7 @@
   右上角关闭按钮, 对应 HTML 的关闭键)
 - ``.dialog-body > .dm-split``        -> :class:`QSplitter`(水平两栏)
 - ``.dm-tree``                        -> 左栏: 树头「数据库连接」+ QTreeWidget
-  + 「新建连接」按钮
+  + 「新建连接」按钮(本地库 / 服务器连接均可入树)
 - ``.dm-panel``                       -> 右栏: 标题行(选中库名 + 创建数据 /
   导入 / 刷新按钮) + QTableWidget(数据表: 数据名称 / 类型 / 几何类型 /
   坐标系 / 说明, 全列可手动拖宽且自动撑满可用宽度, 行悬停显示字段列表
@@ -16,10 +16,12 @@
 本地数据库展示以 ``local_db_util`` 的 ``query_all_table_name()`` 注册表为准
 (见 :mod:`app.core.util.local_db_util`), 树按类别分级: 连接文件节点 →
 「矢量 / 字典 / 影像」分组节点 → 注册表名叶子; 右侧面板列出选中库(或某类)
-的注册数据行(类型列=类别, 说明列=行数)。树尾固定「服务器数据库」占位节点
-(服务器连接暂搁置)。创建数据 / 导入 / 刷新仍为回调占位(未传时记日志),
-由 MainWindow 提供回调后接入; 双击数据表行触发 ``on_add_layer`` 回调, 由
-MainWindow 把该表作为图层加入工程(仅矢量可入图)。
+的注册数据行(类型列=类别, 说明列=行数)。树尾为「服务器数据库」分组节点:
+服务器连接(PostgreSQL / Oracle / SQL Server, 来自「新建连接」对话框服务器页)
+挂在分组下, 右侧面板展示连接摘要 —— 表目录浏览待后续版本接入。创建数据 /
+导入 / 刷新仍为回调占位(未传时记日志), 由 MainWindow 提供回调后接入;
+双击数据表行触发 ``on_add_layer`` 回调, 由 MainWindow 把该表作为图层加入
+工程(仅矢量可入图)。
 """
 
 from __future__ import annotations
@@ -85,6 +87,8 @@ class DataManageDock(QDockWidget):
         self._current_db: dict | None = None
         #: 列宽程序化调整中(防止信号重入)
         self._fitting = False
+        #: 服务器连接清单(kind=server, 挂在「服务器数据库」分组下)
+        self._server_connections: list[dict] = []
         self.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
         self.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetClosable
@@ -216,27 +220,32 @@ class DataManageDock(QDockWidget):
              "counts": {表名: 行数|None},
              "meta": {表名: {geom_label, geom_col, srid, crs, fields}}}  # 可省略
 
-        meta 缺省时表格「几何类型 / 坐标系」列显示 —(行 tooltip 无字段清单)。"""
+        meta 缺省时表格「几何类型 / 坐标系」列显示 —(行 tooltip 无字段清单)。
+        服务器连接(``self._server_connections``)不受影响。"""
         self._databases = list(databases)
         self._rebuild_tree()
 
     def add_connection(self, db: dict) -> None:
-        """新建连接成功后追加一个本地数据库节点并选中联动右侧面板."""
+        """新建连接成功后入树并联动: kind=local 追加本地节点; kind=server 挂服务器分组."""
         conn = dict(db)
+        if conn.get("kind") == "server":
+            self._server_connections.append(conn)
+            self._rebuild_tree()
+            # 服务器分组紧跟本地节点之后; 刚加入的就是其最后一个子节点
+            group = self.tree.topLevelItem(len(self._databases))
+            child = group.child(group.childCount() - 1)
+            self.tree.setCurrentItem(child)
+            self._show_server_connection(conn)
+            return
         self._databases.append(conn)
         self._rebuild_tree()
-        for i in range(self.tree.topLevelItemCount()):
-            item = self.tree.topLevelItem(i)
-            payload = item.data(0, _ROLE) or {}
-            if payload.get("db") is conn:
-                self.tree.setCurrentItem(item)
-                self._show_database(conn)
-                return
-        if self._databases:
-            self._show_database(self._databases[0])
+        # 刚加入的本地节点位于本地区段末尾
+        item = self.tree.topLevelItem(len(self._databases) - 1)
+        self.tree.setCurrentItem(item)
+        self._show_database(conn)
 
     def _rebuild_tree(self) -> None:
-        """重建左树: 本地连接节点在前(按类别分级), 末尾固定服务器占位."""
+        """重建左树: 本地连接节点在前(按类别分级), 末尾「服务器数据库」分组(含连接)."""
         self.tree.clear()
         for db in self._databases:
             top = QTreeWidgetItem()
@@ -251,15 +260,23 @@ class DataManageDock(QDockWidget):
                 top.setExpanded(True)
             self.tree.addTopLevelItem(top)
 
+        # 服务器数据库分组: 服务器连接(PostgreSQL/Oracle/SQL Server)挂在下面
         server = QTreeWidgetItem()
         server.setText(0, "服务器数据库")
-        server.setToolTip(0, "服务器数据库连接暂未开放")
+        server.setToolTip(0, "服务器数据库连接(PostgreSQL / Oracle / SQL Server)")
         sfont = server.font(0)
         sfont.setBold(True)
         server.setFont(0, sfont)
         server.setData(
             0, _ROLE, {"db": {"kind": "server", "name": "服务器数据库"}}
         )
+        for conn in self._server_connections:
+            child = QTreeWidgetItem(server)
+            child.setText(0, self._server_title(conn))
+            child.setToolTip(0, self._server_tooltip(conn))
+            child.setData(0, _ROLE, {"db": conn})
+        if server.childCount():
+            server.setExpanded(True)
         self.tree.addTopLevelItem(server)
 
         if self._databases:
@@ -295,6 +312,27 @@ class DataManageDock(QDockWidget):
     def _db_title(db: dict) -> str:
         """节点标题: 有 name 用 name, 否则取文件名的 stem."""
         return str(db.get("name") or Path(str(db.get("path", ""))).stem or "数据库")
+
+    @staticmethod
+    def _server_title(conn: dict) -> str:
+        """服务器连接标题: "<类型标签> · <host>:<port>/<db>"."""
+        label = str(conn.get("db_type_label") or conn.get("db_type") or "服务器")
+        name = str(conn.get("name") or "")
+        if not name and conn.get("host"):
+            name = f"{conn.get('host')}:{conn.get('port', '')}/{conn.get('database', '')}"
+        return f"{label} · {name}" if name else label
+
+    @staticmethod
+    def _server_tooltip(conn: dict) -> str:
+        """服务器连接悬停提示: 逐行列出连接要素。"""
+        lines = [
+            f"数据库类型: {conn.get('db_type_label') or conn.get('db_type') or '-'}",
+            f"主机: {conn.get('host') or '-'}",
+            f"端口: {conn.get('port') or '-'}",
+            f"数据库名: {conn.get('database') or '-'}",
+            f"用户名: {conn.get('username') or '-'}",
+        ]
+        return "\n".join(lines)
 
     @staticmethod
     def _rows(db: dict, category: str | None = None) -> list[dict]:
@@ -394,6 +432,18 @@ class DataManageDock(QDockWidget):
 
     # ------------------------------------------------------------ 交互
 
+    def _show_server_connection(self, conn: dict) -> None:
+        """选中服务器连接: 右侧标题/摘要展示(表目录浏览待后续版本接入)."""
+        self._current_db = None
+        self.table.setRowCount(0)
+        if not conn.get("db_type") or not conn.get("name"):
+            # 「服务器数据库」分组头自身: 只显示分组名
+            self.sel_name.setText("服务器数据库")
+            self.sel_name.setToolTip("")
+            return
+        self.sel_name.setText(self._server_title(conn))
+        self.sel_name.setToolTip(self._server_tooltip(conn))
+
     def _on_tree_item_clicked(self, item: QTreeWidgetItem, column: int) -> None:
         payload = item.data(0, _ROLE)
         if not isinstance(payload, dict):
@@ -414,7 +464,10 @@ class DataManageDock(QDockWidget):
             self._show_database(db, category=payload["cat"])
             return
         if isinstance(db, dict):
-            # 数据库节点(本地连接 / 服务器占位): 显示全部
+            # 数据库节点(本地连接 / 服务器分组/连接): 本地显示全部, 服务器显示摘要
+            if db.get("kind") == "server":
+                self._show_server_connection(db)
+                return
             self._show_database(db)
 
     def eventFilter(self, obj, ev) -> bool:  # noqa: N802 —— Qt 命名
