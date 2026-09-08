@@ -160,6 +160,10 @@ class MainWindow(FramelessMixin, QMainWindow):
         self._style_clipboard: Optional[str] = None
         #: 流程节点编辑器窗口（懒建单实例，见 _open_flow_editor）
         self._flow_editor_window = None
+        #: 离线下载弹窗（懒建单实例，保留用户勾选/进度状态）
+        self._offline_download_dialog = None
+        #: 可用离线任务列表（平台任务接口就绪后由此注入 TaskInfo，见 TaskInfo.from_dict）
+        self.offline_tasks: list = []
 
         # ---- dock ----
         self._build_docks()
@@ -257,6 +261,7 @@ class MainWindow(FramelessMixin, QMainWindow):
             "qmap_compare": self._on_qmap_compare,
             "online_basemap": self._on_online_basemap,
             "data_manage": self._on_data_manage,
+            "offline_download": self._on_offline_download,
             "zoom_full": self._on_zoom_full,
             "refresh": self._on_refresh,
             "test": self._on_test,
@@ -530,6 +535,24 @@ class MainWindow(FramelessMixin, QMainWindow):
 
         dlg = CheckViewerDialog(self, "")
         dlg.show()
+
+    def _on_offline_download(self) -> None:
+        """打开「下载离线图层」弹窗（懒建单实例，保留勾选与进度状态）。"""
+        from app.ui.dialogs.offline_download import OfflineDownloadDialog
+
+        if self._offline_download_dialog is None:
+            self._offline_download_dialog = OfflineDownloadDialog(
+                self, canvas=self.canvas, tasks=self.offline_tasks or []
+            )
+        dlg = self._offline_download_dialog
+        dlg.set_tasks(self.offline_tasks or dlg.tasks)
+        # 最小化状态下 show()/raise_() 不还原窗口 → 显式 showNormal 再激活
+        if dlg.isMinimized():
+            dlg.showNormal()
+        else:
+            dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _on_analyse(self) -> None:
         # 复用单个"分析工具"dock，避免每次点"分析"都新建一个

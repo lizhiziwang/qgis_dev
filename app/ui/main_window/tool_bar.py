@@ -87,6 +87,7 @@ class ToolBar:
             ("地图对比", "qmap_compare"),
             ("在线底图", "online_basemap"),
             ("数据管理", "data_manage"),
+            ("离线下载", "offline_download"),
             ("全图", "zoom_full"),
             ("刷新", "refresh"),
             ("测试", "test"),
