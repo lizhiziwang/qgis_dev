@@ -396,7 +396,8 @@ def _verify_geometry_blob(db: str, table: str) -> None:
     import sqlite3
 
     try:
-        con = sqlite3.connect(f"file:{db.replace(os.sep, '/')}?mode=ro", uri=True)
+        con = sqlite3.connect(db, timeout=5.0)
+        con.execute("PRAGMA query_only = ON")
         try:
             declared = {
                 r[1]: (r[2] or "").upper()

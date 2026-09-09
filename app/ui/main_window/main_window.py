@@ -66,6 +66,11 @@ from qgis.gui import (
 from app.core.domain.check.space_index import clear_spatial_index
 from app.core.domain.editing import LayerEditService
 from app.core.domain.query import SpaceQueryService
+from app.core.util.local_layer_loader import (
+    LocalLayerError,
+    LocalLayerLoader,
+    LocalLayerUnsupportedCategoryError,
+)
 from app.infra.fs.paths import Paths
 from app.infra.logging import get_logger
 from app.infra.messagebar import FloatingMessageBar
@@ -170,6 +175,8 @@ class MainWindow(FramelessMixin, QMainWindow):
         self._offline_download_dialog = None
         #: 可用离线任务列表（平台任务接口就绪后由此注入 TaskInfo，见 TaskInfo.from_dict）
         self.offline_tasks: list = []
+        #: 数据管理 Dock 加载策略(image/spatial/dict 分流,见 app.core.util.local_layer_loader)
+        self._layer_loader = LocalLayerLoader(self)
 
         # ---- dock ----
         self._build_docks()
@@ -184,6 +191,12 @@ class MainWindow(FramelessMixin, QMainWindow):
 
         # ---- 默认激活平移 ----
         self.canvas.setMapTool(self._pan_tool)
+
+        # ---- 启动清扫: 删上一会话残留的 .gpkg 别名(仅老 .db 兼容路径; 新规
+        #      .gpkg 本体库无别名, 不会命中清扫的 _is_our_alias 闸门) ----
+        from qgis.PyQt.QtCore import QTimer as _SweepTimer
+
+        _SweepTimer.singleShot(2000, self._sweep_startup_gpkg_aliases)
 
     # ===================================================== 装配
 
@@ -310,7 +323,7 @@ class MainWindow(FramelessMixin, QMainWindow):
         # 后续 send() 访问会 native access violation
         self.destroyed.connect(self._clear_global_messagebar)
 
-        # 显隐完全由消息条自己的“展示租约”驱动（见 app/infra/messagebar 的
+        # 显隐完全由消息条自己的"展示租约"驱动（见 app/infra/messagebar 的
         # FloatingMessageBar）：
         # 启动时从未 push → 保持隐藏；push → 显示，duration 秒后自动收起，
         # 不依赖 QgsMessageBar 内部移除机制，空条不可能出现。
@@ -766,10 +779,22 @@ class MainWindow(FramelessMixin, QMainWindow):
             dock.add_connection(dlg.connection())
 
     def _on_dm_add_layer(self, db: dict, category: str, name: str) -> None:
-        """数据管理表格行双击：把注册表作为图层加入工程(仅矢量可入图)。
+        """数据管理表格行双击：把注册表作为图层加入工程。
 
-        - 矢量(spatial): 经 :meth:`_open_local_table_layer` 打开为图层并加入工程;
-        - 字典 / 影像(无空间几何): 提示无法入图, 可到「执行SQL」查看记录。
+        加载策略(image / spatial / dict 分流)统一委托
+        :class:`app.core.util.local_layer_loader.LocalLayerLoader`。本方法
+        只负责 UX(spinner / 模态警告 / 信息弹窗 / messageBar Success / 入
+        工程 / 缩放),业务路径与原 MainWindow 行为一致:
+
+        - ``image``:gpkg 内容 → GDAL/GPKG 栅格直开(gdal provider, 普通文件
+          路径, 经免 .aux.xml 边车的打开); 直开失败(非 GeoPackage 内容)直接
+          模态提示改用 .gpkg 库 —— 无本地 XYZ 回落(服务已移除);
+        - ``spatial``:OGR provider 直开(``路径|layername=表名``)。新规 gpkg
+          内容库本体即 ``.gpkg`` 后缀 → GPKG 驱动直开, 无别名; 仅老 ``.db``
+          后缀 gpkg 库才经同 inode 的 ``.gpkg`` 硬链接别名打开(GDAL 3.11
+          按后缀裁决驱动, .db 会被 SQLite 抢先成纯属性表; 别名仅图层存续
+          期间存在, 移除/退出即删); 老 spatialite 库 OGR 失败时才有回退;
+        - ``dict`` 等无几何数据:沿用原 ``QMessageBox.information`` 提示。
         """
         from app.core.util.local_db_util import _CATEGORY_LABEL
 
@@ -778,18 +803,22 @@ class MainWindow(FramelessMixin, QMainWindow):
         if not path:
             QMessageBox.warning(self, "数据管理", f"「{name}」缺少库文件路径, 无法加载。")
             return
-        if category != "spatial":
-            QMessageBox.information(
-                self,
-                "数据管理",
-                f"「{name}」为{label}数据(无空间几何), 无法加入地图。\n"
-                f"可在「执行SQL」中按表查看记录。",
-            )
-            return
-        self._begin_layer_loading(f"正在加载图层：{name}")
+        kind_zh = "影像" if category == "image" else "图层"
+        self._begin_layer_loading(f"正在加载{kind_zh}：{name}")
         try:
-            meta = (db.get("meta") or {}).get(name) or {}
-            layer = self._open_local_table_layer(path, name, meta)
+            try:
+                layer = self._layer_loader.load(db, category, name, parent=self)
+            except LocalLayerUnsupportedCategoryError:
+                QMessageBox.information(
+                    self,
+                    "数据管理",
+                    f"「{name}」为{label}数据(无空间几何), 无法加入地图。\n"
+                    f"可在「执行SQL」中按表查看记录。",
+                )
+                return
+            except LocalLayerError as exc:
+                QMessageBox.warning(self, "数据管理", f"「{name}」无法打开: {exc}")
+                return
             if layer is None:
                 QMessageBox.warning(
                     self,
@@ -797,36 +826,16 @@ class MainWindow(FramelessMixin, QMainWindow):
                     f"「{name}」无法作为地图图层打开\n(文件: {path})",
                 )
                 return
-            layer.path_c = path  # 容器路径, 供“执行SQL”按文件打开
+            layer.path_c = path  # 容器路径, 供"执行SQL"按文件打开
             self._add_layer_to_project(layer)
             self._zoom_to_layer(layer)
             self.messageBar.pushMessage(
-                f"已加载图层：{name}",
+                f"已加载{kind_zh}：{name}",
                 level=Qgis.MessageLevel.Success,
                 duration=3,
             )
         finally:
             self._end_layer_loading()
-
-    def _open_local_table_layer(self, path: str, name: str, meta: dict):
-        """把本地库中注册的矢量表打开为 :class:`QgsVectorLayer`.
-
-        OGR provider 优先(``路径|layername=表名`` 自动探测几何列); 不识别时
-        用 meta 的几何列 / SRID 走 spatialite provider。返回 valid layer 或 None。
-        """
-        from qgis.core import QgsDataSourceUri, QgsVectorLayer
-
-        layer = QgsVectorLayer(f"{path}|layername={name}", name, "ogr")
-        if layer.isValid():
-            return layer
-        geom_col = meta.get("geom_col")
-        if not geom_col:
-            return None
-        uri = QgsDataSourceUri()
-        uri.setDatabase(path)
-        uri.setDataSource("", name, str(geom_col), "", str(meta.get("srid") or ""))
-        layer = QgsVectorLayer(uri.uri(), name, "spatialite")
-        return layer if layer.isValid() else None
 
     def _on_swipe(self) -> None:
         """卷帘对比：分屏会话已存续则直接恢复（不弹窗）；否则弹窗选栅格激活。
@@ -1518,7 +1527,7 @@ class MainWindow(FramelessMixin, QMainWindow):
         try:
             vlayer = QgsVectorLayer(uri, name, provider)
             if vlayer.isValid():
-                # path_c 存**容器路径**（供“执行SQL”按文件打开）：item.path()
+                # path_c 存**容器路径**（供"执行SQL"按文件打开）：item.path()
                 # 对 gdb/gpkg 子图层是 ``容器|layername=层名`` 的 QGIS URI，
                 # ogr.Open 不认，剥掉 | 及之后所有 provider 选项
                 vlayer.path_c = uri.split("|", 1)[0]
@@ -1747,7 +1756,7 @@ class MainWindow(FramelessMixin, QMainWindow):
             if not layer.isValid():
                 continue
             if u.providerKey == "ogr":
-                # 容器路径（剥 |layername= 等 provider 选项），供“执行SQL”按文件打开
+                # 容器路径（剥 |layername= 等 provider 选项），供"执行SQL"按文件打开
                 layer.path_c = u.uri.split("|", 1)[0]
             self._add_layer_to_project(layer)
         event.acceptProposedAction()
@@ -2033,6 +2042,45 @@ class MainWindow(FramelessMixin, QMainWindow):
                 f"已把 {layer.name()} 移到「{group.name()}」", level=Qgis.MessageLevel.Info, duration=2
             )
 
+    def _sweep_startup_gpkg_aliases(self) -> None:
+        """启动清扫(延迟到 UI 就绪后跑一次): 删上一会话残留的 .gpkg 别名。
+
+        仅老 ``.db`` 兼容路径会产生别名; 新规 ``.gpkg`` 本体库在 `_is_our_alias`
+        闸门(需同 stem ``.db`` 为 gpkg 内容)下不会被误删。建别名的数据目录
+        在上一会话已记进 QGIS settings(见 local_db_util
+        ``sweep_startup_gpkg_aliases``)——退出/崩溃后目录里不留别名文件,
+        下次加载某老库时由 ``gpkg_open_path`` 自动重建。正在被工程引用的
+        别名(若启动即恢复工程)不会误删。
+        """
+        try:
+            from app.core.util.local_db_util import sweep_startup_gpkg_aliases
+
+            n = sweep_startup_gpkg_aliases()
+            if n:
+                logger.info("启动清扫: 已清理 %d 个残留 .gpkg 别名", n)
+        except Exception:  # noqa: BLE001
+            logger.debug("启动清扫失败", exc_info=True)
+
+    def _release_gpkg_alias_retry(self, alias: str, attempt: int) -> None:
+        """尽力删除已无活图层引用的 .gpkg 别名(分段重试, 最长约 3s)。
+
+        QGIS 移除图层后异步析构、释放 GDAL 句柄需要几个事件循环拍; 期间
+        别名可能仍被占用(WinError 32)。"删除"是尽力而为——仍失败就留给
+        下一启动的清扫兜底。"""
+        from qgis.PyQt.QtCore import QTimer
+
+        try:
+            from app.core.util.local_db_util import release_gpkg_alias
+
+            if release_gpkg_alias(alias):
+                return
+        except Exception:  # noqa: BLE001
+            logger.debug("释放别名异常 %s", alias, exc_info=True)
+            return
+        if attempt >= 6:
+            return
+        QTimer.singleShot(500, lambda: self._release_gpkg_alias_retry(alias, attempt + 1))
+
     def _remove_layer(self, layer) -> None:
         """移除图层：清引用 + 刷新画布。
 
@@ -2076,6 +2124,14 @@ class MainWindow(FramelessMixin, QMainWindow):
 
         # 真正从 project 摘掉
         self.project.removeMapLayer(layer_id)
+        # 若该图层是经 .gpkg 别名打开的老 .db gpkg 内容库(源为 “x.gpkg” /
+        # “x.gpkg|layername=t”), 移除后别名已无活引用 → 延迟删除它。
+        # 新规 .gpkg 本体库也以 .gpkg 结尾, 但 release_gpkg_alias 内部有
+        # _is_our_alias 闸门(需同 stem .db 存在且为 gpkg 内容) → 不会误删。
+        src = str(getattr(layer, "source", lambda: "")() or "")
+        alias_candidate = src.split("|", 1)[0].strip()
+        if alias_candidate.lower().endswith(".gpkg"):
+            QTimer.singleShot(0, lambda: self._release_gpkg_alias_retry(alias_candidate, 0))
         # 延迟刷新画布到下一个事件循环 tick，让 layersRemoved 信号链走完
         QTimer.singleShot(0, self._deferred_refresh_after_remove)
         self.messageBar.pushMessage(f"已移除图层：{layer_name}", level=Qgis.MessageLevel.Info, duration=3)
@@ -2337,7 +2393,7 @@ class MainWindow(FramelessMixin, QMainWindow):
         parent.insertChildNode(0, group)
         view = self.layer_dock.view
         # QGIS 行为：新建组后选中并直接进入重命名。两者都只在视图已聚焦时做
-        # （未显示/未聚焦的视图上强设“当前节点”或开编辑器，会在该节点随后被
+        # （未显示/未聚焦的视图上强设"当前节点"或开编辑器，会在该节点随后被
         # 移除时令 Qt 持有失效持久索引，触发堆损坏 0xc0000374）。
         if not view.hasFocus():
             self.messageBar.pushMessage(f"已新建图层组：{name}", level=Qgis.MessageLevel.Info, duration=2)

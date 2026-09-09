@@ -70,8 +70,10 @@ def scan_local_sqlite(path: str | Path) -> list[dict]:
         raise ValueError(f"文件不存在：{p}")
 
     try:
-        # mode=ro 只读打开不碰锁；URI 路径须用正斜杠
-        conn = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True)
+        # 普通路径直连 + 只读模式(不用 ``file:`` URI —— Windows 路径含
+        # 空格/中文时 URI 解析失败, 会误报"无法打开")
+        conn = sqlite3.connect(str(p), timeout=5.0)
+        conn.execute("PRAGMA query_only = ON")
     except sqlite3.Error as exc:
         raise ValueError(f"无法打开 SQLite 数据库：{exc}") from exc
 

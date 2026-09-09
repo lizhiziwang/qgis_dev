@@ -22,7 +22,17 @@
 「新建连接」对话框服务器页), 右侧面板展示连接摘要 —— 表目录浏览待后续
 版本接入。创建数据 / 导入 / 刷新仍为回调占位(未传时记日志), 由 MainWindow
 提供回调后接入; 双击数据表行触发 ``on_add_layer`` 回调, 由 MainWindow 把
-该表作为图层加入工程(仅矢量可入图)。
+该表作为图层加入工程 —— 矢量 OGR provider 直开: 新规 gpkg 内容库本体即
+``.gpkg`` 后缀 → GPKG 驱动直开、无别名无第二文件; 仅兼容老 ``.db`` 后缀
+gpkg 库(经同 inode 的 ``.gpkg`` 硬链接别名打开 —— GDAL 3.11 按文件名
+后缀裁决驱动, .db 会被 SQLite 驱动抢先认领成纯属性表, 别名让 GPKG 驱动
+接管, 零拷贝; 别名是**临时的**: 仅在图层存续期间存在, 图层移除/会话结束
+即删, 见 local_db_util.release_gpkg_alias / sweep_startup_gpkg_aliases);
+老 spatialite 库由 OGR SQLite 驱动原样读,
+影像 gpkg 内容经 GDAL/GPKG 栅格驱动直开(普通文件路径, 经免 .aux.xml
+边车的打开方式); 直开失败(非 GeoPackage 内容)提示改用 .gpkg 库重落 ——
+无本地 XYZ 回落(该服务已移除), 见
+:mod:`app.core.util.local_layer_loader`。
 """
 
 from __future__ import annotations

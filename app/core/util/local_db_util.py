@@ -4,6 +4,7 @@
 
 import json
 import math
+import os
 import re
 import uuid
 from collections.abc import Iterable
@@ -15,6 +16,20 @@ from urllib.parse import parse_qsl, quote, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 import pysqlite3 as sqlite3
+
+# GPKG 几何编码(纯标准库;包内导入失败时退回同目录导入,兼容直接以脚本方式运行本文件)
+try:
+    from app.core.util.gpkg_geom import (
+        GpkgGeomError,
+        encode_geometry,
+        wrap_to_multi,
+    )
+except ImportError:
+    from gpkg_geom import (  # type: ignore[no-redef]
+        GpkgGeomError,
+        encode_geometry,
+        wrap_to_multi,
+    )
 
 # ---------------------------------------------------------------------------
 # ArcGIS Server REST 图层元信息 → SpatiaLite 建表 映射
@@ -222,19 +237,23 @@ class local_db_util:
         *,
         load_spatialite: bool = False,
     ) -> None:
-        """打开(或新建)本地 SQLite / SpatiaLite 数据库。
+        """打开(或新建)本地 SQLite / GeoPackage / SpatiaLite 数据库。
 
         Args:
             db_path: 数据库文件路径,接受 ``str`` 或 ``Path``。
-                - 文件不存在: 自动创建空库并执行 :meth:`init_db`
-                  (加载 spatialite、建元数据、建 ``user_relation`` 表),
+                - 文件不存在: 自动创建空库并按格式执行初始化
+                  (GeoPackage → :meth:`init_gpkg_db`; 旧调用方显式传
+                  ``load_spatialite=True`` 时新建 SpatiaLite → :meth:`init_db`;
+                  ``.mbtiles`` 后缀 → :meth:`init_mbtiles_db`),
                   设置 ``is_new=True``
                 - 文件已存在: 直接打开,设置 ``is_new=False``,
-                  不会执行 :meth:`init_db`(防止重复建表)
+                  不会执行初始化(防止重复建表),格式按**内容**探测
                 - 父目录不存在: 自动创建(首次建库常见场景)
-            load_spatialite: 是否在 ``__init__`` 阶段尝试加载 ``mod_spatialite``
-                扩展。加载失败(纯 sqlite / 编译期禁用了扩展加载)不抛错,
-                ``has_spatialite`` 保持 ``False``;:meth:`init_db` 会按需再加载。
+            load_spatialite: 是否优先按 SpatiaLite 处理 —— 已有库按内容探测
+                不受影响;仅影响**新建**库的默认格式(默认 GeoPackage,
+                置 True 时新建 SpatiaLite,兼容脱机矢量暂存容器等旧调用方)。
+                扩展加载失败(纯 sqlite / 编译期禁用了扩展加载)不抛错,
+                ``has_spatialite`` 保持 ``False``。
 
         Attributes:
             db_path:        规范化后的 ``Path``。
@@ -254,11 +273,14 @@ class local_db_util:
         self.db_path: Path = Path(db_path).expanduser().resolve()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.is_new: bool = not self.db_path.exists()
-        # 库类型: 后缀为 ``.mbtiles`` → 纯 MBTiles 瓦片库(不建 spatialite/"user_relation");
-        # 其余按 spatialite 本地库管理(矢量图层 + 注册表)。
-        self.kind: str = (
-            "mbtiles" if self.db_path.suffix.lower() == ".mbtiles" else "spatialite"
-        )
+        # 库类型判定顺序: 后缀 ``.mbtiles`` → 纯 MBTiles 瓦片库;
+        # 已有文件按**内容**探测: 同时存在 gpkg_contents + gpkg_spatial_ref_sys
+        # → GeoPackage 格式库(新规本体直接 ``.gpkg``; 老 ``.db`` 后缀仍兼容);
+        # 新建库默认 GeoPackage
+        # (``load_spatialite=True`` 的旧调用方仍新建 SpatiaLite —— 脱机下载的
+        # 矢量暂存容器走老行为);其余(旧 spatialite 库 / 纯 sqlite 键值库)
+        # 按 spatialite 处理。
+        self.kind: str = self._probe_db_kind(load_spatialite)
 
         self.conn: sqlite3.Connection = sqlite3.connect(
             self.db_path,
@@ -276,22 +298,51 @@ class local_db_util:
         self._spatial_ready: bool = False
 
         self.has_spatialite: bool = False
-        # MBTiles 库不需要 mod_spatialite,跳过加载;只有 spatialite 库才尝试
-        # if load_spatialite and self.kind == "spatialite":
-        #     # 扩展不可用时静默忽略——纯 sqlite / 编译期禁用了扩展加载都属正常
-        #     try:
-        self.conn.enable_load_extension(True)
-        self.conn.load_extension("mod_spatialite")
-        self.has_spatialite = True
-            # except (sqlite3.OperationalError, AttributeError):
-            #     pass
+        # GeoPackage 库的一切读写都走纯 SQL / GPKG 二进制(见 gpkg_geom),
+        # 不需要也不应该加载 mod_spatialite(避免把两套空间元数据混入文件);
+        # mbtiles/spatialite 保持老行为尝试加载。
+        if self.kind != "gpkg":
+            # 扩展不可用时静默忽略——纯 sqlite / 编译期禁用了扩展加载都属正常
+            try:
+                self.conn.enable_load_extension(True)
+                self.conn.load_extension("mod_spatialite")
+                self.has_spatialite = True
+            except (sqlite3.OperationalError, AttributeError):
+                pass
 
         # 新建的库自动初始化 schema;已有库不动,避免覆盖业务数据
         if self.is_new:
             if self.kind == "mbtiles":
                 self.init_mbtiles_db()
+            elif self.kind == "gpkg":
+                self.init_gpkg_db()
             else:
                 self.init_db()
+
+    def _probe_db_kind(self, prefer_spatialite: bool = False) -> str:
+        """判定库类型: 后缀 ``.mbtiles`` → mbtiles; 内容含 gpkg 系统表 → gpkg;
+        新建库(后缀不限) → 默认 gpkg(``prefer_spatialite=True`` 时新建走
+        spatialite,兼容 ``load_spatialite=True`` 的旧调用方); 其余 → spatialite。"""
+        if self.db_path.suffix.lower() == ".mbtiles":
+            return "mbtiles"
+        if self.is_new:
+            return "spatialite" if prefer_spatialite else "gpkg"
+        try:
+            # 构造早期还没有自建连接,用一次性短连接只读探测
+            con = sqlite3.connect(self.db_path)
+            try:
+                tables = {
+                    r[0] for r in con.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                }
+            finally:
+                con.close()
+        except sqlite3.Error:
+            tables = set()
+        if {"gpkg_contents", "gpkg_spatial_ref_sys"} <= tables:
+            return "gpkg"
+        return "spatialite"
 
 
     def init_db(self):
@@ -303,9 +354,155 @@ class local_db_util:
                   "id" text NOT NULL,
                   "table_name" TEXT,
                   "type" TEXT,
+                  "attr" TEXT,
                   PRIMARY KEY ("id")
                 );
         ''')
+
+    # --------------------------------------------------------- GeoPackage 库
+
+    #: GeoPackage 库新建时的 SRS 种子(见 :meth:`init_gpkg_db`)。
+    #: (srs_name, srs_id, organization, organization_coordsys_id, definition)
+    _GPKG_SRS_SEED: tuple[tuple[str, int, str, int, str], ...] = (
+        (
+            "Undefined Cartesian SRS", 0, "NONE", -1,
+            "undefined",
+        ),
+        (
+            "Undefined Geographic SRS", -1, "NONE", -1,
+            "undefined",
+        ),
+        (
+            "WGS 84", 4326, "EPSG", 4326,
+            'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,'
+            '298.257223563,AUTHORITY["EPSG","7030"]],AUTHORITY["EPSG","6326"]],'
+            'PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],'
+            'UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],'
+            'AUTHORITY["EPSG","4326"]]',
+        ),
+        (
+            "WGS 84 / Pseudo-Mercator", 3857, "EPSG", 3857,
+            'PROJCS["WGS 84 / Pseudo-Mercator",GEOGCS["WGS 84",DATUM["WGS_1984",'
+            'SPHEROID["WGS 84",6378137,298.257223563,AUTHORITY["EPSG","7030"]],'
+            'AUTHORITY["EPSG","6326"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],'
+            'UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],'
+            'AUTHORITY["EPSG","3857"]],PROJECTION["Mercator_1SP"],'
+            'PARAMETER["central_meridian",0],PARAMETER["scale_factor",1],'
+            'PARAMETER["false_easting",0],PARAMETER["false_northing",0],'
+            'UNIT["metre",1],AXIS["Easting",EAST],AXIS["Northing",NORTH],'
+            'AUTHORITY["EPSG","3857"]]',
+        ),
+        (
+            "China Geodetic Coordinate System 2000", 4490, "EPSG", 4490,
+            'GEOGCS["China Geodetic Coordinate System 2000",DATUM["China_2000",'
+            'SPHEROID["CGCS2000",6378137,298.257222101,AUTHORITY["EPSG","1024"]],'
+            'AUTHORITY["EPSG","1043"]],PRIMEM["Greenwich",0,AUTHORITY["EPSG","8901"]],'
+            'UNIT["degree",0.0174532925199433,AUTHORITY["EPSG","9122"]],'
+            'AUTHORITY["EPSG","4490"]]',
+        ),
+    )
+
+    def init_gpkg_db(self) -> None:
+        """给新建的 GeoPackage 格式 ``.db`` 建规范系统表(纯 SQL,不加载 spatialite)。
+
+        建 ``gpkg_spatial_ref_sys`` / ``gpkg_contents`` / ``gpkg_geometry_columns`` /
+        ``gpkg_tile_matrix_set`` / ``gpkg_tile_matrix``(按 OGC GeoPackage 1.3),
+        种常用 SRS(0/-1/4326/3857/4490),并保留本工程的两张普通表:
+        ``user_relation``(数据管理目录注册)与 ``metadata``(影像元信息)。
+        这两张表**不登记进 gpkg_contents**,OGR/GDAL 会忽略它们、sqlite 直查正常。
+        """
+        cur = self.cursor
+        cur.execute(
+            'CREATE TABLE IF NOT EXISTS "gpkg_spatial_ref_sys" ('
+            '  srs_name TEXT NOT NULL,'
+            '  srs_id INTEGER NOT NULL PRIMARY KEY,'
+            '  organization TEXT NOT NULL,'
+            '  organization_coordsys_id INTEGER NOT NULL,'
+            '  definition TEXT NOT NULL,'
+            '  description TEXT)'
+        )
+        cur.executemany(
+            'INSERT OR IGNORE INTO "gpkg_spatial_ref_sys" '
+            '(srs_name, srs_id, organization, organization_coordsys_id, definition) '
+            'VALUES (?, ?, ?, ?, ?)',
+            self._GPKG_SRS_SEED,
+        )
+        cur.execute(
+            'CREATE TABLE IF NOT EXISTS "gpkg_contents" ('
+            '  table_name TEXT NOT NULL PRIMARY KEY,'
+            '  data_type TEXT NOT NULL,'
+            '  identifier TEXT UNIQUE,'
+            "  description TEXT DEFAULT '',"
+            "  last_change DATETIME NOT NULL DEFAULT "
+            "(strftime('%Y-%m-%dT%H:%M:%fZ','now')),"
+            '  min_x DOUBLE, min_y DOUBLE, max_x DOUBLE, max_y DOUBLE,'
+            '  srs_id INTEGER,'
+            '  CONSTRAINT fk_gc_r_srs_id FOREIGN KEY (srs_id) '
+            '    REFERENCES gpkg_spatial_ref_sys (srs_id))'
+        )
+        cur.execute(
+            'CREATE TABLE IF NOT EXISTS "gpkg_geometry_columns" ('
+            '  table_name TEXT NOT NULL,'
+            '  column_name TEXT NOT NULL,'
+            '  geometry_type_name TEXT NOT NULL,'
+            '  srs_id INTEGER NOT NULL,'
+            '  z TINYINT NOT NULL,'
+            '  m TINYINT NOT NULL,'
+            '  CONSTRAINT pk_geom_cols PRIMARY KEY (table_name, column_name),'
+            '  CONSTRAINT uk_gc_table_name UNIQUE (table_name),'
+            '  CONSTRAINT fk_gc_tn FOREIGN KEY (table_name) '
+            '    REFERENCES gpkg_contents (table_name),'
+            '  CONSTRAINT fk_gc_srs FOREIGN KEY (srs_id) '
+            '    REFERENCES gpkg_spatial_ref_sys (srs_id))'
+        )
+        cur.execute(
+            'CREATE TABLE IF NOT EXISTS "gpkg_tile_matrix_set" ('
+            '  table_name TEXT NOT NULL PRIMARY KEY,'
+            '  srs_id INTEGER NOT NULL,'
+            '  min_x DOUBLE NOT NULL, min_y DOUBLE NOT NULL,'
+            '  max_x DOUBLE NOT NULL, max_y DOUBLE NOT NULL,'
+            '  CONSTRAINT fk_gtms_table_name FOREIGN KEY (table_name) '
+            '    REFERENCES gpkg_contents (table_name),'
+            '  CONSTRAINT fk_gtms_srs FOREIGN KEY (srs_id) '
+            '    REFERENCES gpkg_spatial_ref_sys (srs_id))'
+        )
+        cur.execute(
+            'CREATE TABLE IF NOT EXISTS "gpkg_tile_matrix" ('
+            '  table_name TEXT NOT NULL,'
+            '  zoom_level INTEGER NOT NULL,'
+            '  matrix_width INTEGER NOT NULL,'
+            '  matrix_height INTEGER NOT NULL,'
+            '  tile_width INTEGER NOT NULL,'
+            '  tile_height INTEGER NOT NULL,'
+            '  pixel_x_size DOUBLE NOT NULL,'
+            '  pixel_y_size DOUBLE NOT NULL,'
+            '  CONSTRAINT pk_ttm PRIMARY KEY (table_name, zoom_level),'
+            '  CONSTRAINT fk_tmm_table_name FOREIGN KEY (table_name) '
+            '    REFERENCES gpkg_contents (table_name))'
+        )
+        self._ensure_user_relation_table()
+        self._ensure_mbtiles_schema()  # 全局 metadata 键值表(与影像写入共用)
+        # GeoPackage 规范魔数 application_id='GPKG'(0x47504B47)—— 部分工具
+        # 用它识别; GDAL 3.11 对 .gpkg 后缀开库不强制, 但规范要求且无副作用。
+        self.cursor.execute("PRAGMA application_id = 1196444487")
+        self.conn.commit()
+
+    def _ensure_user_relation_table(self) -> None:
+        """幂等确保 ``user_relation`` 目录注册表存在(老库 / 缺 attr 列时补)。"""
+        cur = self.cursor
+        cur.execute('''
+            CREATE TABLE IF NOT EXISTS "user_relation" (
+              "id" text NOT NULL,
+              "table_name" TEXT,
+              "type" TEXT,
+              "attr" TEXT,
+              PRIMARY KEY ("id")
+            )
+        ''')
+        # 兼容更老的库: 表已存在但没有 attr 列 → 补列
+        cols = [r[1] for r in cur.execute("PRAGMA table_info(user_relation)").fetchall()]
+        if "attr" not in cols:
+            cur.execute('ALTER TABLE "user_relation" ADD COLUMN "attr" TEXT')
 
     # --------------------------------------------------------- MBTiles 瓦片库
 
@@ -334,10 +531,10 @@ class local_db_util:
         老库 / ``load_spatialite=False`` 打开的库首次建空间图层时调用,
         避免重复执行 ``InitSpatialMetaData``(重复执行会打错误日志)。
         """
-        if self.kind == "mbtiles":
+        if self.kind != "spatialite":
             raise RuntimeError(
-                f"{self.db_path} 是 MBTiles 瓦片库,不支持 create_arcgis_layer 等"
-                "空间图层操作,请改用 spatialite 库"
+                f"{self.db_path} 是 {self.kind} 库,不需要/不支持 spatialite "
+                "空间元数据初始化(GeoPackage 库的矢量建表走纯 GPKG 分支)"
             )
         if self._spatial_ready:
             return
@@ -358,23 +555,28 @@ class local_db_util:
         if not has_meta:
             self.cursor.execute("SELECT InitSpatialMetaData(1)")
         # 兼容旧库:没有 user_relation 时补一张,后续注册图层用
-        self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS "user_relation" (
-              "id" text NOT NULL,
-              "table_name" TEXT,
-              "type" TEXT,
-              PRIMARY KEY ("id")
-            )
-        ''')
+        self._ensure_user_relation_table()
         self._spatial_ready = True
         self.conn.commit()
 
     def _drop_spatial_table(self, table_name: str, geometry_column: str) -> None:
         """尽量干净地删除一张(可能带几何列/空间索引的)表。
 
-        依次尝试: 拆空间索引 → 注销几何列 → 删表。
+        - spatialite: 拆空间索引 → 注销几何列 → 删表;
+        - GeoPackage: 删 gpkg_geometry_columns / gpkg_contents 登记 → 删表。
         任一步失败只静默跳过(比如表本来就不存在),保证整体可继续。
         """
+        if self.kind == "gpkg":
+            for stmt, args in (
+                ("DELETE FROM gpkg_geometry_columns WHERE table_name = ?",
+                 (table_name,)),
+                ("DELETE FROM gpkg_contents WHERE table_name = ?",
+                 (table_name,)),
+                ("DROP TABLE IF EXISTS " + _quote_ident(table_name), ()),
+            ):
+                with suppress(sqlite3.Error):
+                    self.cursor.execute(stmt, args)
+            return
         for stmt, args in (
             ("SELECT DisableSpatialIndex(?, ?)", (table_name, geometry_column)),
             ("SELECT DiscardGeometryColumn(?, ?)", (table_name, geometry_column)),
@@ -385,19 +587,23 @@ class local_db_util:
 
     # --------------------------------------------------------- 对外接口
 
-    def add_domain_table(self,tn: str, type_name: str) -> None:
+    def add_domain_table(
+        self, tn: str, type_name: str, attr: str | None = None
+    ) -> None:
+        """在 ``user_relation`` 注册一张表(type_name 为 spatial/image/dict 等)。
+
+        Args:
+            tn: 数据表名(与注册名一致,便于按注册名直接打开图层表)。
+            type_name: 类型标签(image=影像瓦片表 / spatial=矢量表 / dict=普通表)。
+            attr: 注册行的补充属性(JSON 文本或 None);影像导入时存源服务的
+                空间参考/范围/bounds/级别/URL 等。老库表结构缺 ``attr`` 列时
+                自动补列,不影响旧数据。
+        """
         # 老库/纯 MBTiles 库可能没有 user_relation,先补一张再注册
+        self._ensure_user_relation_table()
         self.cursor.execute('''
-            CREATE TABLE IF NOT EXISTS "user_relation" (
-              "id" text NOT NULL,
-              "table_name" TEXT,
-              "type" TEXT,
-              PRIMARY KEY ("id")
-            )
-        ''')
-        self.cursor.execute('''
-            insert into user_relation (id,table_name,type) values (?,?,?)
-        ''', (str(uuid.uuid4()), tn, type_name))
+            insert into user_relation (id,table_name,type,attr) values (?,?,?,?)
+        ''', (str(uuid.uuid4()), tn, type_name, attr))
         self.conn.commit()
 
     def get_arcgis_layer_metadata(
@@ -528,7 +734,14 @@ class local_db_util:
         Returns:
             实际建成的表名(与 ``layer_meta["name"]`` 可能不同)。
         """
-        self._ensure_spatial_ready()
+        # spatialite 建表需要 mod_spatialite;GeoPackage 走纯 SQL + GPKG 二进制
+        if self.kind == "spatialite":
+            self._ensure_spatial_ready()
+        elif self.kind != "gpkg":
+            raise RuntimeError(
+                f"{self.db_path} 是 {self.kind} 库,不支持矢量图层"
+                "(请用 spatialite 或 GeoPackage 格式的 .gpkg/.db)"
+            )
 
         geom_type_key = layer_meta.get("geometryType")
         if not geom_type_key:
@@ -593,17 +806,37 @@ class local_db_util:
             # 补一个自增主键占位(不影响后续按字段列表插入数据)
             col_defs = ['"_fid" INTEGER PRIMARY KEY AUTOINCREMENT']
 
+        if self.kind == "gpkg":
+            # 几何列并入 CREATE TABLE(BLOB 承载 GPKG 二进制),免 AddGeometryColumn
+            col_defs = col_defs + [_quote_ident(geom_col) + " BLOB"]
+
         try:
             self.cursor.execute(
                 f"CREATE TABLE {_quote_ident(tn)} ({', '.join(col_defs)})"
             )
-            self.cursor.execute(
-                "SELECT AddGeometryColumn(?, ?, ?, ?, 2)",
-                (tn, geom_col, srid, geom_type),
-            )
-            self.cursor.execute(
-                "SELECT CreateSpatialIndex(?, ?)", (tn, geom_col)
-            )
+            if self.kind == "gpkg":
+                # 登记特征图层与几何列(GPKG 规范)。min/max 不填(全表扫描/建
+                # 空间索引时再维护);identifier 用表名保证唯一。
+                self.cursor.execute(
+                    "INSERT INTO gpkg_contents "
+                    "(table_name, data_type, identifier, description, srs_id) "
+                    "VALUES (?, 'features', ?, ?, ?)",
+                    (tn, tn, "矢量图层: " + str(layer_meta.get("name") or tn), srid),
+                )
+                self.cursor.execute(
+                    "INSERT INTO gpkg_geometry_columns "
+                    "(table_name, column_name, geometry_type_name, srs_id, z, m) "
+                    "VALUES (?, ?, ?, ?, 0, 0)",
+                    (tn, geom_col, geom_type, srid),
+                )
+            else:
+                self.cursor.execute(
+                    "SELECT AddGeometryColumn(?, ?, ?, ?, 2)",
+                    (tn, geom_col, srid, geom_type),
+                )
+                self.cursor.execute(
+                    "SELECT CreateSpatialIndex(?, ?)", (tn, geom_col)
+                )
             self.conn.commit()
         except Exception:
             # 半成品清理后原样抛出,不留脏表
@@ -613,6 +846,143 @@ class local_db_util:
             raise
 
         if register:
+            self._ensure_user_relation_table()
+            self.cursor.execute(
+                "DELETE FROM user_relation WHERE table_name = ?", (tn,)
+            )
+            self.cursor.execute(
+                "INSERT INTO user_relation (id, table_name, type) VALUES (?, ?, ?)",
+                (str(uuid.uuid4()), tn, "spatial"),
+            )
+            self.conn.commit()
+
+        return tn
+
+    def create_vector_table(
+        self,
+        table_name: str,
+        *,
+        columns: list[tuple[str, str]],
+        geometry_column: str | None = None,
+        geometry_type: str | None = None,
+        srid: int = 4326,
+        register: bool = True,
+        overwrite: bool = False,
+    ) -> str:
+        """按显式列清单建一张矢量表(GeoPackage / SpatiaLite 双格式)。
+
+        与 :meth:`create_arcgis_layer`(吃 ArcGIS 元信息 JSON)互补: 本方法
+        直接吃 ``(列名, SQLite 类型)`` 清单,适合从 PG / 文件导入等非 ArcGIS
+        来源建表。两种格式都支持:
+
+        - GeoPackage: 几何列以 ``BLOB`` 并入 ``CREATE TABLE``,登记
+          ``gpkg_contents``(data_type=features)与 ``gpkg_geometry_columns``;
+        - SpatiaLite: 属性列建表后 ``AddGeometryColumn`` + ``CreateSpatialIndex``。
+
+        几何类型传 GPKG 规范名(POINT / LINESTRING / POLYGON / MULTIPOINT /
+        MULTILINESTRING / MULTIPOLYGON / GEOMETRY);面/线源数据不确定单多部件
+        时建议直接建 MULTI 列(单部件行由 :meth:`batch_add_vector_data` 自动
+        ``wrap_to_multi`` / ``ST_Multi`` 归一,与 ``create_arcgis_layer`` 同语义)。
+        空间参考号缺失/未知时传 ``0`` 即可(种子表里预置了 0/-1/4326/3857/4490)。
+
+        Args:
+            table_name: 目标表名。
+            columns: ``(列名, SQLite 类型声明)`` 清单,不含几何列;纯属性表
+                不得为空,含几何列时允许为空。
+            geometry_column: 几何列名;``None`` 表示建纯属性表(不登记
+                gpkg 特征图层,也不写 user_relation 的 spatial 注册)。
+            geometry_type: 几何类型(GPKG 规范名,大小写不敏感);
+                ``geometry_column`` 非空时必填。
+            srid: 空间参考号。GeoPackage 库需在 ``gpkg_spatial_ref_sys``
+                有对应行(否则外键报错),未知号请先自行补种或传 ``0``。
+            register: 是否写入 ``user_relation``(type=spatial),使图层进入
+                :meth:`query_all_table_name` 的空间图层清单。
+            overwrite: 同名表已存在时先删旧表再重建;默认 ``False`` 抛异常。
+
+        Returns:
+            实际建成的表名(原样返回 ``table_name``)。
+        """
+        if self.kind not in ("spatialite", "gpkg"):
+            raise RuntimeError(
+                f"{self.db_path} 是 {self.kind} 库,不支持矢量图层"
+                "(请用 spatialite 或 GeoPackage 格式的 .gpkg/.db)"
+            )
+        tn = str(table_name)
+        cols = [
+            (str(n), str(t or "TEXT"))
+            for n, t in columns or []
+            if str(n).strip()
+        ]
+        geom_raw = str(geometry_column or "").strip()
+        if geom_raw:
+            gt = (geometry_type or "").upper()
+            _ALLOWED = frozenset((
+                "POINT", "MULTIPOINT", "LINESTRING", "MULTILINESTRING",
+                "POLYGON", "MULTIPOLYGON", "GEOMETRY",
+            ))
+            if gt not in _ALLOWED:
+                raise ValueError(
+                    f"不支持的几何类型: {geometry_type!r}"
+                    f"(允许 {sorted(_ALLOWED)})"
+                )
+            if any(n.lower() == geom_raw.lower() for n, _ in cols):
+                raise ValueError("geometry_column 不能与属性列重名")
+        else:
+            gt = None
+        if not cols and gt is None:
+            raise ValueError("纯属性表至少需要一个属性列")
+        srid = int(srid if srid is not None else 0)
+
+        exists = self.cursor.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (tn,)
+        ).fetchone()
+        if exists:
+            if not overwrite:
+                raise ValueError(f"表 {tn!r} 已存在,如需重建请传 overwrite=True")
+            self._drop_spatial_table(tn, geom_raw or "geom")
+            self.conn.commit()
+
+        col_defs = [f"{_quote_ident(n)} {t}" for n, t in cols]
+        if gt is not None and self.kind == "gpkg":
+            # 几何列并入 CREATE TABLE(BLOB 承载 GPKG 二进制),免 AddGeometryColumn
+            col_defs = col_defs + [_quote_ident(geom_raw) + " BLOB"]
+        try:
+            self.cursor.execute(
+                f"CREATE TABLE {_quote_ident(tn)} ({', '.join(col_defs)})"
+            )
+            if gt is not None:
+                if self.kind == "gpkg":
+                    self.cursor.execute(
+                        "INSERT INTO gpkg_contents "
+                        "(table_name, data_type, identifier, description, srs_id) "
+                        "VALUES (?, 'features', ?, ?, ?)",
+                        (tn, tn, "矢量图层: " + tn, srid),
+                    )
+                    self.cursor.execute(
+                        "INSERT INTO gpkg_geometry_columns "
+                        "(table_name, column_name, geometry_type_name, srs_id, z, m) "
+                        "VALUES (?, ?, ?, ?, 0, 0)",
+                        (tn, geom_raw, gt, srid),
+                    )
+                else:
+                    self._ensure_spatial_ready()
+                    self.cursor.execute(
+                        "SELECT AddGeometryColumn(?, ?, ?, ?, 2)",
+                        (tn, geom_raw, srid, gt),
+                    )
+                    self.cursor.execute(
+                        "SELECT CreateSpatialIndex(?, ?)", (tn, geom_raw)
+                    )
+            self.conn.commit()
+        except Exception:
+            # 半成品清理后原样抛出,不留脏表
+            self.conn.rollback()
+            self._drop_spatial_table(tn, geom_raw or "geom")
+            self.conn.commit()
+            raise
+
+        if register and gt is not None:
+            self._ensure_user_relation_table()
             self.cursor.execute(
                 "DELETE FROM user_relation WHERE table_name = ?", (tn,)
             )
@@ -654,10 +1024,10 @@ class local_db_util:
             RuntimeError: 在 MBTiles 库上调用。
             ValueError: 表不存在 / 行不是 dict / 几何与列类型不匹配等。
         """
-        if self.kind == "mbtiles":
+        if self.kind not in ("spatialite", "gpkg"):
             raise RuntimeError(
-                f"{self.db_path} 是 MBTiles 瓦片库,不支持矢量数据插入,"
-                "请改用 spatialite 库"
+                f"{self.db_path} 是 {self.kind} 库,不支持矢量数据插入,"
+                "请改用 spatialite 或 GeoPackage 格式的 .gpkg/.db"
             )
         tn = str(table_name)
         info = self.cursor.execute(
@@ -669,18 +1039,29 @@ class local_db_util:
         if not data:
             return 0
 
-        # 几何列元信息(spatialite 注册表;无几何列时按纯属性表插入)
-        gmeta = self.cursor.execute(
-            "SELECT f_geometry_column AS gc, geometry_type AS gt, srid AS srid "
-            "FROM geometry_columns WHERE f_table_name = ?",
-            (tn,),
-        ).fetchone()
+        # 几何列元信息(spatialite geometry_columns / GPKG gpkg_geometry_columns;
+        # 无几何列时按纯属性表插入)
+        if self.kind == "gpkg":
+            gmeta = self.cursor.execute(
+                "SELECT column_name AS gc, geometry_type_name AS gt, "
+                "srs_id AS srid FROM gpkg_geometry_columns WHERE table_name = ?",
+                (tn,),
+            ).fetchone()
+        else:
+            gmeta = self.cursor.execute(
+                "SELECT f_geometry_column AS gc, geometry_type AS gt, srid AS srid "
+                "FROM geometry_columns WHERE f_table_name = ?",
+                (tn,),
+            ).fetchone()
         geom_col: str | None = None
         col_type: str | None = None
         srid: int | None = None
         if gmeta is not None:
             geom_col = gmeta["gc"]
-            col_type = _GEOMETRY_CODE_TO_NAME.get(int(gmeta["gt"]), "GEOMETRY")
+            if self.kind == "gpkg":
+                col_type = str(gmeta["gt"]).upper()  # GPKG 直接存规范名(POINT 等)
+            else:
+                col_type = _GEOMETRY_CODE_TO_NAME.get(int(gmeta["gt"]), "GEOMETRY")
             srid = int(gmeta["srid"])
         # 属性列(大小写不敏感匹配,几何列除外)
         attr_cols = {
@@ -688,39 +1069,28 @@ class local_db_util:
             for col in cols
             if geom_col is None or col.lower() != geom_col.lower()
         }
-        col_base = {
+        #: 类型名(单/多部件) → 几何基类
+        _TYPE_BASE = {
             "POINT": "POINT",
             "MULTIPOINT": "POINT",
             "LINESTRING": "LINESTRING",
             "MULTILINESTRING": "LINESTRING",
             "POLYGON": "POLYGON",
             "MULTIPOLYGON": "POLYGON",
-        }.get(col_type or "")
+        }
+        col_base = _TYPE_BASE.get(col_type or "")
 
-        def geom_expr(kind: str) -> str:
-            """按几何列类型与输入 WKT 类型决定 SQL 表达式。"""
-            kind_base = {
-                "POINT": "POINT",
-                "MULTIPOINT": "POINT",
-                "LINESTRING": "LINESTRING",
-                "MULTILINESTRING": "LINESTRING",
-                "POLYGON": "POLYGON",
-                "MULTIPOLYGON": "POLYGON",
-            }.get(kind)
+        def _check_kind(kind: str) -> None:
+            """几何类型一致性规则(spatialite / GPKG 共用),不匹配抛 ValueError。"""
+            kind_base = _TYPE_BASE.get(kind)
             if col_base and kind_base and col_base != kind_base:
-                raise ValueError(
-                    f"几何列类型是 {col_type},不能插入 {kind} 几何"
-                )
+                raise ValueError(f"几何列类型是 {col_type},不能插入 {kind} 几何")
             if col_type in _SINGLE_GEOM_TYPES and kind in _MULTI_GEOM_TYPES:
                 raise ValueError(
                     f"几何列是单部件 {col_type},拒绝插入多部件 {kind};"
                     "面/线要素请建表时用 MULTIPOLYGON / MULTILINESTRING "
                     "或 GEOMETRY(见 create_arcgis_layer)"
                 )
-            if col_type in _MULTI_GEOM_TYPES and kind in _SINGLE_GEOM_TYPES:
-                # 多部件列只收多部件;单部件自动 ST_Multi 归一
-                return "ST_Multi(ST_GeomFromText(?, ?))"
-            return "ST_GeomFromText(?, ?)"
 
         inserted = 0
         try:
@@ -750,21 +1120,44 @@ class local_db_util:
                     params.append(val)
 
                 placeholders = ["?"] * len(insert_cols)
-                params = list(params)
-                geo_expr_sql = ""
-                wkt = _to_wkt(geom_val) if geom_val is not None else None
-                if geom_col is not None and wkt:
-                    # ST_GeomFromText 解析失败会静默返回 NULL(丢数据),先预校验
-                    bad = self.cursor.execute(
-                        "SELECT ST_GeomFromText(?, ?) IS NULL", (wkt, srid)
-                    ).fetchone()[0]
-                    if bad:
-                        raise ValueError(
-                            f"第 {i} 行的几何无法解析为 WKT: {wkt[:60]!r}"
-                        )
-                    insert_cols.append(geom_col)
-                    geo_expr_sql = geom_expr(_wkt_kind(wkt))
-                    params.extend((wkt, srid))
+                geo_expr_sql = ""  # spatialite 专用: 几何表达式(ST_GeomFromText 等)
+                if geom_col is not None and geom_val is not None:
+                    if self.kind == "gpkg":
+                        # 纯 Python 编码 GPKG 二进制(WKT / ArcGIS JSON → BLOB)
+                        try:
+                            enc = encode_geometry(geom_val, srid)
+                        except GpkgGeomError as exc:
+                            raise ValueError(
+                                f"第 {i} 行的几何无法编码为 GPKG 二进制: {exc}"
+                            ) from exc
+                        if enc is not None:
+                            blob, kind = enc
+                            _check_kind(kind)
+                            if col_type in _MULTI_GEOM_TYPES and kind in _SINGLE_GEOM_TYPES:
+                                blob = wrap_to_multi(blob, kind)  # 单部件自动包 MULTI
+                            insert_cols.append(geom_col)
+                            placeholders.append("?")
+                            params.append(blob)
+                    else:
+                        wkt = _to_wkt(geom_val)
+                        if wkt:
+                            # ST_GeomFromText 解析失败会静默返回 NULL(丢数据),先预校验
+                            bad = self.cursor.execute(
+                                "SELECT ST_GeomFromText(?, ?) IS NULL", (wkt, srid)
+                            ).fetchone()[0]
+                            if bad:
+                                raise ValueError(
+                                    f"第 {i} 行的几何无法解析为 WKT: {wkt[:60]!r}"
+                                )
+                            kind = _wkt_kind(wkt)
+                            _check_kind(kind)
+                            insert_cols.append(geom_col)
+                            if col_type in _MULTI_GEOM_TYPES and kind in _SINGLE_GEOM_TYPES:
+                                # 多部件列只收多部件;单部件自动 ST_Multi 归一
+                                geo_expr_sql = "ST_Multi(ST_GeomFromText(?, ?))"
+                            else:
+                                geo_expr_sql = "ST_GeomFromText(?, ?)"
+                            params.extend((wkt, srid))
                 if not insert_cols:
                     raise ValueError(
                         f"第 {i} 行没有任何可写入 {tn!r} 的列"
@@ -847,6 +1240,94 @@ class local_db_util:
         rows = self.cursor.execute("SELECT name, value FROM metadata")
         return {row[0]: row[1] for row in rows}
 
+    def _drop_image_store_table(self, table_name: str) -> None:
+        """删影像瓦片表(GeoPackage 库同时清掉 gpkg_contents / tile_matrix* 登记),
+        幂等;spatialite/mbtiles 只删表。"""
+        if self.kind == "gpkg":
+            for stmt, args in (
+                ("DELETE FROM gpkg_tile_matrix WHERE table_name = ?", (table_name,)),
+                ("DELETE FROM gpkg_tile_matrix_set WHERE table_name = ?",
+                 (table_name,)),
+                ("DELETE FROM gpkg_contents WHERE table_name = ?", (table_name,)),
+            ):
+                with suppress(sqlite3.Error):
+                    self.cursor.execute(stmt, args)
+        self.cursor.execute("DROP TABLE IF EXISTS " + _quote_ident(table_name))
+
+    #: 度网格坐标系(行/列步长 = 360°/2^z,原点 -180/90)
+    #: 的 wkid 集合;4326 用其本身,其余按 4490 近似(工具链老约定)。
+    _DEGREE_WKIDS = frozenset((
+        4326, 4269, 4258, 4230, 4267, 4610, 4490, 4214, 4148, 4555, 4617, 4686,
+    ))
+    #: Web 墨卡托 / 伪墨卡托 wkid
+    _MERCATOR_WKIDS = frozenset((3857, 102100, 900913))
+
+    def _register_gpkg_image_pyramid(
+        self,
+        table_name: str,
+        wkid: int | None,
+        min_zoom: int,
+        max_zoom: int,
+    ) -> bool:
+        """登记 GeoPackage 瓦片金字塔元数据(供 GDAL/QGIS 直接打开定位)。
+
+        瓦片表行号 = XYZ(top-origin),登记的矩阵必须与之匹配:
+
+        - 度网格(4326/4490 等,即下载工具链的行号数学): 原点在 (-180, 90),
+          行/列步长 360°/2^z。登记范围用真实地球 ``(-180,-90,180,90)`` 且
+          每级 ``matrix_height = 2**(z-1)``(z≥1),像素步长 = 360°/(2^z·256)
+          与工具链逐级一致,行 r 顶纬 = 90 - r·360°/2^z 精确成立;
+          z=0 单行铺满 -90..90。
+        - Web 墨卡托: 标准全球金字塔 ``extent=(±W/2, ±W/2)``,矩阵 2^z×2^z。
+
+        返回 False 表示 wkid 未知/未登记(数据照常入库,仅 GDAL 直接读时摆位
+        不可靠)。
+        """
+        if wkid is None:
+            return False
+        wkid = int(wkid)
+        w = 2.0 * math.pi * 6378137.0  # 墨卡托全球范围半宽(米)
+        if wkid in self._MERCATOR_WKIDS:
+            srs_id, ext = 3857, (-w, -w, w, w)
+        elif wkid in self._DEGREE_WKIDS:
+            srs_id = 4326 if wkid == 4326 else 4490
+            ext = (-180.0, -90.0, 180.0, 90.0)
+        else:
+            return False
+        min_x, min_y, max_x, max_y = ext
+        cur = self.cursor
+        cur.execute(
+            "INSERT OR REPLACE INTO gpkg_contents "
+            "(table_name, data_type, identifier, description, min_x, min_y, "
+            "max_x, max_y, srs_id) VALUES (?, 'tiles', ?, ?, ?, ?, ?, ?, ?)",
+            (table_name, table_name, "影像瓦片: " + table_name,
+             min_x, min_y, max_x, max_y, srs_id),
+        )
+        cur.execute(
+            "INSERT OR REPLACE INTO gpkg_tile_matrix_set "
+            "(table_name, srs_id, min_x, min_y, max_x, max_y) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (table_name, srs_id, min_x, min_y, max_x, max_y),
+        )
+        for z in range(int(min_zoom), int(max_zoom) + 1):
+            n = 1 << z
+            if srs_id == 3857:
+                mw = mh = n
+            else:
+                # 度网格数据行只落在 0..2^(z-1)-1(真实纬带 -90..90)
+                mw, mh = n, max(1, n >> 1)
+            px = (max_x - min_x) / (mw * 256.0)
+            py = (max_y - min_y) / (mh * 256.0)
+            cur.execute(
+                "INSERT OR REPLACE INTO gpkg_tile_matrix "
+                "(table_name, zoom_level, matrix_width, matrix_height, "
+                "tile_width, tile_height, pixel_x_size, pixel_y_size) "
+                "VALUES (?, ?, ?, ?, 256, 256, ?, ?)",
+                (table_name, z, mw, mh, px, py),
+            )
+        self.conn.commit()
+        return True
+
     def create_arcgis_image_store(
         self,
         layer_meta: dict,
@@ -858,6 +1339,7 @@ class local_db_util:
         bounds: tuple[float, float, float, float] | None = None,
         register: bool = True,
         overwrite: bool = False,
+        attr: dict | None = None,
     ) -> dict[str, str]:
         """按 ArcGIS 影像图层元信息创建一张 MBTiles 形式的瓦片数据表。
 
@@ -886,6 +1368,9 @@ class local_db_util:
                 同名),使影像进入 :meth:`query_all_table_name` 的影像清单;
                 纯 ``.mbtiles`` 库没有 user_relation,自动忽略。
             overwrite: 同名数据表已存在时先删旧表再重建;默认 ``False`` 抛异常。
+            attr: 随注册写入 ``user_relation.attr`` 的补充属性(JSON 对象;如
+                源服务的 wkid/crs/extent/bounds/级别/URL 等,便于后续按注册名
+                恢复源服务信息)。仅 ``register=True`` 时写入;为 None 不写。
 
         Returns:
             摘要 dict: 实际建成的数据表名、图层名、格式、层级、bounds 等。
@@ -929,7 +1414,8 @@ class local_db_util:
         if exists and not overwrite:
             raise ValueError(f"表 {tn!r} 已存在,如需重建请传 overwrite=True")
         if exists:
-            self.cursor.execute("DROP TABLE IF EXISTS " + _quote_ident(tn))
+            # GPKG 库还要清掉 gpkg_contents / gpkg_tile_matrix* 的残留登记
+            self._drop_image_store_table(tn)
         # 建 MBTiles 形式的瓦片数据表(列结构与规范 tiles 表一致)
         self.cursor.execute(
             f"CREATE TABLE {_quote_ident(tn)} ("
@@ -978,10 +1464,21 @@ class local_db_util:
         self._write_mbtiles_metadata(rows)
 
         registered = False
-        if register and self.kind == "spatialite":
-            # 与数据表同名登记,保证按注册名可直接打开图层表
-            self.add_domain_table(tn, "image")
+        if register and self.kind in ("spatialite", "gpkg"):
+            # 与数据表同名登记,保证按注册名可直接打开图层表;attr 存服务属性
+            self.add_domain_table(
+                tn, "image",
+                json.dumps(attr, ensure_ascii=False, separators=(",", ":"))
+                if attr else None,
+            )
             registered = True
+
+        # GeoPackage 库: 登记瓦片金字塔元数据,GDAL/QGIS 才能按 XYZ 行号定位
+        pyramid = False
+        if self.kind == "gpkg":
+            pyramid = self._register_gpkg_image_pyramid(
+                tn, wkid, min_zoom, max_zoom
+            )
 
         return {
             "table": tn,
@@ -991,6 +1488,7 @@ class local_db_util:
             "maxzoom": str(max_zoom),
             "bounds": ",".join(f"{v:.6f}" for v in bounds),
             "registered": registered,
+            "pyramid": pyramid,
         }
 
     def create_arcgis_image_store_from_url(
@@ -1040,7 +1538,9 @@ class local_db_util:
         ``zoom_level / tile_column / tile_row / tile_data``,并在 spatialite
         或 MBTiles 库中均可使用。
 
-        - 瓦片表的 ``tile_row`` 按 MBTiles 约定为 TMS 行号(自北向南);
+        - 入参 ``tile_row`` 按 MBTiles 约定为 TMS 行号(自北向南);spatialite /
+          mbtiles 库原样落库;GeoPackage 库在落库前自动翻转为 XYZ(top-origin,
+          GPKG 规范/GDAL 直读的行号,行 0 在 90° 一侧)。
           若手头数据是 XYZ/slippy 的 ``y``(自南向北),请先换算
           ``tile_row = 2**zoom - 1 - y`` 再传入,函数本身不做换算。
         - 每行字典键名大小写不敏感,支持别名:
@@ -1115,6 +1615,13 @@ class local_db_util:
                 raise ValueError(
                     f"第 {i} 行瓦片编号不能为负: zoom={z}, column={x}, row={y}"
                 )
+            if self.kind == "gpkg":
+                # GPKG 瓦片行号 = XYZ(top-origin);入参为 TMS → 落库前翻转
+                y = (1 << z) - 1 - y
+                if y < 0:
+                    raise ValueError(
+                        f"第 {i} 行瓦片行号越界: 层级 z={z} 翻转后 row={y}"
+                    )
             if blob is None:
                 raise ValueError(f"第 {i} 行缺少 tile_data 键")
             if isinstance(blob, str):
@@ -1209,24 +1716,393 @@ def _crs_display(srid: int | None, rec: tuple | None) -> str | None:
     return " · ".join(parts) or None
 
 
+#: GPKG ``gpkg_geometry_columns.geometry_type_name`` 规范名 → 中文简称
+#: (与上面 spatialite 数字编码的中文标签一一对应)
+_GEOM_NAME_LABEL: dict[str, str] = {
+    "GEOMETRY": "几何",
+    "POINT": "点",
+    "LINESTRING": "线",
+    "POLYGON": "面",
+    "MULTIPOINT": "多点",
+    "MULTILINESTRING": "多线",
+    "MULTIPOLYGON": "多面",
+    "GEOMETRYCOLLECTION": "几何集合",
+}
+
+
+def _conn_is_gpkg(conn) -> bool:
+    """内容探测: 连接是否 GeoPackage 库(存在 gpkg 系统表)。"""
+    try:
+        tables = {
+            r[0] for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            )
+        }
+    except sqlite3.Error:
+        tables = set()
+    return {"gpkg_contents", "gpkg_spatial_ref_sys"} <= tables
+
+
+def _sqlite_table_names(path: str | Path) -> set[str]:
+    """一次性读库内全部表名; 非 sqlite / 打不开 → 空集。"""
+    try:
+        con = sqlite3.connect(str(path))
+        try:
+            return {
+                r[0] for r in con.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+        finally:
+            con.close()
+    except sqlite3.Error:
+        return set()
+
+
+def _db_path_is_gpkg_content(path: str | Path) -> bool:
+    """看文件**内容**: gpkg 系统表齐全 → True(不看后缀)。"""
+    return {"gpkg_contents", "gpkg_spatial_ref_sys"} <= _sqlite_table_names(path)
+
+
+def gpkg_open_path(db_path: str | Path) -> str:
+    """gpkg 内容库 → 返回可供 GDAL/QGIS 直接打开的路径。
+
+    **新规(现行)**: 落库/入库的文件本体直接命名 ``.gpkg`` —— GDAL(3.11)
+    按文件名后缀裁决驱动, ``.gpkg`` 后缀让 GPKG 驱动直接接管, 矢量/栅格
+    都直开。本函数对 ``.gpkg`` 文件**原样返回**, 不建任何别名、目录里永远
+    只有一个文件。
+
+    **为什么老 ``.db`` 需要本函数**: 早期按 ``.db`` 落库的 GeoPackage 内容
+    库会被 SQLite 驱动抢先认领(矢量只剩纯属性表)/ 栅格不被任何驱动识别;
+    ``GPKG:`` 驱动前缀在 Windows 盘符路径被截断(sqlite3_open(D) 失败);
+    ``PRAGMA application_id`` 魔数也不参与裁决(实测无效)。故老库旁维护
+    一个指向**同一 inode** 的 ``.gpkg`` **硬链接**(同盘零拷贝、内容永远
+    同步 —— GDAL 打开的就是原库文件), 返回该 .gpkg 路径。硬链接不可用
+    (跨设备 / 文件系统不支持 / 权限)时退化为复制; 失败则原样返回 .db。
+
+    **老 ``.db`` 库建议迁移**: 无图层打开时把文件直接改名为 ``.gpkg``
+    (内容不变、零拷贝、改名后即新规直开, 不再需要别名)。
+
+    **别名是临时的, 不是常驻文件**: Windows 上 GDAL 打开期间文件句柄
+    不允许删(实测 WinError 32)——所以别名只在“有图层正用它”的期间存在:
+
+    - 图层加载/使用期间 → 别名必须存在(就是它让 GDAL 认成 GPKG);
+    - 图层从工程移除后 → 调 :func:`release_gpkg_alias` 删除;
+    - 应用退出/崩溃残留 → 下一启动 :func:`sweep_startup_gpkg_aliases` 清扫
+      (建别名的目录已记进 QGIS settings, 启动时按目录删无活图层引用的
+      隐藏别名)。
+    - 本目录 .db 已不存在的孤儿别名(崩溃残留)由每次调用的惰性清扫兜底。
+
+    别名创建时加 Windows Hidden 属性(资源管理器默认视图不可见)。非 gpkg
+    内容(老 spatialite / 纯 sqlite / mbtiles / 后缀已是 .gpkg)一律原样
+    返回, 不建别名。
+    """
+    p = Path(db_path)
+    if not p.is_file() or p.suffix.lower() == ".gpkg":
+        return str(p)
+    tables = _sqlite_table_names(p)
+    if not {"gpkg_contents", "gpkg_spatial_ref_sys"} <= tables:
+        return str(p)
+    # 惰性清扫本目录孤儿别名(带隐藏属性且 .db 已不存在的 .gpkg)
+    _lazy_sweep_dir(p.parent)
+    try:
+        db_st = p.stat()
+    except OSError:
+        return str(p)
+    gpkg = p.with_suffix(".gpkg")
+    try:
+        alias_st = gpkg.stat()
+        # 已存在且与 .db 同 inode(硬链接)→ 直接用(并补隐藏属性);
+        # 若只是大小+mtime 一致(用户自留的同步副本)→ 原样用, 不动它的属性;
+        # 否则视为陈旧别名, 重建。
+        if alias_st.st_ino == db_st.st_ino:
+            _set_hidden(gpkg)
+            _remember_alias_dir(p.parent)
+            return str(gpkg)
+        if (
+            alias_st.st_size == db_st.st_size
+            and abs(alias_st.st_mtime - db_st.st_mtime) < 5
+        ):
+            return str(gpkg)
+        gpkg.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return str(p)
+    try:
+        os.link(p, gpkg)
+    except FileExistsError:
+        _set_hidden(gpkg)  # 并发竞争, 对方已建好
+        _remember_alias_dir(p.parent)
+        return str(gpkg)
+    except OSError:
+        import shutil
+
+        try:
+            shutil.copyfile(p, gpkg)
+        except OSError:
+            return str(p)
+    _set_hidden(gpkg)
+    _remember_alias_dir(p.parent)
+    return str(gpkg)
+
+
+# ---- 别名生命周期: Windows Hidden 属性 + 孤儿清扫 ----
+
+_SWEPT_DIRS: set[str] = set()
+
+
+def _win_file_attr(path: Path) -> int | None:
+    """Windows 文件属性(GetFileAttributesW), 非 Windows / 失败返回 None。"""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+
+        v = ctypes.windll.kernel32.GetFileAttributesW(str(path))
+        return v if v != -1 else None
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _is_hidden(path: Path) -> bool:
+    attr = _win_file_attr(path)
+    return bool(attr is not None and attr & 0x2)  # FILE_ATTRIBUTE_HIDDEN
+
+
+def _set_hidden(path: Path) -> None:
+    """Windows: 给文件加 Hidden 属性(资源管理器默认不显示); 其余平台 no-op。
+
+    只加不改动其它属性位; 失败静默(隐藏只是“默认视图不可见”的修饰,
+    不影响按完整路径打开)。
+    """
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+
+        cur = _win_file_attr(path)
+        if cur is not None and not (cur & 0x2):
+            ctypes.windll.kernel32.SetFileAttributesW(str(path), cur | 0x2)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _lazy_sweep_dir(directory: Path) -> None:
+    """每个目录每进程只清扫一次。"""
+    key = str(directory)
+    if key in _SWEPT_DIRS:
+        return
+    try:
+        sweep_orphan_gpkg_aliases(directory)
+    finally:
+        _SWEPT_DIRS.add(key)
+
+
+def sweep_orphan_gpkg_aliases(directory: str | Path) -> int:
+    """删除目录里的“孤儿别名”: 带 Hidden 属性、但同 stem 的 .db 已不存在的
+    ``.gpkg`` 文件。
+
+    判据安全: 本模块建的别名都会加 Hidden 属性, 用户的真 ``.gpkg``
+    库不带该属性, 不会被误删; 也只删 .db 已不存在的(说明没有库需要它,
+    是崩溃/删除残留, 数据体可整体释放)。返回删除的文件数。
+    """
+    try:
+        entries = list(Path(directory).iterdir())
+    except OSError:
+        return 0
+    removed = 0
+    for e in entries:
+        try:
+            if e.suffix.lower() != ".gpkg" or not e.is_file():
+                continue
+            if _is_hidden(e) and not e.with_suffix(".db").is_file():
+                e.unlink()
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+# ---- 别名生命周期(临时): 有图层用 → 文件在; 不再被引用 → 删 ----
+
+_ALIAS_DIRS_KEY = "qgis_dev/gpkg_alias_dirs"
+_REMEMBERED_DIRS: set[str] = set()
+
+
+def _live_alias_sources() -> set[str]:
+    """当前 QGIS 工程里所有图层源指向的 ``.gpkg`` 打开路径(normcase 集)。
+
+    无 QGIS / 无工程 → 空集。源形如 ``D:/x.gpkg|layername=t`` 或 ``D:/x.gpkg``。
+    """
+    out: set[str] = set()
+    try:
+        from qgis.core import QgsProject
+
+        proj = QgsProject.instance()
+        if proj is None:
+            return out
+        for layer in proj.mapLayers().values():
+            try:
+                src = str(layer.source() or "")
+            except Exception:  # noqa: BLE001
+                continue
+            path = src.split("|", 1)[0].strip()
+            if path.lower().endswith(".gpkg"):
+                out.add(os.path.normcase(path))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def _is_our_alias(gpkg: Path) -> bool:
+    """判定该 .gpkg 是本模块建的别名(不是用户的真 .gpkg 库)。
+
+    判据: 同 stem 的 .db 存在且是 gpkg 内容, 且文件带 Hidden 属性或与
+    .db 同 inode(硬链接)。三者缺一即不是我们的别名, 一律不碰。
+    """
+    if gpkg.suffix.lower() != ".gpkg" or not gpkg.is_file():
+        return False
+    db = gpkg.with_suffix(".db")
+    if not db.is_file() or not _db_path_is_gpkg_content(db):
+        return False
+    try:
+        if _is_hidden(gpkg):
+            return True
+        return gpkg.stat().st_ino == db.stat().st_ino
+    except OSError:
+        return False
+
+
+def release_gpkg_alias(alias_path: str | Path) -> bool:
+    """删除不再被任何活图层引用的别名(尽力而为)。
+
+    安全闸: 非本模块别名 / 同 stem .db 不是 gpkg 内容 / QGIS 工程中仍有
+    图层源指向该路径(多图层共用同一库时) → 不动。删除失败(Windows 下
+    GDAL 句柄尚未释放)→ False, 留给下次调用或启动清扫兜底。返回是否已删。
+    """
+    gpkg = Path(alias_path)
+    if not _is_our_alias(gpkg):
+        return False
+    if os.path.normcase(str(gpkg)) in _live_alias_sources():
+        return False
+    try:
+        gpkg.unlink()
+        return True
+    except OSError:
+        return False
+
+
+def _remember_alias_dir(directory: Path) -> None:
+    """把建过别名的目录写进 QGIS settings(每目录每进程一次), 供下一启动
+    清扫上一会话残留。无 QGIS / 写失败 → no-op。"""
+    key = str(directory)
+    if key in _REMEMBERED_DIRS:
+        return
+    _REMEMBERED_DIRS.add(key)
+    try:
+        from qgis.core import QgsSettings
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        s = QgsSettings()
+        cur = list(s.value(_ALIAS_DIRS_KEY, []) or [])
+        if key not in cur:
+            cur.append(key)
+            s.setValue(_ALIAS_DIRS_KEY, cur)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _sweep_unused_aliases_in_dir(directory: Path) -> int:
+    """删除目录里本模块建的、当前无活图层引用的隐藏别名(.db 仍存在)。"""
+    live = _live_alias_sources()
+    removed = 0
+    try:
+        entries = list(directory.iterdir())
+    except OSError:
+        return 0
+    for e in entries:
+        try:
+            if e.suffix.lower() != ".gpkg" or not e.is_file():
+                continue
+            if not _is_hidden(e):
+                continue  # 用户的真 .gpkg 不带隐藏属性, 不碰
+            if os.path.normcase(str(e)) in live:
+                continue  # 正在被图层引用
+            db = e.with_suffix(".db")
+            if not db.is_file() or not _db_path_is_gpkg_content(db):
+                continue  # 非本模块管理的别名(库没了归孤儿清扫)
+            e.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def sweep_startup_gpkg_aliases() -> int:
+    """上一会话残留别名清扫(应用启动后调一次)。
+
+    读 QGIS settings 里记过的数据目录(本模块建别名时写入), 对每个目录:
+
+    - 先清孤儿(带隐藏属性且 .db 已不存在的 .gpkg);
+    - 再删无活图层引用的隐藏别名(.db 还在, 但当前没有任何图层用它);
+    - 最后清空目录记录。
+
+    **正在被引用的别名不误删**: 若启动时工程已自动恢复(读 .qgs 重建图层),
+    :func:`_live_alias_sources` 会拦住它们; 被删掉的都是残留, 下次加载
+    该库时 :func:`gpkg_open_path` 会自动重建。返回删除总数。
+    """
+    try:
+        from qgis.core import QgsSettings
+    except Exception:  # noqa: BLE001
+        return 0
+    total = 0
+    try:
+        s = QgsSettings()
+        dirs = [str(d) for d in (s.value(_ALIAS_DIRS_KEY, []) or [])]
+        for d in dirs:
+            directory = Path(d)
+            total += sweep_orphan_gpkg_aliases(directory)
+            total += _sweep_unused_aliases_in_dir(directory)
+        s.remove(_ALIAS_DIRS_KEY)
+    except Exception:  # noqa: BLE001
+        pass
+    return total
+
+
 def _table_meta(conn, names: Iterable[str]) -> dict[str, dict]:
     """在已打开的只读连接上批量读取注册表元信息(全程容错)。
 
     返回 ``{表名: {"geom_label", "geom_col", "srid", "crs", "fields"}}``:
-    geom_label 取 geometry_columns 几何类型编码的中文名; crs 为
-    spatial_ref_sys 的 ``EPSG:xxxx · 名称`` 文案; fields 为 PRAGMA
-    table_info 的 [(列名, 声明类型), ...]。spatial 元数据表缺失 / 表已删 /
-    字段读不出都不抛异常, 对应项回落 None / []。
+    geom_label 取几何列类型的中文名(spatialite 数字编码 / GPKG 规范名);
+    crs 为 spatial_ref_sys / gpkg_spatial_ref_sys 的 ``EPSG:xxxx · 名称`` 文案;
+    fields 为 PRAGMA table_info 的 [(列名, 声明类型), ...]。空间元数据表缺失 /
+    表已删 / 字段读不出都不抛异常, 对应项回落 None / []。
     """
     out: dict[str, dict] = {}
     names = [n for n in names if n]
     if not names:
         return out
-    try:
-        geom_rows = conn.execute(
+    gpkg = _conn_is_gpkg(conn)
+    # 两套查询的列序统一为 (tn, gcol, gcode, gsrid) / (srid, auth, auth_srid, name)
+    if gpkg:
+        geom_q = (
+            "SELECT table_name, column_name, geometry_type_name, srs_id "
+            "FROM gpkg_geometry_columns"
+        )
+        srs_q = (
+            "SELECT srs_id, organization, organization_coordsys_id, srs_name "
+            "FROM gpkg_spatial_ref_sys"
+        )
+    else:
+        geom_q = (
             "SELECT f_table_name, f_geometry_column, geometry_type, srid "
             "FROM geometry_columns"
-        ).fetchall()
+        )
+        srs_q = "SELECT srid, auth_name, auth_srid, ref_sys_name FROM spatial_ref_sys"
+    try:
+        geom_rows = conn.execute(geom_q).fetchall()
     except sqlite3.Error:
         geom_rows = ()
     gmap: dict[str, tuple] = {}
@@ -1238,12 +2114,11 @@ def _table_meta(conn, names: Iterable[str]) -> dict[str, dict]:
     if srids:
         try:
             marks = ",".join("?" * len(srids))
+            where = "srs_id" if gpkg else "srid"
             crs_rows_map = {
                 int(r[0]): r
                 for r in conn.execute(
-                    "SELECT srid, auth_name, auth_srid, ref_sys_name "
-                    f"FROM spatial_ref_sys WHERE srid IN ({marks})",
-                    srids,
+                    f"{srs_q} WHERE {where} IN ({marks})", srids
                 )
             }
         except sqlite3.Error:
@@ -1264,10 +2139,17 @@ def _table_meta(conn, names: Iterable[str]) -> dict[str, dict]:
             fields = []
         srid_i = int(gsrid) if gsrid is not None else None
         crs_rec = crs_rows_map.get(srid_i) if srid_i is not None else None
+        if gpkg:
+            label = (
+                _GEOM_NAME_LABEL.get(str(gcode).upper())
+                if gcode is not None else None
+            )
+        else:
+            label = (
+                _GEOM_CODE_LABEL.get(int(gcode)) if gcode is not None else None
+            )
         out[n] = {
-            "geom_label": (
-                _GEOM_CODE_LABEL.get(gcode) if gcode is not None else None
-            ),
+            "geom_label": label,
             "geom_col": gcol,
             "srid": srid_i,
             "crs": _crs_display(srid_i, crs_rec),
@@ -1314,7 +2196,10 @@ def describe_local_db(db_path: str | Path) -> dict[str, Any]:
     meta: dict[str, dict] = {}
     if names:
         try:
-            conn = sqlite3.connect(f"file:{p.as_posix()}?mode=ro", uri=True)
+            # 普通路径直连 + 只读模式(不用 ``file:`` URI —— Windows 路径含
+            # 空格/中文时 URI 解析失败, 行数/元信息会静默变 None)
+            conn = sqlite3.connect(str(p), timeout=5.0)
+            conn.execute("PRAGMA query_only = ON")
             try:
                 for n in names:
                     try:
