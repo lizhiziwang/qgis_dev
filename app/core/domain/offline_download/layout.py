@@ -75,8 +75,22 @@ def files_target(key: str, label: str) -> str:
 
 
 def feature_class(key: str, label: str) -> str:
-    """矢量 → SpatiaLite .sqlite 库内图层 ASCII 名。"""
+    """矢量 → SpatiaLite .sqlite 库内图层 ASCII 名（缺服务名时的兜底）。"""
     return _FEATURE_CLASS_ASCII.get(key) or ascii_name(label)
+
+
+def vector_table_name(service_name: str, fallback: str) -> str:
+    """用服务名生成库内图层表名（保留中文/字母/数字/下划线/中划线，去其它字符）。
+
+    项目本地库表名即服务/图层名（见 local_db_util 示例“江西省行政区划县区级修订版”），
+    离线下载的矢量表名也用服务名，避免固定 tuban 等不好对应；缺名退 fallback。
+    """
+    s = str(service_name or "").strip().replace(" ", "_")
+    if not s:
+        return fallback
+    clean = re.sub(r"[^\w\u4e00-\u9fff-]+", "_", s, flags=re.UNICODE)
+    clean = clean.strip("_")
+    return clean or fallback
 
 
 def zip_base_name(task_id: str, task_name: str) -> str:

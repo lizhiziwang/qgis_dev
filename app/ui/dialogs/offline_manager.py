@@ -50,9 +50,12 @@ class OfflineDownloadManagerDialog(BaseDialog):
         self.service = service or OfflineDownloadService()
         self.manager = self.service.manager
         self.manager.record_changed.connect(self._debounce_refresh)
+        # 独立顶层窗口：最小化进任务栏（Dialog 类型会最小化到父窗口/消失）
+        self.setWindowFlag(Qt.WindowType.Window, True)
         self.setMinimumSize(760, 460)
         self._build_ui()
         self.refresh()
+        self._detach_from_parent()
 
     # ------------------------------------------------------------------ UI
 
@@ -97,6 +100,17 @@ class OfflineDownloadManagerDialog(BaseDialog):
         self.setLayout(layout)
 
     # ------------------------------------------------------------------ 数据
+
+    def _detach_from_parent(self) -> None:
+        """脱离父窗口成独立顶层窗口（最小化进任务栏，同 QGIS 弹窗）。"""
+        parent = self.parentWidget()
+        geo = parent.geometry() if parent is not None else None
+        self.setParent(None)
+        if geo is not None:
+            self.move(
+                geo.center().x() - self.width() // 2,
+                geo.center().y() - self.height() // 2,
+            )
 
     def refresh(self) -> None:
         records = self.manager.list_records()

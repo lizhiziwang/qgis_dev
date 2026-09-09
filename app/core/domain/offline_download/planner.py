@@ -23,7 +23,14 @@ from .model import (
     PlanError,
     SpatialScope,
 )
-from .task_info import DataSource, ImageryItem, TaskInfo, infer_source_type, resolve_source_type
+from .task_info import (
+    DataSource,
+    ImageryItem,
+    TaskInfo,
+    infer_source_type,
+    resolve_source_type,
+    service_name,
+)
 
 #: 有序数据集键：先矢量/文件必选组，后可选影像/参考（决定进度条推进顺序）
 _ORDER = [
@@ -60,12 +67,22 @@ def build_plan(req: DownloadRequest) -> FetchPlan:
         scope = _checked_wgs84(req.scope_extent)
 
     items: list[FetchItem] = []
+    used_targets: set[str] = set()
 
     def _vector(key: str, ds: DataSource) -> FetchItem:
-        label = ds.name or KEY_LABELS[key]  # 优先用任务里给的服务/数据集名
+        # 标签/表名优先用服务地址里的服务名（如 JXxian），退而 ds.name/默认
+        label = service_name(ds.service_url) or ds.name or KEY_LABELS[key]
         _ensure_urls(label, ds)
         if infer_from(ds) == "file":
             return _files_item(key, label, ds, "文件", dir_name=label)
+        base = layout.vector_table_name(label, layout.feature_class(key, label))
+        target = base
+        # 同任务里服务名重复会互相覆盖，追加数据集 key 区分
+        n = 1
+        while target in used_targets:
+            target = f"{base}_{n + 1}"
+            n += 1
+        used_targets.add(target)
         return FetchItem(
             key=key,
             kind="vector",
@@ -74,7 +91,7 @@ def build_plan(req: DownloadRequest) -> FetchPlan:
             service_url=ds.service_url,
             file_urls=ds.file_urls,
             layer_id=ds.layer_id,
-            target=layout.feature_class(key, label),
+            target=target,
             display_name=label,
         )
 
@@ -98,8 +115,6 @@ def build_plan(req: DownloadRequest) -> FetchPlan:
         scene: str,
         src: object,
     ) -> FetchItem:
-        # 行文案用服务名（scene=服务/数据集名），缺省退到阶段目录名，避免"参考影像 参考影像"
-        label = (scene or "").strip() or layout.phase_dir(phase)
         if isinstance(src, ImageryItem):
             ds_url = src.service_url
             files = src.file_urls
@@ -108,6 +123,12 @@ def build_plan(req: DownloadRequest) -> FetchPlan:
             ds_url = getattr(src, "service_url", None)
             files = getattr(src, "file_urls", ())
             src_type = resolve_source_type(src)
+        # 行文案优先服务名（如 THL/JXxian），退 scene 名，再退阶段目录名
+        label = (
+            service_name(ds_url)
+            or (scene or "").strip()
+            or layout.phase_dir(phase)
+        )
         if not ds_url and not files:
             raise PlanError(f"「{label}」缺少下载地址（服务或文件）。")
         if src_type == "file" or (not ds_url and files):

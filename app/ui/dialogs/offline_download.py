@@ -71,6 +71,15 @@ class OfflineDownloadDialog(BaseDialog):
 
     def __init__(self, parent=None, canvas=None, tasks=(), title: str = "下载离线图层") -> None:
         super().__init__(parent, title)
+        # 下载弹窗不提供最大化：隐藏无边框标题栏的最大化按钮
+        bar = getattr(self, "title_bar", None)
+        if bar is not None:
+            btn = getattr(bar, "_btn_max", None)
+            if btn is not None:
+                btn.hide()
+        # 独立顶层窗口：最小化进任务栏（与 QGIS 弹窗一致；Dialog 类型会最小化到
+        # 父窗口/消失）。FramelessWindowHint 已由 BaseDialog 设置，这里只升级窗口类型。
+        self.setWindowFlag(Qt.WindowType.Window, True)
         self.canvas = canvas
         self.tasks: list[TaskInfo] = self._coerce_tasks(tasks)
         self.service = OfflineDownloadService()
@@ -87,8 +96,24 @@ class OfflineDownloadDialog(BaseDialog):
         self._init_ui()
         self._reload_tasks()
         self.resize(500, 620)
+        self._detach_from_parent()
 
     # ================================================================ UI
+
+    def _detach_from_parent(self) -> None:
+        """脱离父窗口成独立顶层窗口（最小化进任务栏，同 QGIS 弹窗）。
+
+        带父的 Dialog 是 owned window：最小化只缩到父窗口旁，没有独立任务栏按钮。
+        先记住父几何再 setParent(None)，并居中显示，避免跳位。
+        """
+        parent = self.parentWidget()
+        geo = parent.geometry() if parent is not None else None
+        self.setParent(None)
+        if geo is not None:
+            self.move(
+                geo.center().x() - self.width() // 2,
+                geo.center().y() - self.height() // 2,
+            )
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout()
@@ -476,7 +501,8 @@ class OfflineDownloadDialog(BaseDialog):
 def _available_rows(task: TaskInfo):
     """把任务数据展开成勾选行：(key, label, required锁定)。
 
-    行文案优先用任务里的服务/数据集名（``DataSource.name``），缺失才退回 KEY_LABELS。
+    行文案用任务里的服务/数据集名（``DataSource.name``）或默认标签；库内表名/日志
+    才用服务地址里的服务名（见 planner）。
     """
     rows = []
     for key in ("features", "attr_template", "rule_package"):
@@ -488,10 +514,11 @@ def _available_rows(task: TaskInfo):
     for img in task.imageries:
         from app.core.domain.offline_download.layout import phase_dir
 
-        # 行文案用服务名（img.name），缺省退阶段目录名
         rows.append(("imageries", img.name or phase_dir(img.phase), False))
+    if task.basemap_data is not None:
+        bm = task.basemap_data
+        rows.append(("basemap_data", bm.name or "本底数据", False))
     for key, fallback in (
-        ("basemap_data", "本底数据"),
         ("admin_boundary", "政区边界"),
         ("reference", "参考数据"),
     ):

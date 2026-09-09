@@ -48,7 +48,7 @@ class SpatialExtent:
     ymin: float
     xmax: float
     ymax: float
-    crs: str = "EPSG:4326"
+    crs: str = "EPSG:4490"
 
     @property
     def tuple_wgs84(self) -> tuple[float, float, float, float]:
@@ -251,6 +251,30 @@ def arcgis_sublayer_url(service_url: str, layer_id: Optional[str]) -> str:
     return f"{url}/{layer_id or 0}"
 
 
+def service_name(url: Optional[str]) -> str:
+    """从 ArcGIS 服务地址抽取服务名：``…/services/<folder>/<Name>/MapServer`` → ``Name``。
+
+    ``folder`` 与 ``<Name>`` 之间取服务类型段（MapServer/FeatureServer/ImageServer/
+    WMTS…）的上一段；抽不到返回空串（由调用方退回数据集的 name）。
+    """
+    if not url:
+        return ""
+    path = (url.split("?")[0]).rstrip("/")
+    segs = [s for s in path.split("/") if s]
+    for i in range(len(segs) - 1, -1, -1):
+        if segs[i].lower() in (
+            "mapserver",
+            "featureserver",
+            "imageserver",
+            "wmts",
+            "wms",
+        ):
+            if i >= 1:
+                return segs[i - 1]
+            return ""
+    return ""
+
+
 def _parse_extent(v: object) -> Optional[SpatialExtent]:
     if not v:
         return None
@@ -301,4 +325,5 @@ __all__ = [
     "arcgis_sublayer_url",
     "infer_source_type",
     "resolve_source_type",
+    "service_name",
 ]
