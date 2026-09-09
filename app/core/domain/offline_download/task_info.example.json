@@ -1,0 +1,60 @@
+{
+  "task_id": "T20260908001",
+  "task_name": "示例核查任务（模板）",
+  "extent": {
+    "xmin": 106.3,
+    "ymin": 28.2,
+    "xmax": 107.0,
+    "ymax": 28.9,
+    "crs": "EPSG:4490"
+  },
+  "features": {
+    "name": "图斑矢量",
+    "service_url": "http://<服务IP>:6080/arcgis/rest/services/核查数据/图斑/FeatureServer",
+    "layer_id": "0"
+  },
+  "attr_template": {
+    "name": "属性模板",
+    "file_urls": ["http://<服务IP>/外业/属性模板.xls"]
+  },
+  "rule_package": {
+    "name": "质检规则包",
+    "file_urls": ["http://<服务IP>/外业/规则包.zip"]
+  },
+  "dictionaries": [
+    {
+      "name": "土地利用字典",
+      "file_urls": ["http://<服务IP>/外业/土地利用字典.csv"]
+    },
+    {
+      "name": "权属字典",
+      "file_urls": ["http://<服务IP>/外业/权属字典.csv"]
+    }
+  ],
+  "imageries": [
+    {
+      "phase": "before",
+      "name": "2024-06-12",
+      "service_url": "http://<服务IP>:6080/arcgis/rest/services/影像/前时相/ImageServer"
+    },
+    {
+      "phase": "after",
+      "name": "2024-12-20",
+      "service_url": "http://<服务IP>:6080/arcgis/rest/services/影像/后时相/ImageServer"
+    }
+  ],
+  "basemap_data": {
+    "phase": "baseline",
+    "name": "本底数据",
+    "service_url": "http://<服务IP>:6080/arcgis/rest/services/影像/本底/ImageServer"
+  },
+  "admin_boundary": {
+    "name": "行政区划边界",
+    "service_url": "http://<服务IP>:6080/arcgis/rest/services/基础地理/行政区划/FeatureServer",
+    "layer_id": "0"
+  },
+  "reference": {
+    "name": "参考影像",
+    "service_url": "http://<服务IP>:6080/arcgis/rest/services/影像/参考/ImageServer"
+  }
+}
