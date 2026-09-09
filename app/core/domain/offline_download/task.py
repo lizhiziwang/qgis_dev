@@ -1,4 +1,4 @@
-"""离线下载后台任务：普通 ``threading.Thread`` 跑整个 FetchPlan（方案 §8.2）。
+"""离线下载后台任务：普通 ``threading.Thread`` 跑整个 FetchPlan（单 .gpkg 产物）。
 
 线程模型遵循方案 §6.6 红线：QObject 存活在主线程，worker 跑 ``daemon Thread``，
 进度/日志/完成一律经信号 emit，控件更新由调用方在主线程槽做；**先连信号再
@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import threading
 from typing import Optional
 
@@ -16,7 +15,7 @@ from qgis.PyQt.QtCore import QObject, pyqtSignal
 
 from app.infra.logging import get_logger
 
-from . import fetcher, layout
+from . import fetcher
 from .fetcher import DownloadCanceled
 from .model import FetchPlan
 
@@ -26,11 +25,11 @@ logger = get_logger(__name__)
 class OfflineDownloadTask(QObject):
     """一次离线下载的后台任务。
 
-    - ``progress_updated(int)``：0~100（下载按已写字节/估算总量折算，打包前后置 90→100）；
-    - ``stage_changed(str)``：当前阶段（如「抓图斑矢量」「打包 zip」）；
+    - ``progress_updated(int)``：0~100（下载按已写字节/估算总量折算，收尾置 90→100）；
+    - ``stage_changed(str)``：当前阶段（如「下载 图斑矢量」「收尾」）；
     - ``log_message(level, message)``：与 app 日志面板同款四级；
     - ``taskCompleted`` / ``taskTerminated``：收尾信号；
-    - ``exception``：异常对象；``partial``：是否有数据集失败（走了终止但有已完成项）。
+    - ``exception``：异常对象；``partial``：是否有数据集失败（走了终止）。
 
     调用约定：先 connect 信号 → ``start()``。
     """
@@ -93,17 +92,19 @@ class OfflineDownloadTask(QObject):
     # ------------------------------------------------------------ 执行
 
     def _run(self) -> None:
+        from . import gpkg_fetcher
+
         try:
             self._stage("准备")
             self._log_line("INFO", f"开始离线下载：{self.plan.task_name}（{self.plan.task_id}）")
             self._prepare_estimates()
 
-            layout.ensure_stage(self.plan)
-            # 整库重建：同 job 重试/续跑会残留旧表、geometry_columns 与空间索引，
-            # 重写时 OGR AddGeometryColumn 撞重复列、CreateSpatialIndex 撞旧索引。
-            db_file = os.path.join(self.plan.stage_root, layout.SQLITE_CONTAINER)
-            if os.path.exists(db_file):
-                os.remove(db_file)
+            root = self.plan.target_dir or "."
+            os.makedirs(root, exist_ok=True)
+            # 单 gpkg 产物：矢量表 + 影像瓦片表都写它
+            gpkg_path = os.path.join(root, self.plan.gpkg_name)
+            if os.path.exists(gpkg_path):
+                os.remove(gpkg_path)  # 同任务重下覆盖
             precheck = self._disk_precheck()
             if precheck:
                 raise RuntimeError(precheck)
@@ -112,51 +113,54 @@ class OfflineDownloadTask(QObject):
                 cancel=self._cancel,
                 report=self._on_bytes,
                 log=lambda m: self._log_line("DEBUG", m),
+                gpkg_path=gpkg_path,
+                scope_wgs84=self.plan.scope_wgs84,
             )
-            results: dict = {}
             errors: list[str] = []
 
-            # 1) 逐个数据集抓取（按计划顺序，失败不阻断后续，见方案 §8.2）
+            # 1) 逐个数据集抓取（矢量/影像 → gpkg；文件类落 target 目录，见 §8.2）
             for item in self.plan.items:
                 if self._cancel.is_set():
                     raise DownloadCanceled()
                 self._stage(f"下载 {item.label}")
                 try:
-                    meta = fetcher.fetch_item(item, self.plan.stage_root, self.plan.scope_wgs84, ctx)
-                    results[item.label] = meta
+                    gpkg_fetcher.fetch_item(item, root, self.plan.scope_wgs84, ctx)
                 except DownloadCanceled:
                     raise
                 except Exception as exc:  # noqa: BLE001  单个数据集失败不阻断后续
                     errors.append(f"{item.label}：{exc}")
                     self._log_line("ERROR", f"数据集失败 {item.label}：{exc}")
 
-            # 2) 任一数据集失败 → 部分成功，保留 staging 不打包（可续传/重试）
+            # 2) 任一数据集失败 → 失败中止，删除半成品 gpkg（文件类已下载的保留）
             if errors:
                 self.partial = True
                 self.exception = RuntimeError("；".join(errors))
                 for e in errors:
                     self._log_line("ERROR", e)
-                self._log_line("WARNING", "存在失败数据集，未打包。已完成内容保留在 staging 供重试。")
+                if os.path.exists(gpkg_path):
+                    try:
+                        os.remove(gpkg_path)
+                    except OSError:
+                        pass
+                self._log_line("WARNING", "下载失败：未生成完整 .gpkg，可在下载管理中重试")
                 self.taskTerminated.emit()
                 return
 
-            # 3) 打包 zip + 写 manifest
-            self._stage("打包")
+            # 3) 收尾
+            self._stage("收尾")
             self._progress(90)
-            manifest = layout.build_manifest_dict(self.plan, results)
-            layout.write_manifest(self.plan.stage_root, manifest)
-            zip_path = layout.make_zip(
-                self.plan.stage_root, self.plan.target_dir, self.plan.zip_name
-            )
-            size = os.path.getsize(zip_path)
+            if not os.path.exists(gpkg_path):
+                raise RuntimeError("未生成 .gpkg 产物（请检查是否勾选了矢量/影像数据）")
             from .disk import format_bytes
 
-            self._log_line("INFO", f"下载完成，压缩包：{zip_path}（{format_bytes(size)}）")
+            self._log_line(
+                "INFO",
+                f"下载完成，GeoPackage：{gpkg_path}（{format_bytes(os.path.getsize(gpkg_path))}）",
+            )
             self._progress(100)
-            self._cleanup_stage()
             self.taskCompleted.emit()
         except DownloadCanceled:
-            self._log_line("WARNING", "下载已取消（staging 已保留，可在下载管理中重试/续传）")
+            self._log_line("WARNING", "下载已取消（已写入内容未清理，可重试）")
             self.taskTerminated.emit()
         except Exception as exc:  # noqa: BLE001
             self.exception = exc
@@ -178,10 +182,3 @@ class OfflineDownloadTask(QObject):
         from . import disk
 
         return disk.precheck_message(self.plan.target_dir, self.plan.est_total_bytes)
-
-    def _cleanup_stage(self) -> None:
-        if self.plan.stage_root and os.path.isdir(self.plan.stage_root):
-            try:
-                shutil.rmtree(self.plan.stage_root, ignore_errors=True)
-            except Exception:  # noqa: BLE001
-                self._log_line("DEBUG", f"清理 staging 失败：{self.plan.stage_root}")

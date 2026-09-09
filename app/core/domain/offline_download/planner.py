@@ -69,6 +69,15 @@ def build_plan(req: DownloadRequest) -> FetchPlan:
     items: list[FetchItem] = []
     used_targets: set[str] = set()
 
+    def _unique_target(base: str) -> str:
+        """同任务内重名自动追加序号，避免矢量/影像表互相覆盖。"""
+        t, n = base, 1
+        while t in used_targets:
+            n += 1
+            t = f"{base}_{n}"
+        used_targets.add(t)
+        return t
+
     def _vector(key: str, ds: DataSource) -> FetchItem:
         # 标签/表名优先用服务地址里的服务名（如 JXxian），退而 ds.name/默认
         label = service_name(ds.service_url) or ds.name or KEY_LABELS[key]
@@ -76,13 +85,6 @@ def build_plan(req: DownloadRequest) -> FetchPlan:
         if infer_from(ds) == "file":
             return _files_item(key, label, ds, "文件", dir_name=label)
         base = layout.vector_table_name(label, layout.feature_class(key, label))
-        target = base
-        # 同任务里服务名重复会互相覆盖，追加数据集 key 区分
-        n = 1
-        while target in used_targets:
-            target = f"{base}_{n + 1}"
-            n += 1
-        used_targets.add(target)
         return FetchItem(
             key=key,
             kind="vector",
@@ -91,7 +93,7 @@ def build_plan(req: DownloadRequest) -> FetchPlan:
             service_url=ds.service_url,
             file_urls=ds.file_urls,
             layer_id=ds.layer_id,
-            target=target,
+            target=_unique_target(base),
             display_name=label,
         )
 
@@ -141,6 +143,14 @@ def build_plan(req: DownloadRequest) -> FetchPlan:
                 target=layout.imagery_target(phase, scene).rsplit("/tiles", 1)[0],
             )
         zmin, zmax = req.zoom_range
+        if src_type == "arcgis-image":
+            # ArcGIS 影像 → 同一个 .gpkg 里的瓦片表（表名=服务名，唯一）
+            target = _unique_target(
+                layout.vector_table_name(label, layout.feature_class(key, label))
+            )
+        else:
+            # 其它影像源暂不落 gpkg 瓦片表，保留目录落点用于报错提示
+            target = layout.imagery_target(phase, scene)
         return FetchItem(
             key=key,
             kind="imagery",
@@ -152,7 +162,7 @@ def build_plan(req: DownloadRequest) -> FetchPlan:
             phase=phase,
             zmin=zmin,
             zmax=zmax,
-            target=layout.imagery_target(phase, scene),
+            target=target,
         )
 
     for key in _ORDER:
@@ -204,6 +214,7 @@ def build_plan(req: DownloadRequest) -> FetchPlan:
         scope_wgs84=scope,
         target_dir=req.target_dir or ".",
         zip_name=req.target_name or layout.zip_base_name(task.task_id, task.task_name),
+        gpkg_name=layout.gpkg_filename(task.task_id, task.task_name),
         scope_type=req.scope.value,
     )
 

@@ -69,6 +69,10 @@ class FetchContext:
     headers: dict = field(default_factory=dict)
     #: 单次 HTTP 超时秒
     timeout: float = 30.0
+    #: 单 gpkg 产物路径（矢量/影像落库；task 注入，见 gpkg_fetcher）
+    gpkg_path: Optional[str] = None
+    #: 下载范围 WGS84 (xmin,ymin,xmax,ymax)（供影像 extent 换算，task 注入）
+    scope_wgs84: tuple = None
 
     def check(self) -> None:
         if self.cancel is not None and self.cancel.is_set():

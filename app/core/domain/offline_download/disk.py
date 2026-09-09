@@ -11,10 +11,19 @@ REDUNDANCY_FACTOR = 1.3
 
 
 def free_bytes(path: str) -> Optional[int]:
-    """目标目录所在盘的剩余空间（字节）；目录不存在/不可用返回 None。"""
+    """目标目录所在盘的剩余空间（字节）；目录不存在/不可用返回 None。
+
+    只读探测，**不创建目录**（否则“看剩余空间”会多建一层空文件夹）：
+    沿路径向上找最近已存在目录取所在盘空间。
+    """
     try:
-        os.makedirs(path, exist_ok=True)
-        return shutil.disk_usage(path).free
+        cur = str(path or "").strip() or os.getcwd()
+        while cur and not os.path.isdir(cur):
+            nxt = os.path.dirname(cur)
+            if nxt == cur:
+                return None
+            cur = nxt
+        return shutil.disk_usage(cur).free
     except OSError:
         return None
 

@@ -86,6 +86,11 @@ class OfflineDownloadManagerDialog(BaseDialog):
         open_btn = QPushButton("打开目录")
         open_btn.clicked.connect(self._open_dir)
         btns.addWidget(open_btn)
+        import_btn = QPushButton("导入 gpkg 到地图…")
+        import_btn.setToolTip("选包含 .gpkg 的目录，把矢量表与影像加载进当前工程")
+        import_btn.clicked.connect(self._import_gpkg_to_map)
+        import_btn.hide()  # 暂未开放
+        btns.addWidget(import_btn)
         cancel_btn = QPushButton("取消任务")
         cancel_btn.clicked.connect(self._cancel_job)
         btns.addWidget(cancel_btn)
@@ -178,6 +183,64 @@ class OfflineDownloadManagerDialog(BaseDialog):
         else:
             webbrowser.open(target)
 
+    def _import_gpkg_to_map(self) -> None:
+        """选目录里第一个 .gpkg，加载矢量 feature 表；若含瓦片表再用 gdal 直开。"""
+        from app.infra.messagebar import send
+
+        root = QFileDialog.getExistingDirectory(self, "选择含 .gpkg 的目录")
+        if not root:
+            return
+        gpkgs = [
+            os.path.join(root, f)
+            for f in os.listdir(root)
+            if f.lower().endswith(".gpkg")
+        ]
+        if not gpkgs:
+            send("warning", "目录里没有 .gpkg 文件", duration=4)
+            return
+        path = gpkgs[0]
+        try:
+            from app.core.data.local_db import scan_local_sqlite
+
+            rows = scan_local_sqlite(path)
+        except Exception as exc:  # noqa: BLE001
+            send("critical", f"无法读取 .gpkg：{exc}", duration=6)
+            return
+        loaded, errors = [], []
+        vectors = []
+        has_tiles = False
+        for row in rows:
+            geo = row.get("geo")
+            name = row.get("name", "")
+            if geo == "影像" or geo == "tiles":
+                has_tiles = True
+                continue
+            if not geo:
+                continue
+            from app.core.domain.offline_download.offline_load import (
+                open_local_db_vector,
+            )
+
+            layer = open_local_db_vector(path, name)
+            if layer is not None:
+                loaded.append(f"矢量 {name}（{layer.featureCount()}）")
+                vectors.append(layer)
+            else:
+                errors.append(f"矢量 {name}")
+        if has_tiles:
+            from qgis.core import QgsRasterLayer
+
+            layer = QgsRasterLayer(path, os.path.basename(path) + " 影像", "gdal")
+            if layer.isValid():
+                loaded.append("影像瓦片")
+            else:
+                errors.append("影像瓦片（gdal 打开失败）")
+        if loaded:
+            send("success", "已加载：" + "；".join(loaded), duration=6)
+        if errors:
+            send("warning", "以下未加载：" + "；".join(errors), duration=8)
+        _zoom_to_vector_layers(vectors)
+
     def _debounce_refresh(self, _job_id: str) -> None:
         from qgis.PyQt.QtCore import QTimer
 
@@ -195,6 +258,33 @@ class OfflineDownloadManagerDialog(BaseDialog):
         except (RuntimeError, TypeError):
             pass
         super().closeEvent(event)
+
+
+def _zoom_to_vector_layers(layers) -> None:
+    """把画布缩放到矢量图层并集范围（找不到画布就跳过）。"""
+    if not layers:
+        return
+    from qgis.core import QgsRectangle
+    from qgis.PyQt.QtWidgets import QApplication
+    from qgis.gui import QgsMapCanvas
+
+    canvas = None
+    for w in QApplication.topLevelWidgets():
+        if isinstance(w, QgsMapCanvas):
+            canvas = w
+            break
+    if canvas is None:
+        return
+    ext = None
+    for layer in layers:
+        e = layer.extent()
+        ext = QgsRectangle(e) if ext is None else ext.combineExtentWith(e)
+    if ext is not None and not ext.isNull():
+        try:
+            canvas.setExtent(ext)
+            canvas.refresh()
+        except Exception:  # noqa: BLE001
+            pass
 
 
 def _status_text(rec: dict) -> str:

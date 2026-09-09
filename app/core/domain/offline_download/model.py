@@ -118,6 +118,8 @@ class FetchPlan:
     scope_wgs84: tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)
     target_dir: str = ""
     zip_name: str = ""
+    #: 单 gpkg 产物文件名（矢量表 + 影像瓦片表都在这个库，见方案改写 §6）
+    gpkg_name: str = "离线数据.gpkg"
     scope_type: str = "all"
     #: staging 根（打包前的目录树，见方案 §6.1 决策 3）
     stage_root: str = ""

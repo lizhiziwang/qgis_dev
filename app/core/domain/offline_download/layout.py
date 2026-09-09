@@ -99,6 +99,11 @@ def zip_base_name(task_id: str, task_name: str) -> str:
     return f"{safe_name(task_id, 'task')}_{safe_name(task_name, 'task')}_{stamp}"
 
 
+def gpkg_filename(task_id: str, task_name: str) -> str:
+    """单 gpkg 产物文件名：``<taskName>_<taskId>.gpkg``（任务可辨识）。"""
+    return f"{safe_name(task_name, 'task')}_{safe_name(task_id, 'task')}.gpkg"
+
+
 def ensure_stage(plan: FetchPlan) -> str:
     """建 staging 根与影像/文件目录（矢量 .sqlite 由抓取器用 SQLite+SpatiaLite
     驱动创建，不在此处预建空文件）。"""

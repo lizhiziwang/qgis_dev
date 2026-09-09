@@ -188,7 +188,7 @@ class OfflineDownloadDialog(BaseDialog):
         loc.setHorizontalSpacing(8)
         loc.addWidget(QLabel("下载位置"), 0, 0)
         self.target_edit = QLineEdit()
-        self.target_edit.setText(self._default_target_dir())
+        self.target_edit.setText(self._default_target_dir(None))
         self.target_edit.textChanged.connect(self._refresh_disk)
         loc.addWidget(self.target_edit, 0, 1)
         browse = QPushButton("浏览…")
@@ -236,6 +236,41 @@ class OfflineDownloadDialog(BaseDialog):
         接受 ``TaskInfo`` 或平台 JSON dict（内部经 :meth:`TaskInfo.from_dict` 转换）；
         解析失败的条目跳过并记日志，避免弹窗打不开。
         """
+        tasks = [{
+            "task_id": "T20260908001",
+            "task_name": "示例核查任务（模板）",
+            "extent": {
+                "xmin": 113.572778,
+                "ymin": 24.2,
+                "xmax": 118.482141,
+                "ymax": 30.1,
+                "crs": "EPSG:4490"
+            },
+            "features": {
+                "name": "图斑矢量",
+                "service_url": "http://192.168.17.196:6081/arcgis/rest/services/JXxian/MapServer/0",
+                "layer_id": "0"
+            },
+            "attr_template": {
+                "name": "属性模板",
+                "file_urls": ["http://192.168.17.196:8080/外业/属性模板.xls"]
+            },
+            "rule_package": {
+                "name": "质检规则包",
+                "file_urls": ["http://192.168.17.196:8080/外业/规则包.zip"]
+            },
+            "dictionaries": [
+                {
+                "name": "土地利用字典",
+                "file_urls": ["http://192.168.17.196:8080/外业/土地利用字典.csv"]
+                }
+            ],
+            "reference": {
+                "name": "参考影像",
+                "service_url": "http://192.168.17.13:6080/arcgis/rest/services/test_image/MapServer/0"
+                # "service_url": "http://192.168.17.196:6081/arcgis/rest/services/THL/MapServer"
+            }
+        }]
         self.tasks = self._coerce_tasks(tasks)
         self._reload_tasks()
 
@@ -269,6 +304,9 @@ class OfflineDownloadDialog(BaseDialog):
     def _set_current_task(self, task: Optional[TaskInfo]) -> None:
         self._current_task = task
         self._box_extent = None
+        # 默认导出路径 = 程序目录/任务/<任务名>
+        if task is not None:
+            self.target_edit.setText(self._default_target_dir(task.task_name))
         self._rebuild_rows(task)
 
     def _rebuild_rows(self, task: Optional[TaskInfo]) -> None:
@@ -364,13 +402,26 @@ class OfflineDownloadDialog(BaseDialog):
 
     # ================================================================ 位置与磁盘
 
-    def _default_target_dir(self) -> str:
-        from qgis.PyQt.QtCore import QStandardPaths
+    def _default_target_dir(self, task_name) -> str:
+        """默认下载位置 = 程序目录/任务（有任务时 /<任务名>）。"""
+        import sys
 
-        base = QStandardPaths.writableLocation(QStandardPaths.StandardLocation.DocumentsLocation)
+        base = None
+        exe = getattr(sys, "frozen", False) or os.path.basename(sys.executable).lower() in (
+            "app.exe",
+            "app",
+        )
+        if exe:
+            base = os.path.dirname(sys.executable)
         if not base:
-            base = os.path.expanduser("~")
-        return os.path.join(base, "外业数据")
+            base = os.getcwd()
+        root = os.path.join(base, "任务")
+        name = str(task_name or "").strip()
+        if not name:
+            return root
+        from app.core.domain.offline_download.layout import safe_name
+
+        return os.path.join(root, safe_name(name))
 
     def _browse_target(self) -> None:
         path = QFileDialog.getExistingDirectory(
