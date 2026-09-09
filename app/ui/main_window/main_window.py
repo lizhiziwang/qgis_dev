@@ -34,6 +34,7 @@ from qgis.PyQt.QtWidgets import (
     QToolBar,
     QToolButton,
     QTreeWidget,
+    QHBoxLayout,
     QVBoxLayout,
     QWidget,
 )
@@ -80,6 +81,7 @@ from app.ui.main_window.browser_dock import BrowserDock
 from app.ui.main_window.draw_toolbar import DigitizingToolbar
 from app.ui.main_window.snapping_toolbar import QgisSnappingToolbar
 from app.ui.main_window.layer_dock import LayerDock
+from app.ui.main_window.side_toolbar import SideToolBar
 from app.ui.main_window.status_bar import StatusBar
 from app.ui.main_window.tool_bar import ToolBar
 
@@ -273,8 +275,11 @@ class MainWindow(FramelessMixin, QMainWindow):
     def _build_central_widget(self) -> None:
         central = QWidget(self)
         self.setCentralWidget(central)
-        layout = QVBoxLayout(central)
+        # 横向布局：[左侧竖排工具条][地图画布]——竖条位于左侧面板（图层列表 /
+        # 数据浏览器 Dock）右侧、地图左侧，与设计稿一致
+        layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         # 消息栏：悬浮盖在地图画布顶部，不挤占画布空间。
         self.messageBar = FloatingMessageBar(self.canvas)
@@ -308,6 +313,23 @@ class MainWindow(FramelessMixin, QMainWindow):
         self._msg_active = False
         self.messageBar.set_on_state(self._on_floating_message_state)
         self.messageBar.hide()
+
+        # 左侧竖排工具条（图层列表等左 Dock 与画布之间）：
+        # 已实现工具接主窗口回调；未实现的由 SideToolBar 占位提示开发中
+        self.side_toolbar = SideToolBar(
+            self,
+            {
+                "select_point": self._on_select_point,
+                "select_box": self._on_select_box,
+                "pan": self._on_pan,
+                "zoom_in": self._on_zoom_in,
+                "zoom_full": self._on_zoom_full,
+                "clear_selection": self._on_clear_selection,
+                "condition_query": self._on_condition_query,
+                "swipe": self._on_swipe,
+            },
+        )
+        layout.addWidget(self.side_toolbar.widget)
 
         layout.addWidget(self.canvas)
 
@@ -531,6 +553,10 @@ class MainWindow(FramelessMixin, QMainWindow):
         tbb = getattr(self, "tool_bar_builder", None)
         if tbb is not None:
             tbb.apply_theme(theme)
+        # 左侧竖排工具条图标同步重刷
+        side_tb = getattr(self, "side_toolbar", None)
+        if side_tb is not None:
+            side_tb.apply_theme(theme)
         # 画布底色跟随主题（setCanvasColor，不走 QSS）
         canvas = getattr(self, "canvas", None)
         if canvas is not None:
@@ -570,8 +596,31 @@ class MainWindow(FramelessMixin, QMainWindow):
         }.get(type(tool).__name__)
 
     def _on_map_tool_set(self, tool) -> None:
-        """画布激活的地图工具变化 → 同步工具条单选高亮。"""
-        self.tool_bar_builder.set_active(self._tool_key(tool))
+        """画布激活的地图工具变化 → 同步顶部工具条与左侧竖排工具条单选高亮。"""
+        key = self._tool_key(tool)
+        self.tool_bar_builder.set_active(key)
+        self.side_toolbar.set_active(key)
+
+    def _on_condition_query(self) -> None:
+        """条件查询：对当前选中 / 编辑的矢量图层打开 SQL 条件查询构建器。
+
+        未选中图层时提示先选层（与属性表「筛选」同一对话框，见
+        :class:`app.ui.dialogs.query_builder.QueryBuilderDialog`）。
+        """
+        from qgis.core import QgsVectorLayer
+
+        layer = self._selected_layer or self.edit_layer
+        if layer is None or not isinstance(layer, QgsVectorLayer):
+            self.messageBar.pushMessage(
+                "请先在图层列表选择要查询的矢量图层",
+                level=Qgis.MessageLevel.Warning,
+                duration=3,
+            )
+            return
+        from app.ui.dialogs.query_builder import QueryBuilderDialog
+
+        dlg = QueryBuilderDialog(layer, parent=self)
+        dlg.exec()
 
     def _on_pan(self) -> None:
         self.canvas.setMapTool(self._pan_tool)

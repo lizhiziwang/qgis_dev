@@ -167,6 +167,33 @@ class BaseDrawTool(QgsMapTool):
         self._prev_vertex_snapped = snapped_now
         return extension
 
+    def traced_preview_path(self, point: "QgsPointXY") -> "list[QgsPointXY]":
+        """上一顶点 → 当前点的**预览**折线：追踪生效时插入沿已有几何的路径点。
+
+        与 :meth:`traced_vertex` 同一套判定（追踪开启 + 上一顶点已吸附 + 当前
+        点已吸附），让用户在绘制过程中实时看到追踪后的临时图形（与 QGIS 桌面
+        一致），而不是提交后才发现追踪效果。任一条件不满足时退化为直段
+        ``[上一顶点, 当前点]``。仅读状态，不改任何标志。
+        """
+        if not self.temp_points:
+            return [point]
+        prev = self.temp_points[-1]
+        snapped_now = (
+            self._last_snap_match is not None and self._last_snap_match.isValid()
+        )
+        if not (snapped_now and self._prev_vertex_snapped):
+            return [prev, point]
+        try:
+            from app.core.domain.drawing.tools.trace import trace_between, tracing_enabled
+
+            if not tracing_enabled(self.canvas):
+                return [prev, point]
+            ext = trace_between(self.canvas, prev, point)
+        except Exception:  # noqa: BLE001 —— 预览失败退化为直段，不阻断绘制
+            logger.debug("追踪预览失败（退化为直段）", exc_info=True)
+            ext = []
+        return [prev, *ext, point]
+
     def commit_geometry(self, geometry) -> None:
         """一笔绘制完成：先收起磁吸标记，再按是否挂 draw_manager 派发。
 

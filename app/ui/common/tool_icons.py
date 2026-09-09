@@ -58,7 +58,17 @@ _GLYPHS: dict[str, str] = {
     "folder_open": "",    # folder-open 打开流程
     "save": "",           # save 保存
     "archive": "",        # archive 另存为
-    "expand": "",         # expand-arrows-alt 适应窗口
+    "expand": "",         # expand-arrows-alt 适应窗口
+    # ---- 画布左侧竖排工具条（app/ui/main_window/side_toolbar）----
+    # （PUA 码位用转义书写：Font Awesome 5 Free Solid）
+    "one_key_query": "\uf0e7",      # bolt 一键查询
+    "condition_query": "\uf0b0",    # filter 条件查询（漏斗）
+    "select_mask": "\uf070",        # eye-slash 选择屏蔽
+    "unmask": "\uf06e",             # eye 取消屏蔽
+    "coord_locate": "\uf05b",       # crosshairs 坐标定位
+    "measure_line": "\uf547",       # ruler-horizontal 线测量
+    "measure_area": "\uf546",       # ruler-combined 面测量
+    "extent_clip": "\uf125",        # crop 范围裁剪
 }
 
 _CACHE: dict[tuple[str, str], QIcon] = {}

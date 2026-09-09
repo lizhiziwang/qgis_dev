@@ -47,9 +47,10 @@ class LineDrawTool(BaseDrawTool):
             return
         if not self.temp_points:
             return
+        # 追踪开启时实时展示沿已有几何的追踪路径（与提交结果一致）
         self.line_rubber_band2.reset(QgsWkbTypes.LineGeometry)
-        self.line_rubber_band2.addPoint(self.temp_points[-1])
-        self.line_rubber_band2.addPoint(point)
+        for preview_pt in self.traced_preview_path(point):
+            self.line_rubber_band2.addPoint(preview_pt)
         self.line_rubber_band2.show()
 
     def canvasPressEvent(self, event) -> None:  # noqa: N802

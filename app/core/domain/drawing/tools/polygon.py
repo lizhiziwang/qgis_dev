@@ -51,10 +51,14 @@ class PolygonDrawTool(BaseDrawTool):
             return
         if not self.temp_points:
             return
+        # 预览：闭合边（首点 → 光标）+ 光标到上一顶点的段（追踪开启时该段
+        # 实时展示沿已有几何的追踪路径，与提交结果一致）
+        path = self.traced_preview_path(point)
         self.line_rubber_band.reset(QgsWkbTypes.LineGeometry)
         self.line_rubber_band.addPoint(self.temp_points[0])
-        self.line_rubber_band.addPoint(point)
-        self.line_rubber_band.addPoint(self.temp_points[-1])
+        self.line_rubber_band.addPoint(path[-1])
+        for preview_pt in reversed(path[:-1]):
+            self.line_rubber_band.addPoint(preview_pt)
         self.line_rubber_band.show()
 
     def canvasPressEvent(self, event) -> None:  # noqa: N802
