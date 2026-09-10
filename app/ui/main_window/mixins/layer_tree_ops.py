@@ -1,0 +1,376 @@
+"""图层树操作。
+
+图层树头部工具（样式面板/删除/展开折叠）、新建分组、图层或分组上下移动、
+设为编辑图层与绘制完成后的处理。
+
+由 :class:`~app.ui.main_window.main_window.MainWindow` 多继承组合，方法只依赖
+``self`` 上的共享状态。
+"""
+
+from __future__ import annotations
+
+from typing import Optional
+
+from qgis.core import (
+    Qgis,
+    QgsVectorDataProvider,
+    QgsVectorLayer,
+)
+from qgis.PyQt.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QLabel,
+    QListWidget,
+    QMessageBox,
+    QVBoxLayout,
+)
+
+
+class LayerTreeOpsMixin:
+    """LayerTreeOpsMixin：见模块 docstring。"""
+
+    def _choose_edit_layer(self) -> "Optional[QgsVectorLayer]":
+        """「开始编辑」的选层弹窗：列出工程中可添加要素的矢量图层供选择。
+
+        只负责**选择并返回**（取消返回 None）——把选中层落地为编辑目标
+        （edit_layer / 停旧层 / 工具条 / 磁性捕捉联动）由工具条的
+        :meth:`DigitizingToolbar.start_edit_fun` 统一调用
+        :meth:`_apply_edit_target` 完成，避免职责散落。
+
+        编辑图层入口已收敛到这里——图层树右键「设为编辑图层」与点击自动预设
+        均已移除。
+        """
+        candidates = [
+            layer
+            for layer in self.project.mapLayers().values()
+            if isinstance(layer, QgsVectorLayer)
+            and not layer.readOnly()
+            and bool(
+                layer.dataProvider()
+                and layer.dataProvider().capabilities()
+                & QgsVectorDataProvider.Capability.AddFeatures
+            )
+        ]
+        if not candidates:
+            QMessageBox.information(
+                self, "提示", "工程中没有可编辑的矢量图层，请先加载数据"
+            )
+            return None
+        # 默认高亮：当前编辑图层 → 图层树选中项 → 第一个
+        if self.edit_layer in candidates:
+            default = self.edit_layer
+        elif self._selected_layer in candidates:
+            default = self._selected_layer
+        else:
+            default = candidates[0]
+
+        dlg = QDialog(self)
+        dlg.setWindowTitle("选择编辑图层")
+        dlg.resize(380, 420)
+        layout = QVBoxLayout(dlg)
+        layout.addWidget(QLabel("请选择需要编辑的图层："))
+        list_widget = QListWidget(dlg)
+        for layer in candidates:
+            list_widget.addItem(layer.name())
+        list_widget.setCurrentRow(candidates.index(default))
+        layout.addWidget(list_widget)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        layout.addWidget(buttons)
+        picked = None
+
+        def on_ok() -> None:
+            nonlocal picked
+            row = list_widget.currentRow()
+            if 0 <= row < len(candidates):
+                picked = candidates[row]
+            dlg.accept()
+
+        buttons.accepted.connect(on_ok)
+        buttons.rejected.connect(dlg.reject)
+        list_widget.itemDoubleClicked.connect(lambda *_: on_ok())
+        dlg.exec()
+        return picked
+
+    def _apply_edit_target(self, layer: "Optional[QgsVectorLayer]") -> None:
+        """把 ``layer`` 设为编辑目标图层并联动工具条 / 磁性捕捉。
+
+        仅指定目标（记录 ``self.edit_layer`` + 刷新按钮），不进入编辑态；真正的
+        ``layer.startEditing()`` 由工具条的「开始编辑」执行。若之前有别的图层在
+        编辑，先停掉（避免遗留脏 buffer）。
+        """
+        if layer is None or not isinstance(layer, QgsVectorLayer):
+            return
+        # 如果之前有别的图层在编辑，先停掉（避免遗留脏 buffer）
+        prev = self.edit_layer
+        if prev is not None and prev is not layer and prev.isEditable():
+            self.editing_service.stop(prev, save=False)
+
+        self.edit_layer = layer
+        if hasattr(self, "digitizing_toolbar"):
+            self.digitizing_toolbar.set_edit_target(layer)
+        snap_tb = getattr(self, "snapping_toolbar", None)
+        if snap_tb is not None:
+            snap_tb.set_current_layer(layer)
+        self.messageBar.pushMessage(
+            f"已选 {layer.name()} 为编辑图层",
+            level=Qgis.MessageLevel.Info,
+            duration=3,
+        )
+
+    def _on_layer_clicked_in_dock(self, index) -> None:
+        """用户在图层树点击一层：仅记录为 ``_selected_layer``。
+
+        不再自动设为编辑图层——编辑图层统一在点「开始编辑」时弹窗选择
+        （见 :meth:`_choose_edit_layer`），避免"点了哪层就编辑哪层"的隐式切换。
+        """
+        # 注意：本构建没有 ``indexToNode``，只有 ``index2node``（两者都有
+        # 的版本里行为一致）；index 直接来自 view 的模型，无需再 map。
+        try:
+            node = self.layer_dock.view.index2node(index)
+        except Exception:  # noqa: BLE001
+            return
+        if node is None:
+            return
+        # node 可能是 group / layer / legend node；只要带 ``layer()`` 方法的就拿
+        layer_getter = getattr(node, "layer", None)
+        if not callable(layer_getter):
+            return
+        layer = layer_getter()
+        if layer is None:
+            return
+        self._selected_layer = layer
+
+    # ---------------------------------------------------- 图层树头部工具
+
+    def _current_dock_node(self):
+        """图层树当前选中节点；图例项自动上溯到所在图层节点。
+
+        返回 None 表示没有选中项。
+        """
+        from qgis.core import QgsLayerTreeGroup
+
+        view = self.layer_dock.view
+        node = None
+        try:
+            node = view.currentNode()
+        except Exception:  # noqa: BLE001
+            node = None
+        if node is None:
+            try:
+                index = view.currentIndex()
+                if index.isValid():
+                    node = view.index2node(index)
+            except Exception:  # noqa: BLE001
+                node = None
+        if node is None:
+            return None
+        # 图例项（symbol 行）的父是图层节点，不是组：上溯到图层节点为止
+        while node.parent() is not None and not isinstance(node.parent(), QgsLayerTreeGroup):
+            node = node.parent()
+        return node
+
+    def _on_header_style_panel(self) -> None:
+        """头部「打开图层样式面板」：给当前选中图层打开样式编辑。
+
+        本应用无常驻样式 Dock，与图层右键菜单一致复用模态样式编辑器
+        （:meth:`_show_style_editor`）。
+        """
+        try:
+            layer = self.layer_dock.view.currentLayer()
+        except Exception:  # noqa: BLE001
+            layer = None
+        if layer is None:
+            layer = getattr(self, "_selected_layer", None)
+        if layer is None:
+            self.messageBar.pushMessage(
+                "请先在图层列表中选择要设置样式的图层",
+                level=Qgis.MessageLevel.Warning,
+                duration=3,
+            )
+            return
+        self._show_style_editor(layer)
+
+    def _on_header_remove(self) -> None:
+        """头部「删除图层/组」：当前选中节点（图层或组）。
+
+        - 选中图层 → 直接走 :meth:`_remove_layer`
+        - 选中组 → 确认后递归移除组里全部图层（图层清空组自然消失）
+        """
+        from qgis.core import QgsLayerTreeGroup, QgsLayerTreeLayer
+
+        node = self._current_dock_node()
+        if node is None:
+            self.messageBar.pushMessage(
+                "请先在图层列表中选择要删除的图层或组",
+                level=Qgis.MessageLevel.Warning,
+                duration=3,
+            )
+            return
+
+        if isinstance(node, QgsLayerTreeLayer):
+            layer = node.layer()
+            if layer is not None:
+                self._remove_layer(layer)
+            return
+
+        if isinstance(node, QgsLayerTreeGroup):
+            # findLayers 默认递归收集所有子图层（嵌套子组下的也算）
+            layers = [c.layer() for c in node.findLayers() if c.layer() is not None]
+            if not layers:
+                self.messageBar.pushMessage("选中的图层组为空", level=Qgis.MessageLevel.Info, duration=2)
+                return
+            ret = QMessageBox.question(
+                self,
+                "删除图层组",
+                f"确定删除「{node.name()}」及其 {len(layers)} 个图层吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if ret != QMessageBox.StandardButton.Yes:
+                return
+            for layer in layers:
+                self._remove_layer(layer)
+            return
+
+        # 图例项等其它节点：当作无效选择
+        self.messageBar.pushMessage(
+            "请选择图层或图层组再删除",
+            level=Qgis.MessageLevel.Warning,
+            duration=3,
+        )
+
+    def _on_header_expand_all(self) -> None:
+        """头部「全部展开」：展开整个图层树。"""
+        self.layer_dock.view.expandAll()
+
+    def _on_header_collapse_all(self) -> None:
+        """头部「全部折叠」：折叠整个图层树（保留根节点）。"""
+        self.layer_dock.view.collapseAll()
+
+    def _on_add_layer_group(self) -> None:
+        """新建图层组（与 QGIS 一致）：选中分组 → 建在该组最顶；
+
+        选中图层 → 建在所在分组最顶；未选中 → 建在根最顶。新建后选中并尝试
+        就地重命名（失败则保留默认名）。
+        """
+        from qgis.core import QgsLayerTreeGroup
+
+        node = self._current_dock_node()
+        if isinstance(node, QgsLayerTreeGroup):
+            parent = node
+        elif node is not None and isinstance(node.parent(), QgsLayerTreeGroup):
+            parent = node.parent()
+        else:
+            parent = self.project.layerTreeRoot()
+
+        # 默认名去重（父分组内查重）
+        base = "新建图层组"
+        name = base
+        i = 2
+        while parent.findGroup(name) is not None:
+            name = f"{base} {i}"
+            i += 1
+
+        group = QgsLayerTreeGroup(name)
+        parent.insertChildNode(0, group)
+        view = self.layer_dock.view
+        # QGIS 行为：新建组后选中并直接进入重命名。两者都只在视图已聚焦时做
+        # （未显示/未聚焦的视图上强设"当前节点"或开编辑器，会在该节点随后被
+        # 移除时令 Qt 持有失效持久索引，触发堆损坏 0xc0000374）。
+        if not view.hasFocus():
+            self.messageBar.pushMessage(f"已新建图层组：{name}", level=Qgis.MessageLevel.Info, duration=2)
+            return
+        try:
+            index = view.node2index(group)
+            if index.isValid():
+                view.setCurrentIndex(index)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            index = view.node2index(group)
+            if index.isValid():
+                view.edit(index)
+        except Exception:  # noqa: BLE001
+            pass
+        self.messageBar.pushMessage(f"已新建图层组：{name}", level=Qgis.MessageLevel.Info, duration=2)
+
+    def _on_move_layer_node(self, delta: int) -> None:
+        """上移 / 下移当前选中的图层或组（仅在同分组内重排）。
+
+        严格按 QGIS 桌面 ``qgslayertreeviewdefaultactions.cpp`` 里
+        ``moveToTop / moveToBottom`` 的写法：**clone + insert + remove** 三步走，
+        **不是** ``takeChild + insertChildNode``。
+
+        为何不能直接 takeChild：``takeChild`` 不会发 ``willRemoveChildren`` 信号，
+        ``QgsLayerTreeRegistryBridge`` 收不到"将要删节点"的钩子，于是直接
+        ``project.removeMapLayer(layer)`` 把 layer 从工程中抹掉——肉眼看上去
+        就是"图层消失"。
+
+        正确顺序：先 ``insertChildNode`` 把克隆挂到新位置（layer 立刻在新位置
+        有 node），再 ``removeChildNode`` 删旧 node（bridge 收到
+        willRemoveChildren 时检查到 layer 还有 cloned 那个 node 挂着，**不**删
+        layer，只删旧 node）。**insert 位置要按方向偏移一格**：
+
+        - ``delta < 0``（上移）：原节点在 ``new_pos`` 之后，插到 ``new_pos`` 即
+          落在目标位置之前，删原节点后自然到位。
+        - ``delta > 0``（下移）：原节点在 ``new_pos`` 之前还占着位，插到
+          ``new_pos`` 会被推到原节点**之后**的目标位，删原节点后又落回原
+          ``pos``——下移等于没动。必须插到 ``new_pos + 1``（end-append 越界由
+          上面 ``new_pos < len(siblings)`` 已挡住）。
+
+        clone 是新对象，``view.setCurrentNode`` / messageBar 都用 cloned。
+        """
+        from qgis.core import QgsLayerTreeGroup
+
+        node = self._current_dock_node()
+        if node is None or node.parent() is None:
+            self.messageBar.pushMessage(
+                "请先在图层列表中选择要移动的图层或组",
+                level=Qgis.MessageLevel.Warning,
+                duration=3,
+            )
+            return
+        parent = node.parent()
+        if not isinstance(parent, QgsLayerTreeGroup):
+            return
+        siblings = parent.children()
+        try:
+            pos = siblings.index(node)
+        except ValueError:
+            return
+        new_pos = pos + delta
+        if not 0 <= new_pos < len(siblings):
+            return  # 已在顶/底
+
+        cloned = node.clone()
+        # 1) 先把克隆挂到新位置（layer 立即在树里有 node，bridge 不会干 layer）。
+        #    下移时原节点还占着 ``pos``，insert 必须跳到 ``new_pos + 1``，
+        #    否则删旧节点后 cloned 落回 ``pos``，下移等于没动（见 docstring）。
+        insert_pos = new_pos + (1 if delta > 0 else 0)
+        parent.insertChildNode(insert_pos, cloned)
+        # 2) 再删旧 node（bridge 收到 willRemoveChildren 时发现 layer 还有
+        #    cloned 引用，只摘旧 node，不删 layer）
+        parent.removeChildNode(node)
+
+        view = self.layer_dock.view
+        try:
+            view.setCurrentNode(cloned)
+        except Exception:  # noqa: BLE001
+            pass
+        verb = "上移" if delta < 0 else "下移"
+        self.messageBar.pushMessage(
+            f"已{verb}：{getattr(cloned, 'name', lambda: '')()}",
+            level=Qgis.MessageLevel.Info,
+            duration=2,
+        )
+
+    # ---------------------------------------------------- 绘图工具回调（保留兼容）
+
+    def _on_draw_finished(self, geometry) -> None:
+        """DrawManager.finished 信号：跳到 DigitizingToolbar.finish_draw。"""
+        if hasattr(self, "digitizing_toolbar"):
+            self.digitizing_toolbar.finish_draw(geometry)

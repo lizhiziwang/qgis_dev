@@ -18,3 +18,5 @@ __pycache__/
 tests/
 
 qgis_dev.egg-info/
+
+.pi/

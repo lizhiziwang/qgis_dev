@@ -19,7 +19,8 @@
 
 - :meth:`hit_test` 是**平台无关的纯函数**，命中检测逻辑可脱离 GUI 单测。
 - mixin 不继承 QWidget，靠 duck typing 依赖宿主的 QWidget API；宿主必须把
-  本 mixin 放在 MRO 最前：``class MainWindow(FramelessMixin, QMainWindow)``。
+  本 mixin 放在 QWidget 基类**之前**，其它功能 mixin 可以排在其前面，并通过
+  ``super()`` 链协同：``class MainWindow(WindowShellMixin, FramelessMixin, QMainWindow)``。
 - 宿主仍各自负责自己的 ``window_qss`` / 画布 / 工具条主题刷新；mixin 只接管
   「窗口 chrome」这一层（标题栏 + 系统边框行为）。
 """
@@ -136,9 +137,10 @@ def sc_size_wparam(ht: int) -> int:
 class FramelessMixin:
     """无边框窗口能力（mixin）。
 
-    宿主必须是 QMainWindow / QDialog 子类，并把本 mixin 放在 MRO 最前。用法::
+    宿主必须是 QMainWindow / QDialog 子类，并把本 mixin 放在 QWidget 基类之前
+    （其它功能 mixin 可排在其前面，通过 ``super()`` 链协同）。用法::
 
-        class MainWindow(FramelessMixin, QMainWindow):
+        class MainWindow(WindowShellMixin, FramelessMixin, QMainWindow):
             def __init__(self):
                 super().__init__()
                 self.title_bar = self.enable_frameless(with_tab_bar=True)
