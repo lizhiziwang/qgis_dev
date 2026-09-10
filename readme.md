@@ -66,7 +66,21 @@ qgis_dev/
 ├── tests/                      # pytest（api / core / env / infra / ui）
 ├── legacy/                     # 旧代码归档（只读参考）
 ├── pyproject.toml              # 依赖、ruff、mypy、pytest 配置
+├── docs/coding-standards.md    # Python 编码规范（分层 / 命名 / 类型 / 日志 / 测试）
 └── dist/app/                   # 打包产物（app.exe + 便携 QGIS 运行时）
+```
+
+---
+
+## 开发规范
+
+编码规范见 **[docs/coding-standards.md](docs/coding-standards.md)**，提交前请确保：
+
+```bash
+ruff check app/ config/ tests/ --fix
+ruff format app/ config/ tests/
+mypy
+pytest tests/ -m "not gui"
 ```
 
 ---

@@ -292,8 +292,8 @@ class MainWindow(FramelessMixin, QMainWindow):
     def _build_central_widget(self) -> None:
         central = QWidget(self)
         self.setCentralWidget(central)
-        # 横向布局：[左侧竖排工具条][地图画布]——竖条位于左侧面板（图层列表 /
-        # 数据浏览器 Dock）右侧、地图左侧，与设计稿一致
+        # 横向布局：地图画布占满中央区域（左侧竖排工具条不再占一列，改为悬浮
+        # 盖在画布左上角，见 :meth:`_attach_side_toolbar_overlay`）
         layout = QHBoxLayout(central)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
@@ -331,8 +331,8 @@ class MainWindow(FramelessMixin, QMainWindow):
         self.messageBar.set_on_state(self._on_floating_message_state)
         self.messageBar.hide()
 
-        # 左侧竖排工具条（图层列表等左 Dock 与画布之间）：
-        # 已实现工具接主窗口回调；未实现的由 SideToolBar 占位提示开发中
+        # 左侧竖排工具条：已实现工具接主窗口回调，未实现的由 SideToolBar 占位
+        # 提示开发中；控件本体悬浮装配见 :meth:`_attach_side_toolbar_overlay`
         self.side_toolbar = SideToolBar(
             self,
             {
@@ -346,14 +346,52 @@ class MainWindow(FramelessMixin, QMainWindow):
                 "swipe": self._on_swipe,
             },
         )
-        layout.addWidget(self.side_toolbar.widget)
-
         layout.addWidget(self.canvas)
+        # 竖排工具条悬浮在地图画布左上角（left 4px / top 3px）
+        self._attach_side_toolbar_overlay()
 
         crs = QgsCoordinateReferenceSystem("EPSG:4490")
         self.project.setCrs(crs)
         self.canvas.setDestinationCrs(crs)
         self.canvas.setProject(self.project)
+
+    # ===================================================== 画布左上角悬浮工具条
+
+    def _attach_side_toolbar_overlay(self) -> None:
+        """把左侧竖排工具条悬浮到画布左上角（left 4px / top 3px）。
+
+        悬浮实现与仓库既定覆盖层模式一致（见
+        :class:`app.ui.common.canvas_zoom.CanvasZoomTool` / 悬浮消息条 /
+        :mod:`app.ui.tools.swipe`）：
+
+        - 工具条控件 ``setParent(self.canvas)`` 成为画布**子控件**——子控件坐标
+          相对画布左上角，``move(4, 3)`` 即钉在画布左上角；画布 resize 时锚点
+          自动保持（本 QGIS 构建没有 ``QgsMapCanvas.setOverlayWidget``，不能走
+          官方覆盖层接口）；
+        - 悬浮子控件不受父布局管理，``show()`` 不会自动套用 sizeHint，必须显式
+          ``adjustSize()``，否则塌缩成默认高度、15 个按钮全叠在一起；
+        - 画布每次重绘（平移 / 缩放 / refresh）后，子覆盖层可能被画布渲染层
+          盖住（仓库既定结论，见 CanvasZoomTool / SwipeOverlay 的 ``raise_()``），
+          故接 ``mapCanvasRefreshed`` / ``extentsChanged`` 持续重新置顶。
+        """
+        side_widget = self.side_toolbar.widget
+        side_widget.setParent(self.canvas)
+        side_widget.move(4, 3)
+        side_widget.adjustSize()
+        side_widget.show()
+        self._keep_side_toolbar_on_top()
+        self.canvas.mapCanvasRefreshed.connect(self._keep_side_toolbar_on_top)
+        self.canvas.extentsChanged.connect(self._keep_side_toolbar_on_top)
+
+    def _keep_side_toolbar_on_top(self) -> None:
+        """画布重绘后把悬浮工具条重新置顶（避免被画布渲染层盖住）。"""
+        side = getattr(self, "side_toolbar", None)
+        if side is None:
+            return
+        try:
+            side.widget.raise_()
+        except RuntimeError:
+            pass  # 窗口关闭流程中 C++ 对象已销毁
 
     def _build_docks(self) -> None:
         # 1. 图层树

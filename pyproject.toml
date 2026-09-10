@@ -66,8 +66,14 @@ target-version = "py310"
 extend-exclude = ["legacy", "build", "dist", ".venv", "node_modules"]
 
 [tool.ruff.lint]
-select = ["E", "F", "W", "I", "N", "UP", "B", "A", "C4", "PT", "RET", "SIM", "TID", "RUF", "ASYNC"]
-ignore = ["E501"]
+# 规范见 docs/coding-standards.md
+select = ["E", "F", "W", "I", "N", "UP", "B", "A", "BLE", "C4", "PT", "RET", "SIM", "TID", "RUF", "ASYNC"]
+ignore = [
+    "E501",     # 行宽交给 ruff format
+    "RUF001",   # 中文注释/字符串刻意使用全角标点
+    "RUF002",   # 同上（docstring）
+    "RUF003",   # 同上（注释）
+]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["PT011", "S101"]
@@ -75,6 +81,28 @@ ignore = ["E501"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["app"]
+
+[tool.ruff.lint.pep8-naming]
+# Qt / QGIS 事件与虚函数覆盖必须保持 C++ 驼峰名，否则 Qt 无法回调；
+# 用 glob 集中豁免（比逐行 # noqa: N802 更易维护，也不会产生 RUF100）。
+extend-ignore-names = [
+    "*Event",          # closeEvent / showEvent / paintEvent / nativeEvent / mouse*Event ...
+    "eventFilter",
+    "sizeHint",
+    "rowCount",
+    "columnCount",
+    "headerData",
+    "setData",
+    "push*",           # QgsProcessingFeedback / 自定义 logger 风格回调
+    "reportError",
+    "fatalError",      # reportError(error, fatalError) 签名参数
+    "eventType",       # nativeEvent(self, eventType, message) 覆盖签名
+    "processingContext",
+    "*Completed",      # Qt Signal 属性沿用 camelCase（与 C++ 信号一致）
+    "*Terminated",
+    "*Confirmed",
+    "basePass",        # Pydantic 字段，对应外部配置键名，不可改
+]
 
 [tool.mypy]
 python_version = "3.10"
