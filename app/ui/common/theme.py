@@ -804,6 +804,16 @@ def canvas_zoom_qss(t: Theme) -> str:
     """
 
 
+def divider_colors(t: Theme) -> tuple[QColor, QColor]:
+    """画布分隔条（地图对比 / 卷帘）抓手配色 → ``(抓手填充, 抓手描边)``。
+
+    分隔条由覆盖层用 QPainter 直接绘制、不吃 QSS，故这里返回 :class:`QColor`
+    供 ``paintEvent`` 使用；配色仍集中在 :class:`Theme`，切主题自动跟随。
+    抓手用窗底色填充 + 主题强调色描边，深浅主题下都醒目可抓。
+    """
+    return QColor(t.window_bg), QColor(t.input_focus)
+
+
 def flow_panel_qss(t: Theme) -> str:
     """流程编辑器节点参数面板 QSS（作用于 dock 内容容器）。
 
@@ -1041,6 +1051,7 @@ __all__ = [
     "window_qss",
     "app_qss",
     "canvas_zoom_qss",
+    "divider_colors",
     "flow_panel_qss",
     "login_qss",
     "apply_app_theme",

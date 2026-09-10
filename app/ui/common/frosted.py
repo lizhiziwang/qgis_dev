@@ -8,9 +8,9 @@ Qt 的 ``QGraphicsBlurEffect`` 只能模糊控件*自身*绘制的内容，拍�
 的父窗口，所以这里手动取景：
 
 1. ``QgsMapCanvas`` 是 ``QGraphicsView``，地图画在 ``canvas.viewport()`` 这个
-   子控件上；面板是画布的**另一个子控件**，与 viewport 同级、叠在它上面。
-   取景用 ``canvas.viewport().grab(区域)``，拿到的**只有地图**（覆盖层是画布
-   的兄弟子控件，不在 viewport 里，不会被拍进去）；**不能**用
+   子控件上；面板即使与 viewport 不在同一容器，取景也始终用
+   ``canvas.viewport().grab(区域)``，拿到的**只有地图**（消息条等覆盖层是画布
+   的子控件，不在 viewport 里，不会被拍进去）；**不能**用
    ``canvas.grab()``——那会把面板自己、消息条等覆盖层一起画进底图。
 2. 用 ``QGraphicsBlurEffect`` 走离屏渲染做高斯模糊（Qt 没有直接可用的
    "模糊 QPixmap" 接口，这是官方推荐的迂回做法）。
@@ -26,7 +26,7 @@ Qt 的 ``QGraphicsBlurEffect`` 只能模糊控件*自身*绘制的内容，拍�
 
 from __future__ import annotations
 
-from qgis.PyQt.QtCore import QRect, QRectF, Qt, QTimer
+from qgis.PyQt.QtCore import QPoint, QRect, QRectF, Qt, QTimer
 from qgis.PyQt.QtGui import QBrush, QColor, QImage, QPainter, QPainterPath, QPen, QPixmap
 from qgis.PyQt.QtWidgets import (
     QGraphicsBlurEffect,
@@ -78,7 +78,9 @@ def _blur_pixmap(source: QPixmap, radius: float) -> QPixmap:
 class FrostedPanel(QWidget):
     """悬浮在 ``QgsMapCanvas`` 上的毛玻璃容器。
 
-    作为画布子控件使用（``FrostedPanel(canvas)`` 已把自身 parent 设为画布），
+    默认作为画布子控件使用（``FrostedPanel(canvas)`` 已把自身 parent 设为
+    画布）；也可显式传 ``parent`` 挂到画布的父容器上——这样面板与画布同级，
+    能盖住画布自己的子覆盖层（详见 :mod:`app.ui.main_window.side_toolbar`）。
     定位仍由调用方 ``move()`` / ``resize`` 决定；本控件只负责"背景=背后地图的
     高斯模糊 + 主题底色 60% 半透明"。
 
@@ -122,13 +124,17 @@ class FrostedPanel(QWidget):
         canvas = self._canvas
         if canvas is None or not self.isVisible() or self.width() <= 0:
             return
-        if self.parentWidget() is not canvas:
-            return  # 尚未挂到画布上，坐标换算没有意义
+        if self.parentWidget() is None:
+            return  # 尚未挂到画布层级上，坐标换算没有意义
+        # 面板可能直接挂在画布上，也可能挂在画布的父容器上（后者能盖住画布
+        # 自己的子覆盖层）；用全局坐标之差统一换算到画布坐标系（面板与画布
+        # 可能只是兄弟关系，``mapTo`` 要求目标为祖先，这里不适用）。
+        canvas_pos = self.mapToGlobal(QPoint(0, 0)) - canvas.mapToGlobal(QPoint(0, 0))
         viewport = canvas.viewport()
         if viewport is None or viewport.width() <= 0 or viewport.height() <= 0:
             return
         # 画布坐标系 → viewport 坐标系（viewport 有边框偏移，通常是 1px）
-        vp_rect = QRect(self.pos() - viewport.pos(), self.size())
+        vp_rect = QRect(canvas_pos - viewport.pos(), self.size())
         vp_rect = vp_rect.intersected(viewport.rect())
         if vp_rect.isEmpty():
             return

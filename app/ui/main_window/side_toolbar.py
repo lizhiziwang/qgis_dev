@@ -1,11 +1,13 @@
 """画布左侧竖排工具条。
 
 位置：悬浮盖在地图画布**左上角**（left 4px / top 3px，由
-``MainWindow._attach_side_toolbar_overlay`` 把本工具条 ``setParent`` 到画布并
-``move(4, 3)``——作为画布子控件，坐标相对画布左上角，画布缩放时锚点自动保持；
-不占中央布局，也不挤占画布空间）。
+``MainWindow._attach_side_toolbar_overlay`` 把本工具条 ``setParent`` 到画布的
+**父容器**（中央控件）并摆到「画布左上角 + (4, 3)」——与画布同级，坐标相对父
+容器，画布缩放时由 ``MainWindow._place_side_toolbar`` 重算；不占中央布局，
+也不挤占画布空间）。
 
-画布每次重绘后工具条可能被画布渲染层盖住，由
+层级：因为与画布**同级**（而非画布子控件），工具条 ``raise_()`` 后永远盖在
+画布**及其所有子覆盖层**（悬浮消息条 / 卷帘 / 对比分隔条……）之上；由
 ``MainWindow._keep_side_toolbar_on_top``（接 ``mapCanvasRefreshed`` /
 ``extentsChanged``）持续重新置顶。
 
@@ -17,18 +19,22 @@
 工具清单（自上而下，与设计稿一致）::
 
     选择 / 矩形选择 / 遨游 / 缩放 / 全图 / 清除
-    一键查询 / 条件查询 / 选择屏蔽 / 取消屏蔽 / 卷帘 / 坐标定位
+    一键查询 / 条件查询 / 选择屏蔽 / 取消屏蔽 / 分屏 / 坐标定位
     线测量 / 面测量 / 范围裁剪
 
 行为约定：
 
 - 项目**已实现**的工具直接接主窗口既有回调（与顶部工具条同一入口）：
-  选择 / 矩形选择 / 遨游 / 缩放 / 全图 / 清除 / 条件查询 / 卷帘；
+  选择 / 矩形选择 / 遨游 / 缩放 / 全图 / 清除 / 条件查询 / 分屏；
+- 「分屏」复用 :mod:`app.ui.tools.qmap_compare` 的「地图对比」入口
+  （``MainWindow._on_qmap_compare``：镜像分屏 / 垂直分割 / 水平分割 /
+  放大镜），与顶部工具条「地图对比」同一实现，不再用旧的卷帘覆盖层；
 - 其余工具为占位：点击时经消息条提示「该工具正在开发中」（气泡悬浮在
   地图上，不挤压画布）；
-- 地图工具（选择 / 矩形选择 / 遨游 / 缩放 / 卷帘）为单选高亮：跟随画布
+- 地图工具（选择 / 矩形选择 / 遨游 / 缩放）为单选高亮：跟随画布
   激活的 :class:`QgsMapTool`，由 ``MainWindow._on_map_tool_set`` 调
-  :meth:`set_active` 与顶部工具条同步；其余按钮为一次性动作，不高亮。
+  :meth:`set_active` 与顶部工具条同步；会话型工具「分屏」独立常亮
+  （:meth:`set_session_active`）；其余按钮为一次性动作，不高亮。
 
 图标用 Font Awesome（见 :mod:`app.ui.common.tool_icons`），随主题变色
 （:meth:`apply_theme`）。
@@ -48,7 +54,9 @@ from app.ui.common.frosted import FrostedPanel
 from app.ui.common.theme import Theme, ThemeManager
 
 #: 地图工具 key（单选高亮组，与顶部工具条 key 一致便于同步）
-_TOOL_KEYS = frozenset({"select_point", "select_box", "pan", "zoom_in", "swipe"})
+_TOOL_KEYS = frozenset({"select_point", "select_box", "pan", "zoom_in"})
+#: 会话型工具 key（独立常亮，不受地图工具切换影响；与顶部工具条同 key）
+_SESSION_KEYS = frozenset({"qmap_compare"})
 
 
 class SideToolBar:
@@ -95,7 +103,7 @@ class SideToolBar:
             ("条件查询", "condition_query", False),
             ("选择屏蔽", "select_mask", False),
             ("取消屏蔽", "unmask", False),
-            ("卷帘", "swipe", False),
+            ("分屏", "qmap_compare", False),
             ("坐标定位", "coord_locate", True),
             ("线测量", "measure_line", False),
             ("面测量", "measure_area", False),
@@ -141,8 +149,8 @@ class SideToolBar:
         btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         btn.setAutoRaise(True)
         callback = callbacks.get(key)
-        if key in _TOOL_KEYS:
-            # 地图工具：单选高亮，跟随画布激活工具（set_active 统一推导勾选）
+        if key in _TOOL_KEYS or key in _SESSION_KEYS:
+            # 地图工具：单选高亮；会话型工具（分屏）：独立常亮
             btn.setCheckable(True)
             self._actions[key] = btn
         btn.clicked.connect(
@@ -162,9 +170,22 @@ class SideToolBar:
     # ------------------------------------------------------------ 状态
 
     def set_active(self, key: str | None) -> None:
-        """地图工具单选高亮：仅 ``key`` 对应按钮勾选，其余弹起。"""
+        """地图工具单选高亮：仅 ``key`` 对应按钮勾选，其余弹起。
+
+        会话型工具（分屏）不受影响，由 :meth:`set_session_active` 独立控制。
+        """
         for k, btn in self._actions.items():
+            if k in _SESSION_KEYS:
+                continue
             btn.setChecked(k == key)
+
+    def set_session_active(self, key: str, active: bool) -> None:
+        """会话型工具独立开关：会话存活期间按钮保持高亮（分屏）。"""
+        if key not in _SESSION_KEYS:
+            return
+        btn = self._actions.get(key)
+        if btn is not None:
+            btn.setChecked(active)
 
     def _not_implemented(self, text: str) -> None:
         """占位工具点击：气泡提示开发中（悬浮在地图上，不挤压画布）。"""

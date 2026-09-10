@@ -382,7 +382,7 @@ class MainWindow(FramelessMixin, QMainWindow):
                 "zoom_full": self._on_zoom_full,
                 "clear_selection": self._on_clear_selection,
                 "condition_query": self._on_condition_query,
-                "swipe": self._on_swipe,
+                "qmap_compare": self._on_qmap_compare,
             },
         )
         layout.addWidget(self.canvas)
@@ -403,31 +403,55 @@ class MainWindow(FramelessMixin, QMainWindow):
         :class:`app.ui.common.canvas_zoom.CanvasZoomTool` / 悬浮消息条 /
         :mod:`app.ui.tools.swipe`）：
 
-        - 工具条控件 ``setParent(self.canvas)`` 成为画布**子控件**——子控件坐标
-          相对画布左上角，``move(4, 3)`` 即钉在画布左上角；画布 resize 时锚点
-          自动保持（本 QGIS 构建没有 ``QgsMapCanvas.setOverlayWidget``，不能走
-          官方覆盖层接口）；
+        - 工具条 ``setParent`` 到画布的**父容器**（中央控件）而非画布本身：
+          这样它与画布同级，``raise_()`` 后永远盖在画布**及其所有子覆盖层**
+          （悬浮消息条 / 卷帘 / 对比分隔条……）之上——挂到画布上时这些同级
+          覆盖层会互相抢 z-order，工具条常被后 raise 的消息条等盖住；
+        - 坐标须把画布左上角换算到父容器（用全局坐标之差）再偏移 (4, 3)，
+          画布 resize / 容器变化时由 :meth:`_keep_side_toolbar_on_top` 重算；
         - 悬浮子控件不受父布局管理，``show()`` 不会自动套用 sizeHint，必须显式
-          ``adjustSize()``，否则塌缩成默认高度、15 个按钮全叠在一起；
-        - 画布每次重绘（平移 / 缩放 / refresh）后，子覆盖层可能被画布渲染层
-          盖住（仓库既定结论，见 CanvasZoomTool / SwipeOverlay 的 ``raise_()``），
-          故接 ``mapCanvasRefreshed`` / ``extentsChanged`` 持续重新置顶。
+          ``adjustSize()``，否则塌缩成默认高度、15 个按钮全叠在一起。
         """
         side_widget = self.side_toolbar.widget
-        side_widget.setParent(self.canvas)
-        side_widget.move(4, 3)
+        host = self.canvas.parentWidget() or self.canvas
+        side_widget.setParent(host)
         side_widget.adjustSize()
+        self._place_side_toolbar()
         side_widget.show()
         self._keep_side_toolbar_on_top()
         self.canvas.mapCanvasRefreshed.connect(self._keep_side_toolbar_on_top)
         self.canvas.extentsChanged.connect(self._keep_side_toolbar_on_top)
 
+    def _place_side_toolbar(self) -> None:
+        """把悬浮工具条摆到画布左上角（left 4px / top 3px）。
+
+        工具条挂在画布的父容器上，因此先把画布左上角换算到该容器坐标系，
+        再偏移 (4, 3)；画布缩放 / 容器变化时由
+        :meth:`_keep_side_toolbar_on_top` 重算。
+        """
+        side = getattr(self, "side_toolbar", None)
+        widget = getattr(side, "widget", None) if side is not None else None
+        canvas = getattr(self, "canvas", None)
+        if widget is None or canvas is None:
+            return
+        host = widget.parentWidget()
+        if host is None:
+            return
+        try:
+            # 画布左上角在 host 坐标系里的位置（画布与 host 可能是兄弟/父子，
+            # 用全局坐标之差最稳妥）。
+            origin = canvas.mapToGlobal(QPoint(0, 0)) - host.mapToGlobal(QPoint(0, 0))
+        except RuntimeError:
+            return  # 窗口关闭流程中 C++ 对象已销毁
+        widget.move(origin.x() + 4, origin.y() + 3)
+
     def _keep_side_toolbar_on_top(self) -> None:
-        """画布重绘后把悬浮工具条重新置顶（避免被画布渲染层盖住）。"""
+        """画布重绘后把悬浮工具条重新置顶（跟随画布摆位 + 盖住同级覆盖层）。"""
         side = getattr(self, "side_toolbar", None)
         if side is None:
             return
         try:
+            self._place_side_toolbar()
             side.widget.raise_()
         except RuntimeError:
             pass  # 窗口关闭流程中 C++ 对象已销毁
@@ -937,18 +961,21 @@ class MainWindow(FramelessMixin, QMainWindow):
         session = getattr(self, "_qmap_compare_session", None)
         if session is not None and session.is_active:
             session.stop()
-            self.tool_bar_builder.set_session_active("qmap_compare", False)
+            self._set_qmap_compare_active(False)
             self.messageBar.pushMessage("已停止地图对比", level=Qgis.MessageLevel.Info, duration=3)
             return
         if not self.project.mapLayers():
             QMessageBox.information(self, "提示", "请先加载至少一个图层")
+            self._set_qmap_compare_active(False)
             return
 
         dlg = QMapCompareDialog(self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
+            self._set_qmap_compare_active(False)
             return
         layers, mode, lens_shape, lens_rate = dlg.selected()
         if not layers:
+            self._set_qmap_compare_active(False)
             return
         if mode == "mirror":
 
@@ -956,16 +983,23 @@ class MainWindow(FramelessMixin, QMainWindow):
             session.start(layers)
         else:
 
-            session = CompareMask(self.project, parent=self)
+            session = CompareMask(self.project, parent=self, canvas=self.canvas)
             session.start(layers, mode, lens_shape, lens_rate)
         self._qmap_compare_session = session
-        # 地图对比无地图工具：会话存活期间按钮独立常亮（再点停止）
-        self.tool_bar_builder.set_session_active("qmap_compare", True)
+        # 地图对比无地图工具：会话存活期间顶部 / 左侧工具条按钮独立常亮（再点停止）
+        self._set_qmap_compare_active(True)
         self.messageBar.pushMessage(
             "地图对比已启动，再点「地图对比」停止",
             level=Qgis.MessageLevel.Info,
             duration=3,
         )
+
+    def _set_qmap_compare_active(self, active: bool) -> None:
+        """同步「地图对比 / 分屏」会话高亮到顶部与左侧两个工具条。"""
+        self.tool_bar_builder.set_session_active("qmap_compare", active)
+        side = getattr(self, "side_toolbar", None)
+        if side is not None:
+            side.set_session_active("qmap_compare", active)
 
     def _on_zoom_full(self) -> None:
         layers = [l for l in self.project.mapLayers().values() if l.isValid()]
@@ -1721,14 +1755,20 @@ class MainWindow(FramelessMixin, QMainWindow):
                     pass  # 窗口关闭流程中 C++ 对象已销毁
 
     def _relayout_floating_message_bar(self) -> None:
-        """把悬浮消息条摆到画布顶部（整宽覆盖、高度随内容），仅在有消息时。"""
+        """把悬浮消息条摆到画布顶部（左侧让出置顶工具条、高度随内容），仅在有消息时。"""
         bar = getattr(self, "messageBar", None)
         canvas = getattr(self, "canvas", None)
         if bar is None or canvas is None or not getattr(self, "_msg_active", False):
             return
         try:
-            # 顶部留 6px 边距、取画布整宽；高度按消息内容自适应
-            bar.setGeometry(6, 6, max(canvas.width() - 12, 0), bar.sizeHint().height())
+            # 左侧让出永远置顶的悬浮工具条（画布坐标 (4, 3)、宽 52），消息条从
+            # 其右侧开始，避免开头的图标/文字被工具条盖住；顶部 + 右侧各留 6px。
+            left = 6
+            side = getattr(self, "side_toolbar", None)
+            side_widget = getattr(side, "widget", None) if side is not None else None
+            if side_widget is not None:
+                left = 4 + side_widget.width() + 4
+            bar.setGeometry(left, 6, max(canvas.width() - left - 6, 0), bar.sizeHint().height())
             bar.show()
             bar.raise_()
         except RuntimeError:
@@ -1751,6 +1791,7 @@ class MainWindow(FramelessMixin, QMainWindow):
         if canvas is not None and watched is canvas:
             if event.type() == QEvent.Type.Resize:
                 self._relayout_floating_message_bar()
+                self._place_side_toolbar()
             if event.type() in (
                 QEvent.Type.DragEnter,
                 QEvent.Type.DragMove,

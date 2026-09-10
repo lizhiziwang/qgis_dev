@@ -1,7 +1,7 @@
 """地图对比组件（参照 QGIS 插件 qmapcompare 的实现思路）。
 
-与 :mod:`app.ui.tools.swipe`（卷帘，同画布内可拖动分割）互补，提供三种
-对比模式：
+与 :mod:`app.ui.tools.swipe`（卷帘，双影像合成）互补，提供三种对比模式
+（垂直 / 水平分割支持鼠标拖动分隔条调整比例）：
 
 1. 垂直 / 水平分割（mask 方案）
    图层树顶层插入对比组 ``QMapCompare_Group``（QgsGroupLayer），组内包含：
@@ -11,7 +11,10 @@
      → 分割线一侧露出主画布、另一侧显示组内对比图层；
    - 白色背景层（QMapCompareBackground）：填充被遮罩挖掉的区域；
    - 用户勾选的对比图层（从原位移入组内，停止时还原）。
-   分割线固定在画布中点（qmapcompare 语义；需要可拖动分割请用卷帘工具）。
+   分割线默认在画布中点，可鼠标拖动调整比例（:class:`SplitDividerOverlay`）：
+   拖动条带 → 重建遮罩 geometry generator 表达式 → 动态调整分割比例。
+   分隔条不画通栏线，只在分割线中点画一枚主题配色的「胶囊抓手」
+   （``app.ui.common.theme.divider_colors``），切主题自动跟随。
 
 2. 放大镜（Lens，mask 方案变体）
    遮罩几何为跟随 ``@canvas_cursor_point`` 的圆 / 方形，mask 层
@@ -36,11 +39,12 @@
 
 from __future__ import annotations
 
+import contextlib
 from typing import TYPE_CHECKING, Optional
 
-from qgis.PyQt.QtCore import QObject, Qt, QTimer
-from qgis.PyQt.QtGui import QPainter
-from qgis.PyQt.QtWidgets import QDockWidget
+from qgis.PyQt.QtCore import QEvent, QObject, QPoint, QRect, Qt, QTimer
+from qgis.PyQt.QtGui import QPainter, QPen
+from qgis.PyQt.QtWidgets import QDockWidget, QWidget
 from qgis.core import (
     Qgis,
     QgsCoordinateTransformContext,
@@ -59,7 +63,10 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapCanvas, QgsMapToolPan
 
+from app.ui.common.theme import ThemeManager, divider_colors
+
 if TYPE_CHECKING:  # pragma: no cover
+    from qgis.PyQt.QtGui import QColor
     from qgis.PyQt.QtWidgets import QMainWindow
 
 # ---------------------------------------------------------------------------
@@ -75,20 +82,63 @@ LENS_MIN_SIZE_RATE = 0.05
 LENS_MAX_SIZE_RATE = 0.40
 LENS_AUTO_REFRESH_INTERVAL_MS = 200
 
-# 垂直分割：掩掉右半边矩形（pt3 在 p2 右侧，高 = |pt3-p2| = width/2）
-VERTICAL_SPLIT_GEOMETRY = """make_rectangle_3points(
-        make_point(x(@map_extent_center), y(@map_extent_center) - (@map_extent_height / 2)),
-        make_point(x(@map_extent_center), y(@map_extent_center) + (@map_extent_height / 2)),
+#: 垂直 / 水平分割比例（0~1：垂直从左算、水平从上算，画布占比）
+SPLIT_DEFAULT_RATIO = 0.5
+#: 拖动分隔条的比例上下限（拖到贴边会抓不住，留一点余量）
+SPLIT_MIN_RATIO = 0.02
+SPLIT_MAX_RATIO = 0.98
+#: 分隔条绘制 / 命中参数（逻辑像素）。方案 D：**不画通栏分割线**，
+#: 只在分割线中点画一枚居中「胶囊抓手」（圆角矩形 + 双向箭头）。
+SPLIT_STRIP_SIZE = 24  # 条带（鼠标命中区）宽度：抓手居中于条带
+SPLIT_GRIP_W = 22  # 抓手横宽（垂直分割时）
+SPLIT_GRIP_H = 40  # 抓手纵长（垂直分割时；水平分割与之互换）
+SPLIT_GRIP_RADIUS = 9  # 抓手圆角半径
+SPLIT_GRIP_BORDER = 2  # 抓手描边宽
+SPLIT_GRIP_CHEVRON = 6  # 抓手内单枚箭头的大小
+SPLIT_GRIP_CHEVRON_GAP = 4  # 两枚箭头到中心的距离
+
+
+def get_split_geometry(
+    method: str = "vertical", ratio: float = SPLIT_DEFAULT_RATIO
+) -> str:
+    """生成垂直 / 水平分割遮罩的 geometry generator 表达式。
+
+    :param method: ``"vertical"``（掩掉分割线右侧）/ ``"horizontal"``
+        （掩掉分割线下方）
+    :param ratio: 分割线位置（0~1：垂直从左算、水平从上算）
+
+    ``ratio`` 直接以字面量写进表达式，拖动时重建——不依赖额外的画布
+    表达式变量，离屏渲染（``offscreen_render``）也无需注入新变量。
+    """
+    ratio = max(SPLIT_MIN_RATIO, min(SPLIT_MAX_RATIO, ratio))
+    if method == "horizontal":
+        # 水平：屏幕上边 = ymax，ratio 从上算 → split_y = ymax - h * ratio
+        split_y = (
+            "y(@map_extent_center) + (@map_extent_height / 2)"
+            f" - (@map_extent_height * {ratio!r})"
+        )
+        return f"""make_rectangle_3points(
+        make_point(x(@map_extent_center) - (@map_extent_width / 2), {split_y}),
+        make_point(x(@map_extent_center) + (@map_extent_width / 2), {split_y}),
+        make_point(x(@map_extent_center) + (@map_extent_width / 2), y(@map_extent_center) - (@map_extent_height / 2)),
+        0)"""
+    # 垂直：分割线左侧保留主画布、右侧掩掉显示对比图层
+    split_x = (
+        "x(@map_extent_center) - (@map_extent_width / 2)"
+        f" + (@map_extent_width * {ratio!r})"
+    )
+    return f"""make_rectangle_3points(
+        make_point({split_x}, y(@map_extent_center) - (@map_extent_height / 2)),
+        make_point({split_x}, y(@map_extent_center) + (@map_extent_height / 2)),
         make_point(x(@map_extent_center) + (@map_extent_width / 2), y(@map_extent_center) + (@map_extent_height / 2)),
         0)"""
 
-# 水平分割：掩掉上半矩形。修正 qmapcompare 原实现：第三点必须放 p2 正上方
-# （(cx+w/2, cy-h/2)），否则高 = sqrt(w^2+(h/2)^2) 超出视口、分割失效。
-HORIZONTAL_SPLIT_GEOMETRY = """make_rectangle_3points(
-        make_point(x(@map_extent_center) - (@map_extent_width / 2), y(@map_extent_center)),
-        make_point(x(@map_extent_center) + (@map_extent_width / 2), y(@map_extent_center)),
-        make_point(x(@map_extent_center) + (@map_extent_width / 2), y(@map_extent_center) - (@map_extent_height / 2)),
-        0)"""
+
+# 默认（0.5 居中）分割表达式，供外部 / 测试引用
+VERTICAL_SPLIT_GEOMETRY = get_split_geometry("vertical", SPLIT_DEFAULT_RATIO)
+# 水平分割修正 qmapcompare 原实现：第三点必须放 p2 正上方，否则高
+# = sqrt(w^2+(h/2)^2) 超出视口、分割失效。
+HORIZONTAL_SPLIT_GEOMETRY = get_split_geometry("horizontal", SPLIT_DEFAULT_RATIO)
 
 # 背景层：整个视口范围（InvertedPolygonRenderer 填白）
 BACKGROUND_GEOMETRY = "@map_extent"
@@ -110,6 +160,221 @@ def get_lens_geometry(
     return f"buffer(@canvas_cursor_point, @map_extent_width * {rate})"
 
 
+class SplitDividerOverlay(QWidget):
+    """画布上的可拖动分隔条（垂直 / 水平分割模式）。
+
+    仓库既定覆盖层模式（见 :class:`app.ui.tools.swipe.SwipeOverlay`）：作为
+    canvas 子 QWidget 浮在画布上。与卷帘覆盖层不同，这里是**窄条带**且
+    自身接收鼠标事件——只有条带（``SPLIT_STRIP_SIZE`` px）拦截鼠标，其余
+    区域仍可正常平移 / 缩放。按住条带拖动 → 回调 ``on_ratio(ratio)``
+    重建遮罩几何，动态调整分割比例。
+
+    绘制（方案 D）：**不画通栏分割线**，只在分割线中点画一枚居中的
+    「胶囊抓手」（圆角矩形 + 两枚指示拖拽方向的箭头），其余露出画布渲染
+    结果。抓手配色取自全局主题
+    （:func:`app.ui.common.theme.divider_colors`），不写死黑白，切主题自动重绘。
+    """
+
+    def __init__(self, canvas, orientation: str, on_ratio, parent=None) -> None:
+        super().__init__(canvas)
+        self._canvas = canvas
+        self._orientation = orientation
+        self._on_ratio = on_ratio
+        self._ratio = SPLIT_DEFAULT_RATIO
+        self._dragging = False
+        if orientation == "vertical":
+            self.setCursor(Qt.CursorShape.SplitHCursor)
+        else:
+            self.setCursor(Qt.CursorShape.SplitVCursor)
+        # 透明背景：只画分割线 + 手柄，其余露出画布渲染结果
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+        self._reposition()
+        canvas.installEventFilter(self)
+        with contextlib.suppress(RuntimeError):
+            canvas.viewport().installEventFilter(self)
+        self._canvas_signal = False
+        try:
+            canvas.mapCanvasRefreshed.connect(self._on_canvas_refreshed)
+        except (AttributeError, RuntimeError):
+            pass
+        else:
+            self._canvas_signal = True
+        # 配色走全局主题（QPainter 直绘不吃 QSS），切主题自动重绘
+        self._theme_signal = False
+        try:
+            ThemeManager.instance().theme_changed.connect(self._on_theme_changed)
+        except (AttributeError, RuntimeError):
+            pass
+        else:
+            self._theme_signal = True
+
+    # ------------------------------------------------------------ 状态 / 几何
+
+    def set_ratio(self, ratio: float) -> None:
+        """设置分割比例（0~1）并重定位条带。"""
+        self._ratio = max(SPLIT_MIN_RATIO, min(SPLIT_MAX_RATIO, ratio))
+        self._reposition()
+        self.update()
+
+    def ratio(self) -> float:
+        return self._ratio
+
+    def divider_px(self) -> int:
+        """分割线在当前画布尺寸下的像素位置（垂直：x；水平：y）。"""
+        parent = self.parentWidget()
+        if parent is None:
+            return 0
+        if self._orientation == "vertical":
+            return int(self._ratio * parent.width())
+        return int(self._ratio * parent.height())
+
+    def _reposition(self) -> None:
+        """按比例把条带摆到分割线处（条带居中于分割线，越界时夹回画布内）。"""
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        w, h = parent.width(), parent.height()
+        if w <= 0 or h <= 0:
+            return
+        if self._orientation == "vertical":
+            strip = max(1, min(SPLIT_STRIP_SIZE, w))
+            x = max(0, min(self.divider_px() - strip // 2, w - strip))
+            self.setGeometry(QRect(x, 0, strip, h))
+        else:
+            strip = max(1, min(SPLIT_STRIP_SIZE, h))
+            y = max(0, min(self.divider_px() - strip // 2, h - strip))
+            self.setGeometry(QRect(0, y, w, strip))
+        self.raise_()
+
+    # ------------------------------------------------------------ 事件
+
+    def eventFilter(self, watched, event) -> bool:
+        """画布 / viewport 尺寸变化时重定位条带。"""
+        if event.type() == QEvent.Type.Resize:
+            self._reposition()
+        return super().eventFilter(watched, event)
+
+    def _on_canvas_refreshed(self) -> None:
+        """画布重绘后重新置顶（底层渲染可能盖住覆盖层）。"""
+        self._reposition()
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = True
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._dragging:
+            self._apply_cursor(event.position().toPoint())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._dragging and event.button() == Qt.MouseButton.LeftButton:
+            self._dragging = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _apply_cursor(self, local_pos: QPoint) -> None:
+        """条带内坐标 → 画布坐标 → 归一化比例，回调更新遮罩。"""
+        parent = self.parentWidget()
+        if parent is None:
+            return
+        canvas_pt = self.mapTo(parent, local_pos)
+        if self._orientation == "vertical":
+            ratio = canvas_pt.x() / max(1, parent.width())
+        else:
+            ratio = canvas_pt.y() / max(1, parent.height())
+        self._on_ratio(ratio)
+
+    # ------------------------------------------------------------ 绘制
+
+    def paintEvent(self, event) -> None:
+        grip_fill, grip_border = divider_colors(ThemeManager.instance().current())
+        painter = QPainter(self)
+        try:
+            w, h = self.width(), self.height()
+            if w <= 0 or h <= 0:
+                return
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            if self._orientation == "vertical":
+                cx = self.divider_px() - self.x()
+                cy = h // 2
+                grip = QRect(
+                    cx - SPLIT_GRIP_W // 2,
+                    cy - SPLIT_GRIP_H // 2,
+                    SPLIT_GRIP_W,
+                    SPLIT_GRIP_H,
+                )
+                chevrons_horizontal = True
+            else:
+                cx = w // 2
+                cy = self.divider_px() - self.y()
+                grip = QRect(
+                    cx - SPLIT_GRIP_H // 2,
+                    cy - SPLIT_GRIP_W // 2,
+                    SPLIT_GRIP_H,
+                    SPLIT_GRIP_W,
+                )
+                chevrons_horizontal = False
+            pen = QPen(grip_border)
+            pen.setWidth(SPLIT_GRIP_BORDER)
+            painter.setPen(pen)
+            painter.setBrush(grip_fill)
+            painter.drawRoundedRect(grip, SPLIT_GRIP_RADIUS, SPLIT_GRIP_RADIUS)
+            self._draw_chevrons(painter, cx, cy, chevrons_horizontal, grip_border)
+        finally:
+            painter.end()
+
+    @staticmethod
+    def _draw_chevrons(painter: QPainter, cx: int, cy: int, horizontal: bool, color: QColor) -> None:
+        """在抓手中心画两枚箭头，指向可拖拽的左右（或上下）方向。"""
+        pen = QPen(color)
+        pen.setWidth(SPLIT_GRIP_BORDER)
+        pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        gap = SPLIT_GRIP_CHEVRON_GAP
+        size = SPLIT_GRIP_CHEVRON
+        if horizontal:
+            painter.drawPolyline(
+                [QPoint(cx - gap, cy - size), QPoint(cx - gap - size, cy), QPoint(cx - gap, cy + size)]
+            )
+            painter.drawPolyline(
+                [QPoint(cx + gap, cy - size), QPoint(cx + gap + size, cy), QPoint(cx + gap, cy + size)]
+            )
+        else:
+            painter.drawPolyline(
+                [QPoint(cx - size, cy - gap), QPoint(cx, cy - gap - size), QPoint(cx + size, cy - gap)]
+            )
+            painter.drawPolyline(
+                [QPoint(cx - size, cy + gap), QPoint(cx, cy + gap + size), QPoint(cx + size, cy + gap)]
+            )
+
+    def _on_theme_changed(self, _theme=None) -> None:
+        """主题切换 → 重绘分隔条抓手（配色取自全局主题）。"""
+        self.update()
+
+    # ------------------------------------------------------------ 清理
+
+    def teardown(self) -> None:
+        """断开画布信号 / 事件过滤器（stop 时调用）。"""
+        with contextlib.suppress(RuntimeError):
+            self._canvas.removeEventFilter(self)
+            self._canvas.viewport().removeEventFilter(self)
+        if getattr(self, "_canvas_signal", False):
+            with contextlib.suppress(TypeError, RuntimeError):
+                self._canvas.mapCanvasRefreshed.disconnect(self._on_canvas_refreshed)
+        if getattr(self, "_theme_signal", False):
+            with contextlib.suppress(TypeError, RuntimeError):
+                ThemeManager.instance().theme_changed.disconnect(self._on_theme_changed)
+
+
 # ---------------------------------------------------------------------------
 # mask 方案：垂直/水平分割 + 放大镜
 # ---------------------------------------------------------------------------
@@ -124,13 +389,24 @@ class CompareMask(QObject):
         session.is_active
     """
 
-    def __init__(self, project: Optional[QgsProject] = None, parent: QObject | None = None) -> None:
+    def __init__(
+        self,
+        project: Optional[QgsProject] = None,
+        parent: QObject | None = None,
+        canvas: QgsMapCanvas | None = None,
+    ) -> None:
         super().__init__(parent)
         self._project = project or QgsProject.instance()
+        self._canvas = canvas
         self._group_node: Optional[QgsLayerTreeGroup] = None
         self._group_layer: Optional[QgsGroupLayer] = None
         self._mask_layer: Optional[QgsVectorLayer] = None
         self._background_layer: Optional[QgsVectorLayer] = None
+        #: 遮罩 geometry generator（分割模式拖动时改表达式）
+        self._generator: QgsGeometryGeneratorSymbolLayer | None = None
+        #: 可拖动分隔条覆盖层（仅垂直/水平分割 + 有画布时创建）
+        self._overlay: SplitDividerOverlay | None = None
+        self._split_ratio = SPLIT_DEFAULT_RATIO
         # 对比图层移动记录：(原父节点, 原索引, 图层)
         self._moved: list[tuple[QgsLayerTreeGroup, int, QgsMapLayer]] = []
         self._method: Optional[str] = None
@@ -143,6 +419,11 @@ class CompareMask(QObject):
     @property
     def method(self) -> Optional[str]:
         return self._method
+
+    @property
+    def split_ratio(self) -> float:
+        """当前垂直 / 水平分割比例（0~1）；非分割模式恒为默认值。"""
+        return self._split_ratio
 
     # ------------------------------------------------------------------
     def start(
@@ -206,9 +487,10 @@ class CompareMask(QObject):
         )
 
         # 4) 遮罩渲染器：半边矩形 / 放大镜几何 + 反转 + DestinationIn
-        geometry_formula = VERTICAL_SPLIT_GEOMETRY
+        self._split_ratio = SPLIT_DEFAULT_RATIO
+        geometry_formula = get_split_geometry("vertical", self._split_ratio)
         if method == "horizontal":
-            geometry_formula = HORIZONTAL_SPLIT_GEOMETRY
+            geometry_formula = get_split_geometry("horizontal", self._split_ratio)
         elif method == "lens":
             geometry_formula = get_lens_geometry(lens_shape, lens_size_rate)
         generator = QgsGeometryGeneratorSymbolLayer.create(
@@ -234,16 +516,61 @@ class CompareMask(QObject):
         else:
             mask_layer.setAutoRefreshMode(Qgis.AutoRefreshMode.Disabled)
 
+        self._generator = generator if method in ("vertical", "horizontal") else None
         self._group_node = group_node
         self._group_layer = group_layer
         self._mask_layer = mask_layer
         self._background_layer = background_layer
         self._method = method
+
+        # 6) 垂直/水平分割：画布上加可拖动分隔条
+        #    （无画布时跳过——如离屏渲染测试，CompareMask(project) 仍可用）
+        if self._generator is not None and self._canvas is not None:
+            try:
+                self._overlay = SplitDividerOverlay(self._canvas, method, self.set_split_ratio)
+                self._overlay.show()
+            except RuntimeError:  # 画布正在销毁，退化为不可拖
+                self._overlay = None
         return True
+
+    # ------------------------------------------------------------------
+    def set_split_ratio(self, ratio: float) -> None:
+        """设置垂直 / 水平分割比例（0~1，拖动分隔条 / 外部调用）。
+
+        重建遮罩 geometry generator 表达式并触发 mask 层重绘。仅
+        ``triggerRepaint``（异步），不在 Qt 事件栈内调 ``canvas.refresh()``。
+        """
+        if self._method not in ("vertical", "horizontal"):
+            return
+        ratio = max(SPLIT_MIN_RATIO, min(SPLIT_MAX_RATIO, ratio))
+        self._split_ratio = ratio
+        generator = self._generator
+        if generator is not None:
+            try:
+                generator.setGeometryExpression(get_split_geometry(self._method, ratio))
+            except RuntimeError:
+                return
+        if self._overlay is not None:
+            self._overlay.set_ratio(ratio)
+        if self._mask_layer is not None:
+            with contextlib.suppress(RuntimeError):
+                self._mask_layer.triggerRepaint()
+
+    def _teardown_overlay(self) -> None:
+        """移除分隔条覆盖层（幂等）。"""
+        overlay, self._overlay = self._overlay, None
+        if overlay is None:
+            return
+        with contextlib.suppress(RuntimeError):
+            overlay.teardown()
+        overlay.hide()
+        overlay.deleteLater()
 
     # ------------------------------------------------------------------
     def stop(self) -> None:
         """停止对比：还原对比图层原位、移除对比组、清理临时图层。"""
+        self._teardown_overlay()
+        self._generator = None
         if self._group_node is None:
             # 仍可能残留未清理的临时图层（防御）
             self._cleanup_temp_layers()
