@@ -9,6 +9,7 @@ zip 内 ``矢量.sqlite``（矢量，SpatiaLite）＋ ``影像/<数据集>/<时�
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -120,7 +121,6 @@ def ensure_stage(plan: FetchPlan) -> str:
 
 
 def write_manifest(stage_root: str, manifest: dict) -> str:
-    import json
 
     path = os.path.join(stage_root, "manifest.json")
     with open(path, "w", encoding="utf-8") as f:

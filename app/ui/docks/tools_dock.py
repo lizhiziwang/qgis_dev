@@ -26,54 +26,55 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from app.infra.logging import get_logger
+from app.ui.dialogs.buffer import BufferDialog
+from app.ui.dialogs.generic_alg import GenericAlgDialog
+from app.ui.dialogs.imagery_mbtiles import ImageryMbtilesDialog
+from app.ui.dialogs.imagery_tile import ImageryTileDialog
+from app.ui.dialogs.oriented_bbox import OrientedBBoxDialog
+from app.ui.dialogs.overlay import OverlayDialog
+from app.ui.dialogs.reproject import ReprojectDialog
+from app.ui.dialogs.shortest_path import ShortestPathDialog
+from app.ui.dialogs.vector_tile import VectorTileDialog
 
 logger = get_logger(__name__)
 
 
 def _make_vector_tile_dialog(parent):
-    from app.ui.dialogs.vector_tile import VectorTileDialog
 
     return VectorTileDialog(parent, title="创建矢量瓦片", dia_type="native:writevectortiles_xyz")
 
 
 def _make_buffer_dialog(parent):
-    from app.ui.dialogs.buffer import BufferDialog
 
     return BufferDialog(parent, title="矢量缓冲区")
 
 
 def _make_oriented_bbox_dialog(parent):
-    from app.ui.dialogs.oriented_bbox import OrientedBBoxDialog
 
     return OrientedBBoxDialog(parent, title="最小外包矩形")
 
 
 def _make_overlay_dialog(parent):
-    from app.ui.dialogs.overlay import OverlayDialog
 
     return OverlayDialog(parent, title="叠加分析")
 
 
 def _make_shortest_path_dialog(parent):
-    from app.ui.dialogs.shortest_path import ShortestPathDialog
 
     return ShortestPathDialog(parent, title="最短路径分析")
 
 
 def _make_reproject_dialog(parent):
-    from app.ui.dialogs.reproject import ReprojectDialog
 
     return ReprojectDialog(parent, title="重投影")
 
 
 def _make_imagery_tile_dialog(parent):
-    from app.ui.dialogs.imagery_tile import ImageryTileDialog
 
     return ImageryTileDialog(parent, title="影像切片")
 
 
 def _make_imagery_mbtiles_dialog(parent):
-    from app.ui.dialogs.imagery_mbtiles import ImageryMbtilesDialog
 
     return ImageryMbtilesDialog(parent, title="影像切片（MBTiles）")
 
@@ -87,7 +88,6 @@ def _make_flow_editor(parent):
 
 def _make_generic_algo_dialog(algo_id: str):
     """为单个 processing 算法返回构造 ``GenericAlgDialog`` 的工厂（闭包捕获 algo_id）。"""
-    from app.ui.dialogs.generic_alg import GenericAlgDialog
 
     def _factory(parent):
         return GenericAlgDialog(parent, algo_id=algo_id)

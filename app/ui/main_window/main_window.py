@@ -16,28 +16,11 @@ from __future__ import annotations
 
 import os
 import sys
+import threading
 from contextlib import suppress
+from pathlib import Path
 from typing import Optional
 
-from qgis.PyQt.QtCore import QEvent, QPoint, Qt
-from qgis.PyQt.QtGui import QAction, QCloseEvent, QColor, QKeySequence
-from qgis.PyQt.QtWidgets import (
-    QDialog,
-    QDialogButtonBox,
-    QLabel,
-    QListWidget,
-    QMainWindow,
-    QMenu,
-    QMessageBox,
-    QShortcut,
-    QSizePolicy,
-    QToolBar,
-    QToolButton,
-    QTreeWidget,
-    QHBoxLayout,
-    QVBoxLayout,
-    QWidget,
-)
 from qgis.core import (
     Qgis,
     QgsApplication,
@@ -62,33 +45,90 @@ from qgis.gui import (
     QgsRendererPropertiesDialog,
     QgsVectorLayerSaveAsDialog,
 )
+from qgis.PyQt.QtCore import QEvent, QPoint, Qt
+from qgis.PyQt.QtGui import QAction, QCloseEvent, QColor, QKeySequence
+from qgis.PyQt.QtWidgets import (
+    QDialog,
+    QDialogButtonBox,
+    QHBoxLayout,
+    QLabel,
+    QListWidget,
+    QMainWindow,
+    QMenu,
+    QMessageBox,
+    QShortcut,
+    QSizePolicy,
+    QToolBar,
+    QToolButton,
+    QTreeWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
+from app.core.auth import load_credential
+from app.core.domain.basemap import (
+    add_base_tile_layer,
+    build_online_basemap_layer,
+    canonical_basemap_url,
+    install_referer_preprocessor,
+)
 from app.core.domain.check.space_index import clear_spatial_index
 from app.core.domain.editing import LayerEditService
 from app.core.domain.query import SpaceQueryService
+from app.core.domain.tile_prefetch import TilePrefetcher, ZoomTileGuard
+from app.core.util.local_db_util import _CATEGORY_LABEL, release_gpkg_alias, sweep_startup_gpkg_aliases
 from app.core.util.local_layer_loader import (
     LocalLayerError,
     LocalLayerLoader,
     LocalLayerUnsupportedCategoryError,
 )
+from app.env.config import (
+    AppConfig,
+    append_online_basemap_to_yaml,
+    load_online_basemaps,
+    remove_online_basemap_from_yaml,
+    set_map_keys,
+    update_online_basemap_in_yaml,
+)
 from app.infra.fs.paths import Paths
 from app.infra.logging import get_logger
 from app.infra.messagebar import FloatingMessageBar
+from app.server.cli import main as server_main
 from app.ui.common.frameless import FramelessMixin
 from app.ui.common.icons import Icons
 from app.ui.common.theme import ThemeManager, toolbar_qss, window_qss
+from app.ui.common.widgets import open_file_dir
+from app.ui.dialogs.add_connection import AddConnectionDialog
+from app.ui.dialogs.check_viewer import CheckViewerDialog
+from app.ui.dialogs.custom_basemap import CustomBasemapDialog
+from app.ui.dialogs.edit_basemap import EditBasemapDialog
+from app.ui.dialogs.execute_sql import ExecuteSqlDialog
+from app.ui.dialogs.manage_keys import ManageKeysDialog
+from app.ui.dialogs.offline_download import OfflineDownloadDialog
+from app.ui.dialogs.qmap_compare import QMapCompareDialog
+from app.ui.dialogs.query_builder import QueryBuilderDialog
+from app.ui.dialogs.style_io import StyleOpenDialog, StyleSaveDialog
+from app.ui.dialogs.swipe_compare import SwipeCompareDialog
 from app.ui.docks.attribute_dock import AttributeDock
+from app.ui.docks.data_manage_dock import DataManageDock
 from app.ui.docks.feature_info_dock import FeatureInfoDock
 from app.ui.docks.log_dock import LogDock
+from app.ui.docks.online_basemap_dock import OnlineBasemapDock
 from app.ui.docks.project_dock import ProjectDock
 from app.ui.docks.tools_dock import ToolsDock
+from app.ui.flow_editor import FlowEditorWindow
 from app.ui.main_window.browser_dock import BrowserDock
 from app.ui.main_window.draw_toolbar import DigitizingToolbar
-from app.ui.main_window.snapping_toolbar import QgisSnappingToolbar
 from app.ui.main_window.layer_dock import LayerDock
 from app.ui.main_window.side_toolbar import SideToolBar
+from app.ui.main_window.snapping_toolbar import QgisSnappingToolbar
 from app.ui.main_window.status_bar import StatusBar
+from app.ui.main_window.title_bar import MODE_PROJECT, MODE_TASK
 from app.ui.main_window.tool_bar import ToolBar
+from app.ui.tools.find_feature import FindFeatureTool
+from app.ui.tools.qmap_compare import CompareMask, MirrorCompare
+from app.ui.tools.select_feature import PointSelectTool, RectSelectTool
+from app.ui.tools.swipe import SwipeTool
 
 logger = get_logger(__name__)
 
@@ -146,7 +186,6 @@ class MainWindow(FramelessMixin, QMainWindow):
         self.bridge.setAutoSetupOnFirstLayer(True)
         # 后台瓦片预热：天地图 XYZ 底图拖动/放大后白屏的修复（渲染完成 →
         # 后台离屏预取四周 8 个相邻视口的瓦片进缓存，平移时命中缓存不白屏）
-        from app.core.domain.tile_prefetch import TilePrefetcher, ZoomTileGuard
 
         self._tile_prefetcher = TilePrefetcher(self.canvas, project=self.project, parent=self)
         # 缩放白屏防护：extentsChanged 时冻结画布 + 预取当前视口瓦片 + 解冻重绘，
@@ -593,7 +632,6 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def _on_mode_changed(self, mode: str) -> None:
         """任务 / 工程模式切换 → 记日志（供日志面板追溯操作历史）。"""
-        from app.ui.main_window.title_bar import MODE_PROJECT, MODE_TASK
 
         label = {MODE_PROJECT: "工程模式", MODE_TASK: "任务模式"}.get(mode, mode)
         logger.info("模式切换：%s", label)
@@ -624,7 +662,6 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def _apply_user_info_to_titlebar(self) -> None:
         """把登录用户信息（用户名 + 凭证有效期）挂到标题栏。"""
-        from app.core.auth import load_credential
 
         cred = load_credential()
         if cred is not None:
@@ -673,7 +710,6 @@ class MainWindow(FramelessMixin, QMainWindow):
                 duration=3,
             )
             return
-        from app.ui.dialogs.query_builder import QueryBuilderDialog
 
         dlg = QueryBuilderDialog(layer, parent=self)
         dlg.exec()
@@ -685,14 +721,12 @@ class MainWindow(FramelessMixin, QMainWindow):
         self.tool_bar_builder.set_active("pan")
 
     def _on_select_point(self) -> None:
-        from app.ui.tools.select_feature import PointSelectTool
 
         self._select_point_tool = PointSelectTool(self.canvas)
         self.canvas.setMapTool(self._select_point_tool)
         self.tool_bar_builder.set_active("select_point")
 
     def _on_select_box(self) -> None:
-        from app.ui.tools.select_feature import RectSelectTool
 
         self._select_box_tool = RectSelectTool(self.canvas)
         self.canvas.setMapTool(self._select_box_tool)
@@ -700,8 +734,8 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def _on_clear_selection(self) -> None:
         """取消选择：清空**所有矢量图层**的当前选择并刷新画布。"""
-        from qgis.PyQt.QtCore import QTimer
         from qgis.core import QgsVectorLayer
+        from qgis.PyQt.QtCore import QTimer
 
         for layer in self.project.mapLayers().values():
             if isinstance(layer, QgsVectorLayer) and layer.selectedFeatureCount() > 0:
@@ -709,7 +743,6 @@ class MainWindow(FramelessMixin, QMainWindow):
         QTimer.singleShot(0, self.canvas.refresh)
 
     def _on_identify(self) -> None:
-        from app.ui.tools.find_feature import FindFeatureTool
 
         self._find_feature_tool = FindFeatureTool(self.canvas, parent=self)
         self.canvas.setMapTool(self._find_feature_tool)
@@ -731,14 +764,12 @@ class MainWindow(FramelessMixin, QMainWindow):
         self.tool_bar_builder.set_active("zoom_out")
 
     def _on_quality(self) -> None:
-        from app.ui.dialogs.check_viewer import CheckViewerDialog
 
         dlg = CheckViewerDialog(self, "")
         dlg.show()
 
     def _on_offline_download(self) -> None:
         """打开「下载离线图层」弹窗（懒建单实例，保留勾选与进度状态）。"""
-        from app.ui.dialogs.offline_download import OfflineDownloadDialog
 
         if self._offline_download_dialog is None:
             self._offline_download_dialog = OfflineDownloadDialog(
@@ -764,7 +795,6 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def _on_online_basemap(self) -> None:
         """在线底图：懒建右侧 Dock，按独立清单文件刷新列表。"""
-        from app.ui.docks.online_basemap_dock import OnlineBasemapDock
 
         dock = getattr(self, "_online_basemap_dock", None)
         if dock is None:
@@ -791,7 +821,6 @@ class MainWindow(FramelessMixin, QMainWindow):
         联动右侧数据表；创建数据 / 导入 / 刷新由 Dock 内部占位记日志
         （后续版本接入真实功能）。
         """
-        from app.ui.docks.data_manage_dock import DataManageDock
 
         dock = getattr(self, "_data_manage_dock", None)
         if dock is None:
@@ -807,7 +836,6 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def _on_dm_add_connection(self) -> None:
         """数据管理「+ 新建连接」：弹窗选本地库文件或填服务器连接并加入树。"""
-        from app.ui.dialogs.add_connection import AddConnectionDialog
 
         dlg = AddConnectionDialog(self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -834,7 +862,6 @@ class MainWindow(FramelessMixin, QMainWindow):
           期间存在, 移除/退出即删); 老 spatialite 库 OGR 失败时才有回退;
         - ``dict`` 等无几何数据:沿用原 ``QMessageBox.information`` 提示。
         """
-        from app.core.util.local_db_util import _CATEGORY_LABEL
 
         path = str(db.get("path") or "")
         label = _CATEGORY_LABEL.get(category, category)
@@ -889,8 +916,6 @@ class MainWindow(FramelessMixin, QMainWindow):
         if not any(isinstance(l, QgsRasterLayer) for l in self.project.mapLayers().values()):
             QMessageBox.information(self, "提示", "请先加载至少一个栅格图层")
             return
-        from app.ui.dialogs.swipe_compare import SwipeCompareDialog
-        from app.ui.tools.swipe import SwipeTool
 
         dlg = SwipeCompareDialog(self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -918,7 +943,6 @@ class MainWindow(FramelessMixin, QMainWindow):
         if not self.project.mapLayers():
             QMessageBox.information(self, "提示", "请先加载至少一个图层")
             return
-        from app.ui.dialogs.qmap_compare import QMapCompareDialog
 
         dlg = QMapCompareDialog(self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -927,12 +951,10 @@ class MainWindow(FramelessMixin, QMainWindow):
         if not layers:
             return
         if mode == "mirror":
-            from app.ui.tools.qmap_compare import MirrorCompare
 
             session = MirrorCompare(self, self.canvas, parent=self)
             session.start(layers)
         else:
-            from app.ui.tools.qmap_compare import CompareMask
 
             session = CompareMask(self.project, parent=self)
             session.start(layers, mode, lens_shape, lens_rate)
@@ -962,9 +984,7 @@ class MainWindow(FramelessMixin, QMainWindow):
     def _on_test(self) -> None:
         """测试按钮：启动独立 FastAPI 服务（在新进程中）。"""
         try:
-            import threading
 
-            from app.server.cli import main as server_main
 
             threading.Thread(target=server_main, daemon=True).start()
             self.messageBar.pushMessage("已启动服务（8000）", level=Qgis.MessageLevel.Info, duration=3)
@@ -1065,7 +1085,6 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def _on_open_project(self) -> None:
         """打开工程：读入 ``.qgs`` / ``.qgz`` 工程文件并刷新画布。"""
-        from app.ui.common.widgets import open_file_dir
 
         path = open_file_dir(
             self,
@@ -1116,17 +1135,13 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def _map_config_path(self):
         """``config/app.yaml`` 实际路径（``QGIS_DEV_CONFIG`` 可覆盖），读/写共用。"""
-        import os
-        from pathlib import Path
 
-        from app.infra.fs.paths import Paths
 
         return Path(os.environ.get("QGIS_DEV_CONFIG") or Paths.default().config_file("app.yaml"))
 
     def _load_map_config(self):
         """读取并解析 ``config/app.yaml``；失败返回 ``None``（不抛、只记日志）。"""
         try:
-            from app.env.config import AppConfig
 
             return AppConfig.from_file(self._map_config_path())
         except Exception as exc:  # noqa: BLE001
@@ -1137,7 +1152,6 @@ class MainWindow(FramelessMixin, QMainWindow):
         """读取配置并加载默认底图（新建工程时恢复天地图底图）。返回图层或 ``None``。"""
         self._begin_layer_loading("正在加载默认底图…")
         try:
-            from app.core.domain.basemap import add_base_tile_layer
 
             cfg = self._load_map_config()
             if cfg is None:
@@ -1163,7 +1177,6 @@ class MainWindow(FramelessMixin, QMainWindow):
     def _online_basemap_defs(self):
         """读取独立清单文件里的在线底图（文件缺失 / 读取失败返回空列表）。"""
         try:
-            from app.env.config import load_online_basemaps
 
             return load_online_basemaps(self._online_basemaps_config_path())
         except Exception as exc:  # noqa: BLE001
@@ -1179,7 +1192,6 @@ class MainWindow(FramelessMixin, QMainWindow):
         layers 为空 → 等价于 url 判重）。url 归一把老配置内嵌真实 tk 的 url 与
         ``{tk}`` 模板判等时互认（tk=cb75… == tk={tk}），去重/撞名不失效。
         """
-        from app.core.domain.basemap import canonical_basemap_url
 
         if not d.url:
             return False
@@ -1198,10 +1210,6 @@ class MainWindow(FramelessMixin, QMainWindow):
         同源（url 相同）条目已存在则只提示不重复加。返回是否成功。
         """
         try:
-            from app.env.config import (
-                append_online_basemap_to_yaml,
-                load_online_basemaps,
-            )
 
             path = self._online_basemaps_config_path()
             current = load_online_basemaps(path)  # 缺失/空 = 空清单（可从模板加）
@@ -1241,7 +1249,6 @@ class MainWindow(FramelessMixin, QMainWindow):
         刷新 Dock 树（去重 / messageBar / 异常处理全复用）。取消返回 False。
         按已定决策**不**加载画布——自定义底图先进树，双击再出图。
         """
-        from app.ui.dialogs.custom_basemap import CustomBasemapDialog
 
         dlg = CustomBasemapDialog(self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -1257,8 +1264,6 @@ class MainWindow(FramelessMixin, QMainWindow):
         False。改 key 只影响**新建/重载**的图层（已加载图层 source 已焊死），
         文案已如实提示。
         """
-        from app.env.config import set_map_keys
-        from app.ui.dialogs.manage_keys import ManageKeysDialog
 
         cfg = self._load_map_config()
         if cfg is None:
@@ -1312,13 +1317,6 @@ class MainWindow(FramelessMixin, QMainWindow):
         拒绝保存只提示。返回是否成功。取消返回 False。
         """
         try:
-            from app.env.config import (
-                load_online_basemaps,
-                set_map_keys,
-                update_online_basemap_in_yaml,
-            )
-            from app.ui.dialogs.edit_basemap import EditBasemapDialog
-
             cfg = self._load_map_config()
             if cfg is None:
                 self.messageBar.pushMessage(
@@ -1394,7 +1392,6 @@ class MainWindow(FramelessMixin, QMainWindow):
         返回是否成功删除（取消 / 失败为 False）。
         """
         try:
-            from app.env.config import load_online_basemaps, remove_online_basemap_from_yaml
 
             path = self._online_basemaps_config_path()
             current = load_online_basemaps(path)
@@ -1451,10 +1448,6 @@ class MainWindow(FramelessMixin, QMainWindow):
         """
         self._begin_layer_loading(f"正在加载图层：{tile.name}")
         try:
-            from app.core.domain.basemap import (
-                build_online_basemap_layer,
-                install_referer_preprocessor,
-            )
 
             if tile.referer:
                 install_referer_preprocessor(tile.referer)
@@ -1503,7 +1496,6 @@ class MainWindow(FramelessMixin, QMainWindow):
             self._end_layer_loading()
 
     def _on_open_file(self) -> None:
-        from app.ui.common.widgets import open_file_dir
 
         path = open_file_dir(
             self,
@@ -1604,7 +1596,6 @@ class MainWindow(FramelessMixin, QMainWindow):
                 except Exception:  # noqa: BLE001
                     continue
         except Exception:  # noqa: BLE001
-            from app.infra.logging import get_logger
 
             get_logger(__name__).exception("构建数据浏览器右键菜单失败，仅保留「刷新」")
         # 目录项：提供"新建"子菜单（各类矢量格式）
@@ -1641,13 +1632,13 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def _on_browser_create_vector(self, item, name: str, ext: str, driver: str) -> None:
         """在浏览器目录项下新建空矢量数据文件（"新建"子菜单入口）。"""
-        from qgis.PyQt.QtWidgets import QFileDialog
         from qgis.core import (
             QgsCoordinateReferenceSystem,
             QgsCoordinateTransformContext,
             QgsVectorFileWriter,
             QgsVectorLayer,
         )
+        from qgis.PyQt.QtWidgets import QFileDialog
 
         dir_path = getattr(item, "dirPath", None) or item.path()
         path, _ = QFileDialog.getSaveFileName(
@@ -1676,13 +1667,13 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     def _on_browser_add_gdb_layer(self, item) -> None:
         """向已存在的 File Geodatabase（.gdb）中新增一个空图层。"""
-        from qgis.PyQt.QtWidgets import QInputDialog
         from qgis.core import (
             QgsCoordinateReferenceSystem,
             QgsCoordinateTransformContext,
             QgsVectorFileWriter,
             QgsVectorLayer,
         )
+        from qgis.PyQt.QtWidgets import QInputDialog
 
         gdb = getattr(item, "dirPath", None) or item.path()
         layer_name, ok = QInputDialog.getText(self, "新增图层", "图层名称：")
@@ -2091,7 +2082,6 @@ class MainWindow(FramelessMixin, QMainWindow):
         别名(若启动即恢复工程)不会误删。
         """
         try:
-            from app.core.util.local_db_util import sweep_startup_gpkg_aliases
 
             n = sweep_startup_gpkg_aliases()
             if n:
@@ -2108,7 +2098,6 @@ class MainWindow(FramelessMixin, QMainWindow):
         from qgis.PyQt.QtCore import QTimer
 
         try:
-            from app.core.util.local_db_util import release_gpkg_alias
 
             if release_gpkg_alias(alias):
                 return
@@ -2533,7 +2522,6 @@ class MainWindow(FramelessMixin, QMainWindow):
         self._show_attribute_dock(self._selected_layer)
 
     def _open_execute_sql(self) -> None:
-        from app.ui.dialogs.execute_sql import ExecuteSqlDialog
 
         if self._selected_layer is None:
             return
@@ -2588,13 +2576,11 @@ class MainWindow(FramelessMixin, QMainWindow):
             pass
 
     def _open_style_file(self, layer) -> None:
-        from app.ui.dialogs.style_io import StyleOpenDialog
 
         dlg = StyleOpenDialog(layer, self)
         dlg.show()
 
     def _save_style(self, layer) -> None:
-        from app.ui.dialogs.style_io import StyleSaveDialog
 
         dlg = StyleSaveDialog(layer, self)
         dlg.exec()
@@ -2636,7 +2622,6 @@ class MainWindow(FramelessMixin, QMainWindow):
         """打开流程节点编辑器（懒建单实例，重复调用只置前）。"""
         try:
             if self._flow_editor_window is None:
-                from app.ui.flow_editor import FlowEditorWindow
 
                 self._flow_editor_window = FlowEditorWindow()
             win = self._flow_editor_window
@@ -2645,7 +2630,6 @@ class MainWindow(FramelessMixin, QMainWindow):
             win.activateWindow()
         except Exception as exc:  # noqa: BLE001
             # 槽内异常会 native 崩溃，务必兜住（见 qgis-ui-integration-gotchas）
-            from app.infra.logging import get_logger
 
             get_logger(__name__).error("打开流程编辑器失败：%s", exc, exc_info=True)
             if hasattr(self, "messageBar"):

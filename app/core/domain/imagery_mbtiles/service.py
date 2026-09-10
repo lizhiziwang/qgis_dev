@@ -83,7 +83,7 @@ class ImageryMbtilesService:
 
     def submit(self, job: ImageryMbtilesJob) -> "CreateImageryMbtilesTask":
         """构造切片任务并返回。调用方需自行 ``task.start()`` 启动。"""
-        from .task import CreateImageryMbtilesTask
+        from .task import CreateImageryMbtilesTask  # noqa: PLC0415 - 循环依赖：task 反向依赖 service，上提成环
 
         return CreateImageryMbtilesTask("", job)
 

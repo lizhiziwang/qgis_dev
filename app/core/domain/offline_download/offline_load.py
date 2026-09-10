@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from typing import Optional
+from urllib.parse import quote
 
 #: 找不到文件时给宽层级兜底（金字塔实际只到哪级 QGIS 自己会 404 跳过）
 _FALLBACK_ZOOM = (0, 24)
@@ -22,7 +23,6 @@ def build_local_xyz_uri(
     image_format: str = "png",
 ) -> str:
     """构造本地 XYZ 连接串（URL 内中文/空格已 percent 编码，见 basemap 同款约定）。"""
-    from urllib.parse import quote
 
     p = os.path.abspath(tiles_dir).replace("\\", "/").rstrip("/")
     enc = quote(p, safe=":/")

@@ -62,6 +62,16 @@ from app.core.domain.drawing import DrawManager
 from app.core.domain.drawing.tools import get_tool_class
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
+from app.ui.dialogs.custom_attr import CustomAttrDialog
+from app.ui.docks.attribute_entry_dock import AttributeEntryDock
+from app.ui.tools.attribute_entry import AttributeEntryTool
+from app.ui.tools.dig_hole import DigHoleTool
+from app.ui.tools.explode_parts import explode_features as run_explode
+from app.ui.tools.feature_edit import FeatureEditTool
+from app.ui.tools.fill_hole import FillHoleTool
+from app.ui.tools.merge_geometry import MergeGeometryTool
+from app.ui.tools.split_feature import SplitFeatureTool
+from app.ui.tools.split_polygon import SplitPolygonTool
 
 logger = get_logger(__name__)
 
@@ -569,7 +579,6 @@ class DigitizingToolbar(QObject):
         # 清掉可能激活的绘制 / 融合工具，避免两个工具并存
         self.clear_draw_tool()
 
-        from app.ui.tools.merge_geometry import MergeGeometryTool
 
         self.merge_tool = MergeGeometryTool(
             self.canvas,
@@ -607,7 +616,6 @@ class DigitizingToolbar(QObject):
         # 清掉可能激活的绘制 / 融合工具，避免两个工具并存
         self.clear_draw_tool()
 
-        from app.ui.tools.feature_edit import FeatureEditTool
 
         self.feature_edit_tool = FeatureEditTool(
             self.canvas,
@@ -650,7 +658,6 @@ class DigitizingToolbar(QObject):
         # 清掉可能激活的绘制 / 融合 / 要素编辑工具，避免两个工具并存
         self.clear_draw_tool()
 
-        from app.ui.tools.split_feature import SplitFeatureTool
 
         self.split_tool = SplitFeatureTool(
             self.canvas,
@@ -693,7 +700,6 @@ class DigitizingToolbar(QObject):
         # 清掉可能激活的其它工具，避免并存
         self.clear_draw_tool()
 
-        from app.ui.tools.split_polygon import SplitPolygonTool
 
         self.split_polygon_tool = SplitPolygonTool(
             self.canvas,
@@ -732,7 +738,6 @@ class DigitizingToolbar(QObject):
         # 清掉可能激活的其它工具，避免并存
         self.clear_draw_tool()
 
-        from app.ui.tools.dig_hole import DigHoleTool
 
         self.dig_hole_tool = DigHoleTool(
             self.canvas,
@@ -771,7 +776,6 @@ class DigitizingToolbar(QObject):
         # 清掉可能激活的其它工具，避免并存
         self.clear_draw_tool()
 
-        from app.ui.tools.fill_hole import FillHoleTool
 
         self.fill_hole_tool = FillHoleTool(
             self.canvas,
@@ -860,7 +864,6 @@ class DigitizingToolbar(QObject):
             )
             return
 
-        from app.ui.tools.explode_parts import explode_features as run_explode
 
         result = run_explode(layer)
         if result is None:
@@ -921,8 +924,6 @@ class DigitizingToolbar(QObject):
         # 清掉可能激活的绘制 / 融合 / 要素编辑 / 分割工具，避免并存
         self.clear_draw_tool()
 
-        from app.ui.docks.attribute_entry_dock import AttributeEntryDock
-        from app.ui.tools.attribute_entry import AttributeEntryTool
 
         # 懒建右侧 Dock（单实例；关闭后再次激活时重新显示）
         dock = self._attribute_entry_dock
@@ -1007,7 +1008,6 @@ class DigitizingToolbar(QObject):
         # 创建要素 + 弹属性对话框
         from qgis.core import QgsVectorLayerUtils
 
-        from app.ui.dialogs.custom_attr import CustomAttrDialog
 
         feature = QgsVectorLayerUtils.createFeature(layer, geometry)
         feature.setGeometry(geometry)

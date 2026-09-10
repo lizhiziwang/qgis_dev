@@ -19,13 +19,14 @@ if TYPE_CHECKING:
     from qgis.core import QgsGeometry, QgsPointXY
     from qgis.gui import QgsMapCanvas, QgsMapTool
 
-from qgis.PyQt.QtCore import pyqtSignal
 from qgis.core import QgsWkbTypes
 from qgis.gui import QgsMapTool, QgsRubberBand
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtGui import QColor
 
+from app.core.domain.drawing.tools.trace import trace_between, tracing_enabled
 from app.infra.logging import get_logger
+
 from .snap import snapped_match
 
 logger = get_logger(__name__)
@@ -158,7 +159,6 @@ class BaseDrawTool(QgsMapTool):
             and self.temp_points
         ):
             try:
-                from app.core.domain.drawing.tools.trace import trace_between
 
                 extension = trace_between(self.canvas, self.temp_points[-1], point)
             except Exception:  # noqa: BLE001 —— 追踪失败降级为不插点
@@ -184,7 +184,6 @@ class BaseDrawTool(QgsMapTool):
         if not (snapped_now and self._prev_vertex_snapped):
             return [prev, point]
         try:
-            from app.core.domain.drawing.tools.trace import trace_between, tracing_enabled
 
             if not tracing_enabled(self.canvas):
                 return [prev, point]

@@ -28,6 +28,7 @@ from qgis.PyQt.QtWidgets import (
 
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.icons import Icons
+from app.ui.common.theme import ThemeManager, login_qss
 
 # 兜底账号（无 config / 未传入时的默认值；实际值由 bootstrap 从 app.yaml 传入）
 _DEFAULT_USER = "admin"
@@ -70,7 +71,6 @@ class LoginDialog(BaseDialog):
         配色全部来自当前主题（:func:`app.ui.common.theme.login_qss`），保留
         系统原生窗口边框 → 既是系统程序对话框、内容又是现代化简洁风格。
         """
-        from app.ui.common.theme import ThemeManager, login_qss
 
         self.setObjectName("LoginDialog")
         self.setFixedWidth(400)

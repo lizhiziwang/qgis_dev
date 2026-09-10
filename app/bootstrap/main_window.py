@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
+from app.ui.main_window import MainWindow
+
 
 def build_window(app_name: Optional[str] = None) -> Any:
     """构建主窗口（新 :class:`MainWindow`）。
@@ -13,6 +15,5 @@ def build_window(app_name: Optional[str] = None) -> Any:
         "qgis_dev"。启动初始化流程里（见 :mod:`app.bootstrap`）由
         :func:`app.bootstrap.main` 从已加载的 :class:`AppConfig` 取出传入。
     """
-    from app.ui.main_window import MainWindow
 
     return MainWindow(app_name=app_name)

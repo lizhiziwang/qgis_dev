@@ -155,6 +155,12 @@ app.bootstrap       启动装配（唯一允许同时碰 UI 与 infra 的入口�
 
 5. 禁止 `from x import *`；`__all__` 按字母序排列（`RUF022`）。
 
+6. **自动检查**。`scripts/check_import_placement.py` 扫描 `app/`：
+   - 重依赖（`qgis` / `osgeo` / `processing` 等，或目标 `app` 模块自身传递依赖这些
+     重依赖）的延迟导入自动放行（这类不该逐行标注）；
+   - 其余函数内 import 必须带 `# noqa: PLC0415 - <原因>`，否则 CI 失败。
+   `tests/**` 不在检查范围：测试常在函数内延迟导入以隔离 QGIS 收集期副作用。
+
 ---
 
 ## 5. 类型标注（必须）
@@ -321,7 +327,7 @@ app.bootstrap       启动装配（唯一允许同时碰 UI 与 infra 的入口�
 | `RUF001/002/003` | **忽略** | 中文注释/字符串使用全角标点是刻意的 |
 | `BLE001` | **启用** | 代码已用 `# noqa: BLE001` 标注宽泛捕获，需让 noqa 生效 |
 | `N802/N803/N815` | **集中豁免** | Qt 事件/虚函数/Signal 必须保持 C++ 驼峰名，在 `pep8-naming.extend-ignore-names` 中按 glob 豁免 |
-| `PLC0415` | **目标启用**（存量迁移后） | 函数内 import 仅允许重依赖/循环依赖；当前存量过多，先按 §14.2 清理再加进 `select` |
+| `PLC0415` | **由脚本强制** | ruff 的 `PLC0415` 无法区分重依赖；改由 `scripts/check_import_placement.py` 检查函数内轻量导入，并在 `external` 中声明以接受 `# noqa: PLC0415 - <原因>` 标注（见 §4 第 6 条） |
 | `E501` | **忽略** | 行宽统一交给 `ruff format` 处理 |
 | `legacy/**` | **全部忽略** | 归档只读代码 |
 
@@ -336,27 +342,12 @@ ruff check app/ tests/ --select UP --fix
 # 2) 排序导入、删除未用导入、补文件末尾换行、整理 __all__、清理失效 noqa
 ruff check app/ tests/ --select I,F401,W292,RUF022,RUF100 --fix
 
-# 3) 轻量函数内导入上提（§4）：先用审计脚本列出，再手工把标准库/轻量库/app 模块
-#    移到模块顶层；只保留 qgis / osgeo / processing 等重依赖的延迟导入。
-#    存量约 159 处轻量函数内导入待处理（另有约 160 处重依赖延迟导入合规）。
-python - <<'PY'
-import ast, pathlib
-HEAVY = ("qgis", "osgeo", "processing", "PyQt5", "PyQt6", "psycopg2", "rasterio", "scipy", "networkx")
-for p in pathlib.Path("app").rglob("*.py"):
-    if "__pycache__" in p.parts:
-        continue
-    tree = ast.parse(p.read_text(encoding="utf-8"))
-    for fn in (n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))):
-        for s in ast.walk(fn):
-            mods = ([a.name for a in s.names] if isinstance(s, ast.Import)
-                    else [s.module or ""] if isinstance(s, ast.ImportFrom) else [])
-            for m in mods:
-                if not m.startswith(HEAVY):
-                    print(f"{p}:{s.lineno}: {m}")
-PY
+# 3) 函数内导入（§4）：存量轻量导入已上提；余下 6 处刻意豁免
+#    （4 循环依赖 + 2 可选依赖）已加 `# noqa: PLC0415 - <原因>`；
+#    另有约 160 处重依赖延迟导入合规。
+python scripts/check_import_placement.py
 
-# 4) 清理完成后启用 PLC0415 作为硬门禁
-ruff check app/ tests/ --select PLC0415
+# 4) 上面这条作为 CI 硬门禁（替代无法区分重依赖的 ruff PLC0415）
 
 # 5) 统一格式（会触碰较多文件，建议单独提交，便于 review 忽略空白 diff）
 ruff format app/ config/ tests/

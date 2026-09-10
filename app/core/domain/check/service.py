@@ -14,6 +14,8 @@ from app.core.domain.check.param import CheckParam
 from app.core.domain.check.registry import BaseCheck, get_check_cls
 from app.core.domain.check.types import CheckResult
 
+from .registry import available_types
+
 if TYPE_CHECKING:
     from qgis.core import QgsVectorLayer
 
@@ -21,7 +23,7 @@ if TYPE_CHECKING:
 def _ensure_builtin_loaded() -> None:
     """触发 builtin 子模块 ``import *`` 完成注册。"""
     # 重复 import 是 no-op，import 副作用是注册本身
-    from app.core.domain.check import builtin  # noqa: F401
+    from app.core.domain.check import builtin  # noqa: F401, PLC0415 - 循环依赖：上提会与 check 包 __init__ 成环
 
 
 class CheckService:
@@ -32,7 +34,6 @@ class CheckService:
 
     def available_types(self) -> List[str]:
         """返回所有已注册的 check ``type_id`` 列表。"""
-        from .registry import available_types
 
         return available_types()
 

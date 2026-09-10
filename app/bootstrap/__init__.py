@@ -24,10 +24,15 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from app.bootstrap.main_window import build_window
+from app.core.auth import Credential, load_credential, save_credential
+from app.core.domain.basemap import add_base_tile_layer
 from app.env.config import AppConfig
 from app.env.qgis_runtime import QgisRuntime
 from app.infra.fs.paths import Paths
 from app.infra.logging import get_logger, install_crash_logging
+from app.infra.logging.config import LogConfig
+from app.infra.logging.sink import _RootSink
 
 logger = get_logger(__name__)
 
@@ -77,7 +82,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     splash = _start_splash(cfg.app_name)
     try:
         # 鉴权优先：本机有未过期凭证就直接跳过登录
-        from app.core.auth import load_credential
 
         cached = load_credential()
         if cached is not None:
@@ -97,7 +101,6 @@ def main(argv: Optional[list[str]] = None) -> int:
             return 0
 
         # 登录成功 → 签发 30 天凭证 + 进入主窗口
-        from app.core.auth import Credential, save_credential
 
         new_cred = Credential.issue(username)
         save_credential(new_cred)
@@ -162,8 +165,6 @@ def _build_paths(cfg: AppConfig) -> Paths:
 
 def _configure_logging(cfg: AppConfig, paths: Paths) -> None:
     """写一份新 :class:`LogConfig` 并强制装配。"""
-    from app.infra.logging.config import LogConfig
-    from app.infra.logging.sink import _RootSink
 
     log_cfg = LogConfig(
         log_dir=paths.logs,
@@ -342,7 +343,6 @@ def _run_qgis_app(cfg: AppConfig, qgis: QgisRuntime, app, splash=None) -> int:
     qgis.init_plugins()
 
     # 4) 主窗口（阶段 4 实现新窗口；阶段 1-3 临时仍用旧类）
-    from app.bootstrap.main_window import build_window
 
     if splash is not None:
         splash.set_status("正在构建主窗口")
@@ -360,7 +360,6 @@ def _make_base_tile_callback(cfg: AppConfig):
     """构造"启动完成后加载配置底图"的回调。"""
 
     def _cb(window) -> None:
-        from app.core.domain.basemap import add_base_tile_layer
 
         layer = add_base_tile_layer(cfg.map)
         if layer is None:

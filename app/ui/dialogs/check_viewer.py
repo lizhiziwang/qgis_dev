@@ -12,8 +12,8 @@ from typing import Any, Optional
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
-    QApplication,
     QAbstractItemView,
+    QApplication,
     QCheckBox,
     QComboBox,
     QFileDialog,
@@ -35,7 +35,8 @@ from app.core.domain.check import CheckParam, CheckService
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.ui.common.base_dialog import BaseDialog
-
+from app.ui.common.widgets import open_file_dir
+from app.ui.dialogs.check_editor import CheckConfigDialog, CheckVo
 
 logger = get_logger(__name__)
 
@@ -438,7 +439,6 @@ class CheckViewerDialog(BaseDialog):
         menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def _create_check_item(self, is_add: bool, item=None) -> None:
-        from app.ui.dialogs.check_editor import CheckConfigDialog, CheckVo
         if item is None:
             return
         original = item["original_item"]
@@ -487,12 +487,10 @@ class CheckViewerDialog(BaseDialog):
             self.parent._show_attribute_dock(layer, filter_str=p.where)
 
     def _on_add_new(self) -> None:
-        from app.infra.messagebar import send
         send("warning", "功能待开发！", duration=5)
         self.close()
 
     def _export_data(self) -> None:
-        from app.ui.common.widgets import open_file_dir
         path = open_file_dir(self.parent, is_dir=True)
         if not path:
             return

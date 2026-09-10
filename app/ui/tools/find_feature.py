@@ -11,6 +11,7 @@ from typing import Optional
 from qgis.gui import QgsMapCanvas, QgsMapToolIdentify
 
 from app.core.domain.identify import FeatureIdentifyService, IdentifyResult
+from app.ui.dialogs.feature_info import FeatureInfoDialog
 
 
 class FindFeatureTool(QgsMapToolIdentify):
@@ -37,8 +38,8 @@ class FindFeatureTool(QgsMapToolIdentify):
         self._show_info(result)
 
     def _show_highlight(self, result: IdentifyResult) -> None:
-        from qgis.PyQt.QtGui import QColor
         from qgis.gui import QgsHighlight
+        from qgis.PyQt.QtGui import QColor
 
         if self.highlight is not None:
             self.canvas.scene().removeItem(self.highlight)
@@ -63,7 +64,6 @@ class FindFeatureTool(QgsMapToolIdentify):
             pw.show_feature_info(result, highlight=self.highlight)
             return
         # 回退：没有主窗口时仍用旧弹窗（保持工具可独立使用）
-        from app.ui.dialogs.feature_info import FeatureInfoDialog
         if self.last_dialog is not None:
             self.last_dialog.close()
         dlg = FeatureInfoDialog(self.parent_window, result, highlight=self.highlight)

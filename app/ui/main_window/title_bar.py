@@ -32,6 +32,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from app.core.auth import load_credential
 from app.ui.common.icons import Icons
 from app.ui.common.qt_compat import global_pos
 from app.ui.common.theme import THEMES, ThemeManager, title_bar_qss
@@ -451,7 +452,6 @@ class TitleBar(QWidget):
         """与主窗口一致：构造时从本地凭证加载登录状态（未登录显示"未登录"）。"""
         if self._user_btn is None:
             return
-        from app.core.auth import load_credential
 
         cred = load_credential()
         if cred is not None:

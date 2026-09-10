@@ -11,10 +11,11 @@ import re
 from datetime import datetime
 from typing import Optional
 
-from qgis.PyQt.QtCore import QTimer, Qt
+from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QTextCursor
 from qgis.PyQt.QtWidgets import (
     QComboBox,
+    QDockWidget,
     QHBoxLayout,
     QLabel,
     QLineEdit,
@@ -25,7 +26,6 @@ from qgis.PyQt.QtWidgets import (
     QTextBrowser,
     QVBoxLayout,
     QWidget,
-    QDockWidget,
 )
 
 from app.infra.fs.io import write_text
@@ -36,7 +36,7 @@ from app.infra.logging import (
     get_logger,
     render_log_html,
 )
-
+from app.ui.common.widgets import open_file_dir
 
 logger = get_logger(__name__)
 
@@ -197,7 +197,6 @@ class LogDock(QDockWidget):
         self._last_mtime = self._file_mtime()
 
     def _on_save(self) -> None:
-        from app.ui.common.widgets import open_file_dir
 
         path = open_file_dir(self, is_dir=True, title="选择保存目录")
         if not path:

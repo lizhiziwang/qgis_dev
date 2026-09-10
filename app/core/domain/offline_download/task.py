@@ -15,7 +15,8 @@ from qgis.PyQt.QtCore import QObject, pyqtSignal
 
 from app.infra.logging import get_logger
 
-from . import fetcher
+from . import disk, fetcher, gpkg_fetcher
+from .disk import format_bytes
 from .fetcher import DownloadCanceled
 from .model import FetchPlan
 
@@ -92,7 +93,6 @@ class OfflineDownloadTask(QObject):
     # ------------------------------------------------------------ 执行
 
     def _run(self) -> None:
-        from . import gpkg_fetcher
 
         try:
             self._stage("准备")
@@ -151,7 +151,6 @@ class OfflineDownloadTask(QObject):
             self._progress(90)
             if not os.path.exists(gpkg_path):
                 raise RuntimeError("未生成 .gpkg 产物（请检查是否勾选了矢量/影像数据）")
-            from .disk import format_bytes
 
             self._log_line(
                 "INFO",
@@ -179,6 +178,5 @@ class OfflineDownloadTask(QObject):
 
     def _disk_precheck(self) -> Optional[str]:
         """磁盘预检（方案 §7.3）：估算×冗余 > 剩余 → 中文提示；None 放行。"""
-        from . import disk
 
         return disk.precheck_message(self.plan.target_dir, self.plan.est_total_bytes)

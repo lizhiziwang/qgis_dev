@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from . import disk, layout, planner, srs
+from . import disk, fetcher, layout, planner, srs
 from .model import (
     ALL_KEYS,
     KEY_LABELS,
@@ -68,7 +68,6 @@ def __getattr__(name: str):
 
         return DownloadManager
     if name in ("FetchContext", "FetchError", "DownloadCanceled"):
-        from . import fetcher
 
         return getattr(fetcher, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -9,8 +9,21 @@
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING, Optional
 
+from qgis.core import (
+    QgsApplication,
+    QgsCoordinateTransform,
+    QgsMapLayer,
+    QgsPointXY,
+    QgsProcessingContext,
+    QgsProcessingUtils,
+    QgsProject,
+    QgsVectorLayer,
+    QgsWkbTypes,
+)
+from qgis.gui import QgsMapToolEmitPoint, QgsVertexMarker
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import (
@@ -26,18 +39,6 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qgis.core import (
-    QgsApplication,
-    QgsCoordinateTransform,
-    QgsMapLayer,
-    QgsPointXY,
-    QgsProcessingContext,
-    QgsProcessingUtils,
-    QgsProject,
-    QgsVectorLayer,
-    QgsWkbTypes,
-)
-from qgis.gui import QgsMapToolEmitPoint, QgsVertexMarker
 
 from app.core.domain.shortestpath import ShortestPathJob
 from app.core.domain.shortestpath.service import build_shortest_path_params
@@ -568,7 +569,6 @@ class ShortestPathDialog(BaseDialog):
 
 
 def _has_ext(path: str) -> bool:
-    import os
 
     return bool(os.path.splitext(path)[1])
 
@@ -580,8 +580,9 @@ def _ensure_processing_algorithm(alg_id: str):
     ``Processing.initialize()`` 再查一次。返回 None 表示注册表仍取不到该算法。
     """
     try:
-        import processing  # noqa: F401
         from processing.core.Processing import Processing
+
+        import processing  # noqa: F401
 
         Processing.initialize()
     except Exception:  # noqa: BLE001

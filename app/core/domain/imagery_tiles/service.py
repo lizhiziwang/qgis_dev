@@ -116,7 +116,7 @@ class ImageryTileService:
 
         :rtype: :class:`~app.core.domain.imagery_tiles.task.CreateImageryTileTask`
         """
-        from .task import CreateImageryTileTask
+        from .task import CreateImageryTileTask  # noqa: PLC0415 - 循环依赖：task 反向依赖 service，上提成环
 
         return CreateImageryTileTask("", job)
 

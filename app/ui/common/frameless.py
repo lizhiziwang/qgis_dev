@@ -35,6 +35,7 @@ from qgis.PyQt.QtGui import QCursor, QGuiApplication
 from qgis.PyQt.QtWidgets import QMainWindow, QMenuBar, QTabBar, QVBoxLayout, QWidget
 
 from app.ui.common.qt_compat import event_pos, global_pos
+from app.ui.main_window.title_bar import TitleBar
 
 # ---------------------------------------------------------------------------
 # Windows 无边框窗口辅助：WM_NCHITTEST 让系统接管"标题栏拖动 + 边缘缩放"；
@@ -167,7 +168,6 @@ class FramelessMixin:
             流程编辑器 / 对话框把后三个传 False，只留 图标/标题/窗口按钮。
         :return: 创建好的 :class:`TitleBar` 实例（也存到 ``self.title_bar``）。
         """
-        from app.ui.main_window.title_bar import TitleBar
 
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
 

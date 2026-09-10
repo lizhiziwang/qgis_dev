@@ -10,6 +10,7 @@ import time
 from typing import Any, List, Optional
 
 from osgeo import ogr
+from qgis.core import QgsVectorLayer
 from qgis.PyQt.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
@@ -25,10 +26,10 @@ from qgis.PyQt.QtWidgets import (
     QTextEdit,
     QVBoxLayout,
 )
-from qgis.core import QgsVectorLayer
 
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.dialogs.query_builder import QueryBuilderDialog
 
 logger = get_logger(__name__)
 
@@ -414,7 +415,6 @@ class ExecuteSqlDialog(BaseDialog):
         pass
 
     def _on_open_query_builder(self) -> None:
-        from app.ui.dialogs.query_builder import QueryBuilderDialog
         dlg = QueryBuilderDialog(self.layer, parent=self)
         dlg.exec()
 

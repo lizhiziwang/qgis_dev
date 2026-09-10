@@ -14,7 +14,13 @@ from __future__ import annotations
 import math
 from typing import Optional
 
+from app.core.util.arcgis_iamge_server_util import ArcGISImageServer
+from app.core.util.arcgis_server_util import ArcGISServer
+from app.core.util.local_db_util import local_db_util
+
+from .fetcher import FetchError, _scope_query_params, fetch_files
 from .model import FetchItem
+from .task_info import arcgis_sublayer_url
 
 #: ArcGIS 字段类型 → sqlite 列类型
 _ESRI_TO_SQL = {
@@ -42,10 +48,6 @@ def _normalize_wkid(wkid: Optional[int]) -> Optional[int]:
 
 def fetch_vector(item: FetchItem, gpkg_path: str, scope_wgs84, ctx) -> dict:
     """矢量服务 → .gpkg feature 表（表名=服务名，见 planner）。"""
-    from app.core.util.arcgis_server_util import ArcGISServer
-    from app.core.util.local_db_util import local_db_util
-    from .task_info import arcgis_sublayer_url
-    from .fetcher import _scope_query_params
 
     url = arcgis_sublayer_url(item.service_url or "", item.layer_id)
     client = ArcGISServer(timeout=max(10.0, float(ctx.timeout or 30)))
@@ -116,9 +118,6 @@ def fetch_vector(item: FetchItem, gpkg_path: str, scope_wgs84, ctx) -> dict:
 
 def fetch_imagery(item: FetchItem, gpkg_path: str, ctx) -> dict:
     """ArcGIS 影像瓦片金字塔 → 同一个 .gpkg 瓦片表（util ArcGISImageServer）。"""
-    from app.core.util.arcgis_iamge_server_util import ArcGISImageServer
-    from app.core.util.local_db_util import local_db_util
-    from .fetcher import FetchError
 
     url = (item.service_url or "").split("?")[0]
     server = ArcGISImageServer(timeout=max(10.0, float(ctx.timeout or 30)))
@@ -177,7 +176,6 @@ def fetch_imagery(item: FetchItem, gpkg_path: str, ctx) -> dict:
 
 def fetch_item(item: FetchItem, root: str, scope_wgs84, ctx) -> dict:
     """分发：矢量/ArcGIS 影像 → .gpkg；文件类保持普通文件下载。"""
-    from .fetcher import FetchError, fetch_files
 
     if item.kind == "vector":
         return fetch_vector(item, ctx.gpkg_path, scope_wgs84, ctx)

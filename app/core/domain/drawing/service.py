@@ -16,7 +16,8 @@ if TYPE_CHECKING:
 
 from qgis.PyQt.QtCore import QObject, pyqtSignal
 
-from .tools import get_tool_class
+from . import tools
+from .tools import TOOL_REGISTRY, get_tool_class
 
 
 @dataclass(frozen=True)
@@ -61,7 +62,7 @@ class DrawingService:
 
     def __init__(self) -> None:
         # 把工具类已 import
-        from . import tools  # noqa: F401
+        pass
 
     def start(self, request: DrawRequest) -> ActiveDraw:
         """激活一个绘制工具。"""
@@ -78,6 +79,5 @@ class DrawingService:
 
     def supported_types(self) -> list[str]:
         """返回所有支持的几何类型。"""
-        from .tools import TOOL_REGISTRY
 
         return list(TOOL_REGISTRY.keys())

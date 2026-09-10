@@ -8,6 +8,15 @@ import threading
 import time
 from typing import List, Optional
 
+from qgis.core import (
+    QgsExpression,
+    QgsExpressionContext,
+    QgsExpressionContextUtils,
+    QgsFeature,
+    QgsFeatureRequest,
+    QgsField,
+    QgsVectorLayer,
+)
 from qgis.PyQt.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, QTimer, QVariant, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
@@ -22,19 +31,11 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qgis.core import (
-    QgsExpression,
-    QgsExpressionContext,
-    QgsExpressionContextUtils,
-    QgsFeature,
-    QgsFeatureRequest,
-    QgsField,
-    QgsVectorLayer,
-)
 
 from app.core.domain.editing import LayerEditService
 from app.infra.logging import get_logger
 from app.ui.common.icons import Icons
+from app.ui.dialogs.query_builder import QueryBuilderDialog
 
 logger = get_logger(__name__)
 
@@ -738,7 +739,6 @@ class PagedAttributeTableWidget(QWidget):
         self.stop_btn.setEnabled(False)
 
     def _filter(self) -> None:
-        from app.ui.dialogs.query_builder import QueryBuilderDialog
         dlg = QueryBuilderDialog(self.layer, parent=self)
         dlg.sqlConfirmed.connect(self._apply_filter)
         dlg.exec()

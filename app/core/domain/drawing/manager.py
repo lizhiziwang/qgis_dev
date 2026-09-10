@@ -19,13 +19,14 @@ if TYPE_CHECKING:
     from qgis.core import QgsGeometry, QgsVectorLayer
     from qgis.gui import QgsMapCanvas, QgsRubberBand
 
-from qgis.PyQt.QtCore import QObject, pyqtSignal
 from qgis.core import QgsWkbTypes
 from qgis.gui import QgsRubberBand
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import QObject, Qt, pyqtSignal
 
 from app.infra.logging import get_logger
+
 from .service import ActiveDraw, DrawingService
+from .tools import get_tool_class
 
 logger = get_logger(__name__)
 
@@ -62,7 +63,6 @@ class DrawManager(QObject):
         与 :class:`DrawingService.start` 区别：本方法传入 ``draw_manager=self``，
         让工具能用共享 rubber_band 和 temp_points 列表。
         """
-        from .tools import get_tool_class
 
         if self._active is not None:
             self.clear_draw_tool()

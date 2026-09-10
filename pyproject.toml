@@ -74,6 +74,10 @@ ignore = [
     "RUF002",   # 同上（docstring）
     "RUF003",   # 同上（注释）
 ]
+# PLC0415（函数内 import）由 scripts/check_import_placement.py 检查：它允许
+# 重依赖延迟导入（ruff 无法区分），只对轻量导入报警。声明为 external 可让
+# RUF100 接受循环依赖处 `# noqa: PLC0415 - <原因>` 的标注。
+external = ["PLC0415"]
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["PT011", "S101"]

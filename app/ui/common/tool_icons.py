@@ -18,6 +18,8 @@ from __future__ import annotations
 from qgis.PyQt.QtCore import QRect, Qt
 from qgis.PyQt.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPixmap
 
+from app.infra.fs.paths import Paths
+
 _LOGICAL = 36        # 逻辑像素边长（与工具条 iconSize 一致）
 _DPR = 2.0           # 2x 渲染，高 DPI 下图标不发虚
 _GLYPH_PX = int(_LOGICAL * 0.8)  # 字形像素尺寸（约留 10% 边距，图标不顶满）
@@ -85,7 +87,6 @@ def _ensure_font() -> bool:
         return _font_ok
     _font_loaded = True
 
-    from app.infra.fs.paths import Paths
 
     font_path = Paths.from_env(Paths.default()).resource("fonts", "fa-solid-900.ttf")
     if not font_path.is_file():

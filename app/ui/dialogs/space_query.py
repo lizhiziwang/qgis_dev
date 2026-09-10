@@ -7,6 +7,8 @@ from __future__ import annotations
 
 from typing import Optional
 
+from qgis.core import Qgis, QgsGeometry, QgsProject
+from qgis.gui import QgsMapCanvas
 from qgis.PyQt.QtCore import QSize, Qt
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import (
@@ -21,16 +23,14 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
 )
 
-from qgis.core import Qgis, QgsGeometry, QgsProject
-from qgis.gui import QgsMapCanvas
-
-from app.core.domain.query import QueryType, SpaceQueryService
 from app.core.domain.drawing import DrawingService
 from app.core.domain.drawing.tools import get_tool_class
+from app.core.domain.query import QueryType, SpaceQueryService
 from app.infra.logging import get_logger
+from app.infra.messagebar import send
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.icons import Icons
-
+from app.ui.docks.attribute_dock import PagedAttributeTableWidget
 
 logger = get_logger(__name__)
 
@@ -65,13 +65,12 @@ class SpaceQueryDialog(BaseDialog):
     def _init_ui(self) -> None:
         layout = QVBoxLayout()
         try:
-            from app.ui.common.widgets import open_file_dir
-            from app.ui.dialogs.query_builder import QueryBuilderDialog  # noqa
+            from app.ui.common.widgets import open_file_dir  # noqa: PLC0415 - 可选依赖：缺失时静默降级
+            from app.ui.dialogs.query_builder import QueryBuilderDialog  # noqa: PLC0415 - 可选依赖：缺失时静默降级
         except Exception:  # noqa: BLE001
             pass
 
         # 图层选择
-        from app.ui.docks.attribute_dock import PagedAttributeTableWidget  # noqa
         from qgis.PyQt.QtWidgets import QComboBox, QHBoxLayout
         layer_layout = QHBoxLayout()
         layer_layout.addWidget(QLabel("查询图层:"))
@@ -136,7 +135,6 @@ class SpaceQueryDialog(BaseDialog):
     def _on_query(self) -> None:
         try:
             if not self.layer_input.currentText():
-                from app.infra.messagebar import send
                 send("warning", "请选择图层进行查询", duration=3)
                 return
             if self.search_geom is None:

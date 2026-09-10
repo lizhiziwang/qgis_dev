@@ -17,6 +17,7 @@ jobs:
       - run: pip install ruff
       - run: ruff check app/ config/ tests/
       - run: ruff format --check app/ config/ tests/
+      - run: python scripts/check_import_placement.py app
 
   test-no-qgis:
     runs-on: ubuntu-latest

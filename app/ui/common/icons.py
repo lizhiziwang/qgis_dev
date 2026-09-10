@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from qgis.PyQt.QtGui import QIcon
 
+from app.infra.fs.paths import Paths
+
 
 class Icons:
     """图标管理（统一从 :class:`Paths` 解析）。"""
@@ -25,7 +27,6 @@ class Icons:
 
     @classmethod
     def _resolve(cls, name: tuple[str, ...]) -> str:
-        from app.infra.fs.paths import Paths
 
         return str(Paths.default().resource(*name))
 

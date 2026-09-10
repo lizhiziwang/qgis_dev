@@ -23,7 +23,13 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
 )
 
+from app.core.data.local_db import scan_local_sqlite
+from app.core.domain.offline_download.offline_load import (
+    open_local_db_vector,
+)
+from app.core.domain.offline_download.service import OfflineDownloadService
 from app.infra.logging import get_logger
+from app.infra.messagebar import send
 from app.ui.common.base_dialog import BaseDialog
 
 logger = get_logger(__name__)
@@ -45,7 +51,6 @@ class OfflineDownloadManagerDialog(BaseDialog):
 
     def __init__(self, parent=None, service=None, title: str = "下载管理") -> None:
         super().__init__(parent, title)
-        from app.core.domain.offline_download.service import OfflineDownloadService
 
         self.service = service or OfflineDownloadService()
         self.manager = self.service.manager
@@ -159,7 +164,6 @@ class OfflineDownloadManagerDialog(BaseDialog):
         if job_id is None:
             return
         if not self.service.retry_job(job_id):
-            from app.infra.messagebar import send
 
             send("warning", "重试失败：任务信息缺失或已过期", duration=4)
             return
@@ -174,7 +178,6 @@ class OfflineDownloadManagerDialog(BaseDialog):
             return
         target = str(rec.get("target_dir", ""))
         if not target or not os.path.isdir(target):
-            from app.infra.messagebar import send
 
             send("warning", "目标目录尚不存在（下载可能未完成或已被清理）", duration=4)
             return
@@ -185,7 +188,6 @@ class OfflineDownloadManagerDialog(BaseDialog):
 
     def _import_gpkg_to_map(self) -> None:
         """选目录里第一个 .gpkg，加载矢量 feature 表；若含瓦片表再用 gdal 直开。"""
-        from app.infra.messagebar import send
 
         root = QFileDialog.getExistingDirectory(self, "选择含 .gpkg 的目录")
         if not root:
@@ -200,7 +202,6 @@ class OfflineDownloadManagerDialog(BaseDialog):
             return
         path = gpkgs[0]
         try:
-            from app.core.data.local_db import scan_local_sqlite
 
             rows = scan_local_sqlite(path)
         except Exception as exc:  # noqa: BLE001
@@ -217,9 +218,6 @@ class OfflineDownloadManagerDialog(BaseDialog):
                 continue
             if not geo:
                 continue
-            from app.core.domain.offline_download.offline_load import (
-                open_local_db_vector,
-            )
 
             layer = open_local_db_vector(path, name)
             if layer is not None:
@@ -265,8 +263,8 @@ def _zoom_to_vector_layers(layers) -> None:
     if not layers:
         return
     from qgis.core import QgsRectangle
-    from qgis.PyQt.QtWidgets import QApplication
     from qgis.gui import QgsMapCanvas
+    from qgis.PyQt.QtWidgets import QApplication
 
     canvas = None
     for w in QApplication.topLevelWidgets():

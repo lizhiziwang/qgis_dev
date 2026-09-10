@@ -50,6 +50,7 @@ from app.core.util.local_db_util import (
     describe_local_db,
 )
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.widgets import open_file_dir
 
 _FILE_FILTER = (
     "SQLite / GeoPackage (*.sqlite *.sqlite3 *.db *.gpkg);;所有文件 (*)"
@@ -200,7 +201,6 @@ class AddConnectionDialog(BaseDialog):
     # ============================================================== 交互
 
     def _on_browse(self) -> None:
-        from app.ui.common.widgets import open_file_dir
 
         path = open_file_dir(self, title="选择 SQLite 数据库文件", filter_=_FILE_FILTER)
         if path:

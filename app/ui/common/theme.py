@@ -14,7 +14,9 @@
 
 from __future__ import annotations
 
+import tempfile
 from dataclasses import dataclass
+from pathlib import Path
 
 from qgis.PyQt.QtCore import QCoreApplication, QObject, QSettings, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QPalette
@@ -453,8 +455,6 @@ def _arrow_url(color: str, up: bool = False) -> str:
     if key in _ARROW_CACHE:
         return _ARROW_CACHE[key]
 
-    import tempfile
-    from pathlib import Path
 
     from qgis.PyQt.QtCore import QPoint, Qt
     from qgis.PyQt.QtGui import QColor, QPainter, QPixmap

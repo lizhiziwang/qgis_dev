@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import argparse
 import os
 from dataclasses import dataclass, field
 from typing import List, Tuple
@@ -202,7 +203,6 @@ class MaxentImporter:
 # ---------------------------------------------------------------------------
 
 def cli_main() -> int:
-    import argparse
 
     parser = argparse.ArgumentParser(description="maxent 目录 → PostGIS")
     parser.add_argument("--maxent-root", required=True, help="maxent 数据根目录")

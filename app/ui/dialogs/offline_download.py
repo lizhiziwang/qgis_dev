@@ -17,8 +17,17 @@
 from __future__ import annotations
 
 import os
+import sys
 from typing import Optional
 
+from qgis.core import (
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsProject,
+    QgsRectangle,
+    QgsWkbTypes,
+)
+from qgis.gui import QgsMapTool, QgsMapToolEmitPoint, QgsRubberBand
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QButtonGroup,
@@ -39,14 +48,6 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qgis.core import (
-    QgsCoordinateReferenceSystem,
-    QgsCoordinateTransform,
-    QgsProject,
-    QgsRectangle,
-    QgsWkbTypes,
-)
-from qgis.gui import QgsMapTool, QgsMapToolEmitPoint, QgsRubberBand
 
 from app.core.domain.offline_download import (
     KEY_LABELS,
@@ -56,10 +57,13 @@ from app.core.domain.offline_download import (
     SpatialScope,
     TaskInfo,
 )
+from app.core.domain.offline_download.disk import format_bytes, free_bytes
+from app.core.domain.offline_download.layout import phase_dir, safe_name
 from app.core.domain.offline_download.service import OfflineDownloadService
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.dialogs.offline_manager import OfflineDownloadManagerDialog
 
 logger = get_logger(__name__)
 
@@ -404,7 +408,6 @@ class OfflineDownloadDialog(BaseDialog):
 
     def _default_target_dir(self, task_name) -> str:
         """默认下载位置 = 程序目录/任务（有任务时 /<任务名>）。"""
-        import sys
 
         base = None
         exe = getattr(sys, "frozen", False) or os.path.basename(sys.executable).lower() in (
@@ -419,7 +422,6 @@ class OfflineDownloadDialog(BaseDialog):
         name = str(task_name or "").strip()
         if not name:
             return root
-        from app.core.domain.offline_download.layout import safe_name
 
         return os.path.join(root, safe_name(name))
 
@@ -431,7 +433,6 @@ class OfflineDownloadDialog(BaseDialog):
             self.target_edit.setText(path)
 
     def _refresh_disk(self) -> None:
-        from app.core.domain.offline_download.disk import format_bytes, free_bytes
 
         free = free_bytes(self.target_edit.text())
         self.free_label.setText(f"剩余 {format_bytes(free)}" if free is not None else "磁盘不可用")
@@ -528,7 +529,6 @@ class OfflineDownloadDialog(BaseDialog):
     # ================================================================ 下载管理
 
     def _open_manager(self) -> None:
-        from app.ui.dialogs.offline_manager import OfflineDownloadManagerDialog
 
         if self._manager_dialog is None:
             self._manager_dialog = OfflineDownloadManagerDialog(self, service=self.service)
@@ -563,7 +563,6 @@ def _available_rows(task: TaskInfo):
     for i, ds in enumerate(task.dictionaries):
         rows.append(("dictionaries", f"字典 {ds.name or i + 1}".strip(), True))
     for img in task.imageries:
-        from app.core.domain.offline_download.layout import phase_dir
 
         rows.append(("imageries", img.name or phase_dir(img.phase), False))
     if task.basemap_data is not None:

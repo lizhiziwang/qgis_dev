@@ -19,6 +19,7 @@ import json
 import math
 import os
 import re
+import sqlite3
 import ssl
 import time
 import urllib.error
@@ -27,8 +28,14 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Callable, Optional
 
-from .layout import SQLITE_CONTAINER
+from app.core.util.arcgis_server_util import ArcGISServer
+from app.core.util.local_db_util import local_db_util
+
+from . import srs
+from .disk import format_bytes
+from .layout import SQLITE_CONTAINER, safe_name
 from .model import FetchItem
+from .task_info import arcgis_sublayer_url
 
 #: 单张 PNG 瓦片平均字节（估算用，方案 §7.2）
 _AVG_TILE_BYTES = 200_000
@@ -243,8 +250,6 @@ def fetch_feature_sqlite(
     - ``local_db_util.batch_add_vector_data``：ST_GeomFromText 批量写几何。
     """
     url = _arcgis_sublayer(item)
-    from app.core.util.arcgis_server_util import ArcGISServer
-    from app.core.util.local_db_util import local_db_util
 
     client = ArcGISServer(timeout=max(10.0, float(ctx.timeout or 30)))
     layer_meta = client.layer_metadata(url)
@@ -314,7 +319,6 @@ class _VectorSink:
     }
 
     def __init__(self, db: str, table: str, meta: dict) -> None:
-        import sqlite3
 
         self.table = table
         self.conn = sqlite3.connect(db)
@@ -397,7 +401,6 @@ def _verify_geometry_blob(db: str, table: str) -> None:
     TEXT），这样 QGIS/数据管理能读到属性但无图形。发现文本降级直接报明确错误，
     不再静默产出“有数据没图形”的库。
     """
-    import sqlite3
 
     try:
         con = sqlite3.connect(db, timeout=5.0)
@@ -480,7 +483,6 @@ def _scope_query_params(
     x1, y1, x2, y2 = scope_wgs84
     if wkid not in (4326, 4490, 102100, 102113, 3857):
         try:
-            from . import srs
 
             rect = srs.rect_wgs84_to(x1, y1, x2, y2, f"EPSG:{wkid}")
             if rect:
@@ -839,7 +841,6 @@ def _full_extent_wgs84(body: dict):
     if wkid == 3857:
         return _merc_rect_to_wgs84(coords[0], coords[1], coords[2], coords[3])
     try:
-        from . import srs
 
         return srs.rect_to_wgs84(coords[0], coords[1], coords[2], coords[3], f"EPSG:{wkid}")
     except Exception:  # noqa: BLE001
@@ -916,7 +917,6 @@ def _wms_tile(item: FetchItem, z: int, x: int, y: int, ctx: FetchContext) -> str
     crs = (existing.get(crs_param) if crs_param else None) or "EPSG:4326"
     x1, y1, x2, y2 = (lon1, lat1, lon2, lat2)
     if crs.upper() != "EPSG:4326":
-        from . import srs
 
         rect = srs.rect_wgs84_to(lon1, lat1, lon2, lat2, crs)
         if rect:
@@ -980,7 +980,6 @@ def _lon_to_x(lon: float, z: int) -> int:
 
 
 def _lat_to_y(lat: float, z: int) -> int:
-    import math
 
     rad = math.radians(lat)
     return int(math.floor((1.0 - math.asinh(math.tan(rad)) / math.pi) / 2.0 * (1 << z)))
@@ -988,7 +987,6 @@ def _lat_to_y(lat: float, z: int) -> int:
 
 def _tile_bounds(x: int, y: int, z: int) -> tuple[float, float, float, float]:
     """瓦片 WGS84 外包 (lon1, lat2, lon2, lat1)，即 (西, 北, 东, 南)。"""
-    import math
 
     n = 1 << z
     lon1 = x / n * 360.0 - 180.0
@@ -1099,7 +1097,6 @@ def _item_urls(item: FetchItem) -> list[str]:
 def _name_from_url(url: str) -> str:
     path = urllib.parse.urlsplit(url).path
     name = urllib.parse.unquote(os.path.basename(path))
-    from .layout import safe_name
 
     if not name or "." not in name:
         name = safe_name(name or "file") + ".dat"
@@ -1118,13 +1115,11 @@ def _sha256(path: str) -> str:
 
 
 def _fmt(num: int) -> str:
-    from .disk import format_bytes
 
     return format_bytes(num)
 
 
 def _arcgis_sublayer(item: FetchItem) -> str:
-    from .task_info import arcgis_sublayer_url
 
     if not item.service_url:
         raise FetchError(f"「{item.label}」缺服务地址。")

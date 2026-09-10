@@ -45,7 +45,7 @@ class TileService:
         """把任务提交到 :class:`QgsApplication.taskManager`，返回 :class:`QgsTask`。"""
         from qgis.core import QgsApplication
 
-        from .task import CreateTileTask
+        from .task import CreateTileTask  # noqa: PLC0415 - 循环依赖：task 反向依赖 service，上提成环
 
         task = CreateTileTask("", job)
         manager = QgsApplication.taskManager()

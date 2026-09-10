@@ -12,3 +12,12 @@ repos:
       - id: mypy
         additional_dependencies: [pydantic, types-PyYAML]
         args: [--config-file=pyproject.toml]
+
+  - repo: local
+    hooks:
+      - id: check-import-placement
+        name: check function-level imports (docs/coding-standards.md §4)
+        entry: python scripts/check_import_placement.py app
+        language: system
+        pass_filenames: false
+        files: ^app/.*\.py$

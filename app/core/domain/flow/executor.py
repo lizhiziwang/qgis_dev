@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import builtins
+import sys
 import time
 import traceback
 from pathlib import Path
@@ -282,15 +283,15 @@ def _ensure_processing_ready() -> None:
     if registry.providerById("native") is not None:
         return
 
-    import sys
 
     prefix = QgsApplication.instance().prefixPath()
     plugins_dir = str(Path(prefix) / "python" / "plugins")
     if plugins_dir and plugins_dir not in sys.path:
         sys.path.insert(0, plugins_dir)
 
-    import processing  # noqa: F401 —— 导入插件，把 qgis.processing.run 换成真实现
     from processing.core.Processing import Processing
+
+    import processing  # noqa: F401 —— 导入插件，把 qgis.processing.run 换成真实现
 
     Processing.initialize()
 

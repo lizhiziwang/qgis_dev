@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
+from qgis.core import QgsMapLayer, QgsProject
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QComboBox,
@@ -22,10 +23,9 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from qgis.core import QgsMapLayer, QgsProject
-
 from app.core.domain.tiles import TileJob, TileService
 from app.infra.logging import get_logger
+from app.infra.messagebar import send
 from app.ui.common.algo_desc import make_description_browser
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.widgets import open_file_dir
@@ -40,7 +40,6 @@ class VectorTileDialog(BaseDialog):
         super().__init__(parent, title)
         self.dia_type = dia_type
         if not self.dia_type:
-            from app.infra.messagebar import send
             send("warning", "功能待开发", duration=3)
             self.close()
             return

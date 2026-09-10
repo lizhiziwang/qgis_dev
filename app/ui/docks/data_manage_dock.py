@@ -65,6 +65,7 @@ from app.core.util.local_db_util import (
     _CATEGORY_UNIT,
 )
 from app.infra.logging import get_logger
+from app.ui.dialogs.add_connection import AddConnectionDialog
 
 logger = get_logger(__name__)
 
@@ -574,7 +575,6 @@ class DataManageDock(QDockWidget):
         if self._on_add_connection is not None:
             self._fire("新建连接", self._on_add_connection)
             return
-        from app.ui.dialogs.add_connection import AddConnectionDialog
 
         dlg = AddConnectionDialog(self)
         if dlg.exec() != QDialog.DialogCode.Accepted:

@@ -25,9 +25,10 @@
 
 from __future__ import annotations
 
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Optional
 
 from app.core.domain.geom_cleanup import copy_with_widened_string_fields
 from app.infra.logging import get_logger
@@ -215,7 +216,6 @@ class GenericAlgService:
     @staticmethod
     def _temp_output_path(dest_param, job: GenericAlgJob) -> str:
         """为 GDAL 算法生成临时输出文件路径（带合法扩展名）。"""
-        import tempfile
 
         from qgis.core import QgsProcessingParameterRasterDestination
 

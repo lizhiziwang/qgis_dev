@@ -2,10 +2,12 @@
     本地sqlite数据创建管理工具
 '''
 
+import ctypes
 import json
 import math
 import os
 import re
+import shutil
 import uuid
 from collections.abc import Iterable
 from contextlib import suppress
@@ -1836,7 +1838,6 @@ def gpkg_open_path(db_path: str | Path) -> str:
         _remember_alias_dir(p.parent)
         return str(gpkg)
     except OSError:
-        import shutil
 
         try:
             shutil.copyfile(p, gpkg)
@@ -1857,7 +1858,6 @@ def _win_file_attr(path: Path) -> int | None:
     if os.name != "nt":
         return None
     try:
-        import ctypes
 
         v = ctypes.windll.kernel32.GetFileAttributesW(str(path))
         return v if v != -1 else None
@@ -1879,7 +1879,6 @@ def _set_hidden(path: Path) -> None:
     if os.name != "nt":
         return
     try:
-        import ctypes
 
         cur = _win_file_attr(path)
         if cur is not None and not (cur & 0x2):

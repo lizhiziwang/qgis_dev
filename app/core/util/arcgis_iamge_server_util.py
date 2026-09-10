@@ -59,6 +59,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, quote, unquote, urlencode, urlparse, urlunparse
 from urllib.request import Request, urlopen
 
+from app.core.util.local_db_util import local_db_util as _local_db_util
+
 _DEFAULT_TIMEOUT = 30.0
 _TILE_SIZE = 256  # 导出方式单块瓦片边长(px);tile 方式按服务 tileInfo 实际尺寸
 
@@ -752,7 +754,6 @@ class ArcGISImageServer:
         if db_util is None:
             if not out_db:
                 raise ValueError("save_tiles_to_db 需传 out_db 或已打开的 db_util")
-            from app.core.util.local_db_util import local_db_util as _local_db_util
             db_util = _local_db_util(out_db)
         kind = getattr(db_util, "kind", None)
         if register and kind == "mbtiles":
