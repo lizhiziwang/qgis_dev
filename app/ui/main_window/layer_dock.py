@@ -9,6 +9,10 @@ Dock 内容顶部带一条 QGIS 风格的头部工具条（只发信号，行为
 - 删除图层/组 → ``remove_requested``
 - 全部展开 / 全部折叠 → ``expand_all_requested`` / ``collapse_all_requested``
 - 上移 / 下移 → ``move_up_requested`` / ``move_down_requested``
+
+右键菜单同样只发信号：``context_menu_requested(layer, 全局坐标)``——图层由
+``index2node`` 从被点的节点直接解出（**不按图层名回查**，重名图层不会拿错），
+菜单本体由主窗口构建，且与工程管理 Dock 共用同一套。
 """
 
 from __future__ import annotations
@@ -17,7 +21,7 @@ from contextlib import suppress
 
 from qgis.core import QgsApplication, QgsLayerTreeModel, QgsProject
 from qgis.gui import QgsLayerTreeView
-from qgis.PyQt.QtCore import QSize, Qt, pyqtSignal
+from qgis.PyQt.QtCore import QPoint, QSize, Qt, pyqtSignal
 from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import (
     QDockWidget,
@@ -63,7 +67,7 @@ def _theme_icon(name: str) -> QIcon:
 class LayerDock(QDockWidget):
     """独立的图层树面板。"""
 
-    context_menu_requested = pyqtSignal(object)  # QPoint
+    context_menu_requested = pyqtSignal(object, object)  # (QgsMapLayer, QPoint 全局坐标)
     layer_clicked = pyqtSignal(object)
     style_panel_requested = pyqtSignal()
     add_group_requested = pyqtSignal()
@@ -92,7 +96,7 @@ class LayerDock(QDockWidget):
         self.view.setModel(self.model)
         self.view.clicked.connect(self.layer_clicked.emit)
         self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.view.customContextMenuRequested.connect(self.context_menu_requested.emit)
+        self.view.customContextMenuRequested.connect(self._on_view_context_menu)
 
         self._build_header()
 
@@ -104,6 +108,35 @@ class LayerDock(QDockWidget):
         body_layout.addWidget(self.header_bar)
         body_layout.addWidget(self.view, 1)
         self.setWidget(body)
+
+    # ------------------------------------------------------------- 事件
+
+    def _on_view_context_menu(self, pos: QPoint) -> None:
+        """右键图层节点 → 发 ``(layer, 全局坐标)``，菜单本体由主窗口构建。
+
+        图层用 ``index2node`` 从被点的节点解出，而不是拿显示名去
+        ``QgsProject.mapLayersByName`` 回查——**同名图层会回查到错的那个**
+        （树里看是 A，菜单作用的却是 B）。
+
+        ``customContextMenuRequested`` 的 pos 是 **viewport 坐标**：``indexAt``
+        与 ``mapToGlobal`` 都按 viewport 解释，与工程管理 Dock 的写法一致。
+
+        组节点 / 图例节点没有 ``layer()``（返回 None），无效位置也直接返回，
+        一律不弹菜单。
+        """
+        index = self.view.indexAt(pos)
+        if not index.isValid():
+            return
+        # index2node 对越界/野索引会抛异常；槽内异常未捕获会崩（0xC0000409）
+        try:
+            node = self.view.index2node(index)
+        except Exception:  # noqa: BLE001
+            return
+        layer_getter = getattr(node, "layer", None)
+        layer = layer_getter() if callable(layer_getter) else None
+        if layer is None:
+            return
+        self.context_menu_requested.emit(layer, self.view.viewport().mapToGlobal(pos))
 
     # ------------------------------------------------------- 头部工具条
 

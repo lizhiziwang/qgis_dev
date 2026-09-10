@@ -1046,7 +1046,7 @@ class MainWindow(FramelessMixin, QMainWindow):
             self.project_dock = ProjectDock(self)
             self.project_dock.render_requested.connect(self._show_style_editor)
             self.project_dock.label_requested.connect(self._show_label_settings)
-            self.project_dock.layer_context_menu_requested.connect(self._on_project_dock_context_menu)
+            self.project_dock.layer_context_menu_requested.connect(self._on_layer_context_menu)
             self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.project_dock)
         self._on_project_create(name)
         self.project_dock.show()
@@ -1833,25 +1833,13 @@ class MainWindow(FramelessMixin, QMainWindow):
 
     # ===================================================== 图层右键菜单
 
-    def _on_layer_context_menu(self, pos: QPoint) -> None:
-        """图层树右键 → 交给共享的菜单构建器。"""
-        view = self.layer_dock.view
-        index = view.indexAt(pos)
-        if not index.isValid():
-            return
-        model = index.model()
-        source_index = model.mapToSource(index)
-        source_model = source_index.model()
-        layer_name = source_model.data(source_index, Qt.ItemDataRole.DisplayRole)
-        if not layer_name:
-            return
-        layers = self.project.mapLayersByName(layer_name)
-        if not layers:
-            return
-        self._build_layer_context_menu(layers[0], view.mapToGlobal(pos))
+    def _on_layer_context_menu(self, layer, global_pos: QPoint) -> None:
+        """图层树 / 工程管理 Dock 右键 → 同一套 QGIS 式图层菜单。
 
-    def _on_project_dock_context_menu(self, layer, global_pos: QPoint) -> None:
-        """工程管理 Dock 的图层右键 → 同一套 QGIS 式图层菜单。"""
+        图层由发信号的 Dock 用 ``index2node`` 自己解析后带出来（两个 Dock 都
+        只发信号），所以这里不再拿显示名去 ``mapLayersByName`` 回查——那样
+        同名图层会拿到错的那个。
+        """
         self._build_layer_context_menu(layer, global_pos)
 
     def _build_layer_context_menu(self, layer, global_pos: QPoint) -> None:
