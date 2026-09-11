@@ -3,6 +3,7 @@
 迁自 :class:`component.TreeTool.PGISTools`，把"工具树 UI"与"瓦片后台任务"分离。
 
 纯工具树展示：工具按类别分组，顶部提供搜索过滤与展开/折叠控制。
+分组默认折叠，避免打开 dock 时铺满整屏；搜索时会自动展开命中的分组。
 点击工具节点弹出对应参数对话框（对话框内部是"左参数 + 右算法描述"布局，
 描述逻辑见 :mod:`app.ui.common.algo_desc`）；同一算法只维护一个对话框实例，
 已打开时点击置前。
@@ -95,7 +96,7 @@ def _make_generic_algo_dialog(algo_id: str):
     return _factory
 
 
-#: GDAL processing 算法清单（QGIS 4.2 注册的 59 个 gdal:*）。
+#: GDAL processing 算法清单（QGIS 4.2 注册的 57 个 gdal:*）。
 #: 结构：(分组名, [(中文显示名, algo_id), ...])
 #: 显示名 = 中文翻译（部分与 QGIS 自家一致，部分自定义）
 _GDAL_ALGORITHMS: list[tuple[str, list[tuple[str, str]]]] = [
@@ -175,7 +176,6 @@ _GDAL_ALGORITHMS: list[tuple[str, list[tuple[str, str]]]] = [
             ("沿线生成点", "gdal:pointsalonglines"),
             ("瓦片索引", "gdal:tileindex"),
             ("矢量信息", "gdal:ogrinfo"),
-            ("矢量信息（JSON）", "gdal:ogrinfojson"),
         ],
     ),
     (
@@ -211,7 +211,7 @@ _DIALOG_FACTORIES: dict = {
     "native:tilesxyzdirectory": _make_imagery_tile_dialog,
     "native:tilesxyzmbtiles": _make_imagery_mbtiles_dialog,
 }
-#: 把 59 个 GDAL 算法全部注册到通用 dialog 工厂
+#: 把 57 个 GDAL 算法全部注册到通用 dialog 工厂
 for _code in (
     code for _group, _items in _GDAL_ALGORITHMS for _name, code in _items
 ):
@@ -354,7 +354,8 @@ class ToolsDock(QDockWidget):
                 if tip:
                     item.setToolTip(0, tip)
                 item.setSizeHint(0, QSize(0, 28))
-            group.setExpanded(True)
+            # 默认折叠：打开 dock 时只看到分组名，点开才展开
+            group.setExpanded(False)
 
     # ------------------------------------------------------------ 交互
 

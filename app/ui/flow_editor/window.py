@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from qgis.PyQt.QtCore import QSize, Qt
+from qgis.PyQt.QtCore import QSize, Qt, QTimer
 from qgis.PyQt.QtGui import QAction, QBrush, QColor, QKeySequence
 from qgis.PyQt.QtWidgets import (
     QDialog,
@@ -29,6 +29,7 @@ from app.core.domain.flow.executor import (
     STATUS_SUCCESS,
     FlowExecutor,
     FlowNodeExecutionError,
+    FlowNodeSkip,
 )
 from app.core.domain.flow.model import FlowGraph, unbound_inputs
 from app.core.domain.flow.serialization import FlowCodec
@@ -75,6 +76,11 @@ class FlowEditorWindow(FramelessMixin, QMainWindow):
         # ---- 执行器（QObject，信号驱动 UI）
         self.executor = FlowExecutor(self)
         self._wire_executor()
+        # ---- 增量运行驱动：QTimer 每滴答执行一个节点，中间把事件循环
+        # 让给 Qt，节点状态 / 日志才能随执行进度实时刷新（而不是跑完才刷新）。
+        self._run_timer = QTimer(self)
+        self._run_timer.setInterval(0)
+        self._run_timer.timeout.connect(self._advance_run)
 
         # ---- 三侧 dock
         self.node_library = NodeLibraryDock(self)
@@ -152,6 +158,7 @@ class FlowEditorWindow(FramelessMixin, QMainWindow):
         self.executor.flow_finished.connect(self._on_flow_finished)
         self.executor.node_started.connect(self._on_node_started)
         self.executor.node_finished.connect(self._on_node_finished)
+        self.executor.node_skipped.connect(self._on_node_skipped)
 
     # ------------------------------------------------------------ 主题
 
@@ -223,6 +230,10 @@ class FlowEditorWindow(FramelessMixin, QMainWindow):
         else:
             self.log_panel.log(f"✘ 节点「{name}」失败：{error}", "error")
 
+    def _on_node_skipped(self, node_id: str, name: str, reason: str) -> None:
+        self.scene.apply_statuses({node_id: STATUS_SKIPPED})
+        self.log_panel.log(f"⏭ 节点「{name}」跳过：{reason}", "skip")
+
     def _on_flow_finished(self, statuses: dict) -> None:
         self.scene.apply_statuses(statuses)
         ok_n = sum(1 for s in statuses.values() if s == STATUS_SUCCESS)
@@ -233,20 +244,55 @@ class FlowEditorWindow(FramelessMixin, QMainWindow):
     # ------------------------------------------------------------ 工具条动作
 
     def _run_flow(self) -> None:
+        if self.executor.is_running:
+            self.log_panel.log("流程正在运行中，请稍候…", "warn")
+            return
         self.log_panel.clear()
         overrides = self._collect_run_overrides()
         if overrides is None:
             return  # 用户取消填写
         try:
-            self.executor.run_flow(self.scene.graph, overrides)
+            self.executor.prepare_run(self.scene.graph, overrides)
         except FlowCycleError as exc:  # noqa: BLE001
             self.log_panel.log(f"流程有环：{exc}", "error")
             QMessageBox.warning(self, "无法运行", f"流程中存在循环依赖：\n{exc}")
-        except FlowNodeExecutionError as exc:  # noqa: BLE001
+            return
+        self._set_running(True)
+        # interval=0：事件队列一空就执行下一个节点，节点变绿后立即重绘
+        self._run_timer.start()
+
+    def _advance_run(self) -> None:
+        """QTimer 滴答：执行下一个节点；出错或跑完则收尾。
+
+        真正的执行仍在主线程（QGIS processing / 图层入工程都不是线程安全的），
+        但每次只跑一个节点就归还控制权，所以界面不会被整条流程卡住。
+        """
+        try:
+            done = self.executor.step_run()
+        except FlowNodeExecutionError as exc:
+            self._finish_run()
             self.log_panel.log(f"流程中止：{exc}", "error")
             QMessageBox.critical(self, "运行失败", str(exc))
+            return
         except Exception as exc:  # noqa: BLE001
+            self._finish_run()
             self.log_panel.log(f"运行出错：{exc}", "error")
+            return
+        if done:
+            self._finish_run()
+
+    def _finish_run(self) -> None:
+        """停止滴答并发 ``flow_finished`` 收尾（失败时状态里已有 failed）。"""
+        self._run_timer.stop()
+        self.executor.finish_run()
+        self._set_running(False)
+
+    def _set_running(self, running: bool) -> None:
+        """运行期间禁掉「运行全部 / 单步」，避免重复触发 / 重入。"""
+        self.act_run.setEnabled(not running)
+        self.act_step.setEnabled(not running)
+        if not running:
+            self.statusBar().showMessage("就绪")
 
     def _collect_run_overrides(self) -> dict | None:
         """运行前填写未绑定输入的参数；用户取消返回 None。
@@ -262,6 +308,9 @@ class FlowEditorWindow(FramelessMixin, QMainWindow):
         return dlg.overrides()
 
     def _run_selected_node(self) -> None:
+        if self.executor.is_running:
+            self.log_panel.log("流程正在运行中，请稍候…", "warn")
+            return
         node_id = self.scene.current_selected_node()
         if node_id is None:
             self.log_panel.log("请先在画布选中要单步执行的节点", "warn")
@@ -269,8 +318,14 @@ class FlowEditorWindow(FramelessMixin, QMainWindow):
         self._run_node(node_id)
 
     def _run_node(self, node_id: str) -> None:
+        if self.executor.is_running:
+            self.log_panel.log("流程正在运行中，请稍候…", "warn")
+            return
         try:
             self.executor.run_node(self.scene.graph, node_id)
+        except FlowNodeSkip as exc:  # noqa: BLE001
+            self.scene.apply_statuses({node_id: STATUS_SKIPPED})
+            self.log_panel.log(f"⏭ 节点跳过：{exc}", "skip")
         except FlowNodeExecutionError as exc:  # noqa: BLE001
             self.log_panel.log(str(exc), "error")
         except ValueError as exc:  # noqa: BLE001
@@ -411,6 +466,7 @@ class FlowEditorWindow(FramelessMixin, QMainWindow):
         return ret == QMessageBox.StandardButton.Discard
 
     def closeEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        self._run_timer.stop()  # 关闭时别再滴答执行节点
         if self._confirm_discard():
             event.accept()
         else:

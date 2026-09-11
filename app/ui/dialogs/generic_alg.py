@@ -1,6 +1,6 @@
 """通用算法 Dialog（按 ``QgsProcessingAlgorithm`` 参数描述动态生成表单）。
 
-为 tools_dock 上挂的 59 个 ``gdal:*`` 算法（以及任意 processing 算法）复用
+为 tools_dock 上挂的 57 个 ``gdal:*`` 算法（以及任意 processing 算法）复用
 同一个对话框：构造时收 ``algo_id`` → ``QgsGui.processingGuiRegistry().createParameterWidgetWrapper``
 按 ``alg.parameterDefinitions()`` 逐个造控件 → 收齐 ``value()`` 后调
 :class:`app.core.domain.generic_alg.GenericAlgService` 跑算法。
@@ -95,7 +95,7 @@ class GenericAlgDialog(BaseDialog):
             title = self._alg.displayName() if self._alg else algo_id
         super().__init__(parent, title)
         self.setMinimumSize(760, 620)
-        # 最大高度对齐主窗口：避免 59 个 GDAL 算法参数面板太长时
+        # 最大高度对齐主窗口：避免 57 个 GDAL 算法参数面板太长时
         # 超出主窗口范围；保留父级 QMainWindow 的实际可用高度，
         # 没父级时退到当前屏幕可用高度减 80px 留出任务栏空间。
         max_h = self._resolve_max_height(parent)

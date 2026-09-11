@@ -1,6 +1,6 @@
 """通用算法任务数据类与服务门面。
 
-为 tools_dock 上挂的 59 个 ``gdal:*`` 算法（以及将来任意 processing 算法）
+为 tools_dock 上挂的 57 个 ``gdal:*`` 算法（以及将来任意 processing 算法）
 提供统一的 service 接口：dialog 只负责参数收集 + 触发执行，service 负责
 实际 ``processing.run`` + 结果图层装配。
 

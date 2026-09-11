@@ -1,7 +1,7 @@
 """流程编排：节点模板库 + QGIS 处理算法桥接。
 
-- :data:`BUILTIN_TEMPLATES`：内置节点模板（数据源 / 常用算法 / 空节点），
-  纯数据，不依赖 QGIS，可离线单测。
+- :data:`BUILTIN_TEMPLATES`：内置节点模板（数据源 / 常用算法 / 通用工具，
+  含空图层过滤、空节点），纯数据，不依赖 QGIS，可离线单测。
 - :func:`describe_processing_algorithm`：从 QGIS 处理工具箱注册表读取算法，
   自动生成节点模板（输入 / 输出 / 调用代码），供「选择处理算法」下拉使用。
 
@@ -74,26 +74,44 @@ _BUILTIN: list[NodeTemplate] = [
         "加载矢量图层",
         "数据源",
         """# 加载矢量图层
-layer = QgsVectorLayer(inputs["图层路径"], "加载矢量", "ogr")
-if not layer.isValid():
-    raise RuntimeError("无法加载矢量图层：" + str(inputs["图层路径"]))
+raw = inputs["图层路径"]
+if isinstance(raw, QgsVectorLayer) and raw.isValid():
+    layer = raw  # 运行参数直接从图层树选的图层对象，直接复用
+else:
+    text = str(raw).strip()
+    layer = QgsVectorLayer(text, "加载矢量", "ogr") if text else None
+    if (layer is None or not layer.isValid()) and text:
+        # 不是有效的地图文件 → 按图层名在工程里回查
+        hits = [lyr for lyr in QgsProject.instance().mapLayersByName(text) if isinstance(lyr, QgsVectorLayer)]
+        layer = hits[0] if hits else layer
+if layer is None or not layer.isValid():
+    raise RuntimeError("无法加载矢量图层：" + str(raw) + "（既不是有效的矢量文件，工程里也没有同名矢量图层）")
 outputs["图层"] = layer""",
         inputs=[TemplateInput("图层路径", PortType.FILE, required=True)],
         outputs=[TemplateOutput("图层", PortType.VECTOR, load_to_canvas=True)],
-        description="从文件加载矢量图层（shp / gpkg / gdb 等）",
+        description="从文件加载矢量图层（shp / gpkg / gdb 等），或按名称复用工程中已加载的图层",
     ),
     _t(
         "load_raster",
         "加载栅格图层",
         "数据源",
         """# 加载栅格图层
-layer = QgsRasterLayer(inputs["图层路径"], "加载栅格")
-if not layer.isValid():
-    raise RuntimeError("无法加载栅格图层：" + str(inputs["图层路径"]))
+raw = inputs["图层路径"]
+if isinstance(raw, QgsRasterLayer) and raw.isValid():
+    layer = raw  # 运行参数直接从图层树选的图层对象，直接复用
+else:
+    text = str(raw).strip()
+    layer = QgsRasterLayer(text, "加载栅格") if text else None
+    if (layer is None or not layer.isValid()) and text:
+        # 不是有效的地图文件 → 按图层名在工程里回查
+        hits = [lyr for lyr in QgsProject.instance().mapLayersByName(text) if isinstance(lyr, QgsRasterLayer)]
+        layer = hits[0] if hits else layer
+if layer is None or not layer.isValid():
+    raise RuntimeError("无法加载栅格图层：" + str(raw) + "（既不是有效的栅格文件，工程里也没有同名栅格图层）")
 outputs["图层"] = layer""",
         inputs=[TemplateInput("图层路径", PortType.FILE, required=True)],
         outputs=[TemplateOutput("图层", PortType.RASTER, load_to_canvas=True)],
-        description="从文件加载栅格图层（tif / img 等）",
+        description="从文件加载栅格图层（tif / img 等），或按名称复用工程中已加载的图层",
     ),
     _t(
         "constant",
@@ -338,6 +356,22 @@ outputs["镶嵌结果"] = processing.run(
         description="把多个栅格镶嵌为一个",
     ),
     _t(
+        "filter_empty_layer",
+        "空图层过滤",
+        "通用",
+        """# 空图层过滤：输入图层没有要素时跳过本节点（下游一并跳过），否则原样输出
+layer = inputs["输入图层"]
+if layer is None:
+    skip("输入图层为空")
+count = layer.featureCount() if hasattr(layer, "featureCount") else -1
+if count == 0:
+    skip("输入图层没有要素")
+outputs["图层"] = layer""",
+        inputs=[TemplateInput("输入图层", PortType.VECTOR, required=True)],
+        outputs=[TemplateOutput("图层", PortType.VECTOR, load_to_canvas=False)],
+        description="输入图层含要素时原样输出；没有要素时跳过本节点及其下游节点",
+    ),
+    _t(
         "empty",
         "空节点（自定义代码）",
         "通用",
@@ -345,6 +379,7 @@ outputs["镶嵌结果"] = processing.run(
 # 可用变量：
 #   inputs   —— 本节点输入参数字典（按键名取值）
 #   outputs  —— 输出字典，请把结果赋值进去
+#   skip(原因) —— 主动跳过本节点及其全部下游节点
 #   processing / context / feedback —— 处理工具箱运行环境
 #   QgsVectorLayer / QgsRasterLayer / QgsProject
 #   QgsVectorFileWriter / QgsRasterFileWriter
@@ -375,7 +410,8 @@ def instantiate_template(
     """
     node = graph.add_node(name=template.name, x=x, y=y, code=template.code, algorithm_id=template.key)
     for ti in template.inputs:
-        graph.add_input(node.id, ti.name, ti.type, default=ti.default)
+        ins = graph.add_input(node.id, ti.name, ti.type, default=ti.default)
+        ins.required = ti.required  # 模板声明的必填必须落下来，否则运行前参数对话框不拦空值
     for to in template.outputs:
         out = graph.add_output(node.id, to.name, to.type)
         out.write_temp = to.write_temp

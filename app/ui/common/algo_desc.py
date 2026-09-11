@@ -21,7 +21,7 @@ logger = get_logger(__name__)
 
 #: GDAL 算法中文兜底描述。QGIS 4.2 在本环境下 ``shortHelpString()`` 对所有
 #: ``gdal:*`` 都返回空字符串（注册表能拿到 alg，displayName 对，但 help 文本
-#: 没装上），所以这里手工补 59 个算法的中文简介，避免对话框右侧展示「裸 code」。
+#: 没装上），所以这里手工补 57 个算法的中文简介，避免对话框右侧展示「裸 code」。
 #: 描述尽量与算法语义对齐，按 ``tools_dock._GDAL_ALGORITHMS`` 的 6 个分组排版。
 _GDAL_FALLBACK_DESC: dict[str, str] = {
     # ---- GDAL 栅格分析（18） ----
@@ -242,7 +242,7 @@ _GDAL_FALLBACK_DESC: dict[str, str] = {
         "<p>识别栅格的格式、驱动、像素深度、波段数等元信息，"
         "用于诊断未知栅格。</p>"
     ),
-    # ---- GDAL 矢量分析（11） ----
+    # ---- GDAL 矢量分析（10） ----
     "gdal:dissolve": (
         "<h2>融合</h2>"
         "<p>按指定字段把多边形融合（dissolve）——同字段值合并为单个要素，"
@@ -292,10 +292,6 @@ _GDAL_FALLBACK_DESC: dict[str, str] = {
         "<p>输出矢量数据源的元信息（层名 / 字段 / 范围 / 要素数 / 几何类型等），"
         "用于诊断未知矢量。</p>"
     ),
-    "gdal:ogrinfojson": (
-        "<h2>矢量信息（JSON）</h2>"
-        "<p>同上，但以 JSON 格式输出，方便程序化处理。</p>"
-    ),
     # ---- GDAL 数据导出（4） ----
     "gdal:importvectorintopostgisdatabaseavailableconnections": (
         "<h2>PostgreSQL 导出（已有连接）</h2>"
@@ -324,7 +320,7 @@ _GDAL_FALLBACK_DESC: dict[str, str] = {
 #: 合并到 ``_ALGO_FALLBACK_DESC`` —— ``algorithm_description_html`` 优先查这个
 #: 合并字典，命中则不再走「裸 code 命令」的兜底分支。
 _ALGO_FALLBACK_DESC: dict[str, str] = {
-    **_GDAL_FALLBACK_DESC,  # 59 个 gdal:* 中文描述
+    **_GDAL_FALLBACK_DESC,  # 57 个 gdal:* 中文描述
     "native:writevectortiles_xyz": (
         "<h2>生成矢量瓦片（XYZ）</h2>"
         "<p>导出一个或多个矢量图层到矢量瓦片格式，为快速地图渲染和小数据量"

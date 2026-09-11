@@ -1,12 +1,13 @@
 """流程编排：画布视图。
 
-滚轮缩放（clamp 到 [0.1, 5]）、空白拖拽框选、接收节点库拖来的模板
-（mime 见 :data:`TEMPLATE_MIME`）并转成场景坐标交给场景建节点。
+滚轮缩放（clamp 到 [0.1, 5]）、按压鼠标滚轮（中键）拖拽平移画布、
+空白拖拽框选、接收节点库拖来的模板（mime 见 :data:`TEMPLATE_MIME`）
+并转成场景坐标交给场景建节点。
 """
 
 from __future__ import annotations
 
-from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtCore import QPoint, Qt, pyqtSignal
 from qgis.PyQt.QtGui import QBrush, QPainter
 from qgis.PyQt.QtWidgets import QGraphicsView
 
@@ -35,6 +36,10 @@ class FlowView(QGraphicsView):
         self.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
         self.setAcceptDrops(True)
         self.setBackgroundBrush(QBrush(current_palette().canvas_bg))
+        # 按压鼠标滚轮（中键）拖拽平移画布
+        self._panning = False
+        self._pan_start = QPoint()
+        self._pan_cursor = None
 
     # ------------------------------------------------------------ 视图操作
 
@@ -47,6 +52,48 @@ class FlowView(QGraphicsView):
         if not (ZOOM_MIN <= new_scale <= ZOOM_MAX):
             return
         self.scale(factor, factor)
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        if event.button() == Qt.MouseButton.MiddleButton:
+            self._start_pan(event_pos(event))
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        if self._panning:
+            self._pan_to(event_pos(event))
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        if event.button() == Qt.MouseButton.MiddleButton and self._panning:
+            self._stop_pan()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def _start_pan(self, pos: QPoint) -> None:
+        """开始中键平移：记录起点并换成抓手光标。"""
+        self._panning = True
+        self._pan_start = QPoint(pos)
+        self._pan_cursor = self.cursor()
+        self.setCursor(Qt.CursorShape.ClosedHandCursor)
+
+    def _pan_to(self, pos: QPoint) -> None:
+        """按鼠标位移滚动视图（内容跟随鼠标移动）。"""
+        delta = pos - self._pan_start
+        self._pan_start = QPoint(pos)
+        h_bar = self.horizontalScrollBar()
+        v_bar = self.verticalScrollBar()
+        h_bar.setValue(h_bar.value() - delta.x())
+        v_bar.setValue(v_bar.value() - delta.y())
+
+    def _stop_pan(self) -> None:
+        """结束中键平移，恢复原光标。"""
+        self._panning = False
+        self.setCursor(self._pan_cursor or Qt.CursorShape.ArrowCursor)
 
     def zoom_in(self) -> None:
         new_scale = self.transform().m11() * ZOOM_STEP

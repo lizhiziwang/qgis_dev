@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import Optional
 
 from qgis.core import (
@@ -198,12 +199,14 @@ class LayerTreeOpsMixin:
         """头部「删除图层/组」：当前选中节点（图层或组）。
 
         - 选中图层 → 直接走 :meth:`_remove_layer`
-        - 选中组 → 确认后递归移除组里全部图层（图层清空组自然消失）
+        - 选中组 → 确认后先递归移除组里全部图层，再摘掉组节点本身
+          （含嵌套空子组；空组也能删）
         """
         from qgis.core import QgsLayerTreeGroup, QgsLayerTreeLayer
 
         node = self._current_dock_node()
-        if node is None:
+        if node is None or node.parent() is None:
+            # parent 为 None 说明拿到的是树根（正常选不中，兜底别把整棵树删了）
             self.messageBar.pushMessage(
                 "请先在图层列表中选择要删除的图层或组",
                 level=Qgis.MessageLevel.Warning,
@@ -218,22 +221,33 @@ class LayerTreeOpsMixin:
             return
 
         if isinstance(node, QgsLayerTreeGroup):
+            parent = node.parent()
             # findLayers 默认递归收集所有子图层（嵌套子组下的也算）
             layers = [c.layer() for c in node.findLayers() if c.layer() is not None]
-            if not layers:
-                self.messageBar.pushMessage("选中的图层组为空", level=Qgis.MessageLevel.Info, duration=2)
-                return
+            name = node.name()
+            text = f"确定删除「{name}」及其 {len(layers)} 个图层吗？" if layers else f"确定删除空图层组「{name}」吗？"
             ret = QMessageBox.question(
                 self,
                 "删除图层组",
-                f"确定删除「{node.name()}」及其 {len(layers)} 个图层吗？",
+                text,
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
             if ret != QMessageBox.StandardButton.Yes:
                 return
+            # 1) 先逐个走 _remove_layer：拿到完整清理（退出编辑态/清选中引用/
+            #    gpkg 别名/延迟刷新）。若只摘组节点，bridge 会直接 delete 里面的
+            #    图层，正在编辑的图层会留下脏 buffer 与悬空 edit_layer。
             for layer in layers:
                 self._remove_layer(layer)
+            # 2) 再摘掉组节点本身（空组、嵌套空子组）。原实现只删子图层就返回，
+            #    空组永远删不掉、非空组删完还留个空壳——看起来就是「移除失效」。
+            #    删节点前先清视图当前项，避免 Qt 持有即将析构节点的持久索引。
+            self._clear_view_current()
+            # 组被删后 _data_group/_ref_group 会悬空，先清引用再摘节点
+            self._forget_group_refs(node)
+            parent.removeChildNode(node)
+            self.messageBar.pushMessage(f"已删除图层组：{name}", level=Qgis.MessageLevel.Info, duration=3)
             return
 
         # 图例项等其它节点：当作无效选择
@@ -242,6 +256,88 @@ class LayerTreeOpsMixin:
             level=Qgis.MessageLevel.Warning,
             duration=3,
         )
+
+    # ---------------------------------------------------- 组节点删除/移动的引用维护
+
+    def _clear_view_current(self) -> None:
+        """清掉图层树视图的当前项与选中项。
+
+        删除（或克隆替换）节点前调用：QgsLayerTreeView 会为当前节点持有持久
+        索引，节点析构后再有事件处理就可能堆损坏（见 :meth:`_on_add_layer_group`
+        注释里的 0xc0000374）。
+        """
+        from qgis.PyQt.QtCore import QModelIndex
+
+        try:
+            view = self.layer_dock.view
+            view.selectionModel().clear()
+            view.setCurrentIndex(QModelIndex())
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _group_subtree_groups(self, node) -> list:
+        """``node`` 自身及递归子组（不含非组节点）；``node`` 非组时返回空表。"""
+        from qgis.core import QgsLayerTreeGroup
+
+        if not isinstance(node, QgsLayerTreeGroup):
+            return []
+        return [node, *node.findGroups()]
+
+    def _forget_group_refs(self, removed) -> None:
+        """``removed`` 子树即将删除：清掉指向其内部组的工程分组引用。
+
+        ``_data_group`` / ``_ref_group`` 是裸 C++ 指针，组被删后继续用会抛
+        ``RuntimeError: wrapped C/C++ object ... has been deleted``。清掉并把
+        工程 Dock 复位，避免删掉「数据图层 / 参考图层」后下一次导图层就崩。
+        """
+        stale = self._group_subtree_groups(removed)
+        changed = False
+        for attr in ("_data_group", "_ref_group"):
+            grp = getattr(self, attr, None)
+            if grp is not None and any(grp is g for g in stale):
+                setattr(self, attr, None)
+                changed = True
+        if changed:
+            dock = getattr(self, "project_dock", None)
+            if dock is not None:
+                with suppress(Exception):
+                    dock.reset()
+
+    def _remap_group_refs(self, old_node, new_node) -> None:
+        """组节点被克隆替换后，把指向 ``old_node`` 的工程分组引用改指新节点。
+
+        上下移动用的是 clone + 删原节点，节点身份会变；若移的正是「数据图层 /
+        参考图层」，裸指针与工程 Dock 的 rootIndex 必须跟着改指克隆，否则原节点
+        销毁后悬空。
+        """
+        stale = self._group_subtree_groups(old_node)
+        if not stale:
+            return
+        changed = False
+        for attr in ("_data_group", "_ref_group"):
+            grp = getattr(self, attr, None)
+            if grp is None:
+                continue
+            if grp is old_node:
+                setattr(self, attr, new_node)
+                changed = True
+            elif any(grp is g for g in stale):
+                setattr(self, attr, None)
+                changed = True
+        if not changed:
+            return
+        dock = getattr(self, "project_dock", None)
+        if dock is None:
+            return
+        data = getattr(self, "_data_group", None)
+        ref = getattr(self, "_ref_group", None)
+        try:
+            if data is not None and ref is not None:
+                dock.set_project(self.project.title(), data, ref)
+            else:
+                dock.reset()
+        except Exception:  # noqa: BLE001
+            pass
 
     def _on_header_expand_all(self) -> None:
         """头部「全部展开」：展开整个图层树。"""
@@ -352,8 +448,12 @@ class LayerTreeOpsMixin:
         #    否则删旧节点后 cloned 落回 ``pos``，下移等于没动（见 docstring）。
         insert_pos = new_pos + (1 if delta > 0 else 0)
         parent.insertChildNode(insert_pos, cloned)
-        # 2) 再删旧 node（bridge 收到 willRemoveChildren 时发现 layer 还有
-        #    cloned 引用，只摘旧 node，不删 layer）
+        # 2) 若移的是「数据图层 / 参考图层」这类工程分组，克隆替换了节点身份，
+        #    先把裸指针 / Dock 的 rootIndex 改指克隆，再删原节点。
+        self._remap_group_refs(node, cloned)
+        # 3) 删旧节点前清视图当前项（旧节点马上析构，别留持久索引），
+        #    之后再把当前项设回克隆。
+        self._clear_view_current()
         parent.removeChildNode(node)
 
         view = self.layer_dock.view

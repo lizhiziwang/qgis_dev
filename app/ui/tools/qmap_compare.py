@@ -13,8 +13,9 @@
    - 用户勾选的对比图层（从原位移入组内，停止时还原）。
    分割线默认在画布中点，可鼠标拖动调整比例（:class:`SplitDividerOverlay`）：
    拖动条带 → 重建遮罩 geometry generator 表达式 → 动态调整分割比例。
-   分隔条不画通栏线，只在分割线中点画一枚主题配色的「胶囊抓手」
-   （``app.ui.common.theme.divider_colors``），切主题自动跟随。
+   分隔条＝一条通栏细线（标出分割位置）＋中点一枚主题配色的「胶囊抓手」
+   （``app.ui.common.theme.divider_colors``），配色全部取自全局主题，
+   切主题自动跟随。
 
 2. 放大镜（Lens，mask 方案变体）
    遮罩几何为跟随 ``@canvas_cursor_point`` 的圆 / 方形，mask 层
@@ -87,8 +88,10 @@ SPLIT_DEFAULT_RATIO = 0.5
 #: 拖动分隔条的比例上下限（拖到贴边会抓不住，留一点余量）
 SPLIT_MIN_RATIO = 0.02
 SPLIT_MAX_RATIO = 0.98
-#: 分隔条绘制 / 命中参数（逻辑像素）。方案 D：**不画通栏分割线**，
-#: 只在分割线中点画一枚居中「胶囊抓手」（圆角矩形 + 双向箭头）。
+#: 分隔条绘制 / 命中参数（逻辑像素）：一条通栏细线（标出分割位置）
+#: ＋ 分割线中点一枚居中「胶囊抓手」（圆角矩形 + 双向箭头）。
+#: 配色（分隔线 / 抓手填充 / 抓手描边）见 :func:`app.ui.common.theme.divider_colors`。
+SPLIT_DIVIDER_WIDTH = 1  # 通栏分隔线宽（1px 细线）
 SPLIT_STRIP_SIZE = 24  # 条带（鼠标命中区）宽度：抓手居中于条带
 SPLIT_GRIP_W = 22  # 抓手横宽（垂直分割时）
 SPLIT_GRIP_H = 40  # 抓手纵长（垂直分割时；水平分割与之互换）
@@ -169,10 +172,10 @@ class SplitDividerOverlay(QWidget):
     区域仍可正常平移 / 缩放。按住条带拖动 → 回调 ``on_ratio(ratio)``
     重建遮罩几何，动态调整分割比例。
 
-    绘制（方案 D）：**不画通栏分割线**，只在分割线中点画一枚居中的
-    「胶囊抓手」（圆角矩形 + 两枚指示拖拽方向的箭头），其余露出画布渲染
-    结果。抓手配色取自全局主题
-    （:func:`app.ui.common.theme.divider_colors`），不写死黑白，切主题自动重绘。
+    绘制：一条跨越整个画布的**细分隔线**（标出分割位置）＋分割线中点一枚
+    居中「胶囊抓手」（圆角矩形 + 两枚指示拖拽方向的箭头）。分隔线与抓手
+    配色均取自全局主题（:func:`app.ui.common.theme.divider_colors`），
+    不写死黑白，切主题自动重绘。
     """
 
     def __init__(self, canvas, orientation: str, on_ratio, parent=None) -> None:
@@ -295,13 +298,13 @@ class SplitDividerOverlay(QWidget):
     # ------------------------------------------------------------ 绘制
 
     def paintEvent(self, event) -> None:
-        grip_fill, grip_border = divider_colors(ThemeManager.instance().current())
+        line_color, grip_fill, grip_border = divider_colors(ThemeManager.instance().current())
         painter = QPainter(self)
         try:
             w, h = self.width(), self.height()
             if w <= 0 or h <= 0:
                 return
-            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            # 通栏分隔线只在本条带内画：条带已跨满画布，线在中点即连成整条
             if self._orientation == "vertical":
                 cx = self.divider_px() - self.x()
                 cy = h // 2
@@ -312,6 +315,7 @@ class SplitDividerOverlay(QWidget):
                     SPLIT_GRIP_H,
                 )
                 chevrons_horizontal = True
+                line_from, line_to = QPoint(cx, 0), QPoint(cx, h)
             else:
                 cx = w // 2
                 cy = self.divider_px() - self.y()
@@ -322,6 +326,13 @@ class SplitDividerOverlay(QWidget):
                     SPLIT_GRIP_W,
                 )
                 chevrons_horizontal = False
+                line_from, line_to = QPoint(0, cy), QPoint(w, cy)
+            # 线：关抗锯齿（QPainter 默认）画 1px 才锐利，开了反而两端发虚
+            painter.setPen(QPen(line_color, SPLIT_DIVIDER_WIDTH))
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawLine(line_from, line_to)
+            # 抓手：盖在线上，开抗锯齿才能把圆角 / 箭头画平滑
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
             pen = QPen(grip_border)
             pen.setWidth(SPLIT_GRIP_BORDER)
             painter.setPen(pen)

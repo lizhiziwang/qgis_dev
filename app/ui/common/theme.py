@@ -804,14 +804,24 @@ def canvas_zoom_qss(t: Theme) -> str:
     """
 
 
-def divider_colors(t: Theme) -> tuple[QColor, QColor]:
-    """画布分隔条（地图对比 / 卷帘）抓手配色 → ``(抓手填充, 抓手描边)``。
+#: 分隔线用主题强调色降透明度绘制——通栏实线会像地图上的一道疤，
+#: 太淡又在深浅主题下都看不见，取中间值。
+_DIVIDER_LINE_ALPHA = 110
+
+
+def divider_colors(t: Theme) -> tuple[QColor, QColor, QColor]:
+    """画布分隔条（地图对比 / 卷帘）配色 → ``(分隔线, 抓手填充, 抓手描边)``。
 
     分隔条由覆盖层用 QPainter 直接绘制、不吃 QSS，故这里返回 :class:`QColor`
     供 ``paintEvent`` 使用；配色仍集中在 :class:`Theme`，切主题自动跟随。
-    抓手用窗底色填充 + 主题强调色描边，深浅主题下都醒目可抓。
+
+    分隔线用主题强调色 ``input_focus`` 降透明度：通栏实线会像地图上的一道疤，
+    太淡又在深浅主题下都看不见。抓手用窗底色填充 + 主题强调色描边，深浅主题下
+    都醒目可抓。
     """
-    return QColor(t.window_bg), QColor(t.input_focus)
+    line = QColor(t.input_focus)
+    line.setAlpha(_DIVIDER_LINE_ALPHA)
+    return line, QColor(t.window_bg), QColor(t.input_focus)
 
 
 def flow_panel_qss(t: Theme) -> str:
