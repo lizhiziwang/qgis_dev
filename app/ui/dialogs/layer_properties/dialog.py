@@ -23,6 +23,7 @@ from qgis.PyQt.QtWidgets import (
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.dialogs.layer_properties.base import PlaceholderTab
+from app.ui.dialogs.layer_properties.fields import FieldsTab
 from app.ui.dialogs.layer_properties.general import GeneralTab
 
 logger = get_logger(__name__)
@@ -32,12 +33,12 @@ _VECTOR_ONLY = frozenset({"字段", "选择"})
 
 
 class LayerPropertiesDialog(BaseDialog):
-    """图层属性对话框（常规页已实现，其余页占位）。"""
+    """图层属性对话框（常规 / 字段页已实现，其余页占位）。"""
 
     #: (标签名, 页类)；页类为 None → 占位页
     _TAB_SPECS = (
         ("常规", GeneralTab),
-        ("字段", None),
+        ("字段", FieldsTab),
         ("选择", None),
         ("标注", None),
         ("渲染", None),
