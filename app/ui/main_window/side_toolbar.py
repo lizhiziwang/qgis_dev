@@ -18,20 +18,20 @@
 
 工具清单（自上而下，与设计稿一致）::
 
-    选择 / 矩形选择 / 遨游 / 缩放 / 全图 / 清除
+    选择 / 框选 / 漫游 / 缩放 / 全图 / 清除
     一键查询 / 条件查询 / 选择屏蔽 / 取消屏蔽 / 分屏 / 坐标定位
     线测量 / 面测量 / 范围裁剪
 
 行为约定：
 
 - 项目**已实现**的工具直接接主窗口既有回调（与顶部工具条同一入口）：
-  选择 / 矩形选择 / 遨游 / 缩放 / 全图 / 清除 / 条件查询 / 分屏；
+  选择 / 框选 / 漫游 / 缩放 / 全图 / 清除 / 条件查询 / 分屏；
 - 「分屏」复用 :mod:`app.ui.tools.qmap_compare` 的「地图对比」入口
   （``MainWindow._on_qmap_compare``：镜像分屏 / 垂直分割 / 水平分割 /
   放大镜），与顶部工具条「地图对比」同一实现，不再用旧的卷帘覆盖层；
 - 其余工具为占位：点击时经消息条提示「该工具正在开发中」（气泡悬浮在
   地图上，不挤压画布）；
-- 地图工具（选择 / 矩形选择 / 遨游 / 缩放）为单选高亮：跟随画布
+- 地图工具（选择 / 框选 / 漫游 / 缩放）为单选高亮：跟随画布
   激活的 :class:`QgsMapTool`，由 ``MainWindow._on_map_tool_set`` 调
   :meth:`set_active` 与顶部工具条同步；会话型工具「分屏」独立常亮
   （:meth:`set_session_active`）；其余按钮为一次性动作，不高亮。
@@ -94,8 +94,8 @@ class SideToolBar:
         # (文本, 图标 key, 分组后是否加分隔线)；callbacks 缺 key → 占位工具
         for text, key, separator_after in [
             ("选择", "select_point", False),
-            ("矩形选择", "select_box", False),
-            ("遨游", "pan", False),
+            ("框选", "select_box", False),
+            ("漫游", "pan", False),
             ("缩放", "zoom_in", False),
             ("全图", "zoom_full", False),
             ("清除", "clear_selection", True),

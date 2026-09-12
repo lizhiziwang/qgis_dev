@@ -4,7 +4,7 @@
 
 - 工具条平铺文本按钮（不用下拉菜单）：
   开始编辑 / 停止编辑 / 保存编辑 / 撤销 / 重做 / 融合几何 / 要素编辑 / 属性录入 /
-  线分割 / 面分割 / 挖洞 / 补洞 / 分解 ｜ 添加点 / 添加线 / 添加面
+  线分割 / 面分割 / 挖洞 / 补洞 / 分解 / 补缝 ｜ 添加点 / 添加线 / 添加面
 - 「开始编辑」**恒可用**：点击弹出图层选择框（:attr:`_edit_layer_chooser`，
   由 :class:`MainWindow` 注入），选中图层即成为编辑目标并进入编辑态——
   不再依赖图层树右键 / 点击预设编辑图层（那些入口已移除）。
@@ -21,7 +21,10 @@
   :class:`app.ui.tools.split_polygon.SplitPolygonTool`）；
   「分解」需处于编辑态（先把多部件要素用选择工具选中，点击后拆成多个
   单部件要素，见 :func:`app.ui.tools.explode_parts.explode_features`——
-  一次性动作，非画布工具，不占用 checkable 状态）。
+  一次性动作，非画布工具，不占用 checkable 状态）；
+  「补缝」需处于编辑态且为面图层（先用选择工具多选相邻面，点击后检出它们
+  之间的封闭缝隙并弹窗逐条指定并入哪个参与面，见
+  :func:`app.ui.tools.gap_repair.repair_gaps_interactive`——同为一次性动作）。
 
 状态机：
 
@@ -69,6 +72,7 @@ from app.ui.tools.dig_hole import DigHoleTool
 from app.ui.tools.explode_parts import explode_features as run_explode
 from app.ui.tools.feature_edit import FeatureEditTool
 from app.ui.tools.fill_hole import FillHoleTool
+from app.ui.tools.gap_repair import repair_gaps_interactive as run_gap_repair
 from app.ui.tools.merge_geometry import MergeGeometryTool
 from app.ui.tools.split_feature import SplitFeatureTool
 from app.ui.tools.split_polygon import SplitPolygonTool
@@ -223,6 +227,14 @@ class DigitizingToolbar(QObject):
         self.explode_action = QAction("分解", self.digitizing_toolbar)
         self.explode_action.triggered.connect(self.explode_features)
 
+        # ---- 补缝（需处于编辑态且为面图层；一次性动作：多选相邻面 → 检出它们
+        #      之间的封闭缝隙 → 弹窗逐条指定并入哪个参与面）----
+        self.gap_repair_action = QAction("补缝", self.digitizing_toolbar)
+        self.gap_repair_action.setToolTip(
+            "先用选择工具多选相邻面，再点此检出它们之间的封闭缝隙并指定并入哪个面"
+        )
+        self.gap_repair_action.triggered.connect(self.repair_gaps)
+
         # ---- 初始态：编辑动作全禁用（「开始编辑」例外——恒可用，点击弹窗选层）
         #     最后统一由 _refresh_button_states 推导，这里只组装不动状态
 
@@ -239,6 +251,7 @@ class DigitizingToolbar(QObject):
         self.digitizing_toolbar.addAction(self.dig_hole_action)
         self.digitizing_toolbar.addAction(self.fill_hole_action)
         self.digitizing_toolbar.addAction(self.explode_action)
+        self.digitizing_toolbar.addAction(self.gap_repair_action)
 
         # 分隔两组
         self.digitizing_toolbar.addSeparator()
@@ -379,8 +392,9 @@ class DigitizingToolbar(QObject):
 
         无论用户之后选「是 / 否」，编辑一旦停止都不该让画布继续挂着一个激活的
         绘制工具，工具条也不该停留在「编辑中」可用态——所以：
-         1. **先** ``clear_draw_tool()`` 取消激活工具（旧实现放在最后，中途异常 /
-            状态残留会让工具继续挂活）；
+         1. 弹窗选「取消」→ **只关窗**，不提交不回滚、不退出编辑，也不动激活工具
+            （编辑会话与工具保持弹窗前的样子）；选「是 / 否」才真正结束编辑，
+            此时先 ``clear_draw_tool()`` 取消激活工具（不管有没有画完都要退出）；
          2. 会话是否结束以**图层真实编辑态**为准，复位放在 ``finally``——提交 /
             回滚真正结束编辑才切回「已指定编辑图层」态（编辑按钮禁用）。
 
@@ -398,10 +412,9 @@ class DigitizingToolbar(QObject):
             layer.isEditable() if layer is not None else None,
             self.active_tool,
         )
-        # 先取消激活工具：不管有没有画完，停止编辑前工具都要退出
-        self.clear_draw_tool()
         if layer is None or not layer.isEditable():
             # 没有在编辑：兜底清掉可能残留的激活工具/橡皮筋，保持干净
+            self.clear_draw_tool()
             self._exit_editing_state(layer)
             return
 
@@ -411,9 +424,18 @@ class DigitizingToolbar(QObject):
                     self.main_window,
                     "警告",
                     "是否保存编辑的内容！",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.Yes
+                    | QMessageBox.StandardButton.No
+                    | QMessageBox.StandardButton.Cancel,
                     QMessageBox.StandardButton.Yes,
                 )
+                if reply == QMessageBox.StandardButton.Cancel:
+                    # 「取消」只关窗：不提交、不回滚、不退出编辑，也不动激活工具——
+                    # 编辑会话与工具状态保持打开弹窗前的样子
+                    logger.info("停止编辑已取消（保持编辑态）: layer=%s", layer.name())
+                    return
+                # 用户已决定结束编辑：此时才取消激活工具（不管有没有画完都要退出）
+                self.clear_draw_tool()
                 if reply == QMessageBox.StandardButton.Yes:
                     try:
                         saved = layer.commitChanges(stopEditing=True)
@@ -438,6 +460,9 @@ class DigitizingToolbar(QObject):
                     # （QGIS 4.2 实测 isEditable 立即变 False），不必再补一次
                     # commitChanges(stopEditing=True)。
                     layer.rollBack()
+            else:
+                # 无未提交改动：不必问保存，直接结束编辑；工具照常退出
+                self.clear_draw_tool()
         finally:
             if layer is not None and layer.isEditable():
                 # 提交失败 / 异常（或回滚失败）→ 会话仍在：保持「编辑中」状态机
@@ -881,6 +906,54 @@ class DigitizingToolbar(QObject):
         # 事件栈内不直接 refresh（仓库约束），推迟出栈后再刷新
         QTimer.singleShot(0, self._safe_refresh)
 
+    def repair_gaps(self) -> None:
+        """「补缝」一次性动作：把多选相邻面之间的封闭缝隙并入指定的目标面。
+
+        不走画布工具、不占用勾选态；目标面由用户在弹窗里逐条指定（只能选
+        参与围成该缝隙的面）。写入**一个**撤销命令，可整体 Ctrl+Z。
+        """
+        layer = self._current_layer()
+        if layer is None or layer.type() != layer.VectorLayer:
+            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            return
+        if not layer.isEditable():
+            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            return
+        if layer.geometryType() != QgsWkbTypes.PolygonGeometry:
+            QMessageBox.warning(self.main_window, "警告", "补缝只支持面图层")
+            return
+        # 选中数在点击时校验：工具条没有 selectionChanged 监听，按钮可用性
+        # 统一由 _refresh_button_states 从图层状态推导，不为此新增信号
+        if len(layer.selectedFeatureIds()) < 2:
+            QMessageBox.warning(
+                self.main_window, "警告", "请先用选择工具选中至少两个相邻面要素"
+            )
+            return
+
+        result = run_gap_repair(
+            layer,
+            canvas=self.canvas,
+            parent=self.main_window,
+            hint=lambda text: self.main_window.messageBar.pushMessage(
+                text, level=Qgis.MessageLevel.Info, duration=2
+            ),
+        )
+        if result is None:
+            return  # 用户取消 / 失败原因已由下游落地
+        changed, filled = result
+        if filled == 0:
+            QMessageBox.information(
+                self.main_window, "提示", "所选面要素之间未发现封闭缝隙"
+            )
+            return
+        QMessageBox.information(
+            self.main_window,
+            "提示",
+            f"已补 {filled} 处缝隙（并入 {changed} 个要素，可 Ctrl+Z 撤销）",
+        )
+        # 事件栈内不直接 refresh（仓库约束），推迟出栈后再刷新
+        QTimer.singleShot(0, self._safe_refresh)
+
     def _safe_refresh(self) -> None:
         try:
             self.canvas.refresh()
@@ -1193,7 +1266,7 @@ class DigitizingToolbar(QObject):
           * 「开始编辑」「属性录入」恒可用(属性录入激活时自动进编辑态)；
           * 「停止编辑 / 保存编辑 / 融合几何 / 要素编辑 / 线分割 / 面分割 /
             分解」仅编辑中可用；
-          * 「挖洞 / 补洞」仅编辑中且图层为面时可用；
+          * 「挖洞 / 补洞 / 补缝」仅编辑中且图层为面时可用；
           * 「撤销 / 重做」仅编辑中且当前图层撤销栈上有对应步骤
             （实时跟随 canUndoChanged / canRedoChanged）；
           * 「添加点/线/面」仅编辑中且图层几何匹配时可用；
@@ -1224,9 +1297,10 @@ class DigitizingToolbar(QObject):
             self.explode_action,
         ):
             action.setEnabled(editing)
-        # 挖洞 / 补洞：编辑中且为面图层才可用
+        # 挖洞 / 补洞 / 补缝：编辑中且为面图层才可用
         self.dig_hole_action.setEnabled(editing and g_type == QgsWkbTypes.PolygonGeometry)
         self.fill_hole_action.setEnabled(editing and g_type == QgsWkbTypes.PolygonGeometry)
+        self.gap_repair_action.setEnabled(editing and g_type == QgsWkbTypes.PolygonGeometry)
         # 撤销 / 重做：编辑中且当前图层撤销栈上有对应步骤
         can_undo = can_redo = False
         if editing:

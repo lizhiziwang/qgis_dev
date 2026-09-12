@@ -22,6 +22,7 @@ from qgis.PyQt.QtWidgets import (
 
 from qgis.core import QgsField, QgsVectorLayer
 
+from app.core.domain.check.space_index import clear_spatial_index
 from app.ui.common.base_dialog import BaseDialog
 
 
@@ -117,6 +118,9 @@ class CustomAttrDialog(BaseDialog):
         if not self.layer.addFeature(self.feature):
             QMessageBox.warning(self, "错误", "要素添加失败，请检查后重试！")
             return
+        # 新增要素 → 空间索引缓存失效。不清的话点选 / 框选用的
+        # ``intersect_features`` 会一直读旧索引，新画的要素怎么都选不中。
+        clear_spatial_index(self.layer)
         self.close()
 
     @staticmethod

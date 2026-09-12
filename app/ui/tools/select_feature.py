@@ -3,8 +3,12 @@
 通用工具条上的「点选」「框选」两个按钮激活的交互工具：
 
 - :class:`PointSelectTool` —— 单击：选中落在点击位置附近（默认 10px 容差）
-  的要素；
-- :class:`RectSelectTool` —— 左键拖拽画矩形，松开时选中矩形内的要素。
+  的要素；光标为**箭头**（对齐 QGIS 的选择手感）；
+- :class:`RectSelectTool` —— 左键拖拽画矩形，松开时选中矩形内的要素；
+  光标为**十字**（提示正在拖框）。
+
+两个工具都**显式** ``setCursor``：不设的话画布会沿用上一个工具遗留的光标
+（画完面之后是十字），看起来就像「选择工具的光标不对」。
 
 选择范围 = 画布当前可见的矢量图层（``canvas.layers()`` 只含渲染图层，
 隐藏图层不在其中）。默认（无修饰键）每次选中**替换**上一次的选中集，
@@ -159,6 +163,12 @@ class PointSelectTool(SelectFeatureToolBase):
     #: 点击容差（像素）：把点击点扩成小矩形再求交，点 / 线 / 面要素都能命中。
     TOLERANCE_PX = 10
 
+    def __init__(self, canvas: "QgsMapCanvas") -> None:
+        super().__init__(canvas)
+        # 显式设光标：不设的话画布会沿用上一个工具遗留的光标（比如画完面之后的
+        # 十字），看起来就像「选择工具的光标不对」。点选对齐 QGIS 的选择手感 → 箭头。
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+
     def canvasReleaseEvent(self, event) -> None:  # noqa: N802 —— QGIS 命名
         if event.button() != Qt.MouseButton.LeftButton:
             return
@@ -180,6 +190,8 @@ class RectSelectTool(SelectFeatureToolBase):
 
     def __init__(self, canvas: "QgsMapCanvas") -> None:
         super().__init__(canvas)
+        # 框选用十字：提示「正在拖框」，也避免沿用上一个工具遗留的光标
+        self.setCursor(Qt.CursorShape.CrossCursor)
         self._start: Optional[QgsPointXY] = None
         self._end: Optional[QgsPointXY] = None
         # 框选用半透明青色，与绘制工具（红色）区分
