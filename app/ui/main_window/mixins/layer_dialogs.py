@@ -124,11 +124,18 @@ class LayerDialogsMixin:
             logger.info("导出图层：%s → %s", layer.name(), out)
 
     def _open_layer_properties(self, layer) -> None:
-        try:
-            from qgis._gui import QgsVectorLayerProperties
+        """打开自建图层属性对话框（不再用 QGIS 原生 ``QgsVectorLayerProperties``）。
 
-            dlg = QgsVectorLayerProperties(canvas=self.canvas, lyr=layer, messageBar=self.messageBar, parent=self)
-            dlg.setWindowIcon(Icons.app())
+        原生窗口自带一套不跟随本应用无边框标题栏与主题的 chrome。自建版见
+        ``app/ui/dialogs/layer_properties/``：目前「常规」页已实现，其余 5 页占位。
+        """
+        if layer is None:
+            return
+        try:
+            from app.ui.dialogs.layer_properties import LayerPropertiesDialog
+
+            dlg = LayerPropertiesDialog(layer, canvas=self.canvas, parent=self)
             dlg.exec()
         except Exception as e:  # noqa: BLE001
+            logger.error("打开图层属性失败: %s", e, exc_info=True)
             QMessageBox.warning(self, "失败", str(e))

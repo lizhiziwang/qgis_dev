@@ -517,6 +517,11 @@ def app_qss(t: Theme) -> str:
     QLabel#loginSubtitle {{ color: {t.text_secondary}; }}
     QLabel#loginError {{ color: {t.text_error}; font-weight: bold; }}
     QLabel#DialogTitle {{ font-size: 14px; font-weight: bold; color: {t.menu_text}; }}
+    /* 属性类面板的数值（图层对象个数 / 范围坐标 / 透明度百分比等）：
+       之前用 input_focus 蓝跟主操作色撞色，改成主文本色 + 加粗，
+       信息层级靠"加粗"而非"换色"区分。*/
+    QLabel#PropValue {{ color: {t.menu_text}; font-weight: bold; }}
+    QLabel#PropHint {{ color: {t.text_secondary}; }}
 
     QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox,
     QDateTimeEdit, QDateEdit, QDoubleSpinBox {{
@@ -637,6 +642,10 @@ def app_qss(t: Theme) -> str:
     QCheckBox:disabled, QRadioButton:disabled {{ color: {t.text_secondary}; }}
 
     QGroupBox {{
+        /* 不显式设背景时 Qt 会落到系统默认色（Windows 上偏灰），导致内部控件
+           （如 QSlider 控件外的空白区）显示一块突兀的灰。改成跟 QDialog 一致的
+           window_bg，跟整体面板无缝衔接。*/
+        background-color: {t.window_bg};
         color: {t.menu_text};
         border: 1px solid {t.border};
         border-radius: 4px;
@@ -732,6 +741,39 @@ def app_qss(t: Theme) -> str:
         border-radius: 3px;
     }}
 
+    /* 水平滑块。仅服务**垂直方向**或自定高度的 QSlider；图层属性的「透明度」
+       等水平滑块已切到 ``app.ui.common.slider.FlatSlider``（完全自绘，
+       不受 windowsvista 风格硬编码的 PE_PanelItemViewItem 影响）——后者
+       在 paintEvent 里直接走 ThemeManager 取色，主题切换自动重绘。 */
+    QSlider::groove:horizontal {{
+        height: 6px;
+        background: {t.window_bg};
+        border: none;
+        border-radius: 3px;
+    }}
+    QSlider {{
+        background: {t.window_bg};
+    }}
+    QSlider::sub-page:horizontal {{
+        background: {t.input_focus};
+        border-radius: 3px;
+    }}
+    QSlider::add-page:horizontal {{
+        background: {t.window_bg};
+        border-radius: 3px;
+    }}
+    QSlider::handle:horizontal {{
+        width: 12px;
+        height: 12px;
+        margin: -5px 0;
+        border-radius: 6px;
+        background: {t.window_bg};
+        border: 1px solid {t.input_focus};
+    }}
+    QSlider::handle:horizontal:hover {{ background: {t.input_focus}; }}
+    QSlider::handle:horizontal:pressed {{ background: {t.btn_pressed}; }}
+    QSlider:disabled::sub-page:horizontal {{ background: {t.menu_hover}; }}
+
     QTabWidget::pane {{
         border: 1px solid {t.border};
         background-color: {t.window_bg};
@@ -747,7 +789,16 @@ def app_qss(t: Theme) -> str:
         border-top-right-radius: 3px;
         margin-right: 2px;
     }}
-    QTabBar::tab:selected {{ background-color: {t.window_bg}; color: {t.menu_text}; }}
+    /* 选中态：顶部加 2px 强调色描边 + 加粗，让激活标签从标签条上明显"抬"起来。
+       普通态下边框已有 1px border；选中态通过 border-top-width 改到 2px 会撑高 1px，
+       用 margin-top: -1px 抵消，保持标签条总高不变。*/
+    QTabBar::tab:selected {{
+        background-color: {t.window_bg};
+        color: {t.menu_text};
+        font-weight: bold;
+        border-top: 2px solid {t.input_focus};
+        margin-top: -1px;
+    }}
     QTabBar::tab:hover:!selected {{ background-color: {t.menu_hover}; }}
     """
 
