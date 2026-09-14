@@ -19,8 +19,15 @@
 - **输入图层（vector source / raster layer）**：若参数值是图层对象（dialog 通过
   ``MapLayerWidgetWrapper`` 拿到的就是），先经
   :func:`copy_with_widened_string_fields` 兜底 GDB 脏数据；其它类型透传
-- **feedback 不挂 progressChanged**：与 :class:`BufferService` 同原因，
-  直连/排队连接都会触发原生崩溃 ``0xC0000409``
+- **异步执行**：dialog 走 :meth:`GenericAlgService.build_task` 构造
+  :class:`~app.core.domain.generic_alg.task.GenericAlgRunnerTask`（
+  ``QgsProcessingAlgRunnerTask``），算法在 worker 线程跑，主线程不阻塞；结果经
+  ``executed`` 信号回主线程后再调 :meth:`wrap_results` 装配图层（worker 线程
+  不创建 ``QgsMapLayer``，避免跨线程 QObject 亲缘问题）。:meth:`run` 保留
+  同步路径，供测试 / 主线程场景使用
+- **进度信号**：``feedback.progressChanged`` 只接任务上的普通 Python 方法
+  （再重发 ``progress_updated`` 信号），不直连控件槽——直连 / 排队连接控件槽
+  都会触发原生崩溃 ``0xC0000409``（见 :class:`BufferDialog` / memory）
 """
 
 from __future__ import annotations
@@ -70,7 +77,13 @@ RESULT_IS_PATH = "path"
 class GenericAlgService:
     """通用 processing 算法 service。
 
-    实例无状态，可多次复用。``run`` 同步调用 ``processing.run``，
+    实例无状态，可多次复用。提供同步与异步两条路径：
+
+    - :meth:`run`：主线程同步 ``processing.run`` + 结果装配，供测试 / 简单场景。
+    - :meth:`build_task` + :meth:`wrap_results`：dialog 用的异步路径——
+      ``build_task`` 在主线程准备参数并返回 ``QgsProcessingAlgRunnerTask``，
+      任务跑完后在 ``executed`` 回调（主线程）里调 ``wrap_results`` 装配结果。
+
     返回值类型随算法输出定义变化：
 
     - :class:`QgsMapLayer`（VectorDestination / RasterDestination + path 模式）
@@ -86,21 +99,40 @@ class GenericAlgService:
         job: GenericAlgJob,
         feedback: Optional["QgsProcessingFeedback"] = None,
     ) -> Any:
-        """执行算法并按输出定义装配返回值。失败抛 ``RuntimeError``。"""
+        """**同步**执行算法并按输出定义装配返回值。失败抛 ``RuntimeError``。
+
+        主线程调用会阻塞窗口事件循环（长任务请走 :meth:`build_task`）；
+        保留该入口用于测试与确实需要同步结果的场景。
+        """
         from qgis import processing
         from qgis.core import (
             QgsProcessingContext,
             QgsProcessingFeedback,
             QgsProject,
-            QgsRasterLayer,
-            QgsVectorLayer,
         )
 
         alg = self._get_algorithm(job.algo_id)
+        params, primary_output = self.prepare(job, alg)
         context = QgsProcessingContext()
         context.setProject(QgsProject.instance())
         fb = feedback or QgsProcessingFeedback()
+        results = processing.run(
+            job.algo_id,
+            params,
+            context=context,
+            feedback=fb,
+        )
+        logger.info(
+            "%s 完成：%s", job.algo_id, self._describe_output(primary_output, results)
+        )
+        return self.wrap_results(job, results, primary_output)
 
+    def prepare(self, job: GenericAlgJob, alg) -> tuple[dict, Any]:
+        """清洗输入 + 注入 OUTPUT 占位符，返回 ``(params, primary_output)``。
+
+        必须在**主线程**调用：``copy_with_widened_string_fields`` 会创建内存图层，
+        且 ``_destination_value`` 会为 GDAL 算法 ``mkdtemp`` 临时目录。
+        """
         params = dict(job.params)  # 拷贝避免污染 dialog 状态
         params = self._clean_inputs(alg, params)
 
@@ -112,7 +144,7 @@ class GenericAlgService:
             )
 
         logger.info(
-            "执行算法 %s：输出=%s",
+            "准备算法 %s：输出=%s",
             job.algo_id,
             (
                 params[primary_output.name()]
@@ -120,21 +152,59 @@ class GenericAlgService:
                 else "无输出"
             ),
         )
-        results = processing.run(
-            job.algo_id,
-            params,
-            context=context,
-            feedback=fb,
+        return params, primary_output
+
+    def build_task(
+        self,
+        job: GenericAlgJob,
+        feedback: Optional["QgsProcessingFeedback"] = None,
+    ):
+        """构造异步执行任务（**不启动**）。
+
+        返回 ``(task, context, feedback, primary_output)``：
+
+        - ``task``：:class:`~app.core.domain.generic_alg.task.GenericAlgRunnerTask`，
+          调用方 ``QgsApplication.taskManager().addTask(task)`` 启动，并连
+          ``task.executed`` 收结果、``task.progress_updated`` 驱进度条
+        - ``context`` / ``feedback``：调用方必须持有到任务结束
+          （``QgsProcessingAlgRunnerTask`` 内部保存的是裸指针，被 Python GC 会
+          悬垂 → worker 线程原生崩溃）
+        - ``primary_output``：destination 参数定义，任务完成后传给
+          :meth:`wrap_results`
+
+        参数准备（含内存图层清洗）在**主线程**完成，worker 只跑算法本身。
+        """
+        from qgis.core import QgsProcessingContext, QgsProject
+
+        from app.core.domain.imagery_tiles.feedback import ProcessingLogFeedback
+
+        from .task import GenericAlgRunnerTask  # noqa: PLC0415 - 懒导入：task 顶层依赖 qgis.core
+
+        alg = self._get_algorithm(job.algo_id)
+        params, primary_output = self.prepare(job, alg)
+        context = QgsProcessingContext()
+        context.setProject(QgsProject.instance())
+        fb = feedback or ProcessingLogFeedback()
+        task = GenericAlgRunnerTask(
+            alg, params, context, fb, prepared_params=params
         )
-        logger.info("%s 完成：%s", job.algo_id, self._describe_output(primary_output, results))
+        return task, context, fb, primary_output
 
-        # 按输出定义装配返回值
+    def wrap_results(
+        self,
+        job: GenericAlgJob,
+        results: dict,
+        primary_output,
+    ) -> Any:
+        """把 ``results`` 装配成图层 / 路径 dict（约定在**主线程**调用）。
+
+        ``processing.run`` / 后台任务返回的 ``results`` 里的图层已统一换成路径
+        字符串，这里据 destination 类型创建 ``QgsRasterLayer`` / ``QgsVectorLayer``。
+        """
         if primary_output is not None:
-            return self._wrap_destination_result(
-                results, primary_output, job
-            )
+            return self._wrap_destination_result(results, primary_output, job)
 
-        # 无 destination（gdal:ogrinfo / gdal:gdalinfo / gdal:dataset_identify）
+        # 无 destination（gdal:gdalinfo / gdal:dataset_identify）
         # 整体当作路径 / 字符串结果返回；dialog 不加图层
         return {
             RESULT_IS_PATH: True,

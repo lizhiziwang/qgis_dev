@@ -40,8 +40,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from pathlib import Path
 
-from qgis.PyQt.QtCore import QEvent, Qt, QTimer
-from qgis.PyQt.QtGui import QFont
+from qgis.PyQt.QtCore import QEvent, QSize, Qt, QTimer
+from qgis.PyQt.QtGui import QBrush, QColor, QFont, QIcon
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -65,6 +65,8 @@ from app.core.util.local_db_util import (
     _CATEGORY_UNIT,
 )
 from app.infra.logging import get_logger
+from app.ui.common import tool_icons
+from app.ui.common.theme import ThemeManager
 from app.ui.dialogs.add_connection import AddConnectionDialog
 
 logger = get_logger(__name__)
@@ -72,6 +74,22 @@ logger = get_logger(__name__)
 _ROLE = int(Qt.ItemDataRole.UserRole)
 #: 表格行(名称列)自带的定位 tag = f"{category}\\x00{name}", 供叶子行精确高亮
 _ROW_TAG_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+
+#: 树节点层级 → Font Awesome 图标键(见 :mod:`app.ui.common.tool_icons`)
+_TREE_ICONS = {
+    "root_local": "db_local",
+    "root_server": "db_server",
+    "conn_local": "db_file",
+    "conn_server": "db_remote",
+    "spatial": "cat_vector",
+    "dict": "cat_dict",
+    "image": "cat_image",
+    "leaf": "cat_data",
+}
+#: 加粗层级(作用域根 / 连接节点); 类别分组与表叶子用常规字重
+_BOLD_KINDS = frozenset({"root_local", "root_server", "conn_local", "conn_server"})
+#: 仅右列数字用的缩小字号(相对基准字号的点差)
+_COUNT_FONT_DELTA = 1.5
 
 
 class DataManageDock(QDockWidget):
@@ -88,6 +106,8 @@ class DataManageDock(QDockWidget):
         on_add_layer: Callable[[dict, str, str], None] | None = None,
     ) -> None:
         super().__init__("数据管理", parent)
+        #: QSS 作用域锚点(见 app.ui.common.theme.window_qss 的 #DataManageDock 规则)
+        self.setObjectName("DataManageDock")
         #: 动作回调占位(未提供时点击只记日志)
         self._on_add_connection = on_add_connection
         self._on_create_data = on_create_data
@@ -110,6 +130,8 @@ class DataManageDock(QDockWidget):
         self._build_ui()
         self._databases: list[dict] = []
         self._rebuild_tree()
+        # 树图标是 QPainter 画的(颜色烧在 PNG 里), 切主题需重刷
+        ThemeManager.instance().theme_changed.connect(self._on_theme_changed)
 
     # ------------------------------------------------------------ UI
 
@@ -133,28 +155,51 @@ class DataManageDock(QDockWidget):
         self.setWidget(root)
 
     def _build_tree_pane(self, parent: QWidget) -> QWidget:
-        """左栏: 数据库连接树(.dm-tree)."""
+        """左栏: 数据库连接树(.dm-tree).
+
+        视觉规格(字号 / 行距 / 悬停 / 选中 / 「新建连接」按钮)集中到
+        :func:`app.ui.common.theme.window_qss` 的 ``#DataManageTree`` /
+        ``#DataManageAddConn`` 规则, 主题切换自动跟随; 这里只管布局、
+        图标尺寸与列宽策略, 节点级配色见 :meth:`_apply_tree_theme`。
+        """
         pane = QWidget(parent)
+        pane.setObjectName("DataManageTreePane")
         lay = QVBoxLayout(pane)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(2)
 
         hd = QLabel("数据库连接")
-        font = hd.font()
-        font.setBold(True)
-        hd.setFont(font)
+        hd.setObjectName("DataManageTreeHeader")
         lay.addWidget(hd)
 
         self.tree = QTreeWidget()
+        self.tree.setObjectName("DataManageTree")
         self.tree.setHeaderHidden(True)
         self.tree.setColumnCount(2)
-        self.tree.setIndentation(16)
+        self.tree.setIndentation(14)
         self.tree.setAnimated(True)
         self.tree.setRootIsDecorated(True)
+        self.tree.setIconSize(QSize(14, 14))
+        self.tree.setUniformRowHeights(True)
+        self.tree.setAllColumnsShowFocus(True)  # 选中态铺满整行
+        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        # 列宽: 名称列吃满剩余宽度(长名省略号 + tooltip 兜底), 行数列紧贴右侧。
+        # 不这么设的话默认「末列拉伸」会让行数列抢走全部富余宽度, 名称列固定
+        # 100px 被截断。行数列不用 ResizeToContents —— 那个模式会在每次
+        # setText 后重算整列, 大库(上千表)重建树是 O(n²); 改成 Interactive
+        # 由 _apply_tree_theme 末尾 resizeColumnToContents 算一次(仍可手拖)。
+        header = self.tree.header()
+        header.setStretchLastSection(False)
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
+        self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.tree.itemClicked.connect(self._on_tree_item_clicked)
         lay.addWidget(self.tree, 1)
 
-        self.add_btn = QPushButton("+ 新建连接")
+        self.add_btn = QPushButton("新建连接")
+        self.add_btn.setObjectName("DataManageAddConn")
+        self.add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.add_btn.setToolTip("连接本地库文件或服务器数据库")
         self.add_btn.clicked.connect(self._on_add_connection_clicked)
         lay.addWidget(self.add_btn)
         return pane
@@ -265,19 +310,32 @@ class DataManageDock(QDockWidget):
         root.treeWidget().setCurrentItem(item)
 
     def _make_root(self, title: str, tooltip: str, scope: str) -> QTreeWidgetItem:
-        """构造粗体根节点; payload 记作用域(local/server), 点击只显示根名。"""
+        """构造作用域根节点; payload 记作用域(local/server), 点击只显示根名.
+
+        字重 / 颜色 / 图标由 :meth:`_apply_tree_theme` 统一刷。
+        """
         root = QTreeWidgetItem()
         root.setText(0, title)
         root.setToolTip(0, tooltip)
         root.setData(0, _ROLE, {"scope": scope})
-        font = root.font(0)
-        font.setBold(True)
-        root.setFont(0, font)
         return root
 
     def _rebuild_tree(self) -> None:
         """重建左树: 固定两棵根节点「本地数据库」/「服务器数据库」,
-        本地/服务器连接作为各自根节点的子节点(连接内按类别分级)。"""
+        本地/服务器连接作为各自根节点的子节点(连接内按类别分级)。
+
+        重建期间关掉重绘(大库上千节点, 逐条插入会反复触发重排/重绘), 建完
+        再统一配色并打开重绘。
+        """
+        self.tree.setUpdatesEnabled(False)
+        try:
+            self._rebuild_tree_items()
+        finally:
+            self.tree.setUpdatesEnabled(True)
+        self._apply_tree_theme()
+
+    def _rebuild_tree_items(self) -> None:
+        """往树上灌节点(不含配色与重绘开关, 见 :meth:`_rebuild_tree`)。"""
         self.tree.clear()
 
         # 本地数据库根节点
@@ -288,15 +346,8 @@ class DataManageDock(QDockWidget):
             top = QTreeWidgetItem(local_root)
             top.setText(0, self._db_title(db))
             top.setToolTip(0, str(db.get("path", "")))
-            font = top.font(0)
-            font.setBold(True)
-            top.setFont(0, font)
             top.setData(0, _ROLE, {"db": db})
             self._append_category_groups(top, db)
-            if top.childCount():
-                top.setExpanded(True)
-        if local_root.childCount():
-            local_root.setExpanded(True)
         self.tree.addTopLevelItem(local_root)
 
         # 服务器数据库根节点: 服务器连接(PostgreSQL/Oracle/SQL Server)挂在下面
@@ -310,9 +361,9 @@ class DataManageDock(QDockWidget):
             child.setText(0, self._server_title(conn))
             child.setToolTip(0, self._server_tooltip(conn))
             child.setData(0, _ROLE, {"db": conn})
-        if server_root.childCount():
-            server_root.setExpanded(True)
         self.tree.addTopLevelItem(server_root)
+
+        self._expand_tree()
 
         # 收尾联动: 有本地库选第一个本地连接; 只有服务器连接选最后一个;
         # 都没有则显示空提示
@@ -326,6 +377,24 @@ class DataManageDock(QDockWidget):
             self._show_server_connection(self._server_connections[-1])
         else:
             self._show_database(None)
+
+    def _expand_tree(self) -> None:
+        """展开全部根 / 连接 / 类别分组节点.
+
+        必须在节点挂到树上之后调 —— ``QTreeWidgetItem.setExpanded()`` 对
+        **尚未插入视图** 的节点(含只挂在未挂载父节点下的子孙)是静默 no-op,
+        只有顶层节点会被记录。之前在建节点时逐条 ``setExpanded(True)``,
+        于是除首个连接外, 所有连接/类别分组都以折叠态出现, 看着像空壳,
+        用户得挨个手点展开。
+        """
+        for i in range(self.tree.topLevelItemCount()):
+            root = self.tree.topLevelItem(i)
+            root.setExpanded(True)
+            for j in range(root.childCount()):
+                conn = root.child(j)
+                conn.setExpanded(True)  # 本地: 展开「矢量/字典/影像」分组
+                for k in range(conn.childCount()):
+                    conn.child(k).setExpanded(True)
 
     def _append_category_groups(self, top: QTreeWidgetItem, db: dict) -> None:
         """给连接节点按 spatial/dict/image 追加分级子节点(空类别不显示)."""
@@ -343,12 +412,67 @@ class DataManageDock(QDockWidget):
                 leaf.setText(0, name)
                 count = counts.get(name)
                 if count is not None:
-                    small = QFont(leaf.font(1))
-                    small.setPointSizeF(max(6.0, small.pointSizeF() - 1.5))
-                    leaf.setFont(1, small)
                     leaf.setText(1, f"{count} {_CATEGORY_UNIT[cat]}")
                 leaf.setData(0, _ROLE, {"db": db, "cat": cat, "name": name})
-            group.setExpanded(True)
+
+    # ------------------------------------------------------------ 样式
+
+    @staticmethod
+    def _payload_kind(payload: dict) -> str | None:
+        """payload → 节点层级键(见 :data:`_TREE_ICONS` / :data:`_BOLD_KINDS`)。"""
+        if payload.get("scope"):
+            return f"root_{payload['scope']}"
+        if "name" in payload:
+            return "leaf"
+        if "cat" in payload:
+            return str(payload["cat"])
+        db = payload.get("db")
+        if isinstance(db, dict):
+            return "conn_server" if db.get("kind") == "server" else "conn_local"
+        return None
+
+    def _apply_tree_theme(self) -> None:
+        """按当前主题重刷全树节点(字重 / 颜色 / 图标 + 「新建连接」按钮图标)。
+
+        QSS 选不中单个 item, 节点级配色只能走 ``setFont`` / ``setForeground`` /
+        ``setIcon``; 图标是 QPainter 画的、颜色烧在 PNG 里, 所以切主题要整树重刷。
+        """
+        theme = ThemeManager.instance().current()
+        text = QColor(theme.menu_text)
+        secondary = QColor(theme.text_secondary)
+        base = QFont(self.tree.font())
+        counts_font = QFont(base)
+        counts_font.setPointSizeF(max(6.0, base.pointSizeF() - _COUNT_FONT_DELTA))
+
+        def visit(item: QTreeWidgetItem) -> None:
+            payload = item.data(0, _ROLE)
+            kind = self._payload_kind(payload) if isinstance(payload, dict) else None
+            font = QFont(base)
+            font.setBold(kind in _BOLD_KINDS)
+            item.setFont(0, font)
+            # 类别分组是容器节点, 用次要色退到背景里, 让库连接与数据叶子更抢眼
+            item.setForeground(0, QBrush(secondary if kind in _CATEGORY_ORDER else text))
+            icon_key = _TREE_ICONS.get(kind or "")
+            item.setIcon(0, tool_icons.icon(icon_key, theme.menu_text) if icon_key else QIcon())
+            if item.text(1):
+                # 右列行数: 小一号 + 次要色, 右对齐成"徽标"感
+                item.setFont(1, counts_font)
+                item.setForeground(1, QBrush(secondary))
+                item.setTextAlignment(
+                    1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
+            for i in range(item.childCount()):
+                visit(item.child(i))
+
+        for i in range(self.tree.topLevelItemCount()):
+            visit(self.tree.topLevelItem(i))
+        # 行数列宽度按内容算一次(字号刚被刷过, 必须放在最后)
+        self.tree.resizeColumnToContents(1)
+        self.add_btn.setIcon(tool_icons.icon("plus_circle", theme.input_focus))
+
+    def _on_theme_changed(self, _theme=None) -> None:
+        """主题切换: 重刷树节点配色与图标。"""
+        self._apply_tree_theme()
 
     @staticmethod
     def _db_title(db: dict) -> str:

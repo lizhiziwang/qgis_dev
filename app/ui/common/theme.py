@@ -435,6 +435,52 @@ def window_qss(t: Theme) -> str:
     QWidget#LayerDockHeader QToolButton:pressed {{
         background-color: {t.toolbar_pressed};
     }}
+
+    /* 数据管理 Dock 左栏「连接管理树」：统一字号 / 行距 / 悬停选中态。
+       节点级的字重、文字色与图标选不中单个 item，由
+       DataManageDock._apply_tree_theme 用 setFont/setForeground/setIcon 刷，
+       这里只管控件层外观。 */
+    QWidget#DataManageTreePane {{ background-color: {t.window_bg}; }}
+    QLabel#DataManageTreeHeader {{
+        color: {t.text_secondary};
+        font-size: 11px;
+        font-weight: 600;
+        padding: 3px 2px 1px 2px;
+    }}
+    QTreeWidget#DataManageTree {{
+        background-color: {t.window_bg};
+        border: none;
+        /* 去掉聚焦时的虚线外框（选中态已有底色，再套虚线框显脏） */
+        outline: 0;
+        padding: 2px 0;
+    }}
+    QTreeWidget#DataManageTree::item {{
+        padding: 3px 2px;
+        border-radius: 3px;
+    }}
+    QTreeWidget#DataManageTree::item:hover {{
+        background-color: {t.menu_hover};
+    }}
+    /* 选中态文字强制回主色：类别分组平时是次要色，选中后要和其他层级一样清楚 */
+    QTreeWidget#DataManageTree::item:selected {{
+        background-color: {t.toolbar_hover};
+        color: {t.menu_text};
+    }}
+    QPushButton#DataManageAddConn {{
+        background-color: transparent;
+        color: {t.input_focus};
+        border: 1px solid {t.input_border};
+        border-radius: 3px;
+        padding: 4px 8px;
+        font-size: 12px;
+    }}
+    QPushButton#DataManageAddConn:hover {{
+        background-color: {_with_alpha(t.input_focus, 24)};
+        border-color: {t.input_focus};
+    }}
+    QPushButton#DataManageAddConn:pressed {{
+        background-color: {_with_alpha(t.input_focus, 44)};
+    }}
     """
 
 
@@ -687,6 +733,24 @@ def app_qss(t: Theme) -> str:
         border: none;
         border-right: 1px solid {t.border};
         border-bottom: 1px solid {t.border};
+    }}
+    /* 表格行内小按钮（图层属性「字段」页的 更新 / 删除） */
+    QPushButton#RowActionBtn, QPushButton#RowActionDanger {{
+        background-color: transparent;
+        border: 1px solid {t.border};
+        border-radius: 3px;
+        padding: 1px 8px;
+        font-size: 11px;
+    }}
+    QPushButton#RowActionBtn {{ color: {t.input_focus}; }}
+    QPushButton#RowActionBtn:hover {{
+        background-color: {t.btn_hover};
+        border-color: {t.input_focus};
+    }}
+    QPushButton#RowActionDanger {{ color: {t.text_error}; }}
+    QPushButton#RowActionDanger:hover {{
+        background-color: {_with_alpha(t.text_error, 26)};
+        border-color: {t.text_error};
     }}
 
     QTextBrowser {{

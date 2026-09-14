@@ -38,8 +38,10 @@ _TYPE_OPTIONS = (
 class AddFieldDialog(BaseDialog):
     """新建字段输入表单。"""
 
-    def __init__(self, parent=None) -> None:
-        super().__init__(parent, "添加字段")
+    def __init__(self, parent=None, initial: dict | None = None) -> None:
+        """``initial`` 为 None → 新建字段；传 spec → 编辑已有 / pending 字段。"""
+        self._initial = initial
+        super().__init__(parent, "编辑字段" if initial else "添加字段")
         self.setMinimumSize(0, 0)
         self.resize(360, 220)
 
@@ -90,9 +92,28 @@ class AddFieldDialog(BaseDialog):
         layout.addWidget(bb)
         self.setLayout(layout)
 
-        # 初始化默认值（用第一个选项 = 文本）
-        self._on_type_changed(0)
+        # 初始化默认值（用第一个选项 = 文本）；编辑模式则回填 spec
+        if self._initial:
+            self._load_initial(self._initial)
+        else:
+            self._on_type_changed(0)
         self.name_edit.setFocus()
+
+    def _load_initial(self, spec: dict) -> None:
+        """把传入的字段 spec 回填到各控件（编辑模式）。"""
+        self.name_edit.setText(spec.get("name") or "")
+        self.alias_edit.setText(spec.get("alias") or "")
+        target = spec.get("type_name")
+        for i in range(self.type_combo.count()):
+            data = self.type_combo.itemData(i)
+            if data and data[1] == target:
+                # 先选类型（避免触发 _on_type_changed 把下面回填的长度/精度覆盖掉）
+                self.type_combo.blockSignals(True)
+                self.type_combo.setCurrentIndex(i)
+                self.type_combo.blockSignals(False)
+                break
+        self.length_spin.setValue(int(spec.get("length", 0) or 0))
+        self.precision_spin.setValue(int(spec.get("precision", 0) or 0))
 
     # ----------------------------------------------------------- 交互
 
@@ -114,7 +135,7 @@ class AddFieldDialog(BaseDialog):
         """用户点「确定」后取结果；校验不过 / 取消 → 返回 None。
 
         返回字典 ``{"name", "alias", "qtype", "type_name", "length", "precision"}``，
-        :class:`FieldsTab` 直接拿这个字典构 ``QgsField`` 并 ``addAttributes``。
+        :class:`FieldsTab` 直接拿这个字典构 ``QgsField`` 或写回 pending 行。
         """
         name = self.name_edit.text().strip()
         if not name:

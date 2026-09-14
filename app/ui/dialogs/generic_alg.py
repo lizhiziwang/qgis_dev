@@ -8,6 +8,10 @@
 复用 :class:`BufferDialog` 的 layout（左参数 + 右算法描述 + 下按钮 / 进度条），
 但不写死任何参数名。Advanced flag 的参数折叠到「高级」``QGroupBox`` 内，与
 QGIS 自家工具箱保持一致。
+
+执行在**后台线程**（``QgsProcessingAlgRunnerTask``，与 QGIS processing 对话框
+同一机制）跑，主线程事件循环不阻塞——GDAL 大栅格处理不再卡死 UI；带进度条与
+取消按钮，结果经 ``executed`` 信号回主线程后再装配图层。
 """
 
 from __future__ import annotations
@@ -34,6 +38,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from qgis.core import (
+    Qgis,
     QgsApplication,
     QgsMapLayer,
     QgsProcessingParameterDefinition,
@@ -103,6 +108,20 @@ class GenericAlgDialog(BaseDialog):
             self.setMaximumHeight(max_h)
         self.project = QgsProject.instance()
         self.service = GenericAlgService()
+
+        #: 当前后台任务及其反馈 / 上下文 / 任务参数。任务结束后 _task 立即置 None；
+        #: context 与 feedback 继续保留（QgsProcessingAlgRunnerTask 内部保存的是裸
+        #: 指针，任务收尾阶段仍会使用），下次执行时被新实例覆盖。
+        self._task = None
+        self._context = None
+        self._feedback = None
+        self._job: Optional[GenericAlgJob] = None
+        self._primary_output = None
+        #: 当前任务清洗后的参数（含临时 memory 输入图层）。任务结束后仍保留到下次
+        #: 执行，避免任务收尾阶段临时图层被 GC 导致悬垂。
+        self._prepared_params: dict = {}
+        #: 最近一条 ERROR 级算法日志（任务失败时展示到 messagebar）
+        self._last_error = ""
 
         # 维持 wrapper 不被 Python GC（C++ 持有指针）
         self._wrappers: dict[str, "QgsAbstractProcessingParameterWidgetWrapper"] = {}
@@ -202,6 +221,10 @@ class GenericAlgDialog(BaseDialog):
         self.execute_btn = QPushButton("执行")
         self.execute_btn.clicked.connect(self._on_execute)
         bottom.addWidget(self.execute_btn)
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        bottom.addWidget(self.cancel_btn)
         close = QPushButton("关闭")
         close.clicked.connect(self.close)
         bottom.addWidget(close)
@@ -426,6 +449,9 @@ class GenericAlgDialog(BaseDialog):
         if self._alg is None:
             send("critical", "算法未注册或已被卸载", duration=3)
             return
+        if self._task is not None:
+            send("warning", "已有任务正在执行，请等待完成或取消", duration=3)
+            return
 
         params = self._collect_params()
         output_name = (
@@ -448,34 +474,184 @@ class GenericAlgDialog(BaseDialog):
 
         self.execute_btn.setEnabled(False)
         self.loading.setValue(0)
-        # 推迟到事件栈外跑 processing.run，与 BufferDialog 同原因
-        QTimer.singleShot(0, lambda: self._run(job))
+        self._last_error = ""
+        # 上一个任务已结束（_task 为 None），可安全释放其临时输入图层
+        self._prepared_params = {}
+
+        # 算法声明 NoThreading → 只能在主线程跑（与 QGIS processing 对话框一致）。
+        # 仍推迟到事件栈外，避免按钮点击处理过程中直接跑 processing.run。
+        if self._alg.flags() & Qgis.ProcessingAlgorithmFlag.NoThreading:
+            QTimer.singleShot(0, lambda: self._run(job))
+            return
+
+        # 后台线程执行（QgsProcessingAlgRunnerTask）：算法在 worker 线程跑，
+        # 主线程事件循环不阻塞 → 窗口保持响应（GDAL 大栅格曾经卡死 UI）。
+        try:
+            task, context, feedback, primary_output = self.service.build_task(job)
+        except Exception as exc:
+            logger.error("%s 任务准备失败：%s", job.algo_id, exc, exc_info=True)
+            self.execute_btn.setEnabled(True)
+            send("critical", f"{job.algo_id} 任务准备失败：{exc}", duration=5)
+            return
+
+        # context / feedback 必须持有到任务结束（task 内部是裸指针，被 GC 会悬垂）
+        self._task = task
+        self._context = context
+        self._feedback = feedback
+        self._job = job
+        self._primary_output = primary_output
+        self._prepared_params = task.prepared_params
+        self.cancel_btn.setEnabled(True)
+        self.cancel_btn.setText("取消")
+
+        task.progress_updated.connect(self._on_task_progress)
+        # executed(successful, results) 在主线程回调里装配结果（见 _on_task_executed）
+        task.executed.connect(self._on_task_executed)
+        # 取消 / 异常终止时 executed 可能不发，用 taskTerminated 兜底复位按钮
+        task.taskTerminated.connect(self._on_task_terminated)
+        # 算法日志（worker 线程发出）跨线程投递到普通 Python 方法（安全）
+        feedback.log_line.connect(self._on_alg_log)
+        QgsApplication.taskManager().addTask(task)
 
     def _run(self, job: GenericAlgJob) -> None:
-        """事件栈外执行算法并按返回类型装配地图 / messagebar。"""
+        """主线程同步执行（``NoThreading`` 算法 / 兜底路径）。
+
+        注意：会阻塞事件循环，仅用于确实无法后台化的算法；常规 GDAL 算法走
+        :meth:`_on_execute` 的 ``QgsProcessingAlgRunnerTask`` 后台路径。
+        """
         self.loading.setValue(0)
         try:
             result = self.service.run(job)
-        except Exception as exc:  # noqa: BLE001
-            logger.error(
-                "%s 执行失败：%s", job.algo_id, exc, exc_info=True
-            )
+        except Exception as exc:
+            logger.error("%s 执行失败：%s", job.algo_id, exc, exc_info=True)
             self.loading.setValue(0)
             send("critical", f"{job.algo_id} 执行失败：{exc}", duration=5)
             return
         finally:
             self.execute_btn.setEnabled(True)
+        self.loading.setValue(100)
+        self._apply_result(job, result)
 
+    # ------------------------------------------------------ 后台任务回调
+
+    def _on_task_progress(self, value: int) -> None:
+        """worker 线程进度跨线程投递到这里（普通 Python 方法，投递安全）。"""
+        self.loading.setValue(int(value))
+
+    def _on_alg_log(self, level: str, message: str) -> None:
+        """worker 线程算法日志跨线程投递到这里。
+
+        记录最近一条 ERROR 供任务失败时展示；完整日志写应用日志。不弹 UI 日志
+        面板（GDAL 控制台输出量大，messagebar + 日志文件足够）。
+        """
+        if level == "ERROR":
+            self._last_error = message
+        if level in ("ERROR", "WARNING"):
+            logger.warning("[%s] %s", level, message)
+        else:
+            logger.debug("[%s] %s", level, message)
+
+    def _on_task_executed(self, ok: bool, results: dict) -> None:
+        """后台任务结束（``QgsProcessingAlgRunnerTask.executed``，主线程回调）。
+
+        先快照再复位：任务随时可能被 ``QgsTaskManager`` 删除，不能再访问任务成员；
+        ``context`` / ``feedback`` 继续保留到下次执行（任务收尾阶段仍会用到它们，
+        且这里无法确定 ``executed`` 与任务析构的先后顺序）。
+        """
+        if self._task is None:
+            return  # 已由 _on_task_terminated 处理（取消 / 异常终止）
+        job = self._job
+        primary_output = self._primary_output
+        feedback = self._feedback
+        error = self._last_error
+        if job is None:
+            return
+        self._reset_task_ui()
+
+        canceled = feedback is not None and feedback.isCanceled()
+        command_failed = bool(getattr(feedback, "failed", False))
+
+        if canceled:
+            self.loading.setValue(0)
+            send("warning", f"已取消 {job.algo_id}", duration=3)
+            return
+        if not ok or command_failed:
+            self.loading.setValue(0)
+            detail = f"：{error}" if error else ""
+            logger.error("%s 执行失败%s", job.algo_id, detail)
+            send("critical", f"{job.algo_id} 执行失败{detail}", duration=5)
+            return
+
+        self.loading.setValue(100)
+        try:
+            result = self.service.wrap_results(job, results or {}, primary_output)
+        except Exception as exc:
+            logger.error("%s 结果装配失败：%s", job.algo_id, exc, exc_info=True)
+            send("critical", f"{job.algo_id} 结果装配失败：{exc}", duration=5)
+            return
+        self._apply_result(job, result)
+
+    def _on_task_terminated(self) -> None:
+        """任务异常终止 / 取消（``executed`` 未送达时的兜底）。
+
+        ``QgsProcessingAlgRunnerTask`` 被取消时可能直接终止而不发 ``executed``，
+        必须在此复位按钮状态，否则对话框会卡在「执行中」。
+        """
+        if self._task is None:
+            return  # 已由 _on_task_executed 处理
+        job = self._job
+        feedback = self._feedback
+        error = self._last_error
+        self._reset_task_ui()
+        self.loading.setValue(0)
+        if job is None:
+            return
+        if feedback is not None and feedback.isCanceled():
+            send("warning", f"已取消 {job.algo_id}", duration=3)
+            return
+        detail = f"：{error}" if error else ""
+        logger.error("%s 执行失败%s", job.algo_id, detail)
+        send("critical", f"{job.algo_id} 执行失败{detail}", duration=5)
+
+    def _reset_task_ui(self) -> None:
+        """复位「执行中」状态（按钮 / 任务引用），保留 context / feedback。"""
+        self._task = None
+        self._job = None
+        self._primary_output = None
+        self._last_error = ""
+        self.execute_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setText("取消")
+
+    def _on_cancel(self) -> None:
+        """请求取消后台任务（转发到 ``feedback.cancel()``，算法尽早停止）。"""
+        task = self._task
+        if task is None:
+            return
+        try:
+            task.cancel()
+        except RuntimeError:
+            # 任务已完成，C++ 对象已被 QgsTaskManager 删除
+            self._task = None
+            return
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setText("取消中…")
+
+    def closeEvent(self, event) -> None:
+        """关闭对话框时取消在跑的后台任务（实例被工具树复用）。"""
+        self._on_cancel()
+        super().closeEvent(event)
+
+    def _apply_result(self, job: GenericAlgJob, result) -> None:
+        """按 service 返回类型装配地图 / messagebar（主线程）。"""
         if isinstance(result, dict) and result.get(RESULT_IS_PATH):
             value = result.get("value", "")
             name = result.get("name", job.output_name)
-            self.loading.setValue(100)
             send("success", f"{job.algo_id} 完成：{name} → {value}", duration=5)
             return
 
         if isinstance(result, QgsMapLayer):
             self.project.addMapLayer(result)
-            self.loading.setValue(100)
             fc = ""
             try:
                 fc = f"，{result.featureCount()} 个要素"
@@ -490,7 +666,6 @@ class GenericAlgDialog(BaseDialog):
             return
 
         # 兜底：未知返回类型
-        self.loading.setValue(100)
         send("success", f"{job.algo_id} 已完成", duration=3)
 
     def _refresh_canvas(self) -> None:

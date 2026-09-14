@@ -1,15 +1,24 @@
 """图层属性「字段」页。
 
-仿 QGIS 原生 vector layer properties → Fields：6 列表格显示当前图层的字段，
-可改字段别名（双击）、选主显示字段（combo）。筛选只是视图过滤，不改图层。
-所有修改推迟到 :meth:`FieldsTab.apply`（与「常规」页的写法一致——只有
-「取消」才会丢修改）。
+仿 QGIS 原生 vector layer properties → Fields：7 列表格显示当前图层的字段，
+可改字段别名（双击）、选主显示字段（combo）、加字段。筛选只是视图过滤，不改
+图层。对话框级的「确定 / 应用」推迟到 :meth:`FieldsTab.apply`（与「常规」页
+的写法一致——只有「取消」才会丢修改）。
+
+最后一列「操作」给每行两个按钮：
+
+- **更新**：把该行的编辑结果立刻写回图层（字段名改名 + 字段别名）。pending
+  行则重新打开字段对话框修改其定义。字段类型 / 长度 / 小数位数只读展示——改
+  类型涉及数据重算，不在本页处理。
+- **删除**：把该字段从图层删除（pending 行只移出行，不落库）。
+
+这两个按钮是**立即生效**的（与延迟 apply 的其它编辑不同）：它们是显式操作，
+点完就调用 :func:`_delete_field_from_layer` / :func:`_rename_field_in_layer`。
+底层统一走「编辑态用 layer.edit buffer API、非编辑态用 provider API」的分支，
+避免图层正在编辑时 ``dataProvider().addAttributes`` 返回 ``False``。
 
 「显示」列 checkbox：**仅视觉呈现**，默认勾上；不联动
-``QgsAttributeTableConfig``（4.2 上 setAttributeTableConfig 是支持的，但内存
-provider 不一定落盘，且截图里的列就是普通 checkbox，没要求写回属性表配置）。
-后续如需真正写回，在 :meth:`apply` 里读每行 checkState → ``cfg.columnHidden``
-→ ``setAttributeTableConfig``，并 try/except 兜内存 provider。
+``QgsAttributeTableConfig``。
 """
 
 from __future__ import annotations
@@ -29,6 +38,7 @@ from qgis.PyQt.QtWidgets import (
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
+    QWidget,
 )
 
 from app.infra.logging import get_logger
@@ -37,7 +47,94 @@ from app.ui.dialogs.layer_properties.base import LayerPropertyTab
 
 logger = get_logger(__name__)
 
-_HEADERS = ("显示", "字段名", "字段别名", "字段类型", "字段长度", "小数位数")
+_HEADERS = ("显示", "字段名", "字段别名", "字段类型", "字段长度", "小数位数", "操作")
+
+#: 「操作」列（更新 / 删除 按钮）
+_ACTION_COL = len(_HEADERS) - 1
+
+
+# --------------------------------------------------------------------- 图层写操作
+#
+# QgsVectorLayer 的 addAttribute / deleteAttribute / renameAttribute 只在编辑态
+# 可用（内部走 edit buffer，需要 commitChanges 落库）；provider 的
+# addAttributes / deleteAttributes / renameAttributes 只在非编辑态可用，且对
+# 部分 provider（如 OGR）在编辑态会直接返回 False。这里按编辑态分流，两条路都
+# 走通，修复「添加字段后 apply 报 addAttributes 返回 False」。
+
+
+def _add_field_to_layer(layer, field: QgsField) -> bool:
+    """给图层加字段；编辑态走 edit buffer，否则直接落 provider。"""
+    if layer.isEditable():
+        return bool(layer.addAttribute(field))
+    if not layer.dataProvider().addAttributes([field]):
+        return False
+    layer.updateFields()
+    return True
+
+
+def _delete_field_from_layer(layer, name: str) -> bool:
+    """按字段名删字段。"""
+    idx = layer.fields().indexOf(name)
+    if idx < 0:
+        return False
+    if layer.isEditable():
+        return bool(layer.deleteAttribute(idx))
+    if not layer.dataProvider().deleteAttributes([idx]):
+        return False
+    layer.updateFields()
+    return True
+
+
+def _rename_field_in_layer(layer, old: str, new: str) -> bool:
+    """按字段名改字段名；``new`` 与已有字段重名时返回 False。"""
+    old_idx = layer.fields().indexOf(old)
+    if old_idx < 0:
+        return False
+    if old == new:
+        return True
+    if layer.fields().indexOf(new) >= 0:  # 目标名已被别的字段占用
+        return False
+    if layer.isEditable():
+        return bool(layer.renameAttribute(old_idx, new))
+    if not layer.dataProvider().renameAttributes({old_idx: new}):
+        return False
+    layer.updateFields()
+    return True
+
+
+def _set_field_alias_on_layer(layer, name: str, alias: str) -> bool:
+    """按字段名写别名（编辑/非编辑态都可用）。"""
+    idx = layer.fields().indexOf(name)
+    if idx < 0:
+        return False
+    layer.setFieldAlias(idx, alias)
+    return True
+
+
+class _RowActionButtons(QWidget):
+    """行尾「更新 / 删除」按钮组。
+
+    两个按钮都回调回 :class:`FieldsTab` 并带上自身；:class:`FieldsTab` 用
+    :meth:`FieldsTab._row_of_actions` 反查所在行——这样删行 / 插行后行号变化
+    也不会点错行。
+    """
+
+    def __init__(self, fields_tab: "FieldsTab", parent=None) -> None:
+        super().__init__(parent)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(2, 1, 2, 1)
+        lay.setSpacing(4)
+        self.update_btn = QPushButton("更新", self)
+        self.update_btn.setObjectName("RowActionBtn")
+        self.delete_btn = QPushButton("删除", self)
+        self.delete_btn.setObjectName("RowActionDanger")
+        for btn in (self.update_btn, self.delete_btn):
+            btn.setCursor(Qt.CursorShape.PointingHandCursor)
+            btn.setFixedHeight(22)
+            lay.addWidget(btn)
+        lay.addStretch(1)
+        self.update_btn.clicked.connect(lambda: fields_tab._on_row_update(self))
+        self.delete_btn.clicked.connect(lambda: fields_tab._on_row_delete(self))
 
 
 class FieldsTab(LayerPropertyTab):
@@ -91,10 +188,11 @@ class FieldsTab(LayerPropertyTab):
         header = self.table.horizontalHeader()
         # 表头行为：固定列用 Interactive（用户可拖）+ 默认宽度合理；
         # 「小数位数」这一列设 Stretch 模式，对话框变宽时把剩余空间吃掉——
-        # 这样表格始终撑满父容器（与 QGIS 原生字段表观感一致）。
+        # 这样表格始终撑满父容器（与 QGIS 原生字段表观感一致）；「操作」列
+        # 固定宽度，放两个小按钮。
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setMinimumSectionSize(48)
-        header.setStretchLastSection(True)
+        header.setStretchLastSection(False)
         # 各列默认宽度（像素）——「小数位数」列因为是 Stretch，会自动吃掉剩余空间
         for col, width in (
             (0, 50),    # 显示：checkbox
@@ -102,9 +200,10 @@ class FieldsTab(LayerPropertyTab):
             (2, 180),   # 字段别名
             (3, 130),   # 字段类型
             (4, 90),    # 字段长度
-            (5, 90),    # 小数位数（Stretch，吃剩余）
+            (6, 150),   # 操作：更新 / 删除
         ):
             self.table.setColumnWidth(col, width)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         # 表头整体略高一点，让标题不贴边
         header.setDefaultAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         root.addWidget(self.table, 1)
@@ -147,7 +246,7 @@ class FieldsTab(LayerPropertyTab):
             logger.error("读取字段失败: %s", exc, exc_info=True)
 
     def _populate_table(self, fields) -> None:
-        """把 ``QgsFields`` 写进 6 列表格。"""
+        """把 ``QgsFields`` 写进 7 列表格。"""
         n = fields.size()
         self.table.setRowCount(n)
         for i in range(n):
@@ -163,9 +262,9 @@ class FieldsTab(LayerPropertyTab):
             cb_item.setCheckState(Qt.CheckState.Checked)
             self.table.setItem(i, 0, cb_item)
 
-            # 列 1：字段名（只读）
+            # 列 1：字段名（可编辑；UserRole 存原始名，apply 时据此判断是否要改名）
             name_item = QTableWidgetItem(fld.name())
-            name_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            name_item.setData(Qt.ItemDataRole.UserRole, fld.name())
             self.table.setItem(i, 1, name_item)
 
             # 列 2：字段别名（可编辑）
@@ -197,11 +296,13 @@ class FieldsTab(LayerPropertyTab):
             )
             self.table.setItem(i, 5, prec_item)
 
+        self._rebuild_action_cells()
+
     def _append_pending_row(self, spec: dict) -> None:
         """把「添加字段」对话框返回的 spec 追加成一行 pending 状态。
 
-        pending 行在 :meth:`apply` 里通过 ``addAttributes`` 真正写进图层；
-        用户点「取消」→ 表格丢弃 pending 行；点「刷新」→ 同样丢弃。
+        pending 行在 :meth:`apply` 里通过 :func:`_add_field_to_layer` 真正写进
+        图层；用户点「取消」或「刷新」→ 表格丢弃 pending 行（刷新是从图层重读）。
         """
         row = self.table.rowCount()
         self.table.insertRow(row)
@@ -217,9 +318,10 @@ class FieldsTab(LayerPropertyTab):
         cb_item.setData(Qt.ItemDataRole.UserRole, {"pending": True, "spec": spec})
         self.table.setItem(row, 0, cb_item)
 
-        # 列 1：字段名（只读；pending 也不允许改名，避免和 spec 不一致）
+        # 列 1：字段名（只读；pending 改名走「更新」按钮打开对话框）
         name_item = QTableWidgetItem(spec["name"])
         name_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+        name_item.setData(Qt.ItemDataRole.UserRole, spec["name"])
         self.table.setItem(row, 1, name_item)
 
         # 列 2：字段别名（可编辑；用户可以再调整）
@@ -254,6 +356,23 @@ class FieldsTab(LayerPropertyTab):
             f"{spec['name']} · {spec.get('alias') or spec['name']}",
             spec["name"],
         )
+        self._rebuild_action_cells()
+
+    def _rebuild_action_cells(self) -> None:
+        """给每行（重新）挂「操作」列按钮。
+
+        插行 / 删行会把行号打乱，这里统整一遍；按钮回调带自身，靠
+        :meth:`_row_of_actions` 反查当前行，所以行号漂移也不会点错。
+        """
+        for row in range(self.table.rowCount()):
+            self.table.setCellWidget(row, _ACTION_COL, _RowActionButtons(self))
+
+    def _row_of_actions(self, widget: QWidget) -> int:
+        """反查按钮组所在行；找不到返回 -1。"""
+        for row in range(self.table.rowCount()):
+            if self.table.cellWidget(row, _ACTION_COL) is widget:
+                return row
+        return -1
 
     def _is_pending_row(self, row: int) -> dict | None:
         """row 是否是 pending 添加；是的话返回 spec，否则返回 None。"""
@@ -288,8 +407,10 @@ class FieldsTab(LayerPropertyTab):
             if not needle:
                 self.table.setRowHidden(row, False)
                 continue
-            name = (self.table.item(row, 1).text() or "").lower()
-            alias = (self.table.item(row, 2).text() or "").lower()
+            name_item = self.table.item(row, 1)
+            alias_item = self.table.item(row, 2)
+            name = (name_item.text() if name_item else "").lower()
+            alias = (alias_item.text() if alias_item else "").lower()
             self.table.setRowHidden(
                 row, needle not in name and needle not in alias
             )
@@ -333,48 +454,209 @@ class FieldsTab(LayerPropertyTab):
         # 字段个数立即反映在标签上
         self.count_label.setText(f"字段个数: {self.table.rowCount()}")
 
+    # ------------------------------------------------------------- 行操作
+
+    def _on_row_update(self, widget: QWidget) -> None:
+        """「更新」按钮：立即把该行写回图层（改名 + 别名）；pending 行改定义。"""
+        row = self._row_of_actions(widget)
+        if row < 0 or self.table.item(row, 1) is None:
+            return
+        spec = self._is_pending_row(row)
+        if spec is not None:
+            self._edit_pending_row(row, spec)
+            return
+
+        if self._layer is None:
+            return
+        name_item = self.table.item(row, 1)
+        alias_item = self.table.item(row, 2)
+        orig = name_item.data(Qt.ItemDataRole.UserRole)
+        orig = orig if isinstance(orig, str) and orig else name_item.text()
+        new_name = (name_item.text() or "").strip()
+        new_alias = (alias_item.text() or "").strip() if alias_item else ""
+
+        if not new_name:
+            QMessageBox.warning(self, "更新字段", "字段名不能为空")
+            return
+        try:
+            if new_name != orig and not _rename_field_in_layer(self._layer, orig, new_name):
+                QMessageBox.warning(
+                    self, "更新字段",
+                    f"重名字段「{orig}」→「{new_name}」失败（名称冲突或 provider 不支持）",
+                )
+                return
+            if not _set_field_alias_on_layer(self._layer, new_name, new_alias):
+                QMessageBox.warning(self, "更新字段", f"更新字段「{new_name}」的别名失败")
+                return
+        except Exception as exc:  # noqa: BLE001
+            logger.error("更新字段失败: %s", exc, exc_info=True)
+            QMessageBox.warning(self, "更新字段", f"更新字段失败：{exc}")
+            return
+
+        name_item.setData(Qt.ItemDataRole.UserRole, new_name)
+        self._rename_combo_item(orig, new_name, new_alias)
+        self._refresh_fields_after_change()
+
+    def _on_row_delete(self, widget: QWidget) -> None:
+        """「删除」按钮：从图层删除该字段；pending 行只移出行。"""
+        row = self._row_of_actions(widget)
+        if row < 0 or self.table.item(row, 1) is None:
+            return
+        name = (self.table.item(row, 1).text() or "").strip()
+        spec = self._is_pending_row(row)
+
+        if spec is not None:
+            # pending 行：直接丢，不落库
+            self._drop_row(row)
+            self._drop_combo_item(spec["name"])
+            self.count_label.setText(f"字段个数: {self.table.rowCount()}")
+            return
+
+        if self._layer is None or not name:
+            return
+        answer = QMessageBox.question(
+            self, "删除字段", f"确定从图层中删除字段「{name}」？该操作不可撤销。"
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            ok = _delete_field_from_layer(self._layer, name)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("删除字段失败: %s", exc, exc_info=True)
+            QMessageBox.warning(self, "删除字段", f"删除字段失败：{exc}")
+            return
+        if not ok:
+            QMessageBox.warning(
+                self, "删除字段",
+                f"删除字段「{name}」失败（provider 不支持或图层只读）",
+            )
+            return
+        self._drop_row(row)
+        self._drop_combo_item(name)
+        self.count_label.setText(f"字段个数: {self.table.rowCount()}")
+        self._refresh_fields_after_change()
+
+    def _edit_pending_row(self, row: int, spec: dict) -> None:
+        """pending 行「更新」：打开字段对话框改定义，替换该行。"""
+        dlg = AddFieldDialog(self, initial=spec)
+        if dlg.exec() != AddFieldDialog.DialogCode.Accepted:
+            return
+        new_spec = dlg.field_spec()
+        if new_spec is None:
+            QMessageBox.warning(self, "编辑字段", "字段名不能为空")
+            return
+        others = {
+            self.table.item(r, 1).text()
+            for r in range(self.table.rowCount())
+            if r != row and self.table.item(r, 1)
+        }
+        if new_spec["name"] in others:
+            QMessageBox.warning(self, "编辑字段", f"字段名「{new_spec['name']}」已存在")
+            return
+
+        cb_item = self.table.item(row, 0)
+        cb_item.setData(
+            Qt.ItemDataRole.UserRole, {"pending": True, "spec": new_spec}
+        )
+        self.table.item(row, 1).setText(new_spec["name"])
+        self.table.item(row, 1).setData(Qt.ItemDataRole.UserRole, new_spec["name"])
+        self.table.item(row, 2).setText(new_spec.get("alias") or "")
+        self.table.item(row, 3).setText(new_spec["type_name"])
+        length = new_spec.get("length", 0)
+        self.table.item(row, 4).setText(str(length) if length > 0 else "")
+        precision = new_spec.get("precision", 0)
+        self.table.item(row, 5).setText(str(precision) if precision > 0 else "")
+        self._rename_combo_item(
+            spec["name"], new_spec["name"], new_spec.get("alias") or ""
+        )
+        self._apply_filter(self.search_edit.text())
+
+    # ------------------------------------------------------------- 小工具
+
+    def _drop_row(self, row: int) -> None:
+        """删表行并重挂操作按钮（行号会漂移）。"""
+        self.table.removeRow(row)
+        self._rebuild_action_cells()
+
+    def _drop_combo_item(self, name: str) -> None:
+        """从「主显示字段」combo 里移除 itemData == name 的项。"""
+        for i in range(self.display_combo.count()):
+            if self.display_combo.itemData(i) == name:
+                self.display_combo.removeItem(i)
+                return
+
+    def _rename_combo_item(self, old: str, new: str, alias: str) -> None:
+        """字段改名 / 改别名后同步 combo 的显示文本与 itemData。"""
+        for i in range(self.display_combo.count()):
+            if self.display_combo.itemData(i) == old:
+                self.display_combo.setItemText(i, f"{new} · {alias or new}")
+                self.display_combo.setItemData(i, new)
+                return
+
+    def _refresh_fields_after_change(self) -> None:
+        """立即操作后轻量刷新：重绘图层，让画布跟上新字段结构。"""
+        try:
+            self._layer.triggerRepaint()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("刷新图层失败: %s", exc)
+
     # ------------------------------------------------------------- 写回
 
     def apply(self, layer) -> bool:
         """把控件值写回图层。统一 try/except 兜底——任何字段写失败都弹窗 + 返回 False。
 
-        写回分两步：
-        1. 收集所有 pending 行（用户通过「添加字段」按钮加的），批量
-           ``dataProvider().addAttributes`` 落到图层，再 ``updateFields`` 让
-           新字段出现在 ``layer.fields()`` 里；
-        2. 遍历整张表（原始字段 + 新加字段），按字段名查索引 → 写别名，
-           这样新字段的别名（用户在第 2 列手填的）也能跟上去；
+        写回分三步：
+        1. 收集所有 pending 行（用户通过「添加字段」按钮加的），逐个
+           :func:`_add_field_to_layer` 落到图层（编辑态走 edit buffer，否则
+           直接落 provider）；成功后把 pending 标记摘掉（重复点「应用」不会再加）；
+        2. 遍历整张表（原始字段 + 新加字段），按 UserRole 里的原始名判断是否改名
+           → :func:`_rename_field_in_layer`，再写别名——这样新字段的别名（用户
+           在第 2 列手填的）也能跟上去；
         3. 写主显示字段 ``setDisplayExpression``。
         """
         if not isinstance(layer, QgsVectorLayer):
             return True
         try:
-            # 1) 批量添加 pending 字段
-            pending_specs: list[dict] = []
+            # 1) 逐个添加 pending 字段
+            pending: list[tuple[int, dict]] = []
             for row in range(self.table.rowCount()):
                 spec = self._is_pending_row(row)
                 if spec is not None:
-                    pending_specs.append(spec)
-            if pending_specs:
-                new_fields = [
-                    QgsField(
-                        s["name"], s["qtype"], s["type_name"], s["length"], s["precision"]
+                    pending.append((row, spec))
+            for row, s in pending:
+                field = QgsField(
+                    s["name"], s["qtype"], s["type_name"], s["length"], s["precision"]
+                )
+                if not _add_field_to_layer(layer, field):
+                    raise RuntimeError(
+                        "添加字段失败：provider 不允许改 schema（图层可能只读）"
                     )
-                    for s in pending_specs
-                ]
-                ok = layer.dataProvider().addAttributes(new_fields)
-                if not ok:
-                    raise RuntimeError("dataProvider.addAttributes 返回 False（provider 可能不允许改 schema）")
-                layer.updateFields()
+                # 摘 pending 标记，并让 UserRole 的原始名 = 新名
+                cb_item = self.table.item(row, 0)
+                if cb_item is not None:
+                    cb_item.setData(Qt.ItemDataRole.UserRole, None)
+                name_item = self.table.item(row, 1)
+                if name_item is not None:
+                    name_item.setData(Qt.ItemDataRole.UserRole, s["name"])
 
-            # 2) 写别名：按字段名查索引（addAttributes 后 layer.fields() 已含新字段）
+            # 2) 写改名 + 别名：按字段名查索引（addAttributes 后 layer.fields() 已含新字段）
             for row in range(self.table.rowCount()):
-                # pending 行的别名可能被用户在第 2 列手改过；原始行也可能改了别名
-                new_alias = (self.table.item(row, 2).text() or "").strip()
-                name = (self.table.item(row, 1).text() or "").strip()
-                idx = layer.fields().indexOf(name)
-                if idx >= 0:
-                    layer.setFieldAlias(idx, new_alias)
+                name_item = self.table.item(row, 1)
+                if name_item is None:
+                    continue
+                new_name = (name_item.text() or "").strip()
+                alias_item = self.table.item(row, 2)
+                new_alias = (alias_item.text() or "").strip() if alias_item else ""
+                if not new_name:
+                    raise RuntimeError("字段名不能为空")
+                orig = name_item.data(Qt.ItemDataRole.UserRole)
+                if isinstance(orig, str) and orig and orig != new_name:
+                    if not _rename_field_in_layer(layer, orig, new_name):
+                        raise RuntimeError(
+                            f"重命名字段「{orig}」→「{new_name}」失败（名称冲突或 provider 不支持）"
+                        )
+                    name_item.setData(Qt.ItemDataRole.UserRole, new_name)
+                _set_field_alias_on_layer(layer, new_name, new_alias)
 
             # 3) 写主显示字段：combo 的 itemData 存的就是字段名
             name = self.display_combo.currentData()

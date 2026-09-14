@@ -72,6 +72,16 @@ _GLYPHS: dict[str, str] = {
     "measure_line": "\uf547",       # ruler-horizontal 线测量
     "measure_area": "\uf546",       # ruler-combined 面测量
     "extent_clip": "\uf125",        # crop 范围裁剪
+    # ---- 数据管理 Dock 左栏连接树（app/ui/docks/data_manage_dock.py）----
+    "db_local": "\uf1c0",     # database 「本地数据库」根
+    "db_server": "\uf233",    # server 「服务器数据库」根
+    "db_file": "\uf07b",      # folder 本地库文件连接
+    "db_remote": "\uf0ac",    # globe 服务器连接
+    "cat_vector": "\uf5cb",   # vector-square 矢量数据分组
+    "cat_dict": "\uf0ce",     # table 字典数据分组
+    "cat_image": "\uf03e",    # image 影像数据分组
+    "cat_data": "\uf15b",     # file 注册数据表叶子
+    "plus_circle": "\uf055",  # plus-circle 新建连接
 }
 
 _CACHE: dict[tuple[str, str], QIcon] = {}
