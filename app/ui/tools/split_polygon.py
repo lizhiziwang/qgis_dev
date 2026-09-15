@@ -79,6 +79,10 @@ class SplitPolygonTool(QgsMapTool):
         self._pts: list[QgsPointXY] = []
         #: 跟随光标的预览端点（地图坐标；未落点，闭合预览用）
         self._preview_pt: QgsPointXY | None = None
+        #: Qt 的双击事件序列是 ``press → release → dblclick → release``：切割完成后
+        #: 还会**补一个 release**，不吞掉它就会在已清空的顶点表里立刻落新点，
+        #: 看起来像「刚分割完又开始画切割区」。
+        self._skip_next_release = False
         #: 预览橡皮筋（面型，半透明填充）
         self._band: QgsRubberBand | None = None
         self._init_band()
@@ -118,9 +122,17 @@ class SplitPolygonTool(QgsMapTool):
 
     # -------------------------------------------------- 交互
 
+    def canvasPressEvent(self, event) -> None:  # noqa: N802
+        """新的按下 = 新手势开始，清掉可能残留的「吞一次 release」标记。"""
+        self._skip_next_release = False
+
     def canvasReleaseEvent(self, event) -> None:  # noqa: N802
         """左键单击：加顶点；右键单击：清除已画多边形。"""
         button = event.button()
+        if self._skip_next_release:
+            # 双击序列末尾补发的那个 release：只用于抵消标记，不落点
+            self._skip_next_release = False
+            return
         if button == Qt.MouseButton.RightButton:
             if self._pts:
                 self._clear_polygon()
@@ -134,6 +146,8 @@ class SplitPolygonTool(QgsMapTool):
         """左键双击：把双击点收作末点（防单击已加过）后闭合多边形并执行切割动作。"""
         if event.button() != Qt.MouseButton.LeftButton:
             return
+        # 先立标记：无论后面成功与否，这次双击末尾补发的 release 都不该再落点
+        self._skip_next_release = True
         pt = self._snapped_pt(event, wait_index=True)
         if pt is None:
             return

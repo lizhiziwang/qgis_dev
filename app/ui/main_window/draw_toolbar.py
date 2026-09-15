@@ -4,7 +4,8 @@
 
 - 工具条平铺文本按钮（不用下拉菜单）：
   开始编辑 / 停止编辑 / 保存编辑 / 撤销 / 重做 / 融合几何 / 要素编辑 / 属性录入 /
-  线分割 / 面分割 / 挖洞 / 补洞 / 分解 / 补缝 ｜ 添加点 / 添加线 / 添加面
+  线分割 / 面分割 / 挖洞 / 补洞 / 分解 / 补缝 / 边界修改 / 移动要素 /
+  删除 / 要素分割 ｜ 添加点 / 添加线 / 添加面
 - 「开始编辑」**恒可用**：点击弹出图层选择框（:attr:`_edit_layer_chooser`，
   由 :class:`MainWindow` 注入），选中图层即成为编辑目标并进入编辑态——
   不再依赖图层树右键 / 点击预设编辑图层（那些入口已移除）。
@@ -24,7 +25,19 @@
   一次性动作，非画布工具，不占用 checkable 状态）；
   「补缝」需处于编辑态且为面图层（先用选择工具多选相邻面，点击后检出它们
   之间的封闭缝隙并弹窗逐条指定并入哪个参与面，见
-  :func:`app.ui.tools.gap_repair.repair_gaps_interactive`——同为一次性动作）。
+  :func:`app.ui.tools.gap_repair.repair_gaps_interactive`——同为一次性动作）；
+  「边界修改」需处于编辑态、为面图层**且有选中要素**（先用点选 / 框选选中图形，
+  再左键画整形线、双击完成整形，见
+  :class:`app.ui.tools.boundary_edit.BoundaryEditTool`——唯一一个把「有选中」
+  写进按钮可用性的工具）。
+  「移动要素」同样需处于编辑态**且有选中要素**（左键拖动平移，几何类型不限，
+  见 :class:`app.ui.tools.move_features.MoveFeaturesTool`）。
+  「删除」需处于编辑态**且有选中要素**（删掉编辑图层上的选中要素，见
+  :func:`app.ui.tools.delete_features.delete_selected_features`）；
+  「要素分割」需处于编辑态，且**其它图层**上有选中的切割要素（先用点选 / 框选
+  在其它图层选好，再点按钮切开编辑图层中与之相交的要素，见
+  :func:`app.ui.tools.split_by_selection.split_by_selected_features`）。
+  后两者都是一次性动作，不占用勾选态。
 
 状态机：
 
@@ -50,6 +63,8 @@ if TYPE_CHECKING:
 from qgis.core import (
     Qgis,
     QgsGeometry,
+    QgsProject,
+    QgsVectorLayer,
     QgsWkbTypes,
 )
 from qgis.gui import QgsRubberBand
@@ -68,16 +83,27 @@ from app.infra.messagebar import send
 from app.ui.dialogs.custom_attr import CustomAttrDialog
 from app.ui.docks.attribute_entry_dock import AttributeEntryDock
 from app.ui.tools.attribute_entry import AttributeEntryTool
+from app.ui.tools.boundary_edit import BoundaryEditTool
+from app.ui.tools.delete_features import delete_selected_features as run_delete
 from app.ui.tools.dig_hole import DigHoleTool
 from app.ui.tools.explode_parts import explode_features as run_explode
 from app.ui.tools.feature_edit import FeatureEditTool
 from app.ui.tools.fill_hole import FillHoleTool
 from app.ui.tools.gap_repair import repair_gaps_interactive as run_gap_repair
 from app.ui.tools.merge_geometry import MergeGeometryTool
+from app.ui.tools.move_features import MoveFeaturesTool
 from app.ui.tools.split_feature import SplitFeatureTool
 from app.ui.tools.split_polygon import SplitPolygonTool
+from app.ui.tools.split_by_selection import (
+    has_cutter_selection,
+    split_by_selected_features as run_split_by_selection,
+)
 
 logger = get_logger(__name__)
+
+#: 必须先有选中要素才能用的工具：按钮可用性依赖选中集，失去选中即自动退出
+#: （见 :meth:`DigitizingToolbar._on_selection_changed`）
+_SELECTION_REQUIRED_KINDS = ("boundary_edit", "move")
 
 
 class DigitizingToolbar(QObject):
@@ -129,6 +155,8 @@ class DigitizingToolbar(QObject):
         self.split_polygon_tool = None
         self.dig_hole_tool = None
         self.fill_hole_tool = None
+        self.boundary_edit_tool = None
+        self.move_features_tool = None
         #: 属性录入工具实例（防 GC）与右侧 Dock（懒建单实例）
         self.attribute_entry_tool = None
         self._attribute_entry_dock = None
@@ -136,14 +164,19 @@ class DigitizingToolbar(QObject):
         # 当前是否处于编辑态（start_edit_fun 成功后 True，stop_edit_fun 后 False）
         self._editing = False
         #: 当前激活的工具种类："point"/"line"/"polygon"/"merge"/"feature"/
-        #: "split"/"split_polygon"/"dig_hole"/"fill_hole"/"attr_entry"，None=未
-        #: 激活（「分解」是一次性动作，不占用激活态）。工具按钮的勾选/互斥、
-        #: 日志都以它为唯一依据（_refresh_button_states 统一推导）
+        #: "split"/"split_polygon"/"dig_hole"/"fill_hole"/"boundary_edit"/
+        #: "move"/"attr_entry"，None=未激活（「分解」「补缝」是一次性动作，
+        #: 不占用激活态）。工具按钮的勾选/互斥、日志都以它为唯一依据
+        #: （_refresh_button_states 统一推导）
         self._active_kind: str | None = None
         #: 挂了 ``editingStopped`` 兜底钩子的图层：外部入口（属性表 Dock「停止
         #: 编辑」/ 切图层停旧层 / 关工程等）结束编辑时不走 :meth:`stop_edit_fun`，
         #: 靠本钩子统一清工具并复位状态（见 :meth:`_on_editing_stopped`）。
         self._edit_stop_hook_layer = None
+        #: 已挂 ``selectionChanged`` 的图层 id 集合（工程级监听，见
+        #: :meth:`_connect_selection_hook`）；工程量少，用集合去重即可。
+        self._selection_hooked: dict[str, bool] = {}
+        self._project_selection_connected = False
 
         self._build_toolbar()
 
@@ -235,6 +268,39 @@ class DigitizingToolbar(QObject):
         )
         self.gap_repair_action.triggered.connect(self.repair_gaps)
 
+        # ---- 边界修改（需处于编辑态、面图层且**有选中要素**；左键画整形线、
+        #      双击完成，线的两端须落在图形外侧）----
+        self.boundary_edit_action = QAction("边界修改", self.digitizing_toolbar)
+        self.boundary_edit_action.setCheckable(True)
+        self.boundary_edit_action.setToolTip(
+            "先用点选/框选选中图形并进入编辑，再点此：左键画整形线、双击完成"
+        )
+        self.boundary_edit_action.triggered.connect(
+            lambda checked=False: self.enable_boundary_edit(checked)
+        )
+
+        # ---- 移动要素（需处于编辑态**且有选中要素**；左键拖动平移，任意几何类型）----
+        self.move_action = QAction("移动要素", self.digitizing_toolbar)
+        self.move_action.setCheckable(True)
+        self.move_action.setToolTip(
+            "先用点选/框选选中要素并进入编辑，再点此：在画布上左键拖动即可平移"
+        )
+        self.move_action.triggered.connect(
+            lambda checked=False: self.enable_move_tool(checked)
+        )
+
+        # ---- 删除（需处于编辑态且有选中要素；一次性动作：删掉选中要素）----
+        self.delete_action = QAction("删除", self.digitizing_toolbar)
+        self.delete_action.setToolTip("删除当前编辑图层上选中的要素（可 Ctrl+Z 撤销）")
+        self.delete_action.triggered.connect(self.delete_selected)
+
+        # ---- 要素分割（需处于编辑态，且**其它图层**上有选中的切割要素；一次性动作）----
+        self.split_by_selection_action = QAction("要素分割", self.digitizing_toolbar)
+        self.split_by_selection_action.setToolTip(
+            "先在其它图层选中与目标相交的要素，再点此分割当前编辑图层的相交要素"
+        )
+        self.split_by_selection_action.triggered.connect(self.split_by_selection)
+
         # ---- 初始态：编辑动作全禁用（「开始编辑」例外——恒可用，点击弹窗选层）
         #     最后统一由 _refresh_button_states 推导，这里只组装不动状态
 
@@ -252,6 +318,10 @@ class DigitizingToolbar(QObject):
         self.digitizing_toolbar.addAction(self.fill_hole_action)
         self.digitizing_toolbar.addAction(self.explode_action)
         self.digitizing_toolbar.addAction(self.gap_repair_action)
+        self.digitizing_toolbar.addAction(self.boundary_edit_action)
+        self.digitizing_toolbar.addAction(self.move_action)
+        self.digitizing_toolbar.addAction(self.delete_action)
+        self.digitizing_toolbar.addAction(self.split_by_selection_action)
 
         # 分隔两组
         self.digitizing_toolbar.addSeparator()
@@ -285,6 +355,8 @@ class DigitizingToolbar(QObject):
             "split_polygon": self.split_polygon_action,
             "dig_hole": self.dig_hole_action,
             "fill_hole": self.fill_hole_action,
+            "boundary_edit": self.boundary_edit_action,
+            "move": self.move_action,
             "attr_entry": self.attribute_entry_action,
         }
 
@@ -817,6 +889,179 @@ class DigitizingToolbar(QObject):
             "已激活「补洞」工具：在面要素洞的内部单击填补（挖洞产生的洞、内环均可）；Esc 退出",
         )
 
+    def enable_boundary_edit(self, checked: bool = True) -> None:
+        """激活「边界修改」工具：画整形线改写**选中**面要素的边界。
+
+        与其它画布工具不同，本工具**必须先有选中要素**才可用（按钮可用性也由
+        选中集决定，见 :meth:`_refresh_button_states`）：它改的就是选中图形，
+        没有选中就无从下手。
+
+        ``checked=False``(再点一次已按下的按钮) → 取消激活。
+        """
+        if not checked:
+            self.clear_draw_tool()
+            return
+        layer = self._current_layer()
+        if layer is None or layer.type() != layer.VectorLayer:
+            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            return
+        if not layer.isEditable():
+            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            return
+        if layer.geometryType() != QgsWkbTypes.PolygonGeometry:
+            QMessageBox.warning(self.main_window, "警告", "边界修改只支持面图层")
+            return
+        if not layer.selectedFeatureIds():
+            QMessageBox.warning(
+                self.main_window, "警告", "请先用点选 / 框选选中要修改边界的图形"
+            )
+            return
+        # 清掉可能激活的其它工具，避免并存
+        self.clear_draw_tool()
+
+        self.boundary_edit_tool = BoundaryEditTool(
+            self.canvas,
+            editing_layer_getter=self._editing_layer_getter,
+            hint=lambda text: self.main_window.messageBar.pushMessage(
+                text, level=Qgis.MessageLevel.Info, duration=2
+            ),
+        )
+        self._activate_map_tool(self.boundary_edit_tool)
+        self._mark_active("boundary_edit")
+        send(
+            level="success",
+            message=(
+                "已激活「边界修改」工具：左键画整形线、双击完成（线的两端要落在"
+                "图形外侧）；右键清除、Esc 退出"
+            ),
+            duration=3,
+        )
+
+    def enable_move_tool(self, checked: bool = True) -> None:
+        """激活「移动要素」工具：在画布上拖动平移**选中**的要素。
+
+        与「边界修改」一样属于**必须先有选中要素**的工具（可用性由选中集决定，
+        见 :meth:`_refresh_button_states`）；几何类型不限——点 / 线 / 面都能移。
+
+        ``checked=False``(再点一次已按下的按钮) → 取消激活。
+        """
+        if not checked:
+            self.clear_draw_tool()
+            return
+        layer = self._current_layer()
+        if layer is None or layer.type() != layer.VectorLayer:
+            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            return
+        if not layer.isEditable():
+            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            return
+        if not layer.selectedFeatureIds():
+            QMessageBox.warning(
+                self.main_window, "警告", "请先用点选 / 框选选中要移动的要素"
+            )
+            return
+        # 清掉可能激活的其它工具，避免并存
+        self.clear_draw_tool()
+
+        self.move_features_tool = MoveFeaturesTool(
+            self.canvas,
+            editing_layer_getter=self._editing_layer_getter,
+            hint=lambda text: self.main_window.messageBar.pushMessage(
+                text, level=Qgis.MessageLevel.Info, duration=2
+            ),
+        )
+        self._activate_map_tool(self.move_features_tool)
+        self._mark_active("move")
+        send(
+            level="success",
+            message=(
+                "已激活「移动要素」工具：在画布上左键拖动即可平移选中要素"
+                "（拖动起止点都会吸附）；Esc 取消本次拖动"
+            ),
+            duration=3,
+        )
+
+    def delete_selected(self) -> None:
+        """「删除」一次性动作：删掉当前编辑图层上选中的要素。
+
+        不走画布工具、不占用勾选态；只作用于**当前编辑图层**（与工具条其它命令
+        作用域一致），写入一个撤销命令，可整体 Ctrl+Z。
+        """
+        layer = self._current_layer()
+        if layer is None or layer.type() != layer.VectorLayer:
+            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            return
+        if not layer.isEditable():
+            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            return
+        if not layer.selectedFeatureIds():
+            QMessageBox.warning(
+                self.main_window, "警告", "请先用点选 / 框选选中要删除的要素"
+            )
+            return
+
+        deleted = run_delete(
+            layer,
+            hint=lambda text: self.main_window.messageBar.pushMessage(
+                text, level=Qgis.MessageLevel.Info, duration=2
+            ),
+        )
+        if deleted is None:
+            return  # 失败原因已由下游落地
+        if deleted == 0:
+            QMessageBox.information(self.main_window, "提示", "没有可删除的选中要素")
+            return
+        QMessageBox.information(
+            self.main_window, "提示", f"已删除 {deleted} 个要素（可 Ctrl+Z 撤销）"
+        )
+        # 事件栈内不直接 refresh（仓库约束），推迟出栈后再刷新
+        QTimer.singleShot(0, self._safe_refresh)
+
+    def split_by_selection(self) -> None:
+        """「要素分割」一次性动作：用其它图层选中的要素切开当前编辑图层的相交要素。
+
+        先用点选 / 框选在**其它图层**上选好切割要素，再点本按钮；与切割要素相交
+        的编辑图层要素被切开。支持线切面 / 线切线 / 面切面 / 面切线（统一按
+        「切割要素的边界线」切分）。写入一个撤销命令，可整体 Ctrl+Z。
+        """
+        layer = self._current_layer()
+        if layer is None or layer.type() != layer.VectorLayer:
+            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            return
+        if not layer.isEditable():
+            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            return
+        if not has_cutter_selection(layer):
+            QMessageBox.warning(
+                self.main_window,
+                "警告",
+                "请先在**其它图层**上选中要与目标相交的切割要素"
+                "（当前编辑图层自身不算）",
+            )
+            return
+
+        result = run_split_by_selection(
+            layer,
+            hint=lambda text: self.main_window.messageBar.pushMessage(
+                text, level=Qgis.MessageLevel.Info, duration=2
+            ),
+        )
+        if result is None:
+            return  # 失败原因已由下游落地
+        changed, added = result
+        if changed == 0:
+            QMessageBox.information(
+                self.main_window, "提示", "所选要素没能切开任何图形"
+            )
+            return
+        QMessageBox.information(
+            self.main_window,
+            "提示",
+            f"已切开 {changed} 个要素，新增 {added} 块（可 Ctrl+Z 撤销）",
+        )
+        # 事件栈内不直接 refresh（仓库约束），推迟出栈后再刷新
+        QTimer.singleShot(0, self._safe_refresh)
+
     # ============================================================== 编辑撤销 / 重做
 
     def undo_last_edit(self) -> None:
@@ -1130,6 +1375,8 @@ class DigitizingToolbar(QObject):
         _drop("split_polygon_tool")
         _drop("dig_hole_tool")
         _drop("fill_hole_tool")
+        _drop("boundary_edit_tool")
+        _drop("move_features_tool")
         _drop("active_tool")
         # 业务层 draw_manager 的共享 rubber_band / temp_points 也一并清掉
         if self.draw_manager is not None:
@@ -1202,8 +1449,9 @@ class DigitizingToolbar(QObject):
         图层再连当前图层，同一时刻只挂一个钩子。
         """
         self._disconnect_edit_stop_hook()
-        # 撤销栈信号与停编钩子同生命周期：目标图层切换时一并换绑
+        # 撤销栈信号、选中集信号与停编钩子同生命周期：目标图层切换时一并换绑
         self._connect_undo_stack(layer)
+        self._connect_selection_hook(layer)
         if layer is None or layer.type() != layer.VectorLayer:
             return
         try:
@@ -1216,8 +1464,9 @@ class DigitizingToolbar(QObject):
 
     def _disconnect_edit_stop_hook(self) -> None:
         """断开当前图层的 ``editingStopped`` 钩子（目标切换 / 钩子已触发）。"""
-        # 撤销栈信号与停编钩子同生命周期：一并断开
+        # 撤销栈信号、选中集信号与停编钩子同生命周期：一并断开
         self._disconnect_undo_stack()
+        self._disconnect_selection_hook()
         layer = self._edit_stop_hook_layer
         self._edit_stop_hook_layer = None
         if layer is None:
@@ -1229,6 +1478,95 @@ class DigitizingToolbar(QObject):
             logger.warning(
                 "断开图层 editingStopped 钩子失败(收尾场景属正常): %s", layer.name(), exc_info=True
             )
+
+    def _connect_selection_hook(self, layer: QgsVectorLayer | None) -> None:
+        """把工程内**所有矢量图层**的 ``selectionChanged`` 接到按钮状态重算。
+
+        「边界修改」「移动要素」「删除」看的是**编辑图层**的选中集，而「要素分割」
+        用的是**其它图层**上选中的切割要素——只监听编辑图层不够，必须工程级监听。
+        :class:`QgsProject` 没有全局选择信号，所以逐层连，并跟随图层增删同步
+        （见 :meth:`_sync_selection_listeners`）。
+
+        与停编钩子同生命周期：切目标图层时重建。
+        """
+        self._disconnect_selection_hook()
+        try:
+            project = QgsProject.instance()
+            project.layersAdded.connect(self._sync_selection_listeners)
+            project.layersRemoved.connect(self._sync_selection_listeners)
+            self._project_selection_connected = True
+        except Exception:  # noqa: BLE001
+            self._project_selection_connected = False
+            logger.exception("连接工程图层增删信号失败")
+        self._sync_selection_listeners()
+
+    def _sync_selection_listeners(self, *_args) -> None:
+        """让「已连接图层表」与工程当前矢量图层集合保持一致。"""
+        try:
+            project = QgsProject.instance()
+            layers = {
+                item.id(): item
+                for item in project.mapLayers().values()
+                if isinstance(item, QgsVectorLayer)
+            }
+        except Exception:  # noqa: BLE001
+            return
+        # 编辑图层未必在工程里（临时图层 / 测试桩），但它一定得被监听，
+        # 否则它的选中变化推不动按钮状态
+        current = self._current_layer()
+        if isinstance(current, QgsVectorLayer):
+            layers[current.id()] = current
+        # 先摘掉已不在工程里的（图层可能已销毁，断开抛异常属正常收尾）
+        for layer_id in list(self._selection_hooked):
+            if layer_id in layers:
+                continue
+            stale = QgsProject.instance().mapLayer(layer_id)
+            if stale is not None:
+                try:
+                    stale.selectionChanged.disconnect(self._on_selection_changed)
+                except Exception:  # noqa: BLE001
+                    pass
+            self._selection_hooked.pop(layer_id, None)
+        # 再接上新出现的
+        for layer_id, item in layers.items():
+            if layer_id in self._selection_hooked:
+                continue
+            try:
+                item.selectionChanged.connect(self._on_selection_changed)
+                self._selection_hooked[layer_id] = True
+            except Exception:  # noqa: BLE001
+                logger.warning("连接图层 selectionChanged 失败: %s", item.name(), exc_info=True)
+
+    def _disconnect_selection_hook(self) -> None:
+        """断开全部选中集钩子与工程图层增删信号（目标切换 / 收尾）。"""
+        project = QgsProject.instance()
+        if self._project_selection_connected:
+            for signal in (project.layersAdded, project.layersRemoved):
+                try:
+                    signal.disconnect(self._sync_selection_listeners)
+                except Exception:  # noqa: BLE001 —— 收尾场景属正常
+                    pass
+            self._project_selection_connected = False
+        for layer_id in list(self._selection_hooked):
+            layer = project.mapLayer(layer_id)
+            if layer is not None:
+                try:
+                    layer.selectionChanged.disconnect(self._on_selection_changed)
+                except Exception:  # noqa: BLE001 —— 图层销毁等收尾场景属正常
+                    pass
+        self._selection_hooked.clear()
+
+    def _on_selection_changed(self) -> None:
+        """选中集变化（任意图层）：重算按钮状态；依赖选中的工具失去选中即退出。
+
+        工具作用的正是选中的图形，选中被清空后再挂着它没有意义——而且按钮会被
+        :meth:`_refresh_button_states` 置灰，留下「按钮禁用却仍处激活态」的怪状态。
+        """
+        if self._active_kind in _SELECTION_REQUIRED_KINDS:
+            layer = self._current_layer()
+            if layer is None or not layer.selectedFeatureIds():
+                self.clear_draw_tool()
+        self._refresh_button_states()
 
     def _on_editing_stopped(self) -> None:
         """任意入口结束编辑的兜底：解除激活工具并复位工具条状态。
@@ -1267,6 +1605,10 @@ class DigitizingToolbar(QObject):
           * 「停止编辑 / 保存编辑 / 融合几何 / 要素编辑 / 线分割 / 面分割 /
             分解」仅编辑中可用；
           * 「挖洞 / 补洞 / 补缝」仅编辑中且图层为面时可用；
+          * 「边界修改」仅编辑中、图层为面**且有选中要素**时可用；
+          * 「移动要素」仅编辑中**且有选中要素**时可用（几何类型不限）；
+          * 「删除」仅编辑中**且有选中要素**时可用；
+          * 「要素分割」仅编辑中且**其它图层有选中要素**时可用；
           * 「撤销 / 重做」仅编辑中且当前图层撤销栈上有对应步骤
             （实时跟随 canUndoChanged / canRedoChanged）；
           * 「添加点/线/面」仅编辑中且图层几何匹配时可用；
@@ -1301,6 +1643,17 @@ class DigitizingToolbar(QObject):
         self.dig_hole_action.setEnabled(editing and g_type == QgsWkbTypes.PolygonGeometry)
         self.fill_hole_action.setEnabled(editing and g_type == QgsWkbTypes.PolygonGeometry)
         self.gap_repair_action.setEnabled(editing and g_type == QgsWkbTypes.PolygonGeometry)
+        # 需要选中集的工具：编辑中、且**有选中要素**才可用——它们作用的正是选中的图形
+        has_selection = bool(editing and layer.selectedFeatureIds())
+        self.boundary_edit_action.setEnabled(
+            editing and g_type == QgsWkbTypes.PolygonGeometry and has_selection
+        )
+        self.move_action.setEnabled(editing and has_selection)
+        # 「删除」删的是编辑图层的选中要素；「要素分割」要求**其它图层**上有选中的切割要素
+        self.delete_action.setEnabled(editing and has_selection)
+        self.split_by_selection_action.setEnabled(
+            bool(editing and has_cutter_selection(layer))
+        )
         # 撤销 / 重做：编辑中且当前图层撤销栈上有对应步骤
         can_undo = can_redo = False
         if editing:
