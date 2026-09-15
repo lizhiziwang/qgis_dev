@@ -63,6 +63,7 @@ from app.core.util.local_db_util import (
     _CATEGORY_LABEL,
     _CATEGORY_ORDER,
     _CATEGORY_UNIT,
+    describe_local_db,
 )
 from app.infra.logging import get_logger
 from app.ui.common import tool_icons
@@ -301,6 +302,62 @@ class DataManageDock(QDockWidget):
         item = root.child(len(self._databases) - 1)
         self._select_node(root, item)
         self._show_database(conn)
+
+    # ------------------------------------------------------------ 工程持久化
+
+    def export_state(self) -> dict:
+        """导出连接状态供写入工程文件（:meth:`restore_state` 可还原）。
+
+        本地库只存 ``name`` / ``path``（分类、行数、元信息下次打开重新扫，
+        避免文件变动后展示陈旧数据）；服务器连接整条存下（含凭据，以便
+        下次直接可用）。
+        """
+        return {
+            "local": [
+                {"name": self._db_title(db), "path": str(db.get("path") or "")}
+                for db in self._databases
+                if db.get("path")
+            ],
+            "server": [dict(c) for c in self._server_connections],
+        }
+
+    def restore_state(self, state: dict | None) -> None:
+        """用工程里保存的连接状态整体替换当前列表（本地库重新扫描）。
+
+        文件不存在的本地库 / 读取失败的库跳过并记日志；全部缺失时树回到空
+        状态。服务器连接原样恢复。
+        """
+        state = state or {}
+        databases: list[dict] = []
+        for item in state.get("local") or []:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "")
+            if not path:
+                continue
+            if not Path(path).is_file():
+                logger.warning("数据管理[恢复]: 本地库文件不存在, 跳过: %s", path)
+                continue
+            try:
+                catalog = describe_local_db(path)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("数据管理[恢复]: 读取本地库失败, 跳过: %s (%s)", path, exc)
+                continue
+            databases.append(
+                {
+                    "kind": "local",
+                    "name": str(item.get("name") or Path(path).stem),
+                    "path": path,
+                    "categories": catalog["categories"],
+                    "counts": catalog["counts"],
+                    "meta": catalog["meta"],
+                }
+            )
+        self._databases = databases
+        self._server_connections = [
+            dict(c) for c in (state.get("server") or []) if isinstance(c, dict)
+        ]
+        self._rebuild_tree()
 
     @staticmethod
     def _select_node(root: QTreeWidgetItem, item: QTreeWidgetItem) -> None:

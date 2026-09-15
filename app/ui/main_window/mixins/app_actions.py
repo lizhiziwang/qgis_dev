@@ -117,6 +117,11 @@ class AppActionsMixin:
             )
             self._data_manage_dock = dock
             self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+            # 打开工程时若数据管理还没开过，连接状态暂存在 MainWindow，
+            # 这里首次建 Dock 时应用上去
+            apply_pending = getattr(self, "_apply_pending_data_manage_state", None)
+            if apply_pending is not None:
+                apply_pending(dock)
         dock.show()
         dock.raise_()
 

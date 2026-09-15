@@ -38,6 +38,7 @@ if TYPE_CHECKING:
 
 from qgis.core import Qgis, QgsSnappingConfig
 from qgis.gui import QgsMapCanvasSnappingUtils
+from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QObject, QTimer
 from qgis.PyQt.QtWidgets import (
     QComboBox,
@@ -53,6 +54,11 @@ from app.core.domain.drawing.tools.trace import set_tracing_enabled
 _DEFAULT_TOLERANCE_PX = 12.0
 _DEFAULT_UNITS = Qgis.MapToolUnit.Pixels
 _DEFAULT_MODE = Qgis.SnappingMode.AllLayers
+
+
+def _alive(obj) -> bool:
+    """对象非空且底层 C++ 未被销毁（访问已删 wrapper 的方法会 native 崩溃）。"""
+    return obj is not None and not sip.isdeleted(obj)
 
 
 class QgisSnappingToolbar(QObject):
@@ -95,6 +101,10 @@ class QgisSnappingToolbar(QObject):
         # 的自动目标层列表依赖画布渲染/刷新时序，独立应用里不可靠，必须显式注册
         self.project.layersAdded.connect(self._on_project_layers_changed)
         self.project.layersRemoved.connect(self._on_project_layers_changed)
+        # 图层**即将**被删（project.clear / removeMapLayer）：抢在其 C++ 对象销毁前
+        # 从吸附 utils 摘出，否则 utils 内部残留悬空指针，后续
+        # ``getExtraSnapLayers()`` 包装它即 native 崩溃（工程清空时必现）。
+        self.project.layersWillBeRemoved.connect(self._on_layers_will_be_removed)
         self.canvas.layersChanged.connect(self._on_project_layers_changed)
 
         self._build_toolbar()
@@ -278,17 +288,21 @@ class QgisSnappingToolbar(QObject):
             targets: "list[QgsVectorLayer]" = []
             if mode == Qgis.SnappingMode.AdvancedConfiguration:
                 target = self._current_layer or self._editing_layer_getter()
-                if target is not None and target.type() == target.VectorLayer:
+                if _alive(target) and target.type() == target.VectorLayer:
                     targets.append(target)
             else:
                 for layer in self.canvas.layers():
-                    if layer.type() == layer.VectorLayer:
+                    # 工程清空/图层移除后画布可能短暂持有已被销毁的 python
+                    # wrapper（C++ 对象已 delete），访问其方法会 native 崩溃
+                    if _alive(layer) and layer.type() == layer.VectorLayer:
                         targets.append(layer)
             want = {id(t) for t in targets}
-            have = {id(l) for l in self._utils.getExtraSnapLayers() if l is not None}
+            have = {id(l) for l in self._utils.getExtraSnapLayers() if _alive(l)}
             if want == have:
                 return
             for old in list(self._utils.getExtraSnapLayers()):
+                if not _alive(old):
+                    continue
                 try:
                     self._utils.removeExtraSnapLayer(old)
                 except Exception:  # noqa: BLE001
@@ -314,6 +328,28 @@ class QgisSnappingToolbar(QObject):
         半移除状态的图层。
         """
         QTimer.singleShot(0, self._sync_extra_layers)
+
+    def _on_layers_will_be_removed(self, layer_ids) -> None:
+        """图层即将被删：先从吸附 utils 摘除，避免留下悬空指针。"""
+        if not layer_ids:
+            return
+        doomed = set(layer_ids)
+        try:
+            registered = list(self._utils.getExtraSnapLayers())
+        except Exception:  # noqa: BLE001
+            return
+        for layer in registered:
+            if not _alive(layer):
+                continue
+            try:
+                if layer.id() in doomed:
+                    self._utils.removeExtraSnapLayer(layer)
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            self._utils.clearAllLocators()
+        except Exception:  # noqa: BLE001
+            pass
 
     # ============================================================== 公共 API
 

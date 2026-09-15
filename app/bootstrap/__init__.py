@@ -342,6 +342,13 @@ def _run_qgis_app(cfg: AppConfig, qgis: QgisRuntime, app, splash=None) -> int:
         splash.set_status("正在加载处理工具箱")
     qgis.init_plugins()
 
+    # 用户自定义表达式函数（QGIS 函数编辑器里写的 @qgsfunction）：本应用不走
+    # QGIS 启动器，qgis.user 不会被自动 import，不补这步表达式构建器里就
+    # 看不到也用不了这些函数。详见 app/env/user_expressions.py。
+    from app.env.user_expressions import load_user_expression_functions
+
+    load_user_expression_functions()
+
     # 4) 主窗口（阶段 4 实现新窗口；阶段 1-3 临时仍用旧类）
 
     if splash is not None:

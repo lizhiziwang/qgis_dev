@@ -1,7 +1,9 @@
 """工程操作。
 
-新建 / 打开工程、工程名询问、图层加入工程分组，以及地图配置（app.yaml）
-的读取与基础底图装载。
+新建 / 保存为工程 / 打开工程、工程名询问、图层加入工程分组，以及地图配置
+（app.yaml）的读取与基础底图装载。保存为工程时额外记录画布当前显示范围，
+下次打开自动恢复。关闭应用前询问是否保存工程：已是工程文件（打开过 / 另存过）
+则直接更新该文件，否则走“保存为工程”另存。
 
 由 :class:`~app.ui.main_window.main_window.MainWindow` 多继承组合，方法只依赖
 ``self`` 上的共享状态。
@@ -9,6 +11,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -24,10 +27,17 @@ from app.core.domain.basemap import add_base_tile_layer
 from app.env.config import AppConfig
 from app.infra.fs.paths import Paths
 from app.infra.logging import get_logger
-from app.ui.common.widgets import open_file_dir
+from app.ui.common.widgets import open_file_dir, save_file
 from app.ui.docks.project_dock import ProjectDock
 
 logger = get_logger(__name__)
+
+#: 工程文件的保存 / 打开过滤器
+_PROJECT_FILTER = "工程文件 (*.pgs);;所有文件 (*)"
+
+#: 应用私有数据在工程文件里的存放位置（QgsProject.writeEntry 的 scope/key）
+_DM_SCOPE = "qgis_dev"
+_DM_KEY = "data_manage"
 
 
 class ProjectOpsMixin:
@@ -99,6 +109,11 @@ class ProjectOpsMixin:
         self.setWindowTitle(f"{self._app_name} - {name}")
         self.project.setCrs(QgsCoordinateReferenceSystem("EPSG:4490"))
 
+        # 新建工程 ⇒ 尚未关联工程文件，关闭/保存时需另存
+        self._project_path = None
+        # 数据管理连接不属于新工程：清空 Dock / 待恢复状态
+        self._reset_data_manage_state()
+
         # 底图进参考分组
         self._load_config_base_tile_into_ref_group()
 
@@ -125,14 +140,202 @@ class ProjectOpsMixin:
         if layer is not None and getattr(self, "_ref_group", None) is not None:
             self._move_layer_to_group(layer, self._ref_group)
 
+    # ------------------------------------------------------------ 保存为工程
+
+    def _save_project_to(self, path: str) -> bool:
+        """把当前工程写入 ``path``（已存在的工程文件即“更新”）。返回是否成功。
+
+        QGIS 工程天然序列化图层树、数据源、渲染器与标注设置（本工程文件后缀
+        ``.pgs``，内容即 QGIS 工程 XML）；画布当前显示范围额外写入 “工程视图
+        设置”，下次打开时由 :meth:`_restore_canvas_extent` 恢复。
+        """
+        # 把画布当前显示范围写进工程视图设置，供下次打开恢复
+        self._store_canvas_extent()
+        # 把数据管理里添加的本地库 / 服务器连接一并写进工程
+        self._store_data_manage_state()
+        self._begin_layer_loading(f"正在保存工程：{os.path.basename(path)}")
+        try:
+            saved = self.project.write(path)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("保存工程失败：%s", exc, exc_info=True)
+            QMessageBox.warning(self, "保存失败", f"无法保存工程：{path}\n{exc}")
+            return False
+        finally:
+            self._end_layer_loading()
+
+        if not saved:
+            QMessageBox.warning(self, "保存失败", f"无法保存工程：{path}")
+            return False
+        title = self.project.title() or Path(path).stem
+        self.project.setTitle(title)
+        self.setWindowTitle(f"{self._app_name} - {title}")
+        # 记住当前工程文件：下次保存 / 关闭时直接更新该文件，不再弹另存
+        self._project_path = path
+        logger.info("保存工程：%s", path)
+        self.messageBar.pushMessage(
+            f"已保存工程：{path}", level=Qgis.MessageLevel.Info, duration=3
+        )
+        return True
+
+    def _on_save_project_as(self) -> bool:
+        """保存为工程（另存为）：选路径后写入。返回是否已保存。"""
+        if not self.project.mapLayers():
+            QMessageBox.information(self, "提示", "当前没有可保存的图层")
+            return False
+        path = save_file(
+            self,
+            title="保存为工程",
+            init_path=str(getattr(self, "_paths", Paths.default()).project_root),
+            filter_=_PROJECT_FILTER,
+        )
+        if not path:
+            return False
+        if not Path(path).suffix:
+            path += ".pgs"
+        return self._save_project_to(path)
+
+    def _save_current_project(self) -> bool:
+        """保存当前工程：已有工程文件则更新，否则走“保存为工程”另存。
+
+        返回是否已保存（用户取消另存对话框 / 写盘失败均返回 ``False``）。
+        """
+        path = getattr(self, "_project_path", None)
+        if path:
+            return self._save_project_to(path)
+        return self._on_save_project_as()
+
+    def _confirm_save_project_on_close(self) -> bool:
+        """关闭应用前询问是否保存工程；返回 ``True`` 表示可以关闭。
+
+        - 无图层 / 提示被禁用（``prompt_save_on_close=False``）→ 直接可关闭；
+        - 「是（保存）」→ 已有工程文件则更新，否则走“保存为工程”；保存失败即
+          不关闭（返回 ``False``）；
+        - 「否（不保存）」→ 直接关闭；
+        - 「取消」→ 返回 ``False``，调用方应 ``event.ignore()``。
+        """
+        if not getattr(self, "prompt_save_on_close", True):
+            return True
+        if not self.project.mapLayers():
+            return True
+        path = getattr(self, "_project_path", None)
+        hint = f"将保存到：{path}" if path else "当前工程尚未保存到文件。"
+        ret = QMessageBox.question(
+            self,
+            "关闭应用",
+            f"是否保存当前工程？\n{hint}",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ret == QMessageBox.StandardButton.Cancel:
+            return False
+        if ret == QMessageBox.StandardButton.Yes:
+            return self._save_current_project()
+        return True  # 否（不保存）
+
+    def _store_data_manage_state(self) -> None:
+        """把数据管理 Dock 里的本地库 / 服务器连接写入工程文件。
+
+        Dock 尚未创建（本次会话没开过数据管理）时，若有从工程恢复的待应用
+        状态则原样写回，避免重存工程丢掉连接信息。失败只记日志、不阻断保存。
+        """
+        try:
+            dock = getattr(self, "_data_manage_dock", None)
+            if dock is not None:
+                state = dock.export_state()
+            else:
+                state = getattr(self, "_dm_pending_state", None)
+                if not state:
+                    return
+            self.project.writeEntry(
+                _DM_SCOPE, _DM_KEY, json.dumps(state, ensure_ascii=False)
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("保存数据管理连接失败：%s", exc, exc_info=True)
+
+    def _restore_data_manage_state(self) -> None:
+        """从工程文件恢复数据管理里的本地库 / 服务器连接。
+
+        工程里没有该项时按“空”处理（新工程式工作区，清空残留连接）。Dock 已
+        创建（用户开过数据管理）→ 立即应用；尚未创建 → 暂存到
+        ``_dm_pending_state``，等 Dock 首次创建时再由
+        :meth:`_apply_pending_data_manage_state` 应用。
+        """
+        state: dict = {}
+        try:
+            raw, ok = self.project.readEntry(_DM_SCOPE, _DM_KEY, "")
+            if ok and raw:
+                parsed = json.loads(raw) if isinstance(raw, str) else raw
+                if isinstance(parsed, dict):
+                    state = parsed
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("恢复数据管理连接失败：%s", exc, exc_info=True)
+        dock = getattr(self, "_data_manage_dock", None)
+        if dock is not None:
+            dock.restore_state(state)
+        else:
+            self._dm_pending_state = state
+
+    def _apply_pending_data_manage_state(self, dock) -> None:
+        """把打开工程时暂存的连接状态应用到刚创建的 Dock（无暂存则不动）。"""
+        state = getattr(self, "_dm_pending_state", None)
+        self._dm_pending_state = None
+        if state:
+            dock.restore_state(state)
+
+    def _reset_data_manage_state(self) -> None:
+        """新建工程：丢掉待恢复状态，并把已存在的 Dock 清空成空树。"""
+        self._dm_pending_state = None
+        dock = getattr(self, "_data_manage_dock", None)
+        if dock is not None:
+            dock.restore_state({})
+
+    def _store_canvas_extent(self) -> None:
+        """把画布当前显示范围写入工程视图设置（保存工程时调用）。"""
+        try:
+            from qgis.core import QgsReferencedRectangle
+
+            extent = self.canvas.extent()
+            crs = self.canvas.mapSettings().destinationCrs()
+            if extent is None or extent.isNull() or extent.isEmpty():
+                return
+            settings = self.project.viewSettings()
+            settings.setDefaultViewExtent(QgsReferencedRectangle(extent, crs))
+            settings.setRestoreProjectExtentOnProjectLoad(True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("记录画布范围失败：%s", exc, exc_info=True)
+
+    def _restore_canvas_extent(self) -> bool:
+        """恢复工程里保存的画布范围；无有效范围或失败返回 ``False``。"""
+        try:
+            from qgis.core import QgsCoordinateTransform
+
+            extent = self.project.viewSettings().defaultViewExtent()
+            if extent is None or extent.isNull() or extent.isEmpty():
+                return False
+            crs = extent.crs()
+            canvas_crs = self.canvas.mapSettings().destinationCrs()
+            rect = extent
+            if crs.isValid() and canvas_crs.isValid() and crs != canvas_crs:
+                transform = QgsCoordinateTransform(crs, canvas_crs, self.project)
+                rect = transform.transformBoundingBox(extent)
+            if rect is None or rect.isNull() or rect.isEmpty():
+                return False
+            self.canvas.setExtent(rect)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("恢复画布范围失败：%s", exc, exc_info=True)
+            return False
+
     def _on_open_project(self) -> None:
-        """打开工程：读入 ``.qgs`` / ``.qgz`` 工程文件并刷新画布。"""
+        """打开工程：读入 ``.pgs`` 工程文件并刷新画布。"""
 
         path = open_file_dir(
             self,
             is_dir=False,
             title="打开工程",
-            filter_="QGIS 工程 (*.qgs *.qgz);;所有文件 (*)",
+            filter_=_PROJECT_FILTER,
         )
         if not path:
             return
@@ -144,8 +347,15 @@ class ProjectOpsMixin:
             self._end_layer_loading()
         if opened:
             self.canvas.setDestinationCrs(self.project.crs())
+            # 记住工程文件：关闭 / 保存时直接更新该文件
+            self._project_path = path
+            # 恢复保存工程时的画布范围（无记录时保持默认全图）
+            self._restore_canvas_extent()
+            # 恢复工程里保存的数据管理连接（本地库 / 服务器）
+            self._restore_data_manage_state()
             self.canvas.refreshAllLayers()
-            self.setWindowTitle(f"{self._app_name} - {self.project.title()}")
+            title = self.project.title() or Path(path).stem
+            self.setWindowTitle(f"{self._app_name} - {title}")
             # 打开的工程里若带"数据图层/参考图层"分组则重绑 Dock，否则复位
             # （只匹配真正的分组，避免把同名图层节点误当分组）
             self._data_group = None

@@ -127,7 +127,8 @@ class LayerDialogsMixin:
         """打开自建图层属性对话框（不再用 QGIS 原生 ``QgsVectorLayerProperties``）。
 
         原生窗口自带一套不跟随本应用无边框标题栏与主题的 chrome。自建版见
-        ``app/ui/dialogs/layer_properties/``：目前「常规」页已实现，其余 5 页占位。
+        ``app/ui/dialogs/layer_properties/``：目前「常规」「字段」「标注」页
+        已实现，其余 3 页占位。
         """
         if layer is None:
             return

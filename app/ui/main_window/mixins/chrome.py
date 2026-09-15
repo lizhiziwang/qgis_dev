@@ -127,7 +127,7 @@ class WindowChromeMixin:
         self._on_tab_changed(tab_bar.currentIndex())
 
     def _build_file_toolbar(self) -> QToolBar:
-        """「文件」tab 工具条：新建工程 / 打开工程 / 打开文件 / 退出（原文件菜单）。"""
+        """「文件」tab 工具条：新建工程 / 保存为工程 / 打开工程 / 打开文件 / 退出。"""
         tb = QToolBar("文件", self)
         tb.setObjectName("FileTabToolbar")
         tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
@@ -136,6 +136,11 @@ class WindowChromeMixin:
         act_new.setShortcut("Ctrl+N")
         act_new.triggered.connect(self._on_new_project)
         tb.addAction(act_new)
+
+        act_save_as = QAction("保存为工程", self)
+        act_save_as.setShortcut(QKeySequence.StandardKey.SaveAs)
+        act_save_as.triggered.connect(self._on_save_project_as)
+        tb.addAction(act_save_as)
 
         act_open_proj = QAction("打开工程", self)
         act_open_proj.setShortcut("Ctrl+Shift+O")

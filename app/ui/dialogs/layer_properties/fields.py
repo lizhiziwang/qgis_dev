@@ -124,6 +124,11 @@ class _RowActionButtons(QWidget):
         lay = QHBoxLayout(self)
         lay.setContentsMargins(2, 1, 2, 1)
         lay.setSpacing(4)
+        # 必须靠上对齐：本控件在 ``__init__`` 时无父级，Qt 会先给它 640x480 的
+        # 默认几何，布局据此把「更新 / 删除」摆到 y≈229；随后 ``setCellWidget``
+        # 把它塞进 ~29px 高的单元格时，Windows 下布局不会重算，按钮被裁到行外
+        # 变成不可见 / 不可点。AlignTop 让按钮永远贴在顶部，与容器高度无关。
+        lay.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         self.update_btn = QPushButton("更新", self)
         self.update_btn.setObjectName("RowActionBtn")
         self.delete_btn = QPushButton("删除", self)
@@ -356,6 +361,8 @@ class FieldsTab(LayerPropertyTab):
             f"{spec['name']} · {spec.get('alias') or spec['name']}",
             spec["name"],
         )
+        # 字段个数立即反映在标签上（pending 行也算入已加的表行数）
+        self.count_label.setText(f"字段个数: {self.table.rowCount()}")
         self._rebuild_action_cells()
 
     def _rebuild_action_cells(self) -> None:
@@ -365,7 +372,12 @@ class FieldsTab(LayerPropertyTab):
         :meth:`_row_of_actions` 反查当前行，所以行号漂移也不会点错。
         """
         for row in range(self.table.rowCount()):
-            self.table.setCellWidget(row, _ACTION_COL, _RowActionButtons(self))
+            widget = _RowActionButtons(self, self.table.viewport())
+            self.table.setCellWidget(row, _ACTION_COL, widget)
+            # 单元格尺寸确定后显式激活一次布局，让按钮按行高 / 列宽落位。
+            lay = widget.layout()
+            if lay is not None:
+                lay.activate()
 
     def _row_of_actions(self, widget: QWidget) -> int:
         """反查按钮组所在行；找不到返回 -1。"""
@@ -451,8 +463,6 @@ class FieldsTab(LayerPropertyTab):
             )
             return
         self._append_pending_row(spec)
-        # 字段个数立即反映在标签上
-        self.count_label.setText(f"字段个数: {self.table.rowCount()}")
 
     # ------------------------------------------------------------- 行操作
 

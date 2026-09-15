@@ -116,6 +116,9 @@ class MainWindow(
         # ---- 项目 + 图层树桥（先建好，_build_central_widget 要用 self.project）----
         self.project = QgsProject.instance()
         self.tree_root = self.project.layerTreeRoot()
+        #: 当前工程关联的文件路径（打开 / 保存为工程后记录）；关闭或再次保存
+        #: 时据此判断“更新已有工程”还是走“保存为工程”另存。
+        self._project_path: Optional[str] = None
 
         # ---- 地图画布 ----
         self.canvas = self._build_canvas()
@@ -176,7 +179,15 @@ class MainWindow(
 
     # ===================================================== 关闭
 
+    #: 关闭窗口时是否弹窗询问“是否保存工程”。默认开启；无头 / 测试场景可置
+    #: ``False`` 以避免模态弹窗阻塞（见 ``tests/ui/conftest.py`` 的 autouse fixture）。
+    prompt_save_on_close: bool = True
+
     def closeEvent(self, event: QCloseEvent) -> None:
+        # 关闭前询问是否保存工程；用户选“取消”/保存失败则放弃关闭
+        if not self._confirm_save_project_on_close():
+            event.ignore()
+            return
         try:
             # ZoomTileGuard 先停：冻结期间若直接关窗，worker 线程还在跑离屏渲染，
             # 关窗口会触发 QPainter/QImage 析构，可能撞上 native 崩溃。
