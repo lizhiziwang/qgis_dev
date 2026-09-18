@@ -13,7 +13,7 @@
    调 :meth:`apply_env`（仅设环境变量，**不**初始化 QGIS）
 5. 创建 :class:`QgsApplication`（**不**调 ``initQgis``），弹出登录对话框
 6. 登录成功才调 ``initQgis``、加载翻译、初始化 processing 插件（仅 dev）
-7. 实例化主窗口、显示、``exec_``
+7. 实例化主窗口、显示、依次执行启动回调（加载底图、弹出“打开地图文档”）、``exec_``
 """
 
 from __future__ import annotations
@@ -60,6 +60,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     # 注册启动完成回调：按配置加载天地图 XYZ 底图
     register_startup_callback(_make_base_tile_callback(cfg))
 
+    # 注册启动完成回调：主窗口显示后立即弹“打开地图文档”，让用户选择要打开的 .pgs
+    register_startup_callback(_make_open_project_callback())
+
     _configure_logging(cfg, paths)
 
     # 崩溃日志：装配在日志目录确定之后、QGIS 初始化之前。
@@ -79,9 +82,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # 启动初始化状态页：QgsApplication 创建后立刻弹出，覆盖登录 → initQgis →
     # 插件注册 → 主窗口构建等耗时阶段，主窗口显示时由 _run_qgis_app 关闭。
-    splash = _start_splash(cfg.app_name)
     try:
         # 鉴权优先：本机有未过期凭证就直接跳过登录
+        splash = _start_splash(cfg.app_name)
 
         cached = load_credential()
         if cached is not None:
@@ -373,6 +376,54 @@ def _make_base_tile_callback(cfg: AppConfig):
             logger.warning("未加载配置底图（未启用或图层无效）")
         else:
             logger.info("已加载配置底图：%s", layer.name())
+
+    return _cb
+
+
+def _make_open_project_callback():
+    """构造“主窗口显示后立即弹出打开地图文档对话框”的启动回调。
+
+    登录校验通过、主窗口 ``show()`` 后由 :func:`_run_startup_callbacks` 执行。
+    弹 ArcMap 风格的 :class:`~app.ui.dialogs.startup_project.StartupProjectDialog`
+    ——最近工程列表 + 浏览 + 新建，替代系统文件选择框：选中已有工程走主窗口
+    :meth:`ProjectOpsMixin.open_project_path`，选“新建工程”走
+    :meth:`ProjectOpsMixin._on_new_project`，取消则停留在空工作区（先前回调
+    已加载的底图不受影响）。回调本身失败只记日志，不阻断启动。
+    """
+
+    def _cb(window) -> None:
+        from qgis.PyQt.QtWidgets import QDialog
+
+        from app.ui.dialogs.startup_project import StartupProjectDialog
+
+        opener = getattr(window, "open_project_path", None)
+        creator = getattr(window, "_on_new_project", None)
+        if opener is None and creator is None:  # 旧窗口无这些动作时静默跳过
+            logger.warning("主窗口缺少工程操作动作，跳过启动选择工程")
+            return
+
+        logger.info("启动完成，弹出“打开地图文档”对话框")
+        dlg = StartupProjectDialog(
+            window, app_name=getattr(window, "_app_name", None) or "qgis_dev"
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            logger.info("启动未选择工程，停留在空工作区")
+            return
+        if dlg.create_new():
+            if creator is None:
+                logger.warning("主窗口缺少 _on_new_project，跳过新建工程")
+                return
+            logger.info("启动选择：新建工程")
+            creator()
+            return
+        path = dlg.selected_path()
+        if not path:
+            return
+        if opener is None:
+            logger.warning("主窗口缺少 open_project_path，跳过打开工程")
+            return
+        logger.info("启动选择：打开工程 %s", path)
+        opener(path)
 
     return _cb
 

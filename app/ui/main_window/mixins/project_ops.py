@@ -27,6 +27,7 @@ from app.core.domain.basemap import add_base_tile_layer
 from app.env.config import AppConfig
 from app.infra.fs.paths import Paths
 from app.infra.logging import get_logger
+from app.ui.common.recent_projects import add_recent
 from app.ui.common.widgets import open_file_dir, save_file
 from app.ui.docks.project_dock import ProjectDock
 
@@ -94,15 +95,14 @@ class ProjectOpsMixin:
                 self.digitizing_toolbar.set_edit_target(None)
         self.project.clear()
 
-        # 重建分组：参考图层（底图）+ 数据图层（用户数据）。
-        # **顺序敏感**：QGIS 按 layer tree 索引升序渲染——索引 0 先画、最后索引
-        # 画在最上面。所以参考图层（底图）必须建在根分组**底部**（先渲染），
-        # 数据图层建在**顶部**（后渲染、盖在底图上）。若顺序反了，缩放/平移时
-        # 底图会被排到最后渲染，慢速矢量图层会拖住它——表现为"等矢量画完才出
-        # 底图"。``addGroup`` 是 append，所以建组顺序直接决定渲染顺序。
+        # 重建分组：数据图层（用户数据，画在最上）+ 参考图层（底图，垫在最下）。
+        # **顺序敏感**：QGIS 画布 ``layers()`` 是自顶向下存储——索引 0 画在最上
+        # 层，末尾索引垫在最底（见 QgsMapSettings.setLayers 文档）。``addGroup``
+        # 是 append，所以先建“数据图层”（索引 0，最上），再建“参考图层”（末尾，
+        # 最底）。若反过来，底图分组会压在数据图层之上、把数据盖住。
         root = self.project.layerTreeRoot()
-        self._ref_group = root.addGroup("参考图层")
         self._data_group = root.addGroup("数据图层")
+        self._ref_group = root.addGroup("参考图层")
 
         # 工程名 + 坐标系（project.clear() 会把 CRS 重置回默认）
         self.project.setTitle(name)
@@ -172,6 +172,7 @@ class ProjectOpsMixin:
         # 记住当前工程文件：下次保存 / 关闭时直接更新该文件，不再弹另存
         self._project_path = path
         logger.info("保存工程：%s", path)
+        add_recent(path)
         self.messageBar.pushMessage(
             f"已保存工程：{path}", level=Qgis.MessageLevel.Info, duration=3
         )
@@ -329,7 +330,7 @@ class ProjectOpsMixin:
             return False
 
     def _on_open_project(self) -> None:
-        """打开工程：读入 ``.pgs`` 工程文件并刷新画布。"""
+        """打开工程：弹文件框选 ``.pgs`` 后读入并刷新画布。"""
 
         path = open_file_dir(
             self,
@@ -339,6 +340,16 @@ class ProjectOpsMixin:
         )
         if not path:
             return
+        self.open_project_path(path)
+
+    def open_project_path(self, path: str) -> bool:
+        """读入 ``path`` 指定的工程文件并刷新画布；返回是否成功。
+
+        打开工程动作（菜单 / 工具栏）与启动“打开地图文档”对话框共用：对话框
+        只负责选路径，读盘、bridge 同步、分组重排都在这里。
+        """
+        if not path:
+            return False
         # QgsProject.read 会同步读入工程里所有图层（大工程较慢）→ 期间亮起加载指示
         self._begin_layer_loading(f"正在打开图层：{os.path.basename(path)}")
         try:
@@ -367,23 +378,41 @@ class ProjectOpsMixin:
                     self._data_group = child
                 elif child.name() == "参考图层":
                     self._ref_group = child
-            # 老工程可能把"参考图层"建在数据图层之上（索引更大、后渲染），
-            # 缩放时底图会被慢速矢量图层拖住。强制把参考图层挪到根分组最底，
-            # 与 ``_on_project_create`` 的建组顺序一致。``insertChildNode`` 在
-            # 同父节点上移动已存在的子节点时只重排不重发 willRemoveChildren 给
-            # bridge（group 节点不挂 layer，bridge 不关心）。
+            # 老工程可能把“参考图层”排在数据图层之上（树里索引更小 = 画在更上
+            # 层），底图会盖住数据。这里把参考图层挪到根分组末尾（最底层），与
+            # ``_on_project_create`` 的建组顺序一致。
+            #
+            # 注意：**不能**直接 ``insertChildNode(index, ref_group)``——实测对
+            # 已在树里的子节点，该调用会在同一父节点下插入一份重复节点（树里
+            # 出现两个“参考图层”）。必须用 clone + insert + remove 三步（与
+            # ``_on_move_layer_node`` 一致）：bridge 收到 willRemoveChildren 时
+            # 看到图层仍挂在克隆节点上，不会把底图从工程删掉。
             if self._ref_group is not None:
                 root = self.project.layerTreeRoot()
-                if root.children().index(self._ref_group) != 0:
-                    root.insertChildNode(0, self._ref_group)
+                children = root.children()
+                ref_idx = children.index(self._ref_group)
+                data_idx = (
+                    children.index(self._data_group) if self._data_group is not None else -1
+                )
+                if data_idx < 0 or ref_idx < data_idx:
+                    self._clear_view_current()
+                    cloned = self._ref_group.clone()
+                    root.insertChildNode(len(children), cloned)
+                    self._remap_group_refs(self._ref_group, cloned)
+                    root.removeChildNode(self._ref_group)
+                    # 重排后 bridge 未必收到通知（与 read 同理），显式再同步
+                    # 一次，保证画布按纠正后的顺序重绘。
+                    self.bridge.setCanvasLayers()
             if getattr(self, "project_dock", None) is not None:
                 if self._data_group is not None and self._ref_group is not None:
                     self.project_dock.set_project(self.project.title(), self._data_group, self._ref_group)
                 else:
                     self.project_dock.reset()
             self.messageBar.pushMessage(f"已打开工程：{path}", level=Qgis.MessageLevel.Info, duration=3)
-        else:
-            QMessageBox.warning(self, "打开失败", f"无法打开工程：{path}")
+            add_recent(path)
+            return True
+        QMessageBox.warning(self, "打开失败", f"无法打开工程：{path}")
+        return False
 
     def _map_config_path(self):
         """``config/app.yaml`` 实际路径（``QGIS_DEV_CONFIG`` 可覆盖），读/写共用。"""

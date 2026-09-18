@@ -22,7 +22,11 @@
   本 mixin 放在 QWidget 基类**之前**，其它功能 mixin 可以排在其前面，并通过
   ``super()`` 链协同：``class MainWindow(WindowShellMixin, FramelessMixin, QMainWindow)``。
 - 宿主仍各自负责自己的 ``window_qss`` / 画布 / 工具条主题刷新；mixin 只接管
-  「窗口 chrome」这一层（标题栏 + 系统边框行为）。
+  「窗口 chrome」这一层（标题栏 + 系统边框行为 + 主题描边）。
+- 无边框窗口没有系统边框 / 阴影，:meth:`enable_frameless` 会在客户区铺一层
+  透明的 :class:`_WindowBorder` 自绘一圈 :data:`WINDOW_BORDER_WIDTH` 像素的
+  描边（颜色取当前主题 ``border``），它在布局变化后置顶，不被标题栏 /
+  中央控件 / Dock 盖住。
 """
 
 from __future__ import annotations
@@ -31,11 +35,12 @@ import ctypes
 import sys
 from ctypes import wintypes
 
-from qgis.PyQt.QtCore import QEvent, QPoint, QRect, Qt
-from qgis.PyQt.QtGui import QCursor, QGuiApplication
+from qgis.PyQt.QtCore import QEvent, QPoint, QRect, QRectF, Qt
+from qgis.PyQt.QtGui import QColor, QCursor, QGuiApplication, QPainter, QPen
 from qgis.PyQt.QtWidgets import QMainWindow, QMenuBar, QTabBar, QVBoxLayout, QWidget
 
 from app.ui.common.qt_compat import event_pos, global_pos
+from app.ui.common.theme import ThemeManager
 from app.ui.main_window.title_bar import TitleBar
 
 # ---------------------------------------------------------------------------
@@ -91,6 +96,10 @@ class _MONITORINFO(ctypes.Structure):
 #: 边缘命中判定的像素宽度（窗口边缘外这一范围内都算可缩放）。
 RESIZE_MARGIN = 6
 
+#: 无边框窗口描边宽度（px）。无边框窗口没有系统边框，描边用于和桌面 /
+#: 其它窗口区分，故比普通分隔线（1px）略粗。
+WINDOW_BORDER_WIDTH = 2
+
 
 def hit_test(rect, pos, margin: int = RESIZE_MARGIN) -> "Qt.Edge":
     """返回 ``pos``（``rect`` 本地坐标）落在哪条边缘（:class:`Qt.Edge` 组合）。
@@ -134,6 +143,40 @@ def sc_size_wparam(ht: int) -> int:
     return SC_SIZE | (ht - 9)
 
 
+class _WindowBorder(QWidget):
+    """无边框窗口的描边层（宿主窗口的透明子控件）。
+
+    自绘标题栏的窗口没有系统边框 / 阴影，贴在同色桌面或其它窗口上时边界糊成
+    一片。本类铺满整个客户区并置顶，只在最外圈画 :data:`WINDOW_BORDER_WIDTH`
+    像素宽的描边线：
+
+    - ``WA_TransparentForMouseEvents``：不吃鼠标事件，标题栏按钮点击、画布
+      拖拽、边缘缩放（``WM_NCHITTEST``）全部照常；
+    - 颜色在 :meth:`paintEvent` 里实时读当前主题的 ``border``，主题切换时宿主
+      重刷 QSS 会顺带触发重绘，无需额外信号连接；
+    - 必须由宿主在每次布局 / 尺寸变化后 ``raise_()``，否则后建的 Dock / 工具栏
+      会盖住它。
+    """
+
+    def __init__(self, parent: QWidget, width: int = WINDOW_BORDER_WIDTH) -> None:
+        super().__init__(parent)
+        self._width = max(1, int(width))
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
+        self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+
+    def paintEvent(self, _event) -> None:  # noqa: N802 —— Qt 命名
+        theme = ThemeManager.instance().current()
+        painter = QPainter(self)
+        painter.setPen(QPen(QColor(theme.border), self._width))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        # 画笔以路径为中心向两侧展开；把路径内缩半个线宽，描边才恰好落在
+        # 客户区内侧（1px→1px，2px→2px……），不会向窗口外溢半像素。
+        half = self._width / 2.0
+        painter.drawRect(QRectF(self.rect()).adjusted(half, half, -half, -half))
+
+
 class FramelessMixin:
     """无边框窗口能力（mixin）。
 
@@ -156,6 +199,7 @@ class FramelessMixin:
         show_user_button: bool = True,
         show_theme_button: bool = True,
         show_mode_switch: bool = True,
+        with_border: bool = True,
     ):
         """把宿主设为无边框窗口，挂载自绘标题栏，并装配平台行为。
 
@@ -168,6 +212,9 @@ class FramelessMixin:
         :param show_theme_button: 标题栏是否显示主题切换按钮。
         :param show_mode_switch: 标题栏是否显示任务/工程模式开关。
             流程编辑器 / 对话框把后三个传 False，只留 图标/标题/窗口按钮。
+        :param with_border: 是否给窗口画一圈描边（默认开，宽度
+            :data:`WINDOW_BORDER_WIDTH`）。无边框窗口没有系统边框，描边用于
+            和桌面 / 其它窗口区分；全屏类窗口可传 False。
         :return: 创建好的 :class:`TitleBar` 实例（也存到 ``self.title_bar``）。
         """
 
@@ -227,6 +274,11 @@ class FramelessMixin:
         if not self._is_windows():
             self.setMouseTracking(True)
 
+        # ---- 无边框窗口描边（透明子控件置顶自绘，不被 title_bar / central 盖住）----
+        self._border_syncing = False
+        self._window_border = _WindowBorder(self) if with_border else None
+        self._sync_window_border()
+
         return self.title_bar
 
     # ------------------------------------------------------------ 平台判定
@@ -282,15 +334,63 @@ class FramelessMixin:
         tb = getattr(self, "title_bar", None)
         if tb is not None:
             tb.set_maximized(self.isMaximized() or self._visual_maximized)
+        self._sync_window_border()
+
+    # ------------------------------------------------------------ 窗口描边
+
+    def _sync_window_border(self) -> None:
+        """同步描边层的几何 / 显隐 / 层级。
+
+        最大化 / 全屏时隐藏（系统窗口此时也无边框）；重入安全：``event`` 里
+        的 ``LayoutRequest`` 也会调它，避免 ``raise_()`` 间接触发重入。
+        """
+        border = getattr(self, "_window_border", None)
+        if border is None or getattr(self, "_border_syncing", False):
+            return
+        self._border_syncing = True
+        try:
+            border.setGeometry(self.rect())
+            visible = not (
+                self.isMaximized()
+                or self.isFullScreen()
+                or getattr(self, "_visual_maximized", False)
+            )
+            border.setVisible(visible)
+            if visible:
+                border.raise_()
+        finally:
+            self._border_syncing = False
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        super().resizeEvent(event)
+        self._sync_window_border()
+
+    def showEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        super().showEvent(event)
+        self._sync_window_border()
+
+    def event(self, event):
+        """布局变化（Dock / 工具条增删、菜单栏重建）后把描边层重新置顶。
+
+        后创建的子控件默认叠在描边层之上，会在窗口边缘盖掉描边；QMainWindow
+        的 Dock 增删不一定触发 resize，所以监听 ``LayoutRequest`` 补一次抬升。
+        """
+        result = super().event(event)
+        if event.type() == QEvent.Type.LayoutRequest:
+            border = getattr(self, "_window_border", None)
+            if border is not None and not border.isHidden():
+                border.raise_()
+        return result
 
     def changeEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
-        """最大化/还原状态变化 → 同步标题栏按钮图标。"""
+        """最大化/还原状态变化 → 同步标题栏按钮图标 + 描边显隐。"""
         if event.type() == QEvent.Type.WindowStateChange:
             tb = getattr(self, "title_bar", None)
             if tb is not None and hasattr(self, "isMaximized"):
                 tb.set_maximized(
                     self.isMaximized() or getattr(self, "_visual_maximized", False)
                 )
+            self._sync_window_border()
         super().changeEvent(event)
 
     # ------------------------------------------------------------ Windows 原生事件

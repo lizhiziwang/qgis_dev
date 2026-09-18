@@ -1,9 +1,14 @@
 """GeoPackage(1.3 规范)几何二进制编码 — 纯标准库,不依赖 GDAL / mod_spatialite。
 
 GPKG 几何列存的是: 魔数 ``GP`` + 版本(1B) + flags(1B) + srs_id(LE int32)
-+ [可选 envelope] + WKB。本模块只做 2D 编码:
++ [可选 envelope] + WKB。本模块只做 2D 编码, 并按 GDAL/OGR 写出的
+"标准/常规" GeoPackage 几何来落库:
 
-- 不写 envelope(flags=0,便于过滤;QGIS/OGR/GDAL 读取不要求 envelope);
+- flags=0x03: bit0=1(头字段小端) + bits1-3=1(带 XY envelope)——
+  与 GDAL 一致; envelope 为 4 个 little-endian double
+  ``minx, maxx, miny, maxy``。不能图省事只写 flags(如 0x00 / 0x01):
+  0x00 会被当成大端 header, srs_id 读错, 部分环境甚至判几何损坏
+  ("Unable to read geometry");
 - WKB 一律小端;
 - 空几何 / ZM / 三维: 统一不支持,抛 ``ValueError``(与现有 spatialite
   路径 ``ST_GeomFromText(...) IS NULL`` 报错语义对齐)。
@@ -20,12 +25,18 @@ GPKG 几何列存的是: 魔数 ``GP`` + 版本(1B) + flags(1B) + srs_id(LE int3
 - ``encode_esri_json(geom, srs_id)`` / ``encode_wkt(wkt, srs_id)``:
   → ``(BLOB bytes, 规范类型名)``(无几何内容返回 ``None``);
 - ``wrap_to_multi(blob, kind)``: 单部件 → 对应 MULTI 部件(已是 MULTI 原样);
-- ``blob_kind_name(blob)`` / ``blob_xy_envelope(blob)``: 反读校验/调试。
+- ``blob_kind_name(blob)`` / ``blob_xy_envelope(blob)``: 反读校验/调试;
+- ``decompress_blob(blob)``: 把早期私有压缩几何还原成规范 GPKG 几何。
+
+早期本工程曾把几何做 XOR 差分 + zlib 压缩并置 flags bit5
+(``FLAG_COMPRESSED``)。这是**私有格式**, QGIS/GDAL 读不了, 现已废弃:
+本模块只写规范几何, ``decompress_blob`` 仅用于修复存量压缩库。
 """
 from __future__ import annotations
 
 import re
 import struct
+import zlib
 from typing import Any
 
 #: 规范几何类型名 → WKB 类型码
@@ -90,9 +101,160 @@ def _multi_wkb(kind: str, members: list[bytes]) -> bytes:
     return _wkb(_GEOM_CODE[kind], struct.pack("<I", len(members)) + b"".join(members))
 
 
+#: envelope 指示位(bits1-3) → envelope 字节数(bit0 是字节序, 不参与)
+_ENVELOPE_LEN: dict[int, int] = {0: 0, 1: 32, 2: 48, 3: 48, 4: 64}
+
+
+def _wkb_offset(blob: bytes) -> int:
+    """从 GPKG 几何头反推 WKB 起始偏移(按 envelope 指示位算)。"""
+    return 8 + _ENVELOPE_LEN.get((blob[3] >> 1) & 0x07, 0)
+
+
 def _blob(srs_id: int, wkb: bytes) -> bytes:
-    """GPKG 几何 BLOB: 'GP' + 版本 0 + flags 0(无 envelope) + srs_id + WKB。"""
-    return b"GP" + b"\x00" + b"\x00" + struct.pack("<i", int(srs_id)) + wkb
+    """GPKG 几何 BLOB: 'GP' + 版本 0 + flags 0x03 + srs_id + XY envelope + WKB。
+
+    按 GDAL/OGR 的标准写法落库: flags=0x03(头小端 + 带 XY envelope),
+    envelope 为 4 个 little-endian double ``minx, maxx, miny, maxy``。
+    **不要**只写 flags=0x00 —— 规范里 bit0=0 表示大端 header, srs_id 会被
+    读错, 部分环境(实测 QGIS 4.2 / GDAL 3.13)还连带判几何损坏。
+    理论上算不出包络时退回 flags=0x01(小端、不带 envelope)保证仍可读。
+    """
+    srs_le = struct.pack("<i", int(srs_id))
+    env = _wkb_envelope(wkb)
+    if env is None:
+        return b"GP" + b"\x00" + b"\x01" + srs_le + wkb
+    minx, miny, maxx, maxy = env
+    return (
+        b"GP" + b"\x00" + b"\x03" + srs_le
+        + struct.pack("<dddd", minx, maxx, miny, maxy)
+        + wkb
+    )
+
+
+# ----------------------------------------------------------------------
+# 存量修复: 解压早期私有压缩几何(现已废弃, 只读旧库时需要)
+# ----------------------------------------------------------------------
+
+#: flags bit5: 早期本工程“几何差分压缩”私有标记。规范里 bit5 未使用,
+#: QGIS/GDAL 不认 —— 打开这类库会报 ``Unable to read geometry``。
+FLAG_COMPRESSED = 0x20
+
+
+def gpkg_header_len(blob: bytes) -> int | None:
+    """GPKG 几何头字节数(含 envelope, 不含 WKB): 8/40/56/56/72;非法返回 None。"""
+    if (
+        not isinstance(blob, (bytes, bytearray))
+        or len(blob) < 8
+        or bytes(blob[:2]) != b"GP"
+    ):
+        return None
+    return 8 + _ENVELOPE_LEN.get((blob[3] >> 1) & 0x07, 0)
+
+
+def is_compressed_blob(blob: bytes) -> bool:
+    """是否为早期私有压缩几何(BLOB 魔数 ``GP`` 且 flags bit5=1)。"""
+    return (
+        isinstance(blob, (bytes, bytearray))
+        and len(blob) >= 8
+        and bytes(blob[:2]) == b"GP"
+        and bool(blob[3] & FLAG_COMPRESSED)
+    )
+
+
+def _coord_offsets(wkb: bytes) -> list[int]:
+    """遍历 WKB 结构, 返回每个坐标对(16B)的起始偏移。
+
+    只按结构字节走(结构未被压缩改动), 供 :func:`_xor_delta` 反解。支持
+    POINT/LINESTRING/POLYGON 及 MULTI*/GEOMETRYCOLLECTION 递归; 解析不出或
+    长度对不上抛 :class:`GpkgGeomError`。
+    """
+    offsets: list[int] = []
+
+    def walk(pos: int) -> int:
+        if pos + 5 > len(wkb):
+            raise GpkgGeomError("WKB 结构截断")
+        fmt = "<" if wkb[pos] == 1 else ">"
+        code = struct.unpack_from(fmt + "I", wkb, pos + 1)[0]
+        pos += 5
+        if code == 1:  # POINT
+            offsets.append(pos)
+            return pos + 16
+        if code in (2, 3):  # LINESTRING / POLYGON
+            groups = 1 if code == 2 else struct.unpack_from(fmt + "I", wkb, pos)[0]
+            if code == 3:
+                pos += 4
+            for _ in range(groups):
+                (n,) = struct.unpack_from(fmt + "I", wkb, pos)
+                pos += 4
+                for _ in range(n):
+                    offsets.append(pos)
+                    pos += 16
+            return pos
+        if code in (4, 5, 6, 7):  # MULTI* / GEOMETRYCOLLECTION
+            (n,) = struct.unpack_from(fmt + "I", wkb, pos)
+            pos += 4
+            for _ in range(n):
+                pos = walk(pos)
+            return pos
+        raise GpkgGeomError(f"不支持的 WKB 类型码 {code}")
+
+    if walk(0) != len(wkb):
+        raise GpkgGeomError("WKB 长度与结构不一致")
+    return offsets
+
+
+def _xor_delta(raw: bytes, offsets: list[int], *, decode: bool) -> bytes:
+    """坐标差分的编/解码(首坐标 XOR 0 保持不变)。
+
+    压缩: ``out_i = orig_i XOR orig_{i-1}``; 还原: ``orig_i = out_i XOR
+    orig_{i-1}``。两者靠 ``prev`` 取“原值”还是“还原值”区分 —— ``decode=False``
+    (压缩)时 prev 取读到的原值, ``decode=True``(解压)时取还原值。
+    """
+    buf = bytearray(raw)
+    prev_x = prev_y = 0
+    for off in offsets:
+        ix = struct.unpack_from("<Q", buf, off)[0]
+        iy = struct.unpack_from("<Q", buf, off + 8)[0]
+        x = ix ^ prev_x
+        y = iy ^ prev_y
+        struct.pack_into("<QQ", buf, off, x, y)
+        prev_x, prev_y = (x, y) if decode else (ix, iy)
+    return bytes(buf)
+
+
+def decompress_blob(blob: bytes) -> bytes:
+    """把早期私有压缩几何还原为规范 GPKG 几何(未压缩的原样返回)。
+
+    还原后清掉 flags bit5(压缩标记); 若头里没 envelope, 再把 bit0 对齐成
+    WKB 实际字节序(本工程写的小端 WKB → flags bit0=1), 顺带修掉老版
+    flags=0x00 被当大端 header 读的毛病。
+
+    Raises:
+        GpkgGeomError: 头非法 / zlib 解压失败 / WKB 结构解析不出。
+    """
+    blob = bytes(blob)
+    if not is_compressed_blob(blob):
+        return blob
+    hlen = gpkg_header_len(blob)
+    if hlen is None or hlen >= len(blob):
+        raise GpkgGeomError("压缩几何 BLOB 头非法")
+    try:
+        raw = zlib.decompress(blob[hlen:])
+    except zlib.error as exc:
+        raise GpkgGeomError(f"压缩几何 zlib 解压失败: {exc}") from exc
+    try:
+        coords = _coord_offsets(raw)
+    except (struct.error, IndexError) as exc:
+        raise GpkgGeomError("压缩几何 WKB 结构无法解析") from exc
+    wkb = _xor_delta(raw, coords, decode=True)
+    head = bytearray(blob[:hlen])
+    flags = head[3] & ~FLAG_COMPRESSED
+    if ((head[3] >> 1) & 0x07) == 0:  # 无 envelope 时才动头字节序位
+        # 对齐 WKB 实际字节序(本工程写小端 WKB → bit0=1),
+        # 顺带修掉老版 flags=0x00 被当大端 header 读的毛病。
+        flags = (flags & 0xFE) | (0x01 if wkb[:1] == b"\x01" else 0x00)
+    head[3] = flags
+    return bytes(head) + wkb
 
 
 def _xy2(pt: Any) -> tuple[float, float] | None:
@@ -358,10 +520,11 @@ def geometry_kind(value: Any) -> str | None:
 
 
 def wrap_to_multi(blob: bytes, kind: str) -> bytes:
-    """单部件 BLOB → 对应 MULTI 部件(保留原 GPKG 头/srs);已是 MULTI 原样返回。
+    """单部件 BLOB → 对应 MULTI 部件(保留原 srs);已是 MULTI 原样返回。
 
     实现层面只在 WKB 段外包一层: ``MULTI*`` 的成员本就是**完整 WKB**(含各自
-    字节序头),因此单部件 WKB 原样作唯一成员即可。
+    字节序头),因此单部件 WKB 原样作唯一成员即可。外层再走 :func:`_blob`
+    重算 envelope(原件的 envelope 不再适用)。
     """
     if kind in _MULTI:
         return blob
@@ -369,19 +532,23 @@ def wrap_to_multi(blob: bytes, kind: str) -> bytes:
         raise GpkgGeomError(f"无法把 {kind} 包成 MULTI")
     if not isinstance(blob, (bytes, bytearray)) or len(blob) < 9 or bytes(blob[:2]) != b"GP":
         raise GpkgGeomError("wrap_to_multi 需要完整的 GPKG 几何 BLOB")
-    head = bytes(blob[:8])
-    wkb = bytes(blob[8:])
+    srs = struct.unpack("<i", bytes(blob[4:8]))[0]
+    wkb = bytes(blob[_wkb_offset(blob):])
     code = _GEOM_CODE[_SINGLE_TO_MULTI[kind]]
-    return head + _wkb(code, struct.pack("<I", 1) + wkb)
+    return _blob(srs, _wkb(code, struct.pack("<I", 1) + wkb))
 
 
 def blob_kind_name(blob: bytes) -> str | None:
-    """从已编码 BLOB 反读规范几何类型名。"""
+    """从已编码 BLOB 反读规范几何类型名(兼容早期私有压缩几何)。"""
     if not isinstance(blob, (bytes, bytearray)) or len(blob) < 9:
         return None
     if bytes(blob[:2]) != b"GP":
         return None
-    wkb = bytes(blob[8:])
+    try:
+        blob = decompress_blob(bytes(blob))
+    except GpkgGeomError:
+        return None
+    wkb = bytes(blob[_wkb_offset(bytes(blob)):])
     if len(wkb) < 5 or wkb[0] not in (0, 1):
         return None
     code = struct.unpack("<I", wkb[1:5])[0]
@@ -402,7 +569,11 @@ def blob_xy_envelope(blob: bytes) -> tuple[float, float, float, float] | None:
     """
     if not isinstance(blob, (bytes, bytearray)) or len(blob) < 9 or bytes(blob[:2]) != b"GP":
         return None
-    wkb = bytes(blob[8:])
+    try:
+        blob = decompress_blob(bytes(blob))
+    except GpkgGeomError:
+        return None
+    wkb = bytes(blob[_wkb_offset(bytes(blob)):])
     try:
         return _wkb_envelope(wkb)
     except (struct.error, IndexError):
@@ -466,14 +637,17 @@ def _wkb_envelope(wkb: bytes) -> tuple[float, float, float, float] | None:
 
 
 __all__ = [
+    "FLAG_COMPRESSED",
     "GpkgGeomError",
-    "encode_esri_json",
-    "encode_wkt",
-    "encode_geometry",
-    "geometry_kind",
-    "wrap_to_multi",
     "blob_kind_name",
     "blob_srs_id",
     "blob_xy_envelope",
+    "decompress_blob",
+    "encode_esri_json",
+    "encode_geometry",
+    "encode_wkt",
     "geometry_kind",
+    "gpkg_header_len",
+    "is_compressed_blob",
+    "wrap_to_multi",
 ]

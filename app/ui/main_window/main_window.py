@@ -54,6 +54,7 @@ from app.core.domain.tile_prefetch import (
 )
 from app.core.util.local_layer_loader import LocalLayerLoader
 from app.infra.fs.paths import Paths
+from app.infra.logging import get_logger
 from app.ui.common.frameless import FramelessMixin
 from app.ui.common.icons import Icons
 from app.ui.main_window.mixins.app_actions import AppActionsMixin
@@ -68,6 +69,8 @@ from app.ui.main_window.mixins.map_tools import MapToolsMixin
 from app.ui.main_window.mixins.online_basemap import OnlineBasemapMixin
 from app.ui.main_window.mixins.project_ops import ProjectOpsMixin
 from app.ui.main_window.mixins.shell import WindowShellMixin
+
+logger = get_logger(__name__)
 
 
 class MainWindow(
@@ -124,6 +127,12 @@ class MainWindow(
         self.canvas = self._build_canvas()
         self.bridge = QgsLayerTreeMapCanvasBridge(self.tree_root, self.canvas)
         self.bridge.setAutoSetupOnFirstLayer(True)
+        # 读工程后必须显式把图层树同步进画布：QgsProject.read() 读入的图层不会
+        # 驱动 bridge 更新（实测 read 完成后 canvas.layers() 仍为 0），画布空渲染
+        # ⇒ 打开工程白屏，且不触发任何渲染；直到用户手动切换任一图层可见性，
+        # bridge 才收到信号并 setCanvasLayers()，看起来像“必须点一下就恢复”。
+        # 挂 readProject 信号，覆盖所有读工程入口（启动自动打开 / 菜单打开）。
+        self.project.readProject.connect(self._sync_canvas_layers_on_project_read)
         # 后台瓦片预热：天地图 XYZ 底图拖动/放大后白屏的修复（渲染完成 →
         # 后台离屏预取四周 8 个相邻视口的瓦片进缓存，平移时命中缓存不白屏）
 
@@ -201,6 +210,17 @@ class MainWindow(
         finally:
             self._clear_global_messagebar()
             event.accept()
+
+    def _sync_canvas_layers_on_project_read(self, *_args) -> None:
+        """工程读入后把图层树同步到画布（原因见 __init__ 中 readProject 注释）。
+
+        ``QgsProject.read()`` 不会触发 ``QgsLayerTreeMapCanvasBridge`` 更新，
+        必须显式同步一次；失败不应打断打开工程流程。
+        """
+        try:
+            self.bridge.setCanvasLayers()
+        except Exception:  # noqa: BLE001
+            logger.exception("同步画布图层失败")
 
     def _clear_global_messagebar(self, *args) -> None:
         """清理全局 ``messageBar`` 属性（防悬空指针 native 崩溃）。

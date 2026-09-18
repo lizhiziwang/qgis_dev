@@ -40,7 +40,7 @@ from typing import Any, Optional
 from qgis.PyQt.QtCore import QObject
 from qgis.core import QgsDataSourceUri, QgsMapLayer, QgsRasterLayer, QgsVectorLayer
 
-from app.core.util.local_db_util import gpkg_open_path
+from app.core.util.local_db_util import gpkg_open_path, repair_gpkg_if_needed
 from app.infra.logging import get_logger
 
 logger = get_logger(__name__)
@@ -119,6 +119,12 @@ class LocalLayerLoader(QObject):
             raise LocalLayerMissingPathError(
                 f"「{name}」缺少库文件路径, 无法加载。"
             )
+        # 旧版写坏的 GeoPackage 几何头(flags=0x00)会让 GDAL/QGIS 报
+        # "Unable to read geometry"、几何全空。开图前先修一次, 不依赖数据
+        # 管理 Dock 是否开过(文件浏览器/拖拽等直开路径也会走到这里)。
+        fixed = repair_gpkg_if_needed(path)
+        if fixed:
+            logger.info("已修复旧版 GPKG 几何头: %s(%d 行)", path, fixed)
         if category == "image":
             return self._load_image(db, name, path)
         if category == "spatial":

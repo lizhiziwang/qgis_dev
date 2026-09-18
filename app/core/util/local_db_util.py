@@ -23,12 +23,14 @@ import pysqlite3 as sqlite3
 try:
     from app.core.util.gpkg_geom import (
         GpkgGeomError,
+        decompress_blob,
         encode_geometry,
         wrap_to_multi,
     )
 except ImportError:
     from gpkg_geom import (  # type: ignore[no-redef]
         GpkgGeomError,
+        decompress_blob,
         encode_geometry,
         wrap_to_multi,
     )
@@ -68,6 +70,14 @@ _ESRI_FIELD_TYPE_TO_SQL: dict[str, str] = {
 def _quote_ident(name: str) -> str:
     """给标识符加双引号,内部 ``"`` 按 SQLite 规则转义。"""
     return '"' + str(name).replace('"', '""') + '"'
+
+
+def _srs_id_le(srs_id: int) -> bytes:
+    """srs_id → GPKG 几何头里的 4 字节小端 blob(兼容无符号超范围值)。"""
+    v = int(srs_id)
+    if -0x80000000 <= v <= 0x7FFFFFFF:
+        return v.to_bytes(4, "little", signed=True)
+    return (v & 0xFFFFFFFF).to_bytes(4, "little")
 
 
 def _decode_http_text(raw: bytes, charset: str | None = None) -> str:
@@ -487,7 +497,147 @@ class local_db_util:
         # GeoPackage 规范魔数 application_id='GPKG'(0x47504B47)—— 部分工具
         # 用它识别; GDAL 3.11 对 .gpkg 后缀开库不强制, 但规范要求且无副作用。
         self.cursor.execute("PRAGMA application_id = 1196444487")
+        # user_version 同样按 GeoPackage 1.3 声明(10300)。不设的话 GDAL 每次
+        # 开库都会报 "GPKG: unrecognized user_version=0x00000000 (0)" 警告。
+        self.cursor.execute("PRAGMA user_version = 10300")
         self.conn.commit()
+
+    #: 早期私有压缩几何可能出现的 flags 值(bit5=1; 本工程只写过 0x20-0x27)
+    _COMPRESSED_FLAGS = (
+        "X'20'", "X'21'", "X'22'", "X'23'",
+        "X'24'", "X'25'", "X'26'", "X'27'",
+    )
+
+    def repair_gpkg_conformance(self) -> int:
+        """修复本工程早期写坏的 GeoPackage 几何(幂等, 返回修正的几何行数)。
+
+        处理两类历史遗留, **只动本工程建的库**(以 ``user_relation`` 目录表为
+        标记), 第三方规范库一律不碰:
+
+        1. **私有压缩几何**: 早期把 WKB 做 XOR 差分 + zlib 压缩并把 flags bit5
+           置 1(私有格式, 见 :func:`app.core.util.gpkg_geom.decompress_blob`)。
+           QGIS/GDAL 不认, 打开就报 ``Unable to read geometry``、几何全空 ——
+           这里逐行解压、还原成规范 GPKG 几何;
+        2. **flags bit0=0(大端 header)**: 老版 ``_blob`` 把 flags 写成 0x00,
+           而 srs_id 是小端 —— GDAL 按大端读错 srs, 部分环境判几何损坏。
+           改回 0x01(小端 + 无 envelope)。仅当魔数 ``GP`` 且小端 srs 与
+           ``gpkg_geometry_columns`` 声明一致时才改, 避免误改第三方大端几何。
+
+        顺带补 ``PRAGMA user_version=10300``(声明 GeoPackage 1.3), 消掉
+        GDAL 的 ``unrecognized user_version`` 警告。
+
+        非 gpkg 库直接返回 0; 读取异常吞掉, 不影响只读展示。
+        """
+        if self.kind != "gpkg":
+            return 0
+        cur = self.cursor
+        fixed = 0
+        try:
+            # 私有压缩几何是本工程独有的, 只在有 user_relation 标记的库上解压;
+            # 第三方库不碰(解压探测要全表扫一遍, 不做无谓开销)。
+            has_marker = bool(
+                cur.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='user_relation' LIMIT 1"
+                ).fetchone()
+            )
+            geom_cols = cur.execute(
+                "SELECT table_name, column_name, srs_id FROM gpkg_geometry_columns"
+            ).fetchall()
+            for tname, gcol, gsrs in geom_cols:
+                if has_marker:
+                    fixed += self._decompress_geometry_column(tname, gcol)
+                # flags 修复自带“小端 srs 与声明一致”守卫, 第三方大端几何不会被误改
+                fixed += self._fix_geometry_flags(tname, gcol, gsrs)
+            # user_version: 只给本工程建的库补 1.3
+            if has_marker:
+                cur.execute("PRAGMA user_version = 10300")
+            self.conn.commit()
+        except sqlite3.Error:
+            self.conn.rollback()
+        return fixed
+
+    def _decompress_geometry_column(self, tname, gcol) -> int:
+        """逐行解压 flags bit5 的私有压缩几何; 返回解压行数。
+
+        先 ``LIMIT 1`` 探测(无压缩行就全表跳过, 不读大库); 分批按 rowid
+        顺序读、解压、写回, 每批提交, 避免一次把大表拉进内存。
+        """
+        cur = self.cursor
+        qtab = _quote_ident(str(tname))
+        qcol = _quote_ident(str(gcol))
+        flags_in = ",".join(self._COMPRESSED_FLAGS)
+        if not cur.execute(
+            f"SELECT 1 FROM {qtab} WHERE {qcol} IS NOT NULL "
+            f"AND substr({qcol}, 4, 1) IN ({flags_in}) LIMIT 1"
+        ).fetchone():
+            return 0
+        fixed = 0
+        last = 0
+        while True:
+            rows = cur.execute(
+                f"SELECT rowid, {qcol} FROM {qtab} "
+                f"WHERE rowid > ? AND {qcol} IS NOT NULL "
+                f"AND substr({qcol}, 4, 1) IN ({flags_in}) "
+                f"ORDER BY rowid LIMIT 500",
+                (last,),
+            ).fetchall()
+            if not rows:
+                break
+            for rid, blob in rows:
+                last = int(rid)
+                try:
+                    plain = decompress_blob(bytes(blob))
+                except GpkgGeomError:
+                    continue  # 坏行跳过, 不让整库修复中断
+                if plain != bytes(blob):
+                    try:
+                        cur.execute(
+                            f"UPDATE {qtab} SET {qcol} = ? WHERE rowid = ?",
+                            (plain, rid),
+                        )
+                    except sqlite3.Error:
+                        continue
+                    fixed += 1
+            self.conn.commit()
+        return fixed
+
+    def _fix_geometry_flags(self, tname, gcol, gsrs) -> int:
+        """把 flags bit0=0(大端 header)的几何改成 0x01(小端无 envelope)。"""
+        cur = self.cursor
+        qtab = _quote_ident(str(tname))
+        qcol = _quote_ident(str(gcol))
+        # 本工程每张表的几何都按表声明 srs 写(见 batch_add_vector_data),
+        # 故小端 srs 应与之一致; 表 srs 缺失时退回全部声明 srs ——
+        # 对不上就说明不是我们写的 0x00, 不碰(避免误改第三方大端几何)。
+        if gsrs is not None:
+            cand = [int(gsrs)]
+        else:
+            cand = [
+                int(r[0])
+                for r in cur.execute(
+                    "SELECT DISTINCT srs_id FROM gpkg_geometry_columns"
+                )
+                if r[0] is not None
+            ]
+        srs_in = ",".join("X'%s'" % _srs_id_le(s).hex() for s in cand)
+        if not srs_in:
+            return 0
+        try:
+            # 单条 SQL 原地改 flags(``CAST(... AS BLOB)`` 防止 ``||``
+            # 把结果退化成 TEXT, 存成非法文本)
+            cur.execute(
+                f"UPDATE {qtab} SET {qcol} = "
+                f"CAST(substr({qcol}, 1, 3) || X'01' || "
+                f"substr({qcol}, 5) AS BLOB) "
+                f"WHERE {qcol} IS NOT NULL "
+                f"AND substr({qcol}, 1, 2) = X'4750' "
+                f"AND substr({qcol}, 4, 1) = X'00' "
+                f"AND substr({qcol}, 5, 4) IN ({srs_in})"
+            )
+        except sqlite3.Error:
+            return 0
+        return cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
 
     def _ensure_user_relation_table(self) -> None:
         """幂等确保 ``user_relation`` 目录注册表存在(老库 / 缺 attr 列时补)。"""
@@ -2163,8 +2313,10 @@ def describe_local_db(db_path: str | Path) -> dict[str, Any]:
     类别表名清单即 ``local_db_util.query_all_table_name()`` 的原始输出
     (按 user_relation 注册顺序); counts 为逐表 ``COUNT(*)`` 的行数, 表已删/
     打不开的表记 ``None``; meta 为逐表图层元信息(见 :func:`_table_meta`,
-    空间元数据缺失时几何/坐标系回落 None)。整个过程只读, 不会创建文件 /
-    写入任何内容。
+    空间元数据缺失时几何/坐标系回落 None)。不创建文件。仅对 GeoPackage
+    做一次幂等的一致性修复(见
+    :meth:`local_db_util.repair_gpkg_conformance`: 修旧版写坏的几何
+    flags + 补 ``user_version``), 规范库不会重复扫描。
 
     Args:
         db_path: 已存在的 sqlite / spatialite 库文件路径。
@@ -2182,6 +2334,9 @@ def describe_local_db(db_path: str | Path) -> dict[str, Any]:
     try:
         db = local_db_util(p)
         try:
+            # 旧版写坏的 GPKG 几何头(flags=0x00)会导致 QGIS/GDAL 读几何
+            # 失败("Unable to read geometry"), 这里打开时顺手修一次。
+            db.repair_gpkg_conformance()
             cats = db.query_all_table_name()
         finally:
             db.conn.close()
@@ -2215,6 +2370,35 @@ def describe_local_db(db_path: str | Path) -> dict[str, Any]:
             counts = {n: None for n in names}
             meta = {}
     return {"categories": cats, "counts": counts, "meta": meta}
+
+
+def repair_gpkg_if_needed(db_path: str | Path) -> int:
+    """加载/展示前调用: 若是 GPKG 内容库, 幂等修复旧版写坏的几何头。
+
+    旧版 :func:`app.core.util.gpkg_geom._blob` 把几何 flags 写成 0x00, 会让
+    QGIS/GDAL 报 ``Unable to read geometry`` / 几何全空。把文件交给 GDAL/OGR
+    之前先在这里修一次(见 :meth:`local_db_util.repair_gpkg_conformance`),
+    就不依赖“是否开过数据管理 Dock”。
+
+    非 gpkg 内容 / 文件不存在 / 打不开 / 被 GDAL 占用(锁定)一律返回 0,
+    不抛错 —— 修复是锦上添花, 失败留给加载方按原逻辑报错。
+
+    Returns:
+        实际修正的几何行数(0 表示无需修 / 修不了)。
+    """
+    p = Path(db_path)
+    if not p.is_file() or not _db_path_is_gpkg_content(p):
+        return 0
+    try:
+        db = local_db_util(p)
+    except Exception:  # noqa: BLE001
+        return 0
+    try:
+        return db.repair_gpkg_conformance()
+    except Exception:  # noqa: BLE001
+        return 0
+    finally:
+        db.conn.close()
 
 
 if __name__ == '__main__':

@@ -1144,6 +1144,129 @@ def login_qss(t: Theme) -> str:
     """
 
 
+def startup_project_qss(t: Theme) -> str:
+    """启动「打开地图文档」对话框 QSS（ArcMap 启动页风格）。
+
+    结构：标题 + 副标题；左窄栏分类导航 ``StartupNav``（圆角面板，选中行用
+    强调色实心）；右侧最近工程明细表 ``StartupRecent``（表头次要色、隔行底色）；
+    底部「文件名」输入行 ``StartupPath`` + 主/次按钮（``StartupPrimary`` /
+    ``StartupSecondary``）。配色全部来自当前主题。
+    """
+    primary = QColor(t.input_focus)
+    hover = primary.darker(112)
+    pressed = primary.darker(126)
+    return f"""
+    QDialog#StartupProjectDialog {{
+        background-color: {t.window_bg};
+    }}
+    QLabel#StartupHeading {{
+        color: {t.menu_text};
+        font-size: 18px;
+        font-weight: 600;
+    }}
+    QLabel#StartupSub {{
+        color: {t.text_secondary};
+        font-size: 12px;
+    }}
+    QListWidget#StartupNav {{
+        background-color: {t.panel_bg};
+        border: 1px solid {t.border};
+        border-radius: 6px;
+        padding: 4px;
+        outline: none;
+        /* 必须在这里显式声明字体：全局 app_qss 的 `QDialog {{ font-size }}`
+           是在弹窗 polish 之后才下发到 nav 的，QListWidget 的行高已按旧字体
+           缓存，于是 `::item` 的 padding 只加在选中底色矩形上、不加进行距，
+           选中时会压住相邻项。写死与 QDialog 一致的字体后，字体在样式解析
+           阶段即确定，行距与绘制矩形一致。 */
+        font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+        font-size: 12px;
+    }}
+    QListWidget#StartupNav::item {{
+        color: {t.menu_text};
+        padding: 6px 8px;
+        border-radius: 4px;
+    }}
+    QListWidget#StartupNav::item:hover {{
+        background-color: {t.btn_hover};
+    }}
+    QListWidget#StartupNav::item:selected {{
+        background-color: {t.input_focus};
+        color: #ffffff;
+    }}
+    QTreeWidget#StartupRecent {{
+        background-color: {t.input_bg};
+        alternate-background-color: {t.panel_bg};
+        border: 1px solid {t.border};
+        border-radius: 6px;
+        color: {t.menu_text};
+        outline: none;
+    }}
+    QTreeWidget#StartupRecent::item {{
+        padding: 4px 2px;
+    }}
+    QTreeWidget#StartupRecent::item:hover {{
+        background-color: {t.btn_hover};
+    }}
+    QTreeWidget#StartupRecent::item:selected {{
+        background-color: {t.input_focus};
+        color: #ffffff;
+    }}
+    QTreeWidget#StartupRecent QHeaderView::section {{
+        background-color: {t.panel_bg};
+        color: {t.text_secondary};
+        border: none;
+        border-bottom: 1px solid {t.border};
+        padding: 5px 6px;
+    }}
+    QLabel#StartupFieldLabel {{
+        color: {t.text_secondary};
+    }}
+    QLineEdit#StartupPath {{
+        background-color: {t.input_bg};
+        color: {t.menu_text};
+        border: 1px solid {t.input_border};
+        border-radius: 5px;
+        padding: 6px 8px;
+        selection-background-color: {t.input_focus};
+        selection-color: #ffffff;
+    }}
+    QLineEdit#StartupPath:hover {{
+        border-color: {t.input_focus};
+    }}
+    QLineEdit#StartupPath:focus {{
+        border-color: {t.input_focus};
+    }}
+    QPushButton#StartupPrimary {{
+        background-color: {t.input_focus};
+        color: #ffffff;
+        border: none;
+        border-radius: 5px;
+        padding: 7px 22px;
+        font-size: 13px;
+        font-weight: 600;
+    }}
+    QPushButton#StartupPrimary:hover {{ background-color: {hover.name()}; }}
+    QPushButton#StartupPrimary:pressed {{ background-color: {pressed.name()}; }}
+    QPushButton#StartupPrimary:disabled {{
+        background-color: {t.btn_pressed};
+        color: {t.text_secondary};
+    }}
+    QPushButton#StartupPrimary:focus {{ outline: none; }}
+    QPushButton#StartupSecondary {{
+        background-color: transparent;
+        color: {t.menu_text};
+        border: 1px solid {t.input_border};
+        border-radius: 5px;
+        padding: 6px 14px;
+        font-size: 13px;
+    }}
+    QPushButton#StartupSecondary:hover {{ background-color: {t.btn_hover}; }}
+    QPushButton#StartupSecondary:pressed {{ background-color: {t.btn_pressed}; }}
+    QPushButton#StartupSecondary:focus {{ outline: none; }}
+    """
+
+
 def apply_app_theme(theme: Theme) -> None:
     """把全局控件配色设到 QApplication（弹窗 / 右键菜单 / ToolTip 等顶层窗口）。
 

@@ -510,7 +510,7 @@ def migrate_pg_to_sqlite(
 
 if __name__ == '__main__':
     # 本地 sqlite 工具
-    db_util = local_db_util('test01.gpkg')  # 新规: 本体 .gpkg
+    db_util = local_db_util('C:/Users/zk/Desktop/test01.gpkg')  # 新规: 本体 .gpkg
     migrate_pg_to_sqlite(
         db_util,
         tables=["ldsp_ldtb"],
