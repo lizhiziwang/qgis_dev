@@ -5,9 +5,13 @@
 
 鉴权方式：
 
-- 用户名 / 密码提交到**授权服务器**换取 token。接口地址与请求/响应契约集中在
-  :mod:`app.core.auth.config`（部署只改那一个文件），HTTP 客户端是
+- 账号密码：用户名 / 密码提交到**授权服务器**换取 token。接口地址与请求/响应
+  契约集中在 :mod:`app.core.auth.config`（部署只改那一个文件），HTTP 客户端是
   :class:`app.core.auth.client.AuthClient`（仅标准库 ``urllib``，无第三方依赖）。
+- 手机号验证码：卡片顶部可切到「手机号登录」（``LoginTab`` + :class:`QStackedWidget`
+  两套字段页）。**目前是占位实现**：点「登  录」不校验、不请求服务端，直接造一个
+  占位 :class:`AuthResult` 进系统（见 :meth:`LoginDialog._on_phone_accept`）；
+  「获取验证码」也仅提示「开发中」。
 - 网络请求在**后台线程**里跑（普通 :class:`threading.Thread`，与
   ``attribute_dock.FeatureStreamWorker`` 同一套路，不用 QThread / QgsTask），
   界面只切「登录中…」忙碌态、不冻结；结果经 Qt 信号回到主线程再更新 UI。
@@ -30,11 +34,13 @@ from typing import cast
 
 from qgis.PyQt.QtCore import QEvent, QObject, Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
+    QButtonGroup,
     QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -106,10 +112,14 @@ class LoginDialog(BaseDialog):
     def _build_ui(self) -> None:
         """现代简洁卡片式登录界面（与启动 splash 视觉统一）。
 
-        结构：品牌区（图标 + 应用名 + 副标题 + 强调线）→ 卡片表单（字段标签
-        在输入框上方、圆角输入框）→ 右下角操作（取消 + 主色登录按钮）。
-        配色全部来自当前主题（:func:`app.ui.common.theme.login_qss`），内容走
-        无边框标题栏（:class:`app.ui.common.base_dialog.BaseDialog`）。
+        结构：品牌区（图标 + 应用名 + 副标题 + 强调线）→ 卡片表单（
+        「账号密码 / 手机号验证码」方式切换 ``LoginTab`` + :class:`QStackedWidget`
+        两套字段页，字段标签在输入框上方、圆角输入框）→ 右下角操作
+        （取消 + 主色登录按钮）。配色全部来自当前主题
+        （:func:`app.ui.common.theme.login_qss`），内容走无边框标题栏
+        （:class:`app.ui.common.base_dialog.BaseDialog`）。
+
+        两种方式共用一个「登  录」按钮与错误提示行：只切输入区，按钮/取消区不动。
         """
 
         self.setObjectName("LoginDialog")
@@ -150,28 +160,31 @@ class LoginDialog(BaseDialog):
         card_layout.setContentsMargins(20, 20, 20, 20)
         card_layout.setSpacing(6)
 
-        user_label = QLabel("用户名", card)
-        user_label.setObjectName("LoginFieldLabel")
-        card_layout.addWidget(user_label)
+        # ---- 登录方式切换（账号密码 / 手机号验证码）----
+        self._mode_group = QButtonGroup(self)
+        self._mode_group.setExclusive(True)
+        self._tabs: list[QPushButton] = []
+        tab_row = QHBoxLayout()
+        tab_row.setSpacing(4)
+        for index, text in enumerate(("账号登录", "手机号登录")):
+            tab = QPushButton(text, card)
+            tab.setObjectName("LoginTab")
+            tab.setCheckable(True)
+            tab.setAutoDefault(False)
+            tab.setCursor(Qt.CursorShape.PointingHandCursor)
+            self._mode_group.addButton(tab, index)
+            tab_row.addWidget(tab)
+            self._tabs.append(tab)
+        tab_row.addStretch(1)
+        card_layout.addLayout(tab_row)
+        card_layout.addSpacing(8)
 
-        self.username_edit = QLineEdit(card)
-        self.username_edit.setObjectName("LoginField")
-        self.username_edit.setPlaceholderText("请输入用户名")
-        # 点击用户名输入框 → 弹「已保存账号」气泡（由 eventFilter 捕获）
-        self.username_edit.installEventFilter(self)
-        card_layout.addWidget(self.username_edit)
-
-        card_layout.addSpacing(10)
-
-        pwd_label = QLabel("密码", card)
-        pwd_label.setObjectName("LoginFieldLabel")
-        card_layout.addWidget(pwd_label)
-
-        self.password_edit = QLineEdit(card)
-        self.password_edit.setObjectName("LoginField")
-        self.password_edit.setPlaceholderText("请输入密码")
-        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        card_layout.addWidget(self.password_edit)
+        # ---- 输入区（两套字段页共用同一张卡片与错误行）----
+        self.stack = QStackedWidget(card)
+        self.stack.setObjectName("LoginStack")
+        self.stack.addWidget(self._build_password_page())
+        self.stack.addWidget(self._build_phone_page())
+        card_layout.addWidget(self.stack)
 
         # 错误提示（占位预留高度，出现时布局不跳动）
         self.error_label = QLabel("", card)
@@ -206,14 +219,96 @@ class LoginDialog(BaseDialog):
         # 密码框回车直接提交；用户名框回车先跳到密码框
         self.password_edit.returnPressed.connect(self._on_accept)
         self.username_edit.returnPressed.connect(self._focus_password)
+        # 手机号验证码页：两个输入框回车都直接提交
+        self.code_edit.returnPressed.connect(self._on_accept)
+        self.phone_edit.returnPressed.connect(self._on_accept)
+        self._code_btn.clicked.connect(self._on_send_code)
+        self._mode_group.idClicked.connect(self._set_mode)
         self.setLayout(layout)
         self._sync_username_hint()
+        self._set_mode(0)
+
+    # -------------------------------------------------------- 字段页
+
+    def _build_password_page(self) -> QWidget:
+        """账号密码页：用户名（点击弹已保存账号气泡）+ 密码。"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        user_label = QLabel("用户名", page)
+        user_label.setObjectName("LoginFieldLabel")
+        layout.addWidget(user_label)
+
+        self.username_edit = QLineEdit(page)
+        self.username_edit.setObjectName("LoginField")
+        self.username_edit.setPlaceholderText("请输入用户名")
+        # 点击用户名输入框 → 弹「已保存账号」气泡（由 eventFilter 捕获）
+        self.username_edit.installEventFilter(self)
+        layout.addWidget(self.username_edit)
+
+        layout.addSpacing(10)
+
+        pwd_label = QLabel("密码", page)
+        pwd_label.setObjectName("LoginFieldLabel")
+        layout.addWidget(pwd_label)
+
+        self.password_edit = QLineEdit(page)
+        self.password_edit.setObjectName("LoginField")
+        self.password_edit.setPlaceholderText("请输入密码")
+        self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+        layout.addWidget(self.password_edit)
+        return page
+
+    def _build_phone_page(self) -> QWidget:
+        """手机号验证码页：手机号 + 验证码（右侧「获取验证码」）。"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        phone_label = QLabel("手机号", page)
+        phone_label.setObjectName("LoginFieldLabel")
+        layout.addWidget(phone_label)
+
+        self.phone_edit = QLineEdit(page)
+        self.phone_edit.setObjectName("LoginField")
+        self.phone_edit.setPlaceholderText("请输入手机号")
+        self.phone_edit.setMaxLength(11)
+        layout.addWidget(self.phone_edit)
+
+        layout.addSpacing(10)
+
+        code_label = QLabel("验证码", page)
+        code_label.setObjectName("LoginFieldLabel")
+        layout.addWidget(code_label)
+
+        self.code_edit = QLineEdit(page)
+        self.code_edit.setObjectName("LoginField")
+        self.code_edit.setPlaceholderText("请输入验证码")
+        self.code_edit.setMaxLength(6)
+
+        self._code_btn = QPushButton("获取验证码", page)
+        self._code_btn.setObjectName("LoginCode")
+        self._code_btn.setAutoDefault(False)
+        self._code_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        code_row = QHBoxLayout()
+        code_row.setSpacing(8)
+        code_row.addWidget(self.code_edit, 1)
+        code_row.addWidget(self._code_btn)
+        layout.addLayout(code_row)
+        return page
 
     # ============================================================== 行为
 
     def _on_accept(self) -> None:
         """校验输入 → 切忙碌态 → 后台线程请求授权服务器。"""
         if self._busy:
+            return
+        if self.stack.currentIndex() != 0:
+            self._on_phone_accept()
             return
         username = self.username_edit.text().strip()
         password = self.password_edit.text()
@@ -232,6 +327,36 @@ class LoginDialog(BaseDialog):
             daemon=True,
         )
         self._thread.start()
+
+    def _set_mode(self, index: int) -> None:
+        """切换登录方式：切字段页、同步页签勾选、清错误提示、聚焦该页首个输入框。"""
+        self.stack.setCurrentIndex(index)
+        self._tabs[index].setChecked(True)
+        self._show_error("")
+        if index == 0:
+            self.username_edit.setFocus()
+        else:
+            self.phone_edit.setFocus()
+
+    def _on_phone_accept(self) -> None:
+        """手机号验证码登录：**暂未接服务端，直接放行进系统**。
+
+        为让外层 :func:`app.bootstrap.main` 能继续（它把 ``auth_result() is None``
+        当作「用户取消」），这里先造一个不带 token 的占位 :class:`AuthResult`：
+        后续拉当前用户会因空 token 直接失败并被忽略，标题栏回退显示手机号。
+
+        待后端接口就绪后，把这里换成校验手机号 / 验证码，并复用
+        :meth:`_login_in_background` 那套后台线程 + 信号流程。
+        """
+        self._show_error("")
+        phone = self.phone_edit.text().strip()
+        self._username = phone or "手机号用户"
+        self._auth_result = AuthResult(username=self._username)
+        self.accept()
+
+    def _on_send_code(self) -> None:
+        """「获取验证码」按钮：暂未实现，仅提示（不阻塞登录）。"""
+        self._show_error("验证码发送功能开发中")
 
     def _login_in_background(self, attempt: int, username: str, password: str) -> None:
         """后台线程体：只发请求 + emit 信号，不碰任何控件（Qt 控件非线程安全）。"""
@@ -271,8 +396,13 @@ class LoginDialog(BaseDialog):
         自增 ``_attempt`` 丢弃（后台线程是 daemon，超时后自然结束）。
         """
         self._busy = busy
+        for tab in self._tabs:
+            tab.setEnabled(not busy)
         self.username_edit.setEnabled(not busy)
         self.password_edit.setEnabled(not busy)
+        self.phone_edit.setEnabled(not busy)
+        self.code_edit.setEnabled(not busy)
+        self._code_btn.setEnabled(not busy)
         self._login_btn.setEnabled(not busy)
         self._login_btn.setText("登录中…" if busy else "登  录")
         if busy:

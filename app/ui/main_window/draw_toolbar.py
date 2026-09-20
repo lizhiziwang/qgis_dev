@@ -68,18 +68,20 @@ from qgis.core import (
     QgsWkbTypes,
 )
 from qgis.gui import QgsRubberBand
-from qgis.PyQt.QtCore import QObject, Qt, QTimer, pyqtSignal
+from qgis.PyQt.QtCore import QObject, QSize, Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QAction, QColor
 from qgis.PyQt.QtWidgets import (
     QMainWindow,
     QMessageBox,
-    QToolBar,
 )
 
 from app.core.domain.drawing import DrawManager
 from app.core.domain.drawing.tools import get_tool_class
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
+from app.ui.common import tool_icons
+from app.ui.common.ribbon import RibbonToolBar
+from app.ui.common.theme import ThemeManager
 from app.ui.dialogs.custom_attr import CustomAttrDialog
 from app.ui.docks.attribute_entry_dock import AttributeEntryDock
 from app.ui.tools.attribute_entry import AttributeEntryTool
@@ -104,6 +106,9 @@ logger = get_logger(__name__)
 #: 必须先有选中要素才能用的工具：按钮可用性依赖选中集，失去选中即自动退出
 #: （见 :meth:`DigitizingToolbar._on_selection_changed`）
 _SELECTION_REQUIRED_KINDS = ("boundary_edit", "move")
+
+#: 编辑工具图标逻辑边长（与 ``setIconSize`` 一致，SVG 按此尺寸原生渲染）
+_ICON = 20
 
 
 class DigitizingToolbar(QObject):
@@ -183,10 +188,11 @@ class DigitizingToolbar(QObject):
     # ============================================================== 装配
 
     def _build_toolbar(self) -> None:
-        self.digitizing_toolbar = QToolBar("编辑工具")
+        self.digitizing_toolbar = RibbonToolBar("编辑工具")
         self.digitizing_toolbar.setObjectName("DigitizingToolbar")
-        # 工具直接平铺成文本按钮（不用下拉菜单），按编辑态/几何类型启用/禁用
-        self.digitizing_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+        # Ribbon 风格：图标在上 + 小字标签在下；按钮按编辑态/几何类型启用/禁用
+        self.digitizing_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        self.digitizing_toolbar.setIconSize(QSize(_ICON, _ICON))
 
         # ---- 编辑操作 ----
         self.start_edit = QAction("开始编辑", self.digitizing_toolbar)
@@ -304,28 +310,6 @@ class DigitizingToolbar(QObject):
         # ---- 初始态：编辑动作全禁用（「开始编辑」例外——恒可用，点击弹窗选层）
         #     最后统一由 _refresh_button_states 推导，这里只组装不动状态
 
-        self.digitizing_toolbar.addAction(self.start_edit)
-        self.digitizing_toolbar.addAction(self.stop_edit)
-        self.digitizing_toolbar.addAction(self.save_edit)
-        self.digitizing_toolbar.addAction(self.undo_action)
-        self.digitizing_toolbar.addAction(self.redo_action)
-        self.digitizing_toolbar.addAction(self.merge_geometry_action)
-        self.digitizing_toolbar.addAction(self.feature_edit_action)
-        self.digitizing_toolbar.addAction(self.attribute_entry_action)
-        self.digitizing_toolbar.addAction(self.split_feature_action)
-        self.digitizing_toolbar.addAction(self.split_polygon_action)
-        self.digitizing_toolbar.addAction(self.dig_hole_action)
-        self.digitizing_toolbar.addAction(self.fill_hole_action)
-        self.digitizing_toolbar.addAction(self.explode_action)
-        self.digitizing_toolbar.addAction(self.gap_repair_action)
-        self.digitizing_toolbar.addAction(self.boundary_edit_action)
-        self.digitizing_toolbar.addAction(self.move_action)
-        self.digitizing_toolbar.addAction(self.delete_action)
-        self.digitizing_toolbar.addAction(self.split_by_selection_action)
-
-        # 分隔两组
-        self.digitizing_toolbar.addSeparator()
-
         # ---- 添加要素 ----
         self.add_point_action = QAction("添加点", self.digitizing_toolbar)
         self.add_point_action.setCheckable(True)
@@ -364,11 +348,97 @@ class DigitizingToolbar(QObject):
         self.digitizing_toolbar.addAction(self.add_line_action)
         self.digitizing_toolbar.addAction(self.add_polygon_action)
 
+        # 按组挂到工具条：组间加竖分隔线，组名由 RibbonToolBar 画在每组按钮下方
+        tool_groups: list[tuple[str, list[QAction]]] = [
+            (
+                "编辑",
+                [
+                    self.start_edit,
+                    self.stop_edit,
+                    self.save_edit,
+                    self.undo_action,
+                    self.redo_action,
+                ],
+            ),
+            (
+                "几何",
+                [
+                    self.merge_geometry_action,
+                    self.feature_edit_action,
+                    self.attribute_entry_action,
+                    self.boundary_edit_action,
+                    self.move_action,
+                    self.delete_action,
+                ],
+            ),
+            (
+                "分割",
+                [
+                    self.split_feature_action,
+                    self.split_polygon_action,
+                    self.dig_hole_action,
+                    self.fill_hole_action,
+                    self.gap_repair_action,
+                    self.explode_action,
+                    self.split_by_selection_action,
+                ],
+            ),
+            (
+                "绘制",
+                [self.add_point_action, self.add_line_action, self.add_polygon_action],
+            ),
+        ]
+        for idx, (_group_name, acts) in enumerate(tool_groups):
+            for act in acts:
+                self.digitizing_toolbar.addAction(act)
+            if idx != len(tool_groups) - 1:
+                self.digitizing_toolbar.addSeparator()
+        self.digitizing_toolbar.set_groups(
+            tool_groups, ThemeManager.instance().current().text_secondary
+        )
+
+        # 按钮图标（线性 SVG，随主题变色；见 app.ui.common.tool_icons）
+        self._icon_keys: dict = {
+            self.undo_action: "undo",
+            self.redo_action: "redo",
+            self.merge_geometry_action: "merge",
+            self.feature_edit_action: "move",
+            self.attribute_entry_action: "attribute",
+            self.split_feature_action: "line_split",
+            self.split_polygon_action: "polygon_split",
+            self.dig_hole_action: "dig_hole",
+            self.fill_hole_action: "fill_gap",
+            self.explode_action: "explode",
+            self.gap_repair_action: "fill_gap",
+            self.boundary_edit_action: "boundary_edit",
+            self.move_action: "move",
+            self.delete_action: "delete",
+            self.split_by_selection_action: "split_by_selection",
+            self.add_point_action: "draw",
+            self.add_line_action: "draw",
+            self.add_polygon_action: "draw",
+        }
+        self._apply_icons()
+
         # 初始态由统一出口推导（无目标图层 → 仅「开始编辑」/「属性录入」可用）
         self._refresh_button_states()
 
         # 挂到主窗口
         self.main_window.addToolBar(self.digitizing_toolbar)
+
+    def _apply_icons(self) -> None:
+        """按当前主题强调色重刷编辑工具图标（主题切换时也调）。"""
+        theme = ThemeManager.instance().current()
+        color = theme.input_focus
+        for act, key in self._icon_keys.items():
+            act.setIcon(tool_icons.icon(key, color, _ICON))
+        tb = getattr(self, "digitizing_toolbar", None)
+        if isinstance(tb, RibbonToolBar):
+            tb.set_group_color(theme.text_secondary)
+
+    def apply_theme(self, theme=None) -> None:
+        """主题切换入口（与 ToolBar/SideToolBar 一致）：重刷图标颜色。"""
+        self._apply_icons()
 
     # ============================================================== 公共 API
 

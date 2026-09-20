@@ -45,18 +45,20 @@ from __future__ import annotations
 from typing import Callable
 
 from qgis.core import Qgis
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import QSize, Qt
 from qgis.PyQt.QtGui import QFont
 from qgis.PyQt.QtWidgets import QFrame, QSizePolicy, QToolButton, QVBoxLayout, QWidget
 
 from app.ui.common import tool_icons
 from app.ui.common.frosted import FrostedPanel
-from app.ui.common.theme import Theme, ThemeManager
+from app.ui.common.theme import TOOLBAR_BUTTON_RADIUS, Theme, ThemeManager
 
 #: 地图工具 key（单选高亮组，与顶部工具条 key 一致便于同步）
 _TOOL_KEYS = frozenset({"select_point", "select_box", "pan", "zoom_in"})
 #: 会话型工具 key（独立常亮，不受地图工具切换影响；与顶部工具条同 key）
 _SESSION_KEYS = frozenset({"qmap_compare"})
+#: 侧栏图标逻辑边长（原型左侧工具列 44×36 按钮 / 17px 图标）
+_ICON = 17
 
 
 class SideToolBar:
@@ -90,7 +92,7 @@ class SideToolBar:
         layout.setContentsMargins(2, 4, 2, 4)
         layout.setSpacing(2)
 
-        color = ThemeManager.instance().current().toolbar_text
+        color = ThemeManager.instance().current().input_focus
         # (文本, 图标 key, 分组后是否加分隔线)；callbacks 缺 key → 占位工具
         for text, key, separator_after in [
             ("选择", "select_point", False),
@@ -119,7 +121,10 @@ class SideToolBar:
         layout.addStretch(1)
         # 窄条 + 两行文案会顶高按钮：压掉 app_qss 给 QToolButton 的 3px 上下内边距
         #（每个按钮省 6px；挂在本面板上只作用于 15 个侧栏按钮，不影响其它按钮）
-        widget.setStyleSheet("QToolButton { padding: 0px; }")
+        # 圆角跟主/编辑工具条保持一致
+        widget.setStyleSheet(
+            f"QToolButton {{ padding: 0px; border-radius: {TOOLBAR_BUTTON_RADIUS}px; }}"
+        )
         widget.setFixedWidth(52)
         widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.widget = widget
@@ -145,7 +150,8 @@ class SideToolBar:
         btn.setFont(font)
 
         btn.setToolTip(text)
-        btn.setIcon(tool_icons.icon(key, color))
+        btn.setIcon(tool_icons.icon(key, color, _ICON))
+        btn.setIconSize(QSize(_ICON, _ICON))
         btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         btn.setAutoRaise(True)
         callback = callbacks.get(key)
@@ -204,6 +210,6 @@ class SideToolBar:
         """主题切换时刷新按钮图标颜色。"""
         if self.widget is None:
             return
-        color = theme.toolbar_text
+        color = theme.input_focus
         for btn, key in self._icon_items:
-            btn.setIcon(tool_icons.icon(key, color))
+            btn.setIcon(tool_icons.icon(key, color, _ICON))

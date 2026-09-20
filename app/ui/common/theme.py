@@ -302,34 +302,72 @@ def _with_alpha(hex_color: str, alpha: int) -> str:
     return f"rgba({c.red()}, {c.green()}, {c.blue()}, {alpha})"
 
 
-def toolbar_qss(t: Theme) -> str:
-    """主工具条 QSS（工具按钮 hover/按下/选中态）。
+#: QToolBar 相邻项间距（px）。QSS ``spacing`` 只在工具条**可见后**重刷样式时才生效，
+#: 首次布局早于 polish 的工具条（如通用工具条）会退化成风格默认的 1px；
+#: 因此 :class:`RibbonToolBar` 与 :meth:`MainWindow._apply_theme_qss` 都会再
+#: 程序化 ``layout().setSpacing(TOOLBAR_ITEM_GAP)`` 兜底。
+TOOLBAR_ITEM_GAP = 6
 
-    选中态（激活中的工具按钮）用主题强调色 ``input_focus`` 着底 + 底部
-    下划线，与 Tab 选中下划线风格一致，一眼可辨当前激活工具。
+#: 工具条按钮圆角（px）。比原型 ``border-radius:4px`` 更圆，视觉更柔和。
+TOOLBAR_BUTTON_RADIUS = 8
+
+
+def toolbar_qss(t: Theme) -> str:
+    """主工具条 QSS（对标设计原型的 Ribbon 方形图标按钮）。
+
+    按钮为方形圆角块（图标在上 + 10px 小字在下），浅底细边框，hover 用主题
+    强调色淡底 + 强调色边框，选中态用稍深的强调色底。所有颜色走主题 token
+    （``input_bg`` / ``input_border`` / ``input_focus``），四个主题自动适配。
     """
+    hover_bg = _with_alpha(t.input_focus, 38)
+    checked_bg = _with_alpha(t.input_focus, 74)
     return f"""
     QToolBar {{
         background-color: {t.toolbar_bg};
         border: none;
-        padding: 2px 4px;
-        spacing: 6px;
+        border-bottom: 1px solid {t.border};
+        padding: 5px 6px;
+        spacing: {TOOLBAR_ITEM_GAP}px;
     }}
+    /* Ribbon 工具条：组名留白带由 RibbonToolBar.sizeHint() 加高，见 ribbon.py */
     QToolBar::handle {{ background: transparent; }}
+    QToolBar::separator {{
+        background-color: {t.border};
+        width: 1px;
+        margin: 6px 4px;
+    }}
     QToolButton {{
-        border: none;
-        background-color: transparent;
-        border-radius: 3px;
-        padding: 4px 6px;
+        background-color: {t.input_bg};
+        border: 1px solid {t.input_border};
+        border-radius: {TOOLBAR_BUTTON_RADIUS}px;
+        padding: 3px 4px;
         color: {t.toolbar_text};
+        font-size: 10px;
     }}
-    QToolButton:hover {{ background-color: {t.toolbar_hover}; }}
-    QToolButton:pressed {{ background-color: {t.toolbar_pressed}; }}
+    /* 原型组按钮：方形块，图标在上 + 10px 小字在下；
+       宽度由 RibbonToolBar._apply_button_widths() 统一定成 BUTTON_WIDTH */
+    QToolBar[ribbon="true"] QToolButton {{
+        min-height: 48px;
+        padding: 3px 2px;
+    }}
+    QToolButton:hover {{
+        background-color: {hover_bg};
+        border-color: {t.input_focus};
+    }}
+    QToolButton:pressed {{
+        background-color: {_with_alpha(t.input_focus, 96)};
+    }}
     QToolButton:checked {{
-        background-color: {_with_alpha(t.input_focus, 36)};
-        border-bottom: 2px solid {t.input_focus};
+        background-color: {checked_bg};
+        border-color: {t.input_focus};
         color: {t.toolbar_text};
     }}
+    QToolButton:disabled {{
+        color: {t.text_secondary};
+        background-color: {t.panel_bg};
+        border-color: {t.panel_border};
+    }}
+    QToolButton::menu-indicator {{ image: none; width: 0px; }}
     """
 
 
@@ -1114,8 +1152,10 @@ def login_qss(t: Theme) -> str:
     结构：
     - 品牌区：应用图标 + 标题 + 副标题 + 强调线（``LoginTitle / LoginSubtitle /
       LoginAccent``）
-    - 卡片表单：``LoginCard`` 圆角卡片，字段标签在输入框上方
-      （``LoginFieldLabel``），圆角输入框 ``LoginField``（聚焦/悬浮强调色描边）
+    - 卡片表单：``LoginCard`` 圆角卡片，``LoginTab`` 登录方式切换（账号密码 /
+      手机号，选中项用强调色下划线），``QStackedWidget#LoginStack`` 承载两套
+      字段页；字段标签在输入框上方（``LoginFieldLabel``），圆角输入框
+      ``LoginField``（聚焦/悬浮强调色描边）
     - 操作：主色实心 ``LoginPrimary``（hover/按下自动加深）+ 描边 ``LoginCancel``
     - 错误提示复用全局 ``loginError`` 规则（text_error 色），此处再显式声明一次
 
@@ -1152,6 +1192,35 @@ def login_qss(t: Theme) -> str:
         font-size: 11px;
         font-weight: 600;
     }}
+    QPushButton#LoginTab {{
+        background: transparent;
+        color: {t.text_secondary};
+        border: none;
+        border-bottom: 2px solid transparent;
+        padding: 6px 4px;
+        font-size: 13px;
+    }}
+    QPushButton#LoginTab:hover {{ color: {t.menu_text}; }}
+    QPushButton#LoginTab:checked {{
+        color: {t.input_focus};
+        border-bottom: 2px solid {t.input_focus};
+        font-weight: 600;
+    }}
+    QStackedWidget#LoginStack {{
+        background: transparent;
+        border: none;
+    }}
+    QPushButton#LoginCode {{
+        background-color: transparent;
+        color: {t.input_focus};
+        border: 1px solid {t.input_border};
+        border-radius: 6px;
+        padding: 8px 12px;
+        font-size: 12px;
+    }}
+    QPushButton#LoginCode:hover {{ border-color: {t.input_focus}; }}
+    QPushButton#LoginCode:pressed {{ background-color: {t.btn_hover}; }}
+    QPushButton#LoginCode:focus {{ outline: none; }}
     QLineEdit#LoginField {{
         background-color: {t.input_bg};
         color: {t.menu_text};

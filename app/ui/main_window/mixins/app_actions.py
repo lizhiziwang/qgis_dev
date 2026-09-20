@@ -37,6 +37,7 @@ from app.ui.dialogs.swipe_compare import SwipeCompareDialog
 from app.ui.docks.attribute_dock import AttributeDock
 from app.ui.docks.data_manage_dock import DataManageDock
 from app.ui.docks.log_dock import LogDock
+from app.ui.docks.quality_dock import QualityDock
 from app.ui.docks.tools_dock import ToolsDock
 from app.ui.flow_editor import FlowEditorWindow
 from app.ui.tools.qmap_compare import (
@@ -73,6 +74,21 @@ class AppActionsMixin:
 
         dlg = CheckViewerDialog(self, "")
         dlg.show()
+
+    def _on_quality_dock(self) -> None:
+        """质检面板：懒建单个「质检」dock（树里先挂一个「矢量质检」节点）。
+
+        由顶部「质检」页签里的「质检」工具按钮触发，与 :meth:`_on_analyse`
+        同一套「复用单实例 + 置前」逻辑；面板见
+        :class:`app.ui.docks.quality_dock.QualityDock`。
+        """
+        dock = getattr(self, "_quality_dock", None)
+        if dock is None:
+            dock = QualityDock(self)
+            self._quality_dock = dock
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        dock.show()
+        dock.raise_()
 
     def _on_offline_download(self) -> None:
         """打开「下载离线图层」弹窗（懒建单实例，保留勾选与进度状态）。"""

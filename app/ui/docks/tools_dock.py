@@ -1,4 +1,4 @@
-"""工具树 Dock。
+"""工具树 Dock（通用实现）。
 
 迁自 :class:`component.TreeTool.PGISTools`，把"工具树 UI"与"瓦片后台任务"分离。
 
@@ -7,6 +7,10 @@
 点击工具节点弹出对应参数对话框（对话框内部是"左参数 + 右算法描述"布局，
 描述逻辑见 :mod:`app.ui.common.algo_desc`）；同一算法只维护一个对话框实例，
 已打开时点击置前。
+
+本模块只提供通用树 dock 与「分析工具」这一实例；其它专题面板（如「质检」，
+见 :mod:`app.ui.docks.quality_dock`）通过 ``title`` / ``groups`` /
+``simple_actions`` / ``tips`` / ``dialog_factories`` 参数复用同一套树 UI。
 """
 
 from __future__ import annotations
@@ -270,11 +274,34 @@ _TOOL_GROUPS.extend(_GDAL_ALGORITHMS)
 
 
 class ToolsDock(QDockWidget):
-    """工具树 dock。"""
+    """工具树 dock（通用实现）。
 
-    def __init__(self, parent=None) -> None:
-        super().__init__("分析工具", parent)
+    :param parent: 主窗口（点击叶子时作 ``topParent`` 传给对话框工厂）
+    :param title: dock 标题，默认「分析工具」
+    :param groups: 分组树；``None`` 时用模块级「分析工具」分组 :data:`_TOOL_GROUPS`
+    :param simple_actions: code → 一次性动作；``None`` 时用 :data:`_SIMPLE_ACTIONS`
+    :param tips: code → 树节点 tooltip；``None`` 时用 :data:`_TOOL_TIPS`
+    :param dialog_factories: code → 对话框工厂；``None`` 时用 :data:`_DIALOG_FACTORIES`
+    """
+
+    def __init__(
+        self,
+        parent=None,
+        *,
+        title: str = "分析工具",
+        groups: list | None = None,
+        simple_actions: dict | None = None,
+        tips: dict | None = None,
+        dialog_factories: dict | None = None,
+    ) -> None:
+        super().__init__(title, parent)
         self.topParent = parent
+        #: 本 dock 的分组树（专题面板可传入自己的分组）
+        self._groups: list = _TOOL_GROUPS if groups is None else groups
+        #: 一次性动作 / tooltip / 对话框工厂（按引用持有，便于测试替换模块级字典）
+        self._simple_actions: dict = _SIMPLE_ACTIONS if simple_actions is None else simple_actions
+        self._tips: dict = _TOOL_TIPS if tips is None else tips
+        self._dialog_factories: dict = _DIALOG_FACTORIES if dialog_factories is None else dialog_factories
         self.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable | QDockWidget.DockWidgetFeature.DockWidgetMovable | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
         self.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.BottomDockWidgetArea
@@ -331,7 +358,7 @@ class ToolsDock(QDockWidget):
         self.setWidget(wrapper)
 
     def _build_tree(self) -> None:
-        """按 :data:`_TOOL_GROUPS` 构建分组树；分组加粗，叶子加 tooltip。
+        """按 :attr:`_groups` 构建分组树；分组加粗，叶子加 tooltip。
 
         只跳过当前 QGIS 环境不存在的 **GDAL** 算法（如 QGIS 3.40 无
         ``gdal:createcog`` / ``gdal:dataset_identify``），否则点开
@@ -344,7 +371,7 @@ class ToolsDock(QDockWidget):
         reg = QgsApplication.processingRegistry()
         group_font = self.tree.font()
         group_font.setBold(True)
-        for group_name, tools in _TOOL_GROUPS:
+        for group_name, tools in self._groups:
             group = QTreeWidgetItem(self.tree)
             group.setText(0, group_name)
             group.setFont(0, group_font)
@@ -356,7 +383,7 @@ class ToolsDock(QDockWidget):
                 item = QTreeWidgetItem(group)
                 item.setText(0, text)
                 item._code_ = code
-                tip = _TOOL_TIPS.get(code)
+                tip = self._tips.get(code)
                 if tip:
                     item.setToolTip(0, tip)
                 item.setSizeHint(0, QSize(0, 28))
@@ -401,7 +428,7 @@ class ToolsDock(QDockWidget):
             return
         menu = QMenu(self.tree)
         code = getattr(item, "_code_", "")
-        if code in _DIALOG_FACTORIES or code in _SIMPLE_ACTIONS:
+        if code in self._dialog_factories or code in self._simple_actions:
             act = menu.addAction("打开工具")
             act.triggered.connect(lambda: self._on_item_clicked(item, 0))
         else:
@@ -414,11 +441,11 @@ class ToolsDock(QDockWidget):
         code = getattr(item, "_code_", "")
         try:
             # 一次性动作（打开非对话框窗口，如流程编辑器）
-            simple = _SIMPLE_ACTIONS.get(code)
+            simple = self._simple_actions.get(code)
             if simple is not None:
                 simple(self.topParent)
                 return
-            factory = _DIALOG_FACTORIES.get(code)
+            factory = self._dialog_factories.get(code)
             if factory is None:
                 return
             dlg = self._dialogs.get(code)

@@ -1,6 +1,8 @@
 """工具条。
 
 按 :class:`MainWindow` 注入的 callback 列表组装工具按钮。
+工具条用 :class:`app.ui.common.ribbon.RibbonToolBar`：按钮成组，组间竖线分隔，
+组名以小字画在每组按钮下方（对标设计原型 ribbon 工具条）。
 """
 
 from __future__ import annotations
@@ -12,7 +14,45 @@ from qgis.PyQt.QtGui import QAction
 from qgis.PyQt.QtWidgets import QMainWindow, QToolBar, QToolButton
 
 from app.ui.common import tool_icons
+from app.ui.common.ribbon import RibbonToolBar
 from app.ui.common.theme import ThemeManager, Theme, toolbar_qss
+
+#: 工具图标逻辑边长（与 ``setIconSize`` 一致，SVG 按此尺寸原生渲染避免二次缩放）
+_ICON = 20
+
+#: 工具分组：(组名, [(按钮文案, key), ...])，组名画在每组按钮下方
+_TOOL_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
+    (
+        "视图",
+        [
+            ("平移", "pan"),
+            ("放大", "zoom_in"),
+            ("缩小", "zoom_out"),
+            ("全图", "zoom_full"),
+            ("刷新", "refresh"),
+        ],
+    ),
+    (
+        "选择",
+        [
+            ("点选", "select_point"),
+            ("框选", "select_box"),
+            ("取消选择", "clear_selection"),
+        ],
+    ),
+    ("查询", [("属性", "identify")]),
+    ("分析", [("质检", "quality"), ("分析", "analyse")]),
+    ("对比", [("卷帘对比", "swipe"), ("地图对比", "qmap_compare")]),
+    (
+        "数据",
+        [
+            ("在线底图", "online_basemap"),
+            ("数据管理", "data_manage"),
+            ("离线下载", "offline_download"),
+        ],
+    ),
+    ("其他", [("测试", "test")]),
+]
 
 
 class ToolBar:
@@ -65,36 +105,27 @@ class ToolBar:
             - refresh
             - test
         """
-        tb = QMainWindow.addToolBar(self.main_window, "地图工具")
-        # 图标优先展示，文字不出现在按钮上；悬浮时以 Tooltip 提示文本
-        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
-        tb.setIconSize(QSize(25, 25))
+        tb = RibbonToolBar("地图工具", self.main_window)
+        self.main_window.addToolBar(tb)
+        tb.setObjectName("MapToolBar")
+        # Ribbon 风格：图标在上 + 小字标签在下（对标设计原型工具栏）
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        tb.setIconSize(QSize(_ICON, _ICON))
         self.toolbar = tb
 
-        # 每个工具用 QPainter 画的现代化图标（随主题变色）
-        color = ThemeManager.instance().current().toolbar_text
-        for text, key in [
-            ("平移", "pan"),
-            ("点选", "select_point"),
-            ("框选", "select_box"),
-            ("取消选择", "clear_selection"),
-            ("属性", "identify"),
-            ("放大", "zoom_in"),
-            ("缩小", "zoom_out"),
-            ("质检", "quality"),
-            ("分析", "analyse"),
-            ("卷帘对比", "swipe"),
-            ("地图对比", "qmap_compare"),
-            ("在线底图", "online_basemap"),
-            ("数据管理", "data_manage"),
-            ("离线下载", "offline_download"),
-            ("全图", "zoom_full"),
-            ("刷新", "refresh"),
-            ("测试", "test"),
-        ]:
-            self._add_action(tb, text, key, callbacks, color)
+        # 每个工具用 SVG/字体图标画的现代化图标（随主题强调色，对标原型蓝色线性图标）
+        # 同类型工具成组，组间加竖分隔线；组名稍后 set_groups() 交给工具条绘制
+        theme = ThemeManager.instance().current()
+        color = theme.input_focus
+        groups: list[tuple[str, list[QAction]]] = []
+        for idx, (group_name, items) in enumerate(_TOOL_GROUPS):
+            acts = [self._add_action(tb, text, key, callbacks, color) for text, key in items]
+            groups.append((group_name, acts))
+            if idx != len(_TOOL_GROUPS) - 1:
+                tb.addSeparator()
+        tb.set_groups(groups, theme.text_secondary)
 
-        tb.setStyleSheet(toolbar_qss(ThemeManager.instance().current()))
+        tb.setStyleSheet(toolbar_qss(theme))
         return tb
 
     # ------------------------------------------------------------ 状态高亮
@@ -132,7 +163,7 @@ class ToolBar:
     ) -> QAction:
         """建一个图标按钮：图标按 key 绘制，悬浮 Tooltip 显示文本。"""
         act = QAction(text, self.main_window)
-        act.setIcon(tool_icons.icon(key, color))
+        act.setIcon(tool_icons.icon(key, color, _ICON))
         act.setToolTip(text)
         if key in self._TOOL_KEYS or key in self._SESSION_KEYS:
             act.setCheckable(True)
@@ -146,16 +177,16 @@ class ToolBar:
         """追加空间查询工具条（点 / 线 / 面 / 圆 / 框）。"""
         if self.toolbar is None:
             return
-        color = ThemeManager.instance().current().toolbar_text
+        color = ThemeManager.instance().current().input_focus
         for q_type, label, key in [
             ("point", "点查询", "space_query_point"),
             ("line", "线查询", "space_query_line"),
             ("polygon", "面查询", "space_query_polygon"),
         ]:
             btn = QToolButton()
-            btn.setIcon(tool_icons.icon(key, color))
+            btn.setIcon(tool_icons.icon(key, color, _ICON))
             btn.setIconSize(self.toolbar.iconSize())
-            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+            btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
             btn.setText(label)
             btn.setToolTip(label)
             btn.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
@@ -164,9 +195,11 @@ class ToolBar:
             self._icon_items.append((btn, key))
 
     def apply_theme(self, theme: Theme) -> None:
-        """主题切换时刷新工具按钮图标颜色。"""
+        """主题切换时刷新工具按钮图标颜色与组名颜色。"""
         if self.toolbar is None:
             return
-        color = theme.toolbar_text
+        color = theme.input_focus
         for widget, key in self._icon_items:
-            widget.setIcon(tool_icons.icon(key, color))
+            widget.setIcon(tool_icons.icon(key, color, _ICON))
+        if isinstance(self.toolbar, RibbonToolBar):
+            self.toolbar.set_group_color(theme.text_secondary)

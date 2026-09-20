@@ -9,8 +9,8 @@
   ``QGIS_DEV_PATHS_RESOURCE`` 指到便携包 ``resource/``（见
   :func:`app.bootstrap._ensure_portable_env`），PyInstaller spec 已把
   ``resource/`` 整目录打进包；
-- 图标按 ``(key, color)`` 缓存；主题切换时用新颜色重新生成即可（见
-  :meth:`ToolBar.apply_theme`）。
+- 图标按 ``(key, color, size)`` 缓存，按目标逻辑尺寸 ×2 渲染；主题切换时用新颜色
+  重新生成即可（见 :meth:`ToolBar.apply_theme`）。
 """
 
 from __future__ import annotations
@@ -19,10 +19,11 @@ from qgis.PyQt.QtCore import QRect, Qt
 from qgis.PyQt.QtGui import QColor, QFont, QFontDatabase, QIcon, QPainter, QPixmap
 
 from app.infra.fs.paths import Paths
+from app.ui.common import svg_icons
 
-_LOGICAL = 36        # 逻辑像素边长（与工具条 iconSize 一致）
+_DEFAULT_SIZE = 20   # 默认逻辑像素边长（与工具条 iconSize 一致）
 _DPR = 2.0           # 2x 渲染，高 DPI 下图标不发虚
-_GLYPH_PX = int(_LOGICAL * 0.8)  # 字形像素尺寸（约留 10% 边距，图标不顶满）
+_GLYPH_RATIO = 0.8   # 字形像素 ≈ 逻辑边长 ×0.8（约留 10% 边距，图标不顶满）
 
 _FONT_FAMILY = "Font Awesome 5 Free Solid"
 
@@ -86,7 +87,7 @@ _GLYPHS: dict[str, str] = {
     "organize_columns": "\uf0db",  # columns 组织列（字段列显示设置）
 }
 
-_CACHE: dict[tuple[str, str], QIcon] = {}
+_CACHE: dict[tuple[str, str, int], QIcon] = {}
 
 _font_loaded = False
 _font_ok = False
@@ -108,40 +109,51 @@ def _ensure_font() -> bool:
     return _font_ok
 
 
-def _glyph_font() -> QFont:
+def _glyph_font(size: int) -> QFont:
     f = QFont(_FONT_FAMILY, 100)  # pixelSize 精确定位，字号 100 只是占位
-    f.setPixelSize(_GLYPH_PX)
+    f.setPixelSize(max(1, int(size * _GLYPH_RATIO)))
     f.setWeight(QFont.Weight.Bold)       # FA Solid 是 weight 900
     return f
 
 
-def _render(glyph: str, color: QColor) -> QIcon:
-    pm = QPixmap(int(_LOGICAL * _DPR), int(_LOGICAL * _DPR))
-    pm.setDevicePixelRatio(_DPR)
-    pm.fill(Qt.GlobalColor.transparent)
-    painter = QPainter(pm)
-    painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
-    if _ensure_font():
-        painter.setPen(color)
-        painter.setFont(_glyph_font())
-        painter.drawText(QRect(0, 0, _LOGICAL, _LOGICAL), Qt.AlignmentFlag.AlignCenter, glyph)
-    else:
-        # 兜底：字体缺失时画一个实心圆点，避免空白按钮
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(color)
-        painter.drawEllipse(QRect(int(_LOGICAL * 0.3), int(_LOGICAL * 0.3),
-                                  int(_LOGICAL * 0.4), int(_LOGICAL * 0.4)))
-    painter.end()
-    return QIcon(pm)
+def _render(glyph: str, color: QColor, size: int) -> QIcon:
+    icon = QIcon()
+    # 同时提供 1x 与 2x 位图，交给 QIcon 按目标尺寸/DPR 选最合适的一张。
+    # 注意：不能只塞一张 ``setDevicePixelRatio(2)`` 的高清位图——QIcon 在
+    # 请求较小尺寸时会把它**裁切**成左上角一块（图标只显示部分内容）。
+    for px in (int(size), int(size * _DPR)):
+        pm = QPixmap(px, px)
+        pm.fill(Qt.GlobalColor.transparent)
+        painter = QPainter(pm)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        if _ensure_font():
+            painter.setPen(color)
+            painter.setFont(_glyph_font(px))
+            painter.drawText(QRect(0, 0, px, px), Qt.AlignmentFlag.AlignCenter, glyph)
+        else:
+            # 兜底：字体缺失时画一个实心圆点，避免空白按钮
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(color)
+            painter.drawEllipse(QRect(int(px * 0.3), int(px * 0.3),
+                                      int(px * 0.4), int(px * 0.4)))
+        painter.end()
+        icon.addPixmap(pm)
+    return icon
 
 
-def icon(key: str, color: str) -> QIcon:
-    """按 key 画图标，颜色取主题 toolbar_text；同一 (key, color) 缓存。"""
+def icon(key: str, color: str, size: int = _DEFAULT_SIZE) -> QIcon:
+    """按 key 画图标，颜色取主题色，逻辑尺寸为 ``size``；同一 ``(key, color, size)`` 缓存。
+
+    优先用设计原型的 SVG 线性图标（``resource/icons``，见
+    :mod:`app.ui.common.svg_icons`）；没有对应 SVG 的 key 回退到 Font Awesome 字形。
+    """
+    if svg_icons.available(key):
+        return svg_icons.icon(key, color, size)
     if key not in _GLYPHS:
         raise KeyError(f"未知工具图标: {key}")
-    cache_key = (key, color)
+    cache_key = (key, color, int(size))
     if cache_key not in _CACHE:
-        _CACHE[cache_key] = _render(_GLYPHS[key], QColor(color))
+        _CACHE[cache_key] = _render(_GLYPHS[key], QColor(color), int(size))
     return _CACHE[cache_key]
 
 

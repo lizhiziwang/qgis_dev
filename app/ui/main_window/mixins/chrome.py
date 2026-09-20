@@ -1,7 +1,7 @@
 """顶部 chrome、状态栏与主题。
 
 标题栏/模式切换、主题 QSS 应用、用户信息、状态栏与图层加载指示，
-以及顶部各工具条（通用/编辑/文件/视图）与 Tab 切换器。
+以及顶部各工具条（通用/编辑/文件/查看/质检）与 Tab 切换器。
 
 由 :class:`~app.ui.main_window.main_window.MainWindow` 多继承组合，方法只依赖
 ``self`` 上的共享状态。
@@ -23,6 +23,7 @@ from qgis.PyQt.QtWidgets import QToolBar
 
 from app.infra.logging import get_logger
 from app.ui.common.theme import (
+    TOOLBAR_ITEM_GAP,
     ThemeManager,
     toolbar_qss,
     window_qss,
@@ -85,6 +86,8 @@ class WindowChromeMixin:
             self.project,
             editing_layer_getter=lambda: self.edit_layer,
         )
+        # 捕捉工具条单独放第二行（编辑工具条占第一行）
+        self.insertToolBarBreak(self.snapping_toolbar.toolbar)
 
         # 创建平移工具（保留引用避免被 GC）
         self._pan_tool = QgsMapToolPan(self.canvas)
@@ -108,6 +111,7 @@ class WindowChromeMixin:
 
         self._file_toolbar = self._build_file_toolbar()
         self._view_toolbar = self._build_view_toolbar()
+        self._quality_toolbar = self._build_quality_toolbar()
 
         #: tab 索引 → 该 tab 下应显示的工具条列表（切换时互斥显示）
         self._tab_toolbars: dict[int, list] = {}
@@ -119,8 +123,11 @@ class WindowChromeMixin:
                 self.snapping_toolbar.toolbar,
             ]),
             ("通用", [self.tool_bar]),
+            ("质检", [self._quality_toolbar]),
         ):
             self._tab_toolbars[tab_bar.addTab(label)] = toolbars
+            for tb in toolbars:
+                tb.setStyleSheet(toolbar_qss(ThemeManager.instance().current()))
 
         tab_bar.currentChanged.connect(self._on_tab_changed)
         self._on_tab_changed(tab_bar.currentIndex())
@@ -180,6 +187,20 @@ class WindowChromeMixin:
         self.addToolBar(tb)
         return tb
 
+    def _build_quality_toolbar(self) -> QToolBar:
+        """「质检」tab 工具条：当前只有一个「质检」工具，打开质检面板 dock。"""
+        tb = QToolBar("质检", self)
+        tb.setObjectName("QualityTabToolbar")
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+
+        act_check = QAction("质检", self)
+        act_check.setToolTip("打开质检面板")
+        act_check.triggered.connect(self._on_quality_dock)
+        tb.addAction(act_check)
+
+        self.addToolBar(tb)
+        return tb
+
     def _on_tab_changed(self, index: int) -> None:
         """tab 切换：只显示当前 tab 对应的工具条，其余隐藏（模拟"换工具栏"）。"""
         for idx, toolbars in self._tab_toolbars.items():
@@ -229,9 +250,18 @@ class WindowChromeMixin:
         """按当前主题重绘窗体 chrome（菜单栏/状态栏/Dock）、主工具条和画布底色。"""
         theme = ThemeManager.instance().current()
         self.setStyleSheet(window_qss(theme))
-        tb = getattr(self, "tool_bar", None)
-        if tb is not None:
-            tb.setStyleSheet(toolbar_qss(theme))
+        # 5 个 tab 的工具条统一走 Ribbon 风格 QSS（构建后 / 切主题时都刷一遍）
+        tab_toolbars = getattr(self, "_tab_toolbars", None)
+        if tab_toolbars:
+            for toolbars in tab_toolbars.values():
+                for tb in toolbars:
+                    tb.setStyleSheet(toolbar_qss(theme))
+                    self._set_toolbar_gap(tb)
+        else:
+            tb = getattr(self, "tool_bar", None)
+            if tb is not None:
+                tb.setStyleSheet(toolbar_qss(theme))
+                self._set_toolbar_gap(tb)
         # 工具条图标是 QPainter 画的，颜色固定烧在 PNG 里，切主题时需重刷
         tbb = getattr(self, "tool_bar_builder", None)
         if tbb is not None:
@@ -240,6 +270,10 @@ class WindowChromeMixin:
         side_tb = getattr(self, "side_toolbar", None)
         if side_tb is not None:
             side_tb.apply_theme(theme)
+        # 编辑工具条图标同步重刷
+        dig_tb = getattr(self, "digitizing_toolbar", None)
+        if dig_tb is not None:
+            dig_tb.apply_theme(theme)
         # 画布底色跟随主题（setCanvasColor，不走 QSS）
         canvas = getattr(self, "canvas", None)
         if canvas is not None:
@@ -248,6 +282,13 @@ class WindowChromeMixin:
 
     def _on_theme_changed(self, theme) -> None:
         self._apply_theme_qss()
+
+    @staticmethod
+    def _set_toolbar_gap(tb: QToolBar) -> None:
+        """程序化设工具栏项间距：QSS ``spacing`` 首次布局时可能未生效，见 theme.TOOLBAR_ITEM_GAP。"""
+        layout = tb.layout()
+        if layout is not None:
+            layout.setSpacing(TOOLBAR_ITEM_GAP)
 
     def _apply_user_info_to_titlebar(self) -> None:
         """把本次登录会话（用户信息 + token 有效期）挂到标题栏。
