@@ -211,11 +211,13 @@ _DIALOG_FACTORIES: dict = {
     "native:tilesxyzdirectory": _make_imagery_tile_dialog,
     "native:tilesxyzmbtiles": _make_imagery_mbtiles_dialog,
 }
-#: 把 57 个 GDAL 算法全部注册到通用 dialog 工厂
-for _code in (
-    code for _group, _items in _GDAL_ALGORITHMS for _name, code in _items
-):
+#: 把 GDAL 算法全部注册到通用 dialog 工厂（同时记下这批 code，供 :func:`ToolsDock._build_tree` 过滤）
+#: ——**只有这些**才需要检查"当前 QGIS 有没有"；手写对话框（如 ``overlay``）本来
+#: 就不是 Processing 算法 id，拿去查永远查不到，会把工具误删。
+_GENERIC_ALGO_CODES: set[str] = set()
+for _code in (code for _group, _items in _GDAL_ALGORITHMS for _name, code in _items):
     _DIALOG_FACTORIES[_code] = _make_generic_algo_dialog(_code)
+    _GENERIC_ALGO_CODES.add(_code)
 
 #: 工具节点 code → 一次性动作（打开非对话框窗口，无需实例缓存）
 _SIMPLE_ACTIONS = {
@@ -331,9 +333,13 @@ class ToolsDock(QDockWidget):
     def _build_tree(self) -> None:
         """按 :data:`_TOOL_GROUPS` 构建分组树；分组加粗，叶子加 tooltip。
 
-        跳过当前 QGIS 环境不存在的 GDAL 算法（如 QGIS 3.40 无
+        只跳过当前 QGIS 环境不存在的 **GDAL** 算法（如 QGIS 3.40 无
         ``gdal:createcog`` / ``gdal:dataset_identify``），否则点开
         ``GenericAlgDialog`` 会因 ``algorithmById`` 为 None 崩溃。
+
+        判定必须限定在 :data:`_GENERIC_ALGO_CODES`（＝通用工厂接管的那批）：
+        手写对话框的 code（如 ``overlay``）**不是** Processing 算法 id，
+        ``algorithmById()`` 永远返回 None，拿它一起过滤会把整条工具从树里剔除。
         """
         reg = QgsApplication.processingRegistry()
         group_font = self.tree.font()
@@ -344,7 +350,7 @@ class ToolsDock(QDockWidget):
             group.setFont(0, group_font)
             group.setSizeHint(0, QSize(0, 28))
             for text, code in tools:
-                if code in _DIALOG_FACTORIES and reg.algorithmById(code) is None:
+                if code in _GENERIC_ALGO_CODES and reg.algorithmById(code) is None:
                     # 当前 QGIS 版本无此算法（processing provider 未注册）
                     continue
                 item = QTreeWidgetItem(group)

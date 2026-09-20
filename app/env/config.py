@@ -277,7 +277,11 @@ class MapConfig:
 
 @dataclass(frozen=True)
 class AuthConfig:
-    """启动登录的本地校验账号（未接真实 auth 服务前只认这一对账号）。"""
+    """【已废弃】旧版启动登录的本地校验账号。
+
+    登录已改为提交到授权服务器（:mod:`app.core.auth.config` / :class:`app.core.auth.client.AuthClient`），
+    本配置不再参与校验；仅为 ``AppConfig`` 兼容与旧配置文件保留（``config/app.yaml`` 的 ``auth`` 段）。
+    """
 
     username: str
     password: str

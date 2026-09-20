@@ -527,6 +527,41 @@ def _arrow_url(color: str, up: bool = False) -> str:
     return url
 
 
+_CHECK_CACHE: dict[str, str] = {}
+
+
+def _check_url(color: str) -> str:
+    """按颜色生成一个对勾 PNG（勾选框选中态），返回 QSS 可用的 ``url(...)``。
+
+    勾选框的选中态**不能只靠背景色区分**：一旦用 QSS 覆盖 ``::indicator``，
+    原生样式画的勾就被替换掉了（真实 Windows 上会退化成"实心方块、看不出勾"）。
+    这里显式画一个对勾 ``image``，保证任何平台/样式下选中态都有清晰的 ✓。
+    按颜色缓存。
+    """
+    if color in _CHECK_CACHE:
+        return _CHECK_CACHE[color]
+
+    from qgis.PyQt.QtCore import QPoint, Qt
+    from qgis.PyQt.QtGui import QColor, QPainter, QPen, QPixmap, QPolygon
+
+    pm = QPixmap(14, 14)
+    pm.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(color))
+    pen.setWidth(2)
+    painter.setPen(pen)
+    painter.drawPolyline(QPolygon([QPoint(3, 8), QPoint(6, 11), QPoint(11, 4)]))
+    painter.end()
+
+    path = Path(tempfile.gettempdir()) / f"qgis_dev_check_{color.lstrip('#').upper()}.png"
+    if not pm.save(str(path), "PNG"):
+        raise RuntimeError(f"无法写入对勾 PNG: {path}")
+    url = path.as_posix()
+    _CHECK_CACHE[color] = url
+    return url
+
+
 def app_qss(t: Theme) -> str:
     """全局控件 QSS（QApplication 级）。
 
@@ -719,6 +754,24 @@ def app_qss(t: Theme) -> str:
     QListView::item:selected, QListWidget::item:selected {{
         background-color: {t.toolbar_hover};
         color: {t.menu_text};
+    }}
+    /* 「组织列」对话框的字段勾选框：QSS 覆盖 indicator 后原生勾会被顶掉，
+       所以未选/选中都显式画：未选 = 空框，选中 = 强调色描边 + 对勾 image。
+       对勾用 ``_check_url`` 现画 PNG（主题色），保证任何平台/样式下都看得出勾。 */
+    QListWidget#OrganizeColumnsList::indicator {{
+        width: 14px;
+        height: 14px;
+        border: 1px solid {t.input_border};
+        border-radius: 2px;
+        background: {t.input_bg};
+    }}
+    QListWidget#OrganizeColumnsList::indicator:hover {{
+        border-color: {t.input_focus};
+    }}
+    QListWidget#OrganizeColumnsList::indicator:checked {{
+        border: 1px solid {t.input_focus};
+        background: {t.input_bg};
+        image: url({_check_url(t.input_focus)});
     }}
     QHeaderView::section {{
         background-color: {t.menu_bg};
@@ -1066,7 +1119,8 @@ def login_qss(t: Theme) -> str:
     - 操作：主色实心 ``LoginPrimary``（hover/按下自动加深）+ 描边 ``LoginCancel``
     - 错误提示复用全局 ``loginError`` 规则（text_error 色），此处再显式声明一次
 
-    保留系统原生窗口边框，仅美化内容 → 既是系统程序对话框、又是现代化简洁风格。
+    内容走无边框标题栏（:class:`app.ui.common.base_dialog.BaseDialog`），
+    ``:disabled`` 不单独设色：禁用态保持 Qt/平台原生观感。
     """
     primary = QColor(t.input_focus)
     hover = primary.darker(112)
@@ -1141,6 +1195,65 @@ def login_qss(t: Theme) -> str:
     QPushButton#LoginCancel:hover {{ background-color: {t.btn_hover}; }}
     QPushButton#LoginCancel:pressed {{ background-color: {t.btn_pressed}; }}
     QPushButton#LoginCancel:focus {{ outline: none; }}
+    """
+
+
+def saved_login_popup_qss(t: Theme) -> str:
+    """已保存账号气泡 QSS（:class:`app.ui.dialogs.saved_login_popup.SavedLoginPopup`）。
+
+    这是一个 ``Qt.Popup`` 顶层窗口，**与登录框样式彼此独立**：
+
+    - ``SavedLoginPopup``：圆角气泡本体（``menu_bg`` + ``border``，半透明底才能
+      露出圆角）
+    - ``SavedLoginHeader``：小标题（次要文字色）
+    - ``SavedLoginList``：透明列表；行只给 ``border-radius`` / hover 底色，
+      **不加 padding**（行高由 item 的 sizeHint 控制，加 padding 会让绘制区
+      比行距高、相邻行互相覆盖）
+    - ``SavedLoginUser`` / ``SavedLoginMask``：用户名 + 掩码密码
+    - ``SavedLoginRemove`` / ``SavedLoginClear``：无底色小按钮，hover 变错误色
+
+    选中 / 悬浮都用 ``menu_hover`` 这类**浅底色**而不是强调色实心：行内是真实
+    子控件（QLabel），QSS 无法按 ``::item:selected`` 改子控件文字色，用实心强调色
+    会出现深色文字压在深色底上。
+    """
+    return f"""
+    QWidget#SavedLoginPopup {{
+        background-color: {t.menu_bg};
+        border: 1px solid {t.border};
+        border-radius: 8px;
+    }}
+    QLabel#SavedLoginHeader {{
+        color: {t.text_secondary};
+        font-size: 11px;
+        padding: 2px 4px;
+    }}
+    QListWidget#SavedLoginList {{
+        background: transparent;
+        border: none;
+        outline: none;
+    }}
+    QListWidget#SavedLoginList::item {{
+        border-radius: 4px;
+    }}
+    QListWidget#SavedLoginList::item:hover {{ background-color: {t.menu_hover}; }}
+    QListWidget#SavedLoginList::item:selected {{ background-color: {t.menu_hover}; }}
+    QLabel#SavedLoginUser {{
+        color: {t.menu_text};
+        font-size: 12px;
+    }}
+    QLabel#SavedLoginMask {{
+        color: {t.text_secondary};
+        font-size: 11px;
+    }}
+    QPushButton#SavedLoginRemove, QPushButton#SavedLoginClear {{
+        background: transparent;
+        border: none;
+        color: {t.text_secondary};
+        font-size: 11px;
+    }}
+    QPushButton#SavedLoginRemove:hover, QPushButton#SavedLoginClear:hover {{
+        color: {t.text_error};
+    }}
     """
 
 
@@ -1302,6 +1415,7 @@ __all__ = [
     "divider_colors",
     "flow_panel_qss",
     "login_qss",
+    "saved_login_popup_qss",
     "apply_app_theme",
     "apply_app_tooltip_style",
 ]

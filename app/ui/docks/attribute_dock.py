@@ -34,7 +34,10 @@ from qgis.PyQt.QtWidgets import (
 
 from app.core.domain.editing import LayerEditService
 from app.infra.logging import get_logger
+from app.ui.common import tool_icons
 from app.ui.common.icons import Icons
+from app.ui.common.theme import ThemeManager
+from app.ui.dialogs.organize_columns import OrganizeColumnsDialog
 from app.ui.dialogs.query_builder import QueryBuilderDialog
 
 logger = get_logger(__name__)
@@ -571,6 +574,8 @@ class PagedAttributeTableWidget(QWidget):
         self.filter_str = filter_str
         self.show_ids = show_ids
         self.model: Optional[PagedAttributeTableModel] = None
+        #: 「组织列」隐藏的字段名（按名存，模型 reset/新增字段后仍能对上）
+        self._hidden_field_names: set[str] = set()
         self.editing_service = LayerEditService()
         self._setup_ui()
 
@@ -605,12 +610,20 @@ class PagedAttributeTableWidget(QWidget):
         self.calc_btn.setIcon(Icons.field_calc())
         self.calc_btn.setToolTip("字段计算器")
         self.calc_btn.setFixedSize(26, 26)
+        self.columns_btn = QPushButton()
+        self.columns_btn.setObjectName("organizeColumnsBtn")
+        self.columns_btn.setIcon(
+            tool_icons.icon("organize_columns", ThemeManager.instance().current().toolbar_text)
+        )
+        self.columns_btn.setToolTip("组织列")
+        self.columns_btn.setFixedSize(26, 26)
         self.start_btn.clicked.connect(self._start_edit)
         self.save_btn.clicked.connect(self._save_edit)
         self.stop_btn.clicked.connect(self._stop_edit)
         self.filter_btn.clicked.connect(self._filter)
         self.calc_btn.clicked.connect(self._field_calc)
-        for b in (self.start_btn, self.save_btn, self.stop_btn, self.filter_btn, self.calc_btn):
+        self.columns_btn.clicked.connect(self._organize_columns)
+        for b in (self.start_btn, self.save_btn, self.stop_btn, self.filter_btn, self.calc_btn, self.columns_btn):
             tb.addWidget(b)
         tb.addStretch(0)
         main_layout.addLayout(tb)
@@ -649,6 +662,8 @@ class PagedAttributeTableWidget(QWidget):
         self.table_view.setModel(self.model)
         # 筛选重置后刷新加载状态；流式 chunk/结束也自动刷新；滚动到底自动加载下一批
         self.model.modelReset.connect(self._refresh_load_state)
+        # 字段刷新/筛选重置后模型列数变化，按名重算隐藏列（新增字段默认可见）
+        self.model.modelReset.connect(self._sync_column_visibility)
         self.model.state_changed.connect(self._refresh_load_state)
         self.table_view.verticalScrollBar().valueChanged.connect(self._on_scroll)
         self._refresh_load_state()
@@ -787,6 +802,41 @@ class PagedAttributeTableWidget(QWidget):
         editing = bool(self.layer.isEditable())
         self.save_btn.setEnabled(editing)
         self.stop_btn.setEnabled(editing)
+
+    # ------------------------------------------------- 组织列（列显示设置）
+
+    def _visible_field_names(self) -> list[str]:
+        """当前可见（未被隐藏）的字段名，供组织列对话框预置勾选。"""
+        if self.model is None:
+            return [f.name() for f in self.layer.fields()]
+        return [n for n in self.model.field_names if n not in self._hidden_field_names]
+
+    def _organize_columns(self) -> None:
+        """弹「组织列」对话框，按勾选结果隐藏未选中的字段列（ID 列恒显示）。"""
+        dlg = OrganizeColumnsDialog(self.layer, self._visible_field_names(), parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._apply_column_visibility(dlg.checked_field_names())
+
+    def _apply_column_visibility(self, names) -> None:
+        """记录要隐藏的字段名并同步到视图（按字段名存，模型结构不动）。"""
+        if self.model is None:
+            return
+        chosen = set(names)
+        self._hidden_field_names = {n for n in self.model.field_names if n not in chosen}
+        self._sync_column_visibility()
+
+    def _sync_column_visibility(self) -> None:
+        """按字段名重算隐藏列。
+
+        列显示走 ``QTableView.setColumnHidden``（视图层隐藏）：模型列定义不变，
+        取值/编辑/筛选逻辑无需改动，列宽在重新勾选后也能保留。第 0 列是 fid
+        （ID），恒显示，故字段列从 1 起映射。
+        """
+        if self.model is None:
+            return
+        for col, name in enumerate(self.model.field_names, start=1):
+            self.table_view.setColumnHidden(col, name in self._hidden_field_names)
 
     def _show_context_menu(self, position) -> None:
         from qgis.PyQt.QtGui import QAction

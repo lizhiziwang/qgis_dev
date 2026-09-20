@@ -12,7 +12,9 @@
 4. 按 ``env`` 字段选择 :class:`QgisRuntime.for_dev` / ``for_prod``，
    调 :meth:`apply_env`（仅设环境变量，**不**初始化 QGIS）
 5. 创建 :class:`QgsApplication`（**不**调 ``initQgis``），弹出登录对话框
-6. 登录成功才调 ``initQgis``、加载翻译、初始化 processing 插件（仅 dev）
+   （每次启动都要登，账号密码提交到授权服务器换 token，不落盘）；
+   此时**不**显示初始化状态页，否则两个居中浮窗会叠在一起
+6. 登录成功才弹初始化状态页，并调 ``initQgis``、加载翻译、初始化 processing 插件（仅 dev）
 7. 实例化主窗口、显示、依次执行启动回调（加载底图、弹出“打开地图文档”）、``exec_``
 """
 
@@ -21,12 +23,21 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
 from app.bootstrap.main_window import build_window
-from app.core.auth import Credential, load_credential, save_credential
+from app.core.auth import (
+    AuthClient,
+    AuthError,
+    AuthResult,
+    AuthServerConfig,
+    fetch_current_user,
+    load_auth_server_config,
+)
 from app.core.domain.basemap import add_base_tile_layer
+from app.core.util.service_client import set_session_token
 from app.env.config import AppConfig
 from app.env.qgis_runtime import QgisRuntime
 from app.infra.fs.paths import Paths
@@ -80,40 +91,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     # 创建 QApplication（不 initQgis，等登录通过再做）
     app = _ensure_qgis_application(qgis)
 
-    # 启动初始化状态页：QgsApplication 创建后立刻弹出，覆盖登录 → initQgis →
-    # 插件注册 → 主窗口构建等耗时阶段，主窗口显示时由 _run_qgis_app 关闭。
+    # 先弹登录窗口：此时**不**显示初始化状态页。两者都是居中浮窗，
+    # 一起开就会叠在一起（登录框上面压着 splash），体验很怪；而且登录
+    # 阶段本来就短（一次 POST），登录框自己就有"正在登录"反馈。
+    auth_result = _run_login_dialog(cfg)
+    if auth_result is None:
+        logger.info("登录取消，退出")
+        return 0
+    logger.info("登录成功 username=%s", auth_result.username)
+
+    # 登录通过才弹初始化状态页：覆盖 initQgis → 翻译 → 插件注册 → 主窗口构建，
+    # 主窗口显示时由 _run_qgis_app 关闭。
+    splash = _start_splash(cfg.app_name)
     try:
-        # 鉴权优先：本机有未过期凭证就直接跳过登录
-        splash = _start_splash(cfg.app_name)
-
-        cached = load_credential()
-        if cached is not None:
-            logger.info(
-                "凭证校验通过 username=%s 剩余有效 %d 秒 (%s)",
-                cached.username,
-                cached.remaining_seconds(),
-                cached.expires_at,
-            )
-            return _run_qgis_app(cfg, qgis, app, splash)
-
-        # 没有有效凭证 → 弹登录（默认账号来自 config/app.yaml 的 auth 段）
-        logger.info("本地无有效凭证，弹出登录对话框")
-        username = _run_login_dialog(cfg)
-        if not username:
-            logger.info("登录取消，退出")
-            return 0
-
-        # 登录成功 → 签发 30 天凭证 + 进入主窗口
-
-        new_cred = Credential.issue(username)
-        save_credential(new_cred)
-        logger.info(
-            "已签发 30 天凭证 username=%s expires_at=%s path=%s",
-            new_cred.username,
-            new_cred.expires_at,
-            save_credential.__module__,
-        )
-        return _run_qgis_app(cfg, qgis, app, splash)
+        return _run_qgis_app(cfg, qgis, app, splash, auth_result=auth_result)
     finally:
         # 所有出口（含异常）都关掉初始化状态页，避免残留
         splash.close()
@@ -273,30 +264,70 @@ def _ensure_qgis_application(qgis: QgisRuntime):
     return app
 
 
-def _run_login_dialog(cfg: AppConfig) -> Optional[str]:
-    """弹登录对话框；返回登录成功的用户名，或 ``None``（取消 / 校验失败）。
+def _run_login_dialog(cfg: AppConfig) -> AuthResult | None:
+    """弹登录对话框；返回登录结果，或 ``None``（取消 / 关闭窗口）。
 
-    校验账号来自 ``config/app.yaml`` 的 ``auth`` 段（未接真实 auth 服务前
-    只认这一对本地账号）。
+    账号校验走**授权服务器**（地址按 ``app.yaml`` 的 ``env`` 选段，见
+    :data:`app.core.auth.config.PROFILES`）；token 只在本次运行内存里，
+    **不写本地凭证**——每次启动都要登录。
+
+    登录通过后会再用 token 拉一次当前用户信息（姓名 / 单位 / 部门，主界面标题栏
+    要显示），见 :func:`_with_current_user`；同时把 token 登记给业务接口工具
+    :mod:`app.core.util.service_client`，此后业务请求自动带 ``unitkey`` 头。
     """
     from qgis.PyQt.QtWidgets import QDialog
 
     from app.ui.dialogs.login import LoginDialog
 
-    dlg = LoginDialog(
-        default_user=cfg.auth.username,
-        default_password=cfg.auth.password,
-        app_name=cfg.app_name,
+    # 服务器地址在这里解析一次（不依赖对话框内部默认值），日志里能直接看到打到了哪台机
+    server = load_auth_server_config(cfg.env)
+    logger.info("授权服务器（环境 %s）：%s", cfg.env, server.describe())
+    client = AuthClient(server)
+    dlg = LoginDialog(app_name=cfg.app_name, auth_client=client)
+    if dlg.exec() != QDialog.DialogCode.Accepted:
+        logger.info("用户取消登录")
+        return None
+    result = dlg.auth_result()
+    if result is None:  # 理论上不会：对话框接受就有结果
+        logger.warning("登录对话框已接受但没拿到登录结果，按取消处理")
+        return None
+    logger.info("授权服务器校验通过 username=%s", dlg.username())
+    # 登记给业务接口工具（app.core.util.service_client.request()），后续自动带 token 头
+    set_session_token(result.token)
+    return _with_current_user(server, result)
+
+
+def _with_current_user(server: AuthServerConfig, result: AuthResult) -> AuthResult:
+    """登录成功后补拉当前用户信息（``currentUserByToken``，走业务接口工具）。
+
+    **拉不到不拦登录**：只记一条 warning，标题栏回退显示登录账号（见
+    :meth:`app.ui.main_window.mixins.chrome.ChromeMixin._apply_user_info_to_titlebar`）。
+    这里同步调用（一次 GET，超时与登录一致），拿到的信息随 :class:`AuthResult`
+    一路传给主窗口，不另外落盘。
+    """
+    try:
+        user = fetch_current_user(result.token, config=server)
+    except AuthError as exc:
+        logger.warning("获取当前用户信息失败，标题栏回退显示登录账号：%s", exc)
+        return result
+    logger.info(
+        "当前用户：%s（账号 %s，%s）",
+        user.display_name(),
+        user.account or result.username,
+        user.organize_line() or "未返回单位/部门",
     )
-    if dlg.exec() == QDialog.DialogCode.Accepted:
-        logger.info("用户登录成功 username=%s", dlg.username())
-        return dlg.username()
-    logger.info("用户取消登录")
-    return None
+    if user.need_reset_password:
+        logger.warning("服务端提示该账号需要重置密码：%s", user.account or result.username)
+    # AuthResult 是 frozen 的，用 replace 挂上用户信息（其余字段原样保留）
+    return replace(result, user=user)
 
 
 def _start_splash(app_name: str):
     """创建并显示启动初始化状态页，返回实例。
+
+    **登录成功之后才调**（见 :func:`main`）：登录框与状态页都是居中浮窗，
+    同时开场会叠在一起。这里只覆盖登录之后的 ``initQgis`` / 翻译 /
+    插件注册 / 主窗口构建。
 
     :param app_name: 应用名（``app.yaml`` → ``app.name``），用作 splash 标题。
     """
@@ -308,8 +339,17 @@ def _start_splash(app_name: str):
     return splash
 
 
-def _run_qgis_app(cfg: AppConfig, qgis: QgisRuntime, app, splash=None) -> int:
-    """登录成功后才真正初始化 QGIS + 主窗口 + exec_。"""
+def _run_qgis_app(
+    cfg: AppConfig,
+    qgis: QgisRuntime,
+    app,
+    splash=None,
+    auth_result: AuthResult | None = None,
+) -> int:
+    """登录成功后才真正初始化 QGIS + 主窗口 + exec_。
+
+    :param auth_result: 本次登录结果（用户名 / token），传给主窗口显示账号信息。
+    """
     # 关键：initQgis 必须在登录通过之后
     if splash is not None:
         splash.set_status("正在初始化核心程序")
@@ -356,7 +396,7 @@ def _run_qgis_app(cfg: AppConfig, qgis: QgisRuntime, app, splash=None) -> int:
 
     if splash is not None:
         splash.set_status("正在构建主窗口")
-    window = build_window(app_name=cfg.app_name)
+    window = build_window(app_name=cfg.app_name, auth_result=auth_result)
 
     # 主窗口就绪：先关掉初始化状态页再显示，避免浮窗盖在主窗口上
     if splash is not None:

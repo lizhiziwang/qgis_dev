@@ -85,7 +85,9 @@ qgis_dev/
 │   │   ├── fs/                 #   paths.py（统一路径服务）/ io.py
 │   │   └── messagebar/         #   全局消息条：floating_bar / qgis_bar
 │   ├── core/                   # 业务层（不依赖 UI）
-│   │   ├── auth/               #   凭据：credential.py
+│   │   ├── auth/               #   登录鉴权：config.py（服务器地址/接口）+ client.py（HTTP）
+│   │   │                       #   + saved_logins.py（记住的账号）/ _secret.py（密码保护：
+│   │   │                       #     Windows→DPAPI、Linux/macOS→本机密钥）/ _user_paths.py
 │   │   ├── data/               #   数据脚本：pgsql / gdb_to_postgis / local_db / import_maxent
 │   │   ├── util/               #   底层工具：wkt / gpkg_geom / local_layer_loader / ogc_server_util
 │   │   └── domain/             #   领域服务（一个能力一个子包）

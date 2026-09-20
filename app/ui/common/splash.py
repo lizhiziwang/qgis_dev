@@ -1,8 +1,10 @@
 """应用启动初始化状态页（splash）。
 
-:class:`StartupSplash`：无边框、居中浮窗，在 :class:`QgsApplication` 创建后
-立刻弹出，覆盖「登录 → initQgis → 翻译 → 插件注册 → 主窗口构建」等耗时
-阶段，主窗口显示时由 bootstrap 关闭。
+:class:`StartupSplash`：无边框、居中浮窗，在 :class:`QgsApplication` 创建后创建，
+但**要等登录通过**才由 bootstrap 弹出（见 :func:`app.bootstrap.main`）：它覆盖
+「initQgis → 翻译 → 插件注册 → 主窗口构建」等耗时阶段，主窗口显示时关闭。
+
+为什么不在登录时就弹：它和登录框都是居中的无边框浮窗，一起开就叠在一起。
 
 因为各阶段都在主线程**同步**执行，``set_status`` 内部会调
 ``QApplication.processEvents()`` 强制重绘一次，否则状态文字不会实时刷新。

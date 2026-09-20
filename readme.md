@@ -193,9 +193,24 @@ app.ui  ←  表现层（MainWindow + docks + dialogs + tools），只发信号�
 2. 数据图层树 / 参考图层树（各显示一个分组，普通 `QTreeView` + `QgsLayerTreeModel`，用 `setRootIndex` 指向分组）
 3. 渲染与标注（对当前选中图层打开渲染/标注设置）
 
-### 登录与凭证（`app/core/auth`）
+### 登录与鉴权（`app/core/auth`）
 
-启动优先本机未过期凭证；无凭证弹 `LoginDialog`，登录成功签发 30 天凭证。打包后 `initQgis` 在登录通过后才执行。
+**每次启动都要登录**：弹 `LoginDialog`，用户名密码提交到授权服务器换取 token，
+地址 / 接口按 `config/app.yaml` 的 `env:` 选段（`app/core/auth/config.py` 的 `PROFILES`，
+加环境只改那一处），token 只存内存、**不落盘**。
+登录成功后会**记住这次的用户名 + 密码**（`app/core/auth/saved_logins.py`；密码不落明文：
+Windows 用 DPAPI，Linux / 麒麟用机器 + 用户绑定的本机密钥），下次启动点用户名输入框弹气泡选中即同时回填两个输入框（气泡是独立的
+`Qt.Popup`，不改变登录框本身的外观）；不想记密码可设 `QGIS_DEV_REMEMBER_PASSWORDS=0`。
+打包后 `initQgis` 在登录通过后才执行；取消登录则直接退出。
+登录通过后还会拉一次**当前用户信息**（`GET …/currentUserByToken?access_token=…`，
+同时带上 `unitkey: Bearer <token>` 头；实现在 `app/core/auth/current_user.py`，
+**请求走下面那个统一工具**），主窗口标题栏因此显示的是**姓名 / 单位 /
+部门 / 上次登录**（拉不到就回退只显示登录账号）；拉取失败**不拦登录**。详见 `app/auth.md`。
+
+**除登录外，访问业务服务器统一走 `app/core/util/service_client.py`**：`request(接口路径, 参数, 请求方式)`
+自动按 `env:` 取 `ip:port`、自动把登录 token 拼到 `unitkey` 头（登录时 bootstrap 已
+`set_session_token`），失败抛 `ServiceError`；命令行可单发一次：
+`python -m app.core.util.service_client GET /forestry-api/xxx/list`。
 
 ### 流程编排工具（`app/core/domain/flow` + `app/ui/flow_editor`）
 

@@ -21,7 +21,6 @@ from qgis.PyQt.QtGui import (
 )
 from qgis.PyQt.QtWidgets import QToolBar
 
-from app.core.auth import load_credential
 from app.infra.logging import get_logger
 from app.ui.common.theme import (
     ThemeManager,
@@ -251,10 +250,22 @@ class WindowChromeMixin:
         self._apply_theme_qss()
 
     def _apply_user_info_to_titlebar(self) -> None:
-        """把登录用户信息（用户名 + 凭证有效期）挂到标题栏。"""
+        """把本次登录会话（用户信息 + token 有效期）挂到标题栏。
 
-        cred = load_credential()
-        if cred is not None:
-            self.title_bar.set_user(cred.username, expires_at=cred.expires_at)
-        else:
+        登录信息**不再落盘**（没有本地凭证），来源是 :func:`app.bootstrap.main`
+        登录成功后传给 :class:`~app.ui.main_window.main_window.MainWindow` 的
+        ``auth_result``；没传（如非启动路径构造窗口）就显示"未登录"。
+
+        ``auth_result.user`` 是登录后 ``currentUserByToken`` 拉到的当前用户
+        （姓名 / 单位 / 部门 / 上次登录）；拉取失败时为 ``None``，标题栏回退
+        只显示登录账号。
+        """
+        result = getattr(self, "_auth_result", None)
+        if result is None:
             self.title_bar.set_user("未登录")
+        else:
+            self.title_bar.set_user(
+                result.username,
+                expires_at=result.expires_at(),
+                user=getattr(result, "user", None),
+            )

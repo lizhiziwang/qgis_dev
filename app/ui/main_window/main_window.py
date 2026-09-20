@@ -46,6 +46,7 @@ from qgis.gui import QgsLayerTreeMapCanvasBridge
 from qgis.PyQt.QtGui import QCloseEvent
 from qgis.PyQt.QtWidgets import QMainWindow
 
+from app.core.auth import AuthResult
 from app.core.domain.editing import LayerEditService
 from app.core.domain.query import SpaceQueryService
 from app.core.domain.tile_prefetch import (
@@ -91,8 +92,16 @@ class MainWindow(
 ):
     """主窗口：只负责装配顺序、Qt 生命周期钩子与各功能 mixin 的组合。"""
 
-    def __init__(self, project_root: Optional[str] = None, app_name: str = "qgis_dev") -> None:
+    def __init__(
+        self,
+        project_root: Optional[str] = None,
+        app_name: str = "qgis_dev",
+        auth_result: AuthResult | None = None,
+    ) -> None:
         super().__init__()
+        #: 本次启动登录的结果（用户名 / token / 有效期）；标题栏账号信息据此显示。
+        #: 登录已不再落盘（无本地凭证），必须由 bootstrap 传进来。
+        self._auth_result = auth_result
         # 无边框窗口：标题栏 / 拖动 / 缩放 / 最大化统一由 FramelessMixin 装配。
         # 顶部 chrome 用 QTabBar 取代菜单栏（点 tab 切换下方工具条）。
         self.title_bar = self.enable_frameless(with_tab_bar=True)

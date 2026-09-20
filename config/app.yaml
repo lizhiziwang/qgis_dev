@@ -12,7 +12,10 @@ app:
   language: zh-Hans       # i18n
   crs: EPSG:4490          # 默认坐标系（中国 2000）
 
-# 启动登录的本地校验账号（dev 占位；未接真实 auth 服务前只认这一对账号）
+# 【已废弃】启动登录已改为授权服务器鉴权，本段不再参与校验，仅为 AppConfig
+# 兼容保留。授权服务器地址按本文件顶部的 env 选段（dev / prod…）：见
+# app/core/auth/config.py 的 PROFILES，加一个环境 = 在那里加一段 + 把这里的
+# env: 换成同名；不改代码临时换机用 QGIS_DEV_AUTH_IP 等环境变量。
 auth:
   username: admin
   password: admin

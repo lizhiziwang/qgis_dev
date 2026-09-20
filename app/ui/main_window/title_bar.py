@@ -32,10 +32,24 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from app.core.auth import load_credential
+from app.core.auth import CurrentUser
 from app.ui.common.icons import Icons
 from app.ui.common.qt_compat import global_pos
 from app.ui.common.theme import THEMES, ThemeManager, title_bar_qss
+
+
+def _format_remaining(seconds: int) -> str:
+    """把剩余秒数写成人话（会话有效期只有几小时，按天算会全是 0 天）。"""
+    if seconds <= 0:
+        return "已过期"
+    if seconds >= 86400:
+        return f"{seconds // 86400} 天"
+    if seconds >= 3600:
+        return f"{seconds // 3600} 小时"
+    if seconds >= 60:
+        return f"{seconds // 60} 分钟"
+    return f"{seconds} 秒"
+
 
 TITLE_BAR_HEIGHT = 34
 
@@ -353,7 +367,8 @@ class TitleBar(QWidget):
             self._user_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             self._user_menu = QMenu(self._user_btn)
             self._user_btn.setMenu(self._user_menu)
-            self._sync_login_state()
+            # 真正账号由主窗口拿到本次登录结果后调 set_user() 覆盖
+            self.set_user("未登录")
             layout.addWidget(self._user_btn)
 
         # 主题切换按钮（调色盘图标，弹出主题菜单）
@@ -429,35 +444,60 @@ class TitleBar(QWidget):
         kind = "restore" if maximized else "max"
         self._btn_max.set_icons(_window_icon(kind, QColor(self._icon_color)))
 
-    def set_user(self, username: str, expires_at: int = None) -> None:
-        """设置标题栏用户信息；``expires_at`` 为 unix 秒时显示剩余有效期。
+    def set_user(
+        self,
+        username: str,
+        expires_at: int | None = None,
+        user: CurrentUser | None = None,
+    ) -> None:
+        """设置标题栏用户信息；``expires_at`` 为 unix 秒时显示会话剩余有效期。
+
+        ``user`` 是登录后从 ``currentUserByToken`` 拉到的当前用户（姓名 / 单位 /
+        部门 / 上次登录）——传了就按它显示（按钮上是姓名，菜单里是详细信息）；
+        没传（未登录 / 拉取失败）就只显示 ``username``，与以前一致。
 
         用户区被隐藏（``show_user=False``，如对话框标题栏）时无操作。
         """
         if self._user_btn is None or self._user_menu is None:
             return
-        self._username = (username or "未登录").strip()
-        self._user_btn.setText(self._username)
-        self._user_btn.setIcon(QIcon(make_avatar_pixmap(self._username)))
+        account = (username or "").strip()
+        display = (user.display_name() if user is not None else account).strip() or "未登录"
+        self._username = display
+        self._user_btn.setText(display)
+        self._user_btn.setIcon(QIcon(make_avatar_pixmap(display)))
         self._user_menu.clear()
-        name_act = self._user_menu.addAction(f"账号：{self._username}")
-        name_act.setEnabled(False)
-        if expires_at:
-            remaining = expires_at - int(time.time())
-            days = max(0, remaining // 86400)
-            exp_act = self._user_menu.addAction(f"凭证剩余：{days} 天")
-            exp_act.setEnabled(False)
+        for text in self._user_menu_lines(account, expires_at, user):
+            action = self._user_menu.addAction(text)
+            action.setEnabled(False)
 
-    def _sync_login_state(self) -> None:
-        """与主窗口一致：构造时从本地凭证加载登录状态（未登录显示"未登录"）。"""
-        if self._user_btn is None:
-            return
-
-        cred = load_credential()
-        if cred is not None:
-            self.set_user(cred.username, expires_at=cred.expires_at)
+    @staticmethod
+    def _user_menu_lines(
+        account: str,
+        expires_at: int | None,
+        user: CurrentUser | None,
+    ) -> list[str]:
+        """用户菜单里的信息行（都是不可点的展示项；没数据的项不出现）。"""
+        lines: list[str] = []
+        if user is None:
+            lines.append(f"账号：{account or '未登录'}")
         else:
-            self.set_user("未登录")
+            lines.append(f"账号：{user.account or account or '未登录'}")
+            name = user.display_name()
+            if user.name and user.name != user.account:
+                lines.append(f"姓名：{name}")
+            if user.organize_line():
+                lines.append(f"单位：{user.organize_line()}")
+            if user.area:
+                lines.append(f"区域：{user.area}")
+            if user.mobile:
+                lines.append(f"手机：{user.mobile}")
+            if user.prev_login_text():
+                lines.append(f"上次登录：{user.prev_login_text()}")
+        if expires_at:
+            lines.append(f"会话有效期：{_format_remaining(expires_at - int(time.time()))}")
+        if user is not None and user.need_reset_password:
+            lines.append("⚠ 服务端要求重置密码")
+        return lines
 
     # ---------------------------------------------------------- 主题切换
 
