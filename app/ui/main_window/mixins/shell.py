@@ -206,6 +206,8 @@ class WindowShellMixin:
         # 点击图层树即自动设为编辑目标（与 QGIS 桌面一致）：
         # 用户期望点完一层就能在工具条点"开始编辑"
         self.layer_dock.layer_clicked.connect(self._on_layer_clicked_in_dock)
+        # 行尾「标注」开关（圆点 + 标注二字）：开关该图层标注（独立开关，不互斥）
+        self.layer_dock.label_toggle_requested.connect(self._on_layer_label_toggle)
         # 头部工具条：样式面板 / 添加图层组 / 删除 / 全部展开 / 全部折叠 / 上移 / 下移
         self.layer_dock.style_panel_requested.connect(self._on_header_style_panel)
         self.layer_dock.add_group_requested.connect(self._on_add_layer_group)

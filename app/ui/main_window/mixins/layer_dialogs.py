@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from qgis.core import (
+    Qgis,
     QgsStyle,
     QgsVectorLayer,
 )
@@ -75,8 +76,32 @@ class LayerDialogsMixin:
             dlg.exec()
             layer.triggerRepaint()
             self.canvas.refresh()
+            # 对话框里可能改了标注启用状态；图层标注改动不发信号，手动刷新行尾「标注」开关
+            self.layer_dock.refresh_label_state()
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "失败", str(e))
+
+    def _on_layer_label_toggle(self, layer, enabled: bool) -> None:
+        """图层树行尾的「标注」开关：开关该图层标注（每个图层各自独立，不互斥）。
+
+        **不自动创建标注配置**——没配过标注的图层（``labeling() is None``）
+        ``setLabelsEnabled`` 是静默空操作（实测调完 ``labelsEnabled()`` 仍为 False），
+        所以这里如实提示去属性对话框配置，而不是假装打开。关闭时只关启用、保留
+        已有配置，与「图层属性 → 标注」页的「无标注」语义一致。
+        """
+        if not isinstance(layer, QgsVectorLayer):
+            return
+        if enabled and layer.labeling() is None:
+            self.messageBar.pushMessage(
+                f"{layer.name()} 尚未配置标注，请先在「图层属性 → 标注」中配置",
+                level=Qgis.MessageLevel.Info,
+                duration=4,
+            )
+            return
+        layer.setLabelsEnabled(bool(enabled))
+        layer.triggerRepaint()
+        self.canvas.refresh()
+        self.layer_dock.refresh_label_state()
 
     def _select_properties_page(self, dlg, texts: tuple) -> None:
         """尽力跳到图层属性对话框的指定页（按左侧选项列表项文本匹配，失败则忽略）。"""
@@ -137,6 +162,8 @@ class LayerDialogsMixin:
 
             dlg = LayerPropertiesDialog(layer, canvas=self.canvas, parent=self)
             dlg.exec()
+            # 「标注」页可能改了启用状态；图层标注改动不发信号，手动刷新行尾「标注」开关
+            self.layer_dock.refresh_label_state()
         except Exception as e:  # noqa: BLE001
             logger.error("打开图层属性失败: %s", e, exc_info=True)
             QMessageBox.warning(self, "失败", str(e))
