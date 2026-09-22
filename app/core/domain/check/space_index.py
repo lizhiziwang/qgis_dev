@@ -11,6 +11,12 @@ layer 被销毁后索引泄漏。
 类型注解里 :class:`QgsVectorLayer` 与 :class:`QgsSpatialIndex` 用
 ``TYPE_CHECKING`` 引入，让本模块在无 QGIS 环境下也能 import；运行
 ``build_spatial_index`` 时才真正需要 qgis。
+
+**使用范围（重要）**：交互式的点选 / 框选（``intersect_features``）**已不再**用它
+—— 那条路径改为把 bbox 下沉给 provider（``QgsFeatureRequest.setFilterRect``），
+避开了「读全表建索引 + 逐 fid ``getFeature`` 回读」的开销（2 万要素 1.4 s -> 84 ms）。
+本模块现在只服务**质检批量检查**（``space_overlap``）这类一次跑完、需要反复做
+Python 侧相交判断的场景。
 """
 
 from __future__ import annotations
@@ -27,6 +33,10 @@ def build_spatial_index(layer: "Optional[QgsVectorLayer]") -> "Optional[QgsSpati
     """为 ``layer`` 构建 :class:`QgsSpatialIndex`，挂在 layer 的 ``__spatial_index__``。
 
     若已存在，直接返回缓存。``layer`` 无效返回 ``None``。
+
+    注意：这会把**整层要素（含属性）读进 Python**（2 万要素实测 ~0.5 s），且是
+    快照——编辑后必须 ``clear_spatial_index``。交互路径请改用 provider 的
+    ``setFilterRect`` 过滤（见 ``query.intersect_features``）。
     """
     from qgis.core import QgsSpatialIndex  # 延迟 import
 

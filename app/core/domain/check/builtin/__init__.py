@@ -7,13 +7,24 @@
 
 from __future__ import annotations
 
-from . import logic_check, null_check, space_long_thin, space_overlap, space_self_intersect, value_check  # noqa: F401
+from . import (
+    logic_check,
+    null_check,
+    space_angle,
+    space_long_thin,
+    space_overlap,
+    space_self_intersect,
+    space_small_area,
+    value_check,
+)
 
 __all__ = [
     "logic_check",
     "null_check",
+    "space_angle",
     "space_long_thin",
     "space_overlap",
     "space_self_intersect",
+    "space_small_area",
     "value_check",
 ]

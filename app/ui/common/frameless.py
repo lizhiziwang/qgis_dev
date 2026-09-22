@@ -1,32 +1,30 @@
 """无边框窗口通用能力（mixin）。
 
-把原来只写在 :class:`MainWindow` 里的「无边框 chrome」能力抽成可复用的
-:class:`FramelessMixin`，让主窗口、流程编辑器（以及后续的对话框）共用同一套
-标题栏 + 拖动 + 缩放 + 最大化修正，保证所有窗口 chrome 风格统一。
+把「无边框 chrome」能力抽成可复用的 :class:`FramelessMixin`，让主窗口、流程
+编辑器、对话框共用同一套标题栏 + 拖动 + 缩放 + 最大化修正，保证所有窗口
+chrome 风格统一。
 
-跨平台策略：
+跨平台策略（各走最省事、效果最好的一条路）：
 
 - **Windows**：``nativeEvent`` 拦截 ``WM_NCHITTEST``（标题栏拖动 + 边缘缩放）、
-  ``WM_GETMINMAXINFO``（最大化修正到工作区）、``WM_NCLBUTTONDOWN`` /
-  ``WM_NCLBUTTONDBLCLK``（Aero Snap 贴边吸附 + 双击最大化）。
-- **Linux (X11)**：拖动走 :class:`TitleBar` 的 ``startSystemMove``；边缘缩放走
-  本类的 ``eventFilter`` + ``QWindow.startSystemResize``；最大化用
-  ``QScreen.availableGeometry`` 手动 setGeometry（避开 panel/任务栏）。
-- **Linux (Wayland)**：``startSystemResize`` 依赖合成器支持，失败时回退到
-  手动 ``setGeometry``（:meth:`_continue_manual_resize`）。
+  ``WM_SETCURSOR``（补上被 Qt 重置的缩放光标）、``WM_GETMINMAXINFO``（最大化
+  填满工作区 + 缩放下限）、``WM_NCLBUTTONDOWN`` / ``WM_NCLBUTTONDBLCLK``
+  （Aero Snap 贴边吸附 + 双击最大化）。缩放本身交给系统，手感最好。
+- **其它平台（X11 / Wayland）**：由 :class:`_WindowFrame` 这层置顶子控件在
+  窗口四周的 8px 边框带上接管鼠标：移动改光标，按下调
+  ``QWindow.startSystemResize``（X11 原生 / Wayland 交给合成器），失败再回退
+  手动 ``setGeometry``。
 
 设计约定：
 
-- :meth:`hit_test` 是**平台无关的纯函数**，命中检测逻辑可脱离 GUI 单测。
+- :func:`hit_test` / :func:`resized_geometry` 是**平台无关的纯函数**，命中与
+  缩放几何逻辑可脱离 GUI 单测；Windows 与其它平台共用同一套命中结果。
 - mixin 不继承 QWidget，靠 duck typing 依赖宿主的 QWidget API；宿主必须把
   本 mixin 放在 QWidget 基类**之前**，其它功能 mixin 可以排在其前面，并通过
   ``super()`` 链协同：``class MainWindow(WindowShellMixin, FramelessMixin, QMainWindow)``。
-- 宿主仍各自负责自己的 ``window_qss`` / 画布 / 工具条主题刷新；mixin 只接管
-  「窗口 chrome」这一层（标题栏 + 系统边框行为 + 主题描边）。
-- 无边框窗口没有系统边框 / 阴影，:meth:`enable_frameless` 会在客户区铺一层
-  透明的 :class:`_WindowBorder` 自绘一圈 :data:`WINDOW_BORDER_WIDTH` 像素的
-  描边（颜色取当前主题 ``border``），它在布局变化后置顶，不被标题栏 /
-  中央控件 / Dock 盖住。
+- 描边与边缘缩放统一由 :class:`_WindowFrame` 承担：铺满客户区、始终置顶、只在
+  最外圈 :data:`WINDOW_BORDER_WIDTH` 像素画描边；非 Windows 平台再用 ``setMask``
+  把它裁成"边框带"，于是只有贴边那几像素吃鼠标，窗口中间的事件照常落到子控件。
 """
 
 from __future__ import annotations
@@ -36,7 +34,7 @@ import sys
 from ctypes import wintypes
 
 from qgis.PyQt.QtCore import QEvent, QPoint, QRect, QRectF, Qt
-from qgis.PyQt.QtGui import QColor, QCursor, QGuiApplication, QPainter, QPen
+from qgis.PyQt.QtGui import QColor, QGuiApplication, QPainter, QPen, QRegion
 from qgis.PyQt.QtWidgets import QMainWindow, QMenuBar, QTabBar, QVBoxLayout, QWidget
 
 from app.ui.common.qt_compat import event_pos, global_pos
@@ -44,13 +42,14 @@ from app.ui.common.theme import ThemeManager
 from app.ui.main_window.title_bar import TitleBar
 
 # ---------------------------------------------------------------------------
-# Windows 无边框窗口辅助：WM_NCHITTEST 让系统接管"标题栏拖动 + 边缘缩放"；
-# WM_GETMINMAXINFO 修正最大化几何；WM_NCLBUTTONDOWN(HTCAPTION) 重发 SC_MOVE
-# 触发系统移动循环以获得 Aero Snap 贴边吸附；WM_NCLBUTTONDBLCLK(HTCAPTION)
-# 双击标题栏最大化/还原。仅 Windows 平台会收到 windows_generic_MSG。
+# Windows 无边框窗口辅助。无边框窗口在 WM_NCHITTEST 里返回 HT* 后，系统并不
+# 自己设置缩放光标（Qt 的 WM_SETCURSOR 处理会把非客户区光标重置成控件的
+# 箭头），所以要自己处理 WM_SETCURSOR（见 :meth:`FramelessMixin._win_set_cursor`）。
+# 仅 Windows 平台会收到 windows_generic_MSG。
 # ---------------------------------------------------------------------------
 
 WM_NCHITTEST = 0x0084
+WM_SETCURSOR = 0x0020
 WM_GETMINMAXINFO = 0x0024
 WM_NCLBUTTONDOWN = 0x00A1
 WM_NCLBUTTONDBLCLK = 0x00A3
@@ -73,6 +72,40 @@ _SIZE_HT_CODES = frozenset(
 )
 MONITOR_DEFAULTTONEAREST = 2
 
+#: Windows 系统光标资源 id（``LoadCursorW(NULL, id)``，即 IDC_*）。
+IDC_ARROW = 32512
+IDC_SIZEWE = 32644
+IDC_SIZENS = 32645
+IDC_SIZENWSE = 32642
+IDC_SIZENESW = 32643
+_HT_RESIZE_CURSOR_ID = {
+    HTLEFT: IDC_SIZEWE,
+    HTRIGHT: IDC_SIZEWE,
+    HTTOP: IDC_SIZENS,
+    HTBOTTOM: IDC_SIZENS,
+    HTTOPLEFT: IDC_SIZENWSE,
+    HTBOTTOMRIGHT: IDC_SIZENWSE,
+    HTTOPRIGHT: IDC_SIZENESW,
+    HTBOTTOMLEFT: IDC_SIZENESW,
+}
+#: ``LoadCursorW`` 返回的是系统共享光标句柄（不可 DestroyCursor），缓存避免每次
+#: 鼠标移动都重新加载。
+_win_cursor_cache: dict = {}
+
+
+def _load_win_cursor(cursor_id: int) -> int:
+    """按系统光标 id 加载共享光标句柄（带缓存）。仅 Windows 调用。"""
+    handle = _win_cursor_cache.get(cursor_id)
+    if handle is None:
+        handle = ctypes.windll.user32.LoadCursorW(None, cursor_id)
+        _win_cursor_cache[cursor_id] = handle
+    return handle
+
+
+def resize_cursor_id(ht: int):
+    """Windows HT 缩放码 → 光标资源 id；非缩放码返回 ``None``。纯函数、可单测。"""
+    return _HT_RESIZE_CURSOR_ID.get(ht)
+
 
 class _MINMAXINFO(ctypes.Structure):
     _fields_ = [
@@ -93,15 +126,29 @@ class _MONITORINFO(ctypes.Structure):
     ]
 
 
-#: 边缘命中判定的像素宽度（窗口边缘外这一范围内都算可缩放）。
-RESIZE_MARGIN = 6
+#: 边缘命中判定的像素宽度（窗口边缘内这一范围内都算可缩放）。
+#: 取 Windows 系统边框默认值（SM_CXSIZEFRAME + SM_CXPADDEDBORDER = 8），
+#: 比描边（:data:`WINDOW_BORDER_WIDTH` = 2px）宽，命中区域才有手感。
+RESIZE_MARGIN = 8
 
 #: 无边框窗口描边宽度（px）。无边框窗口没有系统边框，描边用于和桌面 /
 #: 其它窗口区分，故比普通分隔线（1px）略粗。
 WINDOW_BORDER_WIDTH = 2
 
+#: :func:`hit_test` 结果 → Windows ``WM_NCHITTEST`` 返回码。
+_EDGE_TO_HT = {
+    Qt.Edge.LeftEdge: HTLEFT,
+    Qt.Edge.RightEdge: HTRIGHT,
+    Qt.Edge.TopEdge: HTTOP,
+    Qt.Edge.BottomEdge: HTBOTTOM,
+    Qt.Edge.TopEdge | Qt.Edge.LeftEdge: HTTOPLEFT,
+    Qt.Edge.TopEdge | Qt.Edge.RightEdge: HTTOPRIGHT,
+    Qt.Edge.BottomEdge | Qt.Edge.LeftEdge: HTBOTTOMLEFT,
+    Qt.Edge.BottomEdge | Qt.Edge.RightEdge: HTBOTTOMRIGHT,
+}
 
-def hit_test(rect, pos, margin: int = RESIZE_MARGIN) -> "Qt.Edge":
+
+def hit_test(rect, pos, margin: int = RESIZE_MARGIN) -> Qt.Edge:
     """返回 ``pos``（``rect`` 本地坐标）落在哪条边缘（:class:`Qt.Edge` 组合）。
 
     纯函数、平台无关、可单测。语义与 Windows ``WM_NCHITTEST`` 一致：紧贴窗口
@@ -120,8 +167,22 @@ def hit_test(rect, pos, margin: int = RESIZE_MARGIN) -> "Qt.Edge":
     return edges
 
 
+def resized_geometry(start_geo: QRect, edges, delta: QPoint) -> QRect:
+    """按拖动增量 ``delta`` 把 ``start_geo`` 的 ``edges`` 边推出去。纯函数、可单测。"""
+    geo = QRect(start_geo)
+    if edges & Qt.Edge.LeftEdge:
+        geo.setLeft(geo.left() + delta.x())
+    if edges & Qt.Edge.RightEdge:
+        geo.setRight(geo.right() + delta.x())
+    if edges & Qt.Edge.TopEdge:
+        geo.setTop(geo.top() + delta.y())
+    if edges & Qt.Edge.BottomEdge:
+        geo.setBottom(geo.bottom() + delta.y())
+    return geo
+
+
 def _cursor_for(edges) -> Qt.CursorShape:
-    """根据边缘组合返回对应的调整大小光标形状。"""
+    """边缘组合 → 调整大小光标形状。"""
     if edges in (Qt.Edge.LeftEdge, Qt.Edge.RightEdge):
         return Qt.CursorShape.SizeHorCursor
     if edges in (Qt.Edge.TopEdge, Qt.Edge.BottomEdge):
@@ -143,38 +204,139 @@ def sc_size_wparam(ht: int) -> int:
     return SC_SIZE | (ht - 9)
 
 
-class _WindowBorder(QWidget):
-    """无边框窗口的描边层（宿主窗口的透明子控件）。
+class _WindowFrame(QWidget):
+    """无边框窗口的描边层，非 Windows 平台同时是边缘缩放手柄。
 
-    自绘标题栏的窗口没有系统边框 / 阴影，贴在同色桌面或其它窗口上时边界糊成
-    一片。本类铺满整个客户区并置顶，只在最外圈画 :data:`WINDOW_BORDER_WIDTH`
-    像素宽的描边线：
+    铺满整个客户区并置顶，只在最外圈画 :data:`WINDOW_BORDER_WIDTH` 像素描边：
 
-    - ``WA_TransparentForMouseEvents``：不吃鼠标事件，标题栏按钮点击、画布
-      拖拽、边缘缩放（``WM_NCHITTEST``）全部照常；
     - 颜色在 :meth:`paintEvent` 里实时读当前主题的 ``border``，主题切换时宿主
       重刷 QSS 会顺带触发重绘，无需额外信号连接；
-    - 必须由宿主在每次布局 / 尺寸变化后 ``raise_()``，否则后建的 Dock / 工具栏
-      会盖住它。
+    - 自带事件过滤器监听宿主窗口的 Resize / Show / LayoutRequest /
+      WindowStateChange，自动同步几何、显隐、层级——宿主不必再写一堆
+      ``resizeEvent`` / ``showEvent`` / ``event`` 样板；
+    - 最大化 / 全屏时自动隐藏（此时系统窗口也无需描边）。
+
+    平台差异：
+
+    - **Windows**：``WA_TransparentForMouseEvents``，不吃鼠标事件；缩放交给
+      ``WM_NCHITTEST`` 原生处理，描边层纯装饰。
+    - **其它平台**：用 ``setMask`` 把它裁成边框带，于是只有贴着窗口外沿的
+      ``RESIZE_MARGIN`` 像素吃鼠标（窗口中间的事件照常落到子控件）。移动改
+      光标，按下调 ``startSystemResize``，失败回退手动 ``setGeometry``。
     """
 
-    def __init__(self, parent: QWidget, width: int = WINDOW_BORDER_WIDTH) -> None:
+    def __init__(self, parent: QWidget, *, interactive: bool, paint_border: bool) -> None:
         super().__init__(parent)
-        self._width = max(1, int(width))
-        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        self._interactive = interactive
+        self._paint_border = paint_border
+        self._resize_edges = Qt.Edge(0)
+        self._resize_start_pos = QPoint()
+        self._resize_start_geo = QRect()
+        self.setObjectName("WindowFrame")
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground, True)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, True)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        if interactive:
+            self.setMouseTracking(True)
+        else:
+            self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        parent.installEventFilter(self)
+        self._sync()
 
-    def paintEvent(self, _event) -> None:  # noqa: N802 —— Qt 命名
+    # ------------------------------------------------------------- 同步
+
+    def eventFilter(self, watched, event) -> bool:
+        if watched is self.parentWidget() and event.type() in (
+            QEvent.Type.Resize,
+            QEvent.Type.Show,
+            QEvent.Type.LayoutRequest,
+            QEvent.Type.WindowStateChange,
+        ):
+            self._sync()
+        return False
+
+    def _sync(self) -> None:
+        window = self.parentWidget()
+        if window is None:
+            return
+        target = QRect(0, 0, window.width(), window.height())
+        if self.geometry() != target:
+            self.setGeometry(target)
+        hidden = (
+            window.isMaximized()
+            or window.isFullScreen()
+            or getattr(window, "_visual_maximized", False)
+        )
+        self.setVisible(not hidden)
+        if hidden:
+            return
+        self.raise_()
+        if self._interactive:
+            inner = self.rect().adjusted(
+                RESIZE_MARGIN, RESIZE_MARGIN, -RESIZE_MARGIN, -RESIZE_MARGIN
+            )
+            self.setMask(QRegion(self.rect()) - QRegion(inner))
+
+    # ------------------------------------------------------------- 绘制
+
+    def paintEvent(self, _event) -> None:
+        if not self._paint_border:
+            return
         theme = ThemeManager.instance().current()
         painter = QPainter(self)
-        painter.setPen(QPen(QColor(theme.border), self._width))
+        painter.setPen(QPen(QColor(theme.border), WINDOW_BORDER_WIDTH))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         # 画笔以路径为中心向两侧展开；把路径内缩半个线宽，描边才恰好落在
         # 客户区内侧（1px→1px，2px→2px……），不会向窗口外溢半像素。
-        half = self._width / 2.0
+        half = WINDOW_BORDER_WIDTH / 2.0
         painter.drawRect(QRectF(self.rect()).adjusted(half, half, -half, -half))
+
+    # ------------------------------------------------------- 边缘缩放（非 Windows）
+
+    def mouseMoveEvent(self, event) -> None:
+        if self._resize_edges != Qt.Edge(0):
+            self._drag_resize(global_pos(event))
+            return
+        self.setCursor(_cursor_for(hit_test(self.rect(), event_pos(event))))
+
+    def mousePressEvent(self, event) -> None:
+        if event.button() == Qt.MouseButton.LeftButton:
+            edges = hit_test(self.rect(), event_pos(event))
+            if edges != Qt.Edge(0):
+                self._begin_resize(edges, global_pos(event))
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        if self._resize_edges != Qt.Edge(0):
+            self._resize_edges = Qt.Edge(0)
+            self.releaseMouse()
+        super().mouseReleaseEvent(event)
+
+    def _begin_resize(self, edges, start_pos: QPoint) -> None:
+        """优先 ``QWindow.startSystemResize``（X11 原生 / Wayland 合成器），失败回退手动。
+
+        手动兜底用**按下事件的全局坐标**做锚点（而非 ``QCursor.pos()``），跨屏 / 光标
+        被 warp 时更可靠。
+        """
+        handle = self.window().windowHandle()
+        if handle is not None and hasattr(handle, "startSystemResize"):
+            try:
+                if handle.startSystemResize(edges):
+                    return
+            except Exception:  # noqa: BLE001 —— 合成器不支持时静默回退
+                pass
+        self._resize_edges = edges
+        self._resize_start_pos = start_pos
+        self._resize_start_geo = self.window().geometry()
+        self.grabMouse()
+
+    def _drag_resize(self, global_position: QPoint) -> None:
+        delta = global_position - self._resize_start_pos
+        self.window().setGeometry(
+            resized_geometry(self._resize_start_geo, self._resize_edges, delta)
+        )
 
 
 class FramelessMixin:
@@ -217,13 +379,10 @@ class FramelessMixin:
             和桌面 / 其它窗口区分；全屏类窗口可传 False。
         :return: 创建好的 :class:`TitleBar` 实例（也存到 ``self.title_bar``）。
         """
-
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
 
         # ---- 状态（mixin 无 __init__，在这里统一初始化）----
-        self._resize_targets: set = set()
-        self._resize_edges = Qt.Edge(0)  # 非 0 = 正在手动 resize（Wayland 兜底）
-        self._visual_maximized = False  # X11 手动放大标记（windowState 不反映，isMaximized() 为 False）
+        self._visual_maximized = False  # X11 手动放大标记（windowState 不反映）
         self._restore_geo = None        # X11 手动放大前的几何，还原时恢复
 
         # ---- 标题栏 + 信号 ----
@@ -240,7 +399,7 @@ class FramelessMixin:
         if show_min_button:
             self.title_bar.minimize_requested.connect(self.showMinimized)
         self.windowTitleChanged.connect(self.title_bar.set_title)
-        self.title_bar.set_title(self.windowTitle())  # 初始标题（构造时 windowTitle 可能已设）
+        self.title_bar.set_title(self.windowTitle())  # 构造时 windowTitle 可能已设
 
         # ---- chrome 挂载：QMainWindow 走 setMenuWidget，QDialog 走布局顶部 ----
         if isinstance(self, QMainWindow):
@@ -270,14 +429,12 @@ class FramelessMixin:
             self._frameless_layout.setSpacing(0)
             self._frameless_layout.addWidget(self.title_bar)
 
-        # ---- Linux/X11 边缘缩放需要鼠标追踪 ----
-        if not self._is_windows():
-            self.setMouseTracking(True)
-
-        # ---- 无边框窗口描边（透明子控件置顶自绘，不被 title_bar / central 盖住）----
-        self._border_syncing = False
-        self._window_border = _WindowBorder(self) if with_border else None
-        self._sync_window_border()
+        # ---- 描边 +（非 Windows）边缘缩放手柄（置顶透明子控件，自动跟随宿主）----
+        self._window_frame = _WindowFrame(
+            self,
+            interactive=not self._is_windows(),
+            paint_border=with_border,
+        )
 
         return self.title_bar
 
@@ -317,188 +474,129 @@ class FramelessMixin:
             else:
                 self.showNormal()
             self._visual_maximized = False
-        elif self._is_windows():
-            self.showMaximized()          # WM_GETMINMAXINFO 已修正到工作区
         elif self._is_x11():
             # X11：availableGeometry 已扣掉 panel/任务栏，手动 setGeometry 避免盖住
             screen = self.screen()
-            if screen is not None:
-                self._restore_geo = self.geometry()
-                self.setGeometry(screen.availableGeometry())
-                self._visual_maximized = True
-            else:
+            if screen is None:
                 self.showMaximized()
+            else:
+                self._restore_geo = self.geometry()
+                self._visual_maximized = True  # 先置位，setGeometry 触发的 Resize 才知道要隐藏描边
+                self.setGeometry(screen.availableGeometry())
         else:
-            self.showMaximized()          # Wayland：交给合成器
-        # X11 手动放大/还原不触发 WindowStateChange，这里主动同步按钮图标
+            # Windows：WM_GETMINMAXINFO 已修正到工作区；Wayland：交给合成器
+            self.showMaximized()
+        self._sync_max_button()
+
+    def _sync_max_button(self) -> None:
+        """同步标题栏最大化按钮图标（X11 手动放大不触发 WindowStateChange）。"""
         tb = getattr(self, "title_bar", None)
         if tb is not None:
             tb.set_maximized(self.isMaximized() or self._visual_maximized)
-        self._sync_window_border()
 
-    # ------------------------------------------------------------ 窗口描边
-
-    def _sync_window_border(self) -> None:
-        """同步描边层的几何 / 显隐 / 层级。
-
-        最大化 / 全屏时隐藏（系统窗口此时也无边框）；重入安全：``event`` 里
-        的 ``LayoutRequest`` 也会调它，避免 ``raise_()`` 间接触发重入。
-        """
-        border = getattr(self, "_window_border", None)
-        if border is None or getattr(self, "_border_syncing", False):
-            return
-        self._border_syncing = True
-        try:
-            border.setGeometry(self.rect())
-            visible = not (
-                self.isMaximized()
-                or self.isFullScreen()
-                or getattr(self, "_visual_maximized", False)
-            )
-            border.setVisible(visible)
-            if visible:
-                border.raise_()
-        finally:
-            self._border_syncing = False
-
-    def resizeEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
-        super().resizeEvent(event)
-        self._sync_window_border()
-
-    def showEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
-        super().showEvent(event)
-        self._sync_window_border()
-
-    def event(self, event):
-        """布局变化（Dock / 工具条增删、菜单栏重建）后把描边层重新置顶。
-
-        后创建的子控件默认叠在描边层之上，会在窗口边缘盖掉描边；QMainWindow
-        的 Dock 增删不一定触发 resize，所以监听 ``LayoutRequest`` 补一次抬升。
-        """
-        result = super().event(event)
-        if event.type() == QEvent.Type.LayoutRequest:
-            border = getattr(self, "_window_border", None)
-            if border is not None and not border.isHidden():
-                border.raise_()
-        return result
-
-    def changeEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
-        """最大化/还原状态变化 → 同步标题栏按钮图标 + 描边显隐。"""
+    def changeEvent(self, event) -> None:
         if event.type() == QEvent.Type.WindowStateChange:
-            tb = getattr(self, "title_bar", None)
-            if tb is not None and hasattr(self, "isMaximized"):
-                tb.set_maximized(
-                    self.isMaximized() or getattr(self, "_visual_maximized", False)
-                )
-            self._sync_window_border()
+            self._sync_max_button()
         super().changeEvent(event)
 
     # ------------------------------------------------------------ Windows 原生事件
 
     def nativeEvent(self, eventType, message):
-        """Windows：拦截 WM_NCHITTEST / WM_GETMINMAXINFO 等，让系统接管拖动/缩放。
+        """Windows：拦截 WM_NCHITTEST / WM_SETCURSOR / WM_GETMINMAXINFO / WM_NCLBUTTON*。
 
-        其它平台 ``windows_generic_MSG`` 不会出现，直接透传给 Qt 默认。
+        其它平台不出现 ``windows_generic_MSG``，直接透传 Qt 默认。
         """
-        if self._is_windows():
+        if self._is_windows() and bytes(eventType) == b"windows_generic_MSG":
             try:
-                if bytes(eventType) == b"windows_generic_MSG":
-                    msg = wintypes.MSG.from_address(int(message))
-                    if msg.message == WM_NCHITTEST:
-                        return (True, self._wm_nchittest(msg))
-                    if msg.message == WM_GETMINMAXINFO:
-                        self._wm_getminmaxinfo(msg)
+                msg = wintypes.MSG.from_address(int(message))
+                if msg.message == WM_NCHITTEST:
+                    return (True, self._win_hit_test(msg))
+                if msg.message == WM_SETCURSOR:
+                    if self._win_set_cursor(msg):
+                        return (True, 1)
+                elif msg.message == WM_GETMINMAXINFO:
+                    self._win_apply_minmax(msg)
+                    return (True, 0)
+                elif msg.message == WM_NCLBUTTONDOWN:
+                    if self._win_start_native(int(msg.wParam)):
                         return (True, 0)
-                    if msg.message == WM_NCLBUTTONDOWN:
-                        wp = int(msg.wParam)
-                        if wp == HTCAPTION:
-                            # 无边框窗口下 Qt 把标题栏区当客户区，系统原生拖动（含 Aero
-                            # Snap 贴边吸附）不会启动。ReleaseCapture + 重发
-                            # WM_SYSCOMMAND(SC_MOVE|HTCAPTION) 让系统进入原生移动循环。
-                            ctypes.windll.user32.ReleaseCapture()
-                            ctypes.windll.user32.SendMessageW(
-                                int(self.winId()), WM_SYSCOMMAND, SC_MOVE | HTCAPTION, 0
-                            )
-                            return (True, 0)
-                        if wp in _SIZE_HT_CODES:
-                            # 边缘缩放同理：WM_NCHITTEST 返回 HT* 缩放码后，系统发的
-                            # WM_NCLBUTTONDOWN(wParam=HT*) 默认由 Qt 窗口过程丢弃，不会
-                            # 进入系统 resize 循环（探针实测尺寸纹丝不动）。这里重发
-                            # WM_SYSCOMMAND(SC_SIZE|方向) 让系统接管缩放。
-                            # 方向编号见 :func:`sc_size_wparam`（不能用 SC_SIZE|wp，会被
-                            # 当 SC_MOVE 解析成拖动）。
-                            ctypes.windll.user32.ReleaseCapture()
-                            ctypes.windll.user32.SendMessageW(
-                                int(self.winId()), WM_SYSCOMMAND, sc_size_wparam(wp), 0
-                            )
-                            return (True, 0)
-                    if msg.message == WM_NCLBUTTONDBLCLK and msg.wParam == HTCAPTION:
-                        self._toggle_maximize()
-                        return (True, 0)
+                elif msg.message == WM_NCLBUTTONDBLCLK and int(msg.wParam) == HTCAPTION:
+                    self._toggle_maximize()
+                    return (True, 0)
             except Exception:  # noqa: BLE001 —— 兜底走 Qt 默认，不拖垮事件循环
                 pass
-        # Qt6 绑定下 super().nativeEvent 对未处理的消息返回 (False, None)；把这个 None
-        # 直接透传回 Qt 时，sip 无法把 None 转成 qintptr 结果参数，抛出的 TypeError
-        # 会穿进 C++ 事件分发，导致原生访问冲突（进程无 traceback 退出）。必须强转 int。
+        # Qt6 绑定下 super().nativeEvent 对未处理的消息返回 (False, None)；把 None
+        # 直接透传回 Qt 时 sip 无法把 None 转成 qintptr 结果参数，抛出的 TypeError
+        # 会穿进 C++ 事件分发导致原生访问冲突（进程无 traceback 退出）。必须强转 int。
         ok, res = super().nativeEvent(eventType, message)
         return (ok, res if isinstance(res, int) else 0)
 
-    def _wm_nchittest(self, msg) -> int:
-        """命中测试：窗口边缘 → resize 码；标题栏空白 → HTCAPTION；其余 HTCLIENT。"""
-        lp = int(msg.lParam)
-        x = lp & 0xFFFF
-        y = (lp >> 16) & 0xFFFF
-        if x & 0x8000:
-            x -= 0x10000
-        if y & 0x8000:
-            y -= 0x10000
+    def _win_hit_test(self, msg) -> int:
+        """WM_NCHITTEST：边缘→HT* 缩放；标题栏空白→HTCAPTION 拖动；其余 HTCLIENT。"""
+        if self.isMaximized():
+            return HTCLIENT  # 最大化时禁止拖动 / 缩放
+        local = self._win_local_pos(msg.lParam)
+        edges = hit_test(self.rect(), local)
+        if edges:
+            return _EDGE_TO_HT[edges]
+        if self._title_bar_is_draggable(local):
+            return HTCAPTION
+        return HTCLIENT
 
-        # WM_NCHITTEST 的 lParam 是**物理像素**屏幕坐标；Qt 的 widget/geometry
-        # 坐标系是逻辑像素。HiDPI 缩放下（Win11 高分屏常见 125%/150%）两者不一致，
-        # 不换算会与下面的 frameGeometry()/mapFromGlobal 全部错位：按钮区可能被
-        # 误判成拖动区（HTCAPTION），点击被系统吃掉。DPI-unaware 进程 dpr=1 时
-        # 该换算退化为恒等，不影响。
+    def _title_bar_is_draggable(self, local: QPoint) -> bool:
+        """``local``（窗口本地坐标）是否落在标题栏空白区（→ 交给系统拖动）。
+
+        用子控件几何命中（``TitleBar.is_interactive_pos``）而不是
+        ``QApplication.widgetAt``：后者是全局查询，在 Win11 / HiDPI / 跨屏缩放
+        下可能返回 None 或错位控件，导致按钮区被误判为拖动区、点击被吃掉。
+        """
+        tb = getattr(self, "title_bar", None)
+        if tb is None or tb.isHidden():
+            return False
+        if not QRect(tb.mapTo(self, QPoint(0, 0)), tb.size()).contains(local):
+            return False
+        return not tb.is_interactive_pos(tb.mapFrom(self, local))
+
+    def _win_local_pos(self, lparam) -> QPoint:
+        """WM_NCHITTEST 的 lParam（屏幕坐标，打包的两个 16 位有符号数）→ 窗口本地逻辑坐标。
+
+        进程 DPI-aware 时 lParam 是**物理**像素，需按 ``devicePixelRatioF`` 换算回
+        逻辑像素再交给 Qt 的 ``mapFromGlobal``；DPI-unaware 进程 dpr=1，换算退化为
+        恒等。
+        """
+        lp = int(lparam)
+        x = ctypes.c_short(lp & 0xFFFF).value
+        y = ctypes.c_short((lp >> 16) & 0xFFFF).value
         ratio = self.devicePixelRatioF()
         if ratio not in (0.0, 1.0):
             x = round(x / ratio)
             y = round(y / ratio)
+        return self.mapFromGlobal(QPoint(x, y))
 
-        if self.isMaximized():
-            return HTCLIENT  # 最大化时禁止拖动 / 缩放
+    def _win_set_cursor(self, msg) -> bool:
+        """WM_SETCURSOR：缩放区手动 SetCursor，返回 Qt 已处理；其它状态交回 Qt。"""
+        cursor_id = resize_cursor_id(int(msg.lParam) & 0xFFFF)
+        if cursor_id is None:
+            return False
+        ctypes.windll.user32.SetCursor(_load_win_cursor(cursor_id))
+        return True
 
-        g = self.frameGeometry()
-        left, top, right, bottom = g.left(), g.top(), g.right(), g.bottom()
-        m = RESIZE_MARGIN
-        if y <= top + m:
-            if x <= left + m:
-                return HTTOPLEFT
-            if x >= right - m:
-                return HTTOPRIGHT
-            return HTTOP
-        if y >= bottom - m:
-            if x <= left + m:
-                return HTBOTTOMLEFT
-            if x >= right - m:
-                return HTBOTTOMRIGHT
-            return HTBOTTOM
-        if x <= left + m:
-            return HTLEFT
-        if x >= right - m:
-            return HTRIGHT
+    def _win_start_native(self, wparam: int) -> bool:
+        """WM_NCLBUTTONDOWN：重发 SC_MOVE（Aero Snap 拖动）/ SC_SIZE（原生缩放）。"""
+        if wparam == HTCAPTION:
+            self._send_syscommand(SC_MOVE | HTCAPTION)
+            return True
+        if wparam in _SIZE_HT_CODES:
+            self._send_syscommand(sc_size_wparam(wparam))
+            return True
+        return False
 
-        # 标题栏空白区域 → 系统拖动；按钮/用户信息区域交给 Qt 正常处理。
-        # 用子控件几何命中（is_interactive_pos）而不是 QApplication.widgetAt：
-        # widgetAt 是全局查询，在 Win11 / HiDPI / 跨屏缩放下可能返回 None 或错位
-        # 控件，导致按钮区被误判为 HTCAPTION（点击被系统当成拖动吃掉）。
-        tb = getattr(self, "title_bar", None)
-        if tb is not None and not tb.isHidden():
-            tb_tl = tb.mapTo(self, QPoint(0, 0))
-            if QRect(tb_tl, tb.size()).contains(QPoint(x - left, y - top)):
-                if not tb.is_interactive_pos(tb.mapFromGlobal(QPoint(x, y))):
-                    return HTCAPTION
-        return HTCLIENT
+    def _send_syscommand(self, wparam: int) -> None:
+        user32 = ctypes.windll.user32
+        user32.ReleaseCapture()
+        user32.SendMessageW(int(self.winId()), WM_SYSCOMMAND, wparam, 0)
 
-    def _wm_getminmaxinfo(self, msg) -> None:
+    def _win_apply_minmax(self, msg) -> None:
         """修正最大化几何 + 缩放下限：无边框窗口最大化时填满工作区，不盖住任务栏。
 
         ``WM_GETMINMAXINFO`` 被本类拦截后不再走 Qt 默认填充，必须在这里手动把
@@ -525,84 +623,13 @@ class FramelessMixin:
             min_h = round(min_h * ratio)
         mmi.ptMinTrackSize.x, mmi.ptMinTrackSize.y = min_w, min_h
 
-    # ------------------------------------------------------------ Linux 边缘缩放
 
-    def monitor_resize_edges(self, widget) -> None:
-        """把 ``widget`` 注册为 Linux 边缘缩放监控目标。
-
-        ``widget`` 必须已 ``installEventFilter(self)``（本方法只负责记录 +
-        开鼠标追踪，不重复安装，避免同一 filter 对同一 widget 过滤两次）。
-        宿主对 central widget（canvas / FlowView）调用即可。
-        """
-        if widget not in self._resize_targets:
-            self._resize_targets.add(widget)
-            widget.setMouseTracking(True)
-
-    def eventFilter(self, watched, event) -> bool:  # noqa: N802 —— Qt 命名
-        """Linux/X11 边缘缩放：在注册的 resize target 上检测边缘 → 光标 / 缩放。
-
-        与宿主的 ``eventFilter``（如 MainWindow 的画布拖拽拦截）通过
-        ``super().eventFilter`` 沿 MRO 协同，互不覆盖。
-        """
-        if not self._is_windows() and watched in getattr(self, "_resize_targets", ()):
-            t = event.type()
-            if t == QEvent.Type.MouseMove:
-                if self._resize_edges == Qt.Edge(0):
-                    edges = hit_test(self.rect(), watched.mapTo(self, event_pos(event)))
-                    self._apply_resize_cursor(watched, edges)
-            elif t == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
-                edges = hit_test(self.rect(), watched.mapTo(self, event_pos(event)))
-                if edges != Qt.Edge(0):
-                    self._start_system_resize(edges)
-                    return True
-        return super().eventFilter(watched, event)
-
-    def _apply_resize_cursor(self, watched, edges) -> None:
-        watched.setCursor(_cursor_for(edges))
-
-    def _start_system_resize(self, edges) -> None:
-        """优先走 ``QWindow.startSystemResize``（X11 原生）；失败回退手动 resize。"""
-        handle = self.windowHandle()
-        if handle is not None and hasattr(handle, "startSystemResize"):
-            try:
-                if handle.startSystemResize(edges):
-                    return
-            except Exception:  # noqa: BLE001
-                pass
-        # Wayland / 合成器不支持：记录初始状态，由 _continue_manual_resize 驱动
-        self._resize_edges = edges
-        self._resize_start_pos = QCursor.pos()
-        self._resize_start_geo = self.geometry()
-        self.grabMouse()
-
-    def _continue_manual_resize(self, global_pos) -> None:
-        if self._resize_edges == Qt.Edge(0):
-            return
-        delta = global_pos - self._resize_start_pos
-        geo = QRect(self._resize_start_geo)
-        edges = self._resize_edges
-        if edges & Qt.Edge.LeftEdge:
-            geo.setLeft(geo.left() + delta.x())
-        if edges & Qt.Edge.RightEdge:
-            geo.setRight(geo.right() + delta.x())
-        if edges & Qt.Edge.TopEdge:
-            geo.setTop(geo.top() + delta.y())
-        if edges & Qt.Edge.BottomEdge:
-            geo.setBottom(geo.bottom() + delta.y())
-        self.setGeometry(geo)
-
-    def mouseMoveEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
-        """手动 resize 兜底：grabMouse 后 MouseMove 直接发给窗口自身。"""
-        if self._resize_edges != Qt.Edge(0):
-            self._continue_manual_resize(global_pos(event))
-        super().mouseMoveEvent(event)
-
-    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
-        """手动 resize 结束：松开鼠标清除状态。"""
-        if self._resize_edges != Qt.Edge(0):
-            self._resize_edges = Qt.Edge(0)
-            self.releaseMouse()
-        super().mouseReleaseEvent(event)
-
-
-__all__ = ["FramelessMixin", "RESIZE_MARGIN", "hit_test"]
+__all__ = [
+    "RESIZE_MARGIN",
+    "WINDOW_BORDER_WIDTH",
+    "FramelessMixin",
+    "hit_test",
+    "resize_cursor_id",
+    "resized_geometry",
+    "sc_size_wparam",
+]

@@ -50,6 +50,21 @@ class CheckService:
         instance = cls()
         return instance.run(p)
 
+    # ---------------------------------------------------------- 流式执行
+
+    def iter_failed(self, p: CheckParam, *, type_id: Optional[str] = None):
+        """流式执行支持增量输出的质检，产出 ``(seen, fid, ratio)``。
+
+        仅像 :class:`SpaceLongThinCheck` 这样实现了 ``iter_failed`` 的 check 可用，
+        供界面分批驱动（避免长循环阻塞 UI）；普通 check 请用 :meth:`run`。
+        """
+        cls = self._resolve_cls(type_id, p)
+        instance = cls()
+        iter_fn = getattr(instance, "iter_failed", None)
+        if iter_fn is None:
+            raise TypeError(f"{cls.__name__} 不支持流式执行")
+        return iter_fn(p)
+
     def run_batch(
         self,
         params: Sequence[CheckParam],

@@ -28,8 +28,7 @@
 - :class:`~app.ui.main_window.mixins.gpkg_alias.GpkgAliasMixin`        - gpkg 别名清扫
 
 各 mixin 只依赖 ``self`` 上的共享状态（``self.canvas`` / ``self.project`` /
-``self._paths`` ...），以 ``super()`` 沿 MRO 协同；功能 mixin 必须排在
-:class:`FramelessMixin` **之前**，宿主的事件过滤器才会先于无边框缩放执行。
+``self._paths`` ...），以 ``super()`` 沿 MRO 协同。
 """
 
 from __future__ import annotations

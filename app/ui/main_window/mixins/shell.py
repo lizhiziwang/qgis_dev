@@ -31,6 +31,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from app.infra.messagebar import FloatingMessageBar
+from app.ui.common.map_canvas import AppMapCanvas
 from app.ui.common.theme import ThemeManager
 from app.ui.main_window.browser_dock import BrowserDock
 from app.ui.main_window.layer_dock import LayerDock
@@ -43,14 +44,13 @@ class WindowShellMixin:
     # ===================================================== 装配
 
     def _build_canvas(self) -> QgsMapCanvas:
-        canvas = QgsMapCanvas(self)
+        # AppMapCanvas：开图层渲染缓存；Python 侧 refresh() 仍为「清缓存 + 整幅重画」
+        # （点选/框选/取消选择改选中集只重画脏图层，实测 260ms -> 13ms）
+        canvas = AppMapCanvas(self)
         canvas.setAcceptDrops(True)
         # 拦截浏览器拖出的图层 URI，走与双击一致的添加路径（原生 drop 会把图层
         # 直接挂到工程根节点，不进"数据图层"分组、也不设 path_c）
         canvas.installEventFilter(self)
-        # Linux/X11 边缘缩放：canvas 覆盖窗口主要边缘，注册为缩放监控目标
-        # （canvas 已 installEventFilter(self)，monitor 只记录 + 开鼠标追踪）
-        self.monitor_resize_edges(canvas)
         # 画布底色跟随主题（默认浅色为白色）
         canvas.setCanvasColor(QColor(ThemeManager.instance().current().canvas_bg))
         canvas.enableAntiAliasing(True)

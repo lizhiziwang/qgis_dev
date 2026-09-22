@@ -69,9 +69,6 @@ class FlowEditorWindow(FramelessMixin, QMainWindow):
         self.scene = FlowScene()
         self.view = FlowView(self.scene, self)
         self.setCentralWidget(self.view)
-        # Linux/X11 边缘缩放：FlowView 覆盖整个窗口，注册为缩放监控目标
-        self.view.installEventFilter(self)
-        self.monitor_resize_edges(self.view)
 
         # ---- 执行器（QObject，信号驱动 UI）
         self.executor = FlowExecutor(self)

@@ -44,6 +44,10 @@ logger = get_logger(__name__)
 
 #: 超过该数量才启用分批动态加载；≤ 阈值时一次性全量加载（避免小图层分页闪烁）
 DYNAMIC_LOAD_THRESHOLD = 1000
+#: ``show_ids`` 走 ``setFilterFids`` 的上限。OGR/GPKG 下大 fid 集合会退化成
+#: ``O(n×m)`` 的逐行判定（实测 2 万要素 / 4148 个 id >2min），超过该值时
+#: 改为“全表扫描 + python set 判定”（同一图层 <1s）。
+FID_FILTER_MAX = 1000
 #: 大图层每批固定加载条数（首屏即 2000，滚动/「加载更多」后续批同量）。
 #: 用固定值而不是总量的百分比：500w 级图层按 20% 算首屏就是 100w 条，一样卡死。
 STREAM_BATCH = 2000
@@ -92,6 +96,9 @@ class FeatureStreamWorker(QObject):
         self._cancel = threading.Event()
         self._go = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        #: 大批 ``show_ids`` 改在 python 侧按 set 判定（见 :meth:`_prepare_filter`）
+        self._id_set = set(self.show_ids)
+        self._filter_ids_py = False
         #: 批次边界探测暂存的 1 条要素（多取 1 条用于判断是否已耗尽）
         self._stashed: Optional[QgsFeature] = None
         #: show_ids + 表达式组合时，表达式在 python 侧逐条求值（见 _prepare_filter）
@@ -118,15 +125,23 @@ class FeatureStreamWorker(QObject):
     def _prepare_filter(self) -> QgsFeatureRequest:
         """构造请求。
 
-        本构建（QGIS 4.2）里 ``setFilterFids`` 与 ``setFilterExpression``
-        **不能组合**：``setFilterExpression`` 会清空已设的 fids，fids 快路径
-        也会忽略已设的表达式（探针实测，两种顺序都只有最后一个生效）。
-        因此 show_ids + 表达式组合时，以 fids 为主过滤（范围受 show_ids 大小
-        约束，非全表扫描），表达式在 :meth:`_next_accepted` 里逐条求值。
+        两条路径：
+
+        * ``show_ids`` 较小（≤ :data:`FID_FILTER_MAX`）→ 走 ``setFilterFids`` 快路径；
+          与表达式组合时以 fids 为主过滤，表达式在 :meth:`_next_accepted` 里逐条求值
+          （本构建 QGIS 4.2 里 ``setFilterFids`` 与 ``setFilterExpression`` 不能组合）。
+        * ``show_ids`` 很大 → OGR/GPKG 的 fid 过滤会退化成 ``O(n×m)``，改为取全表
+          （或已按表达式过滤的结果），在 :meth:`_next_accepted` 里按 python set 丢弃
+          非命中 fid（只取 fid + ``NoGeometry``，开销很小）。
         """
         request = QgsFeatureRequest()
         has_expr = self.where.strip() not in ("", "1=1")
-        if self.show_ids and has_expr:
+        # 大批 show_ids 不用 ``setFilterFids``：OGR/GPKG 后端会退化成 O(n×m)，
+        # 改为取全表（或已按表达式过滤的结果）后在 :meth:`_next_accepted` 里
+        # 按 python set 丢弃非命中 fid（只取 fid + NoGeometry，开销很小）。
+        use_fid_filter = bool(self.show_ids) and len(self.show_ids) <= FID_FILTER_MAX
+        self._filter_ids_py = bool(self.show_ids) and not use_fid_filter
+        if use_fid_filter and has_expr:
             request.setFilterFids(self.show_ids)
             self._expr = QgsExpression(self.where)
             self._expr_ctx = QgsExpressionContext()
@@ -137,8 +152,7 @@ class FeatureStreamWorker(QObject):
         else:
             if has_expr:
                 request.setFilterExpression(self.where)
-            if self.show_ids:
-                # show_ids 用 setFilterFids 快路径，不走 $id in (...) 巨表达式
+            if use_fid_filter:
                 request.setFilterFids(self.show_ids)
             # 非组合路径：QGIS 内部完成过滤，我们只取 fid → 裁掉几何与属性，
             # 迭代快得多（不构造 geometry/不物化属性值），每要素几字节。
@@ -147,12 +161,15 @@ class FeatureStreamWorker(QObject):
         return request
 
     def _next_accepted(self, iterator):
-        """拉取下一条通过表达式过滤的要素；耗尽抛 StopIteration。
+        """拉取下一条通过过滤的要素；耗尽抛 StopIteration。
 
-        无 python 过滤时直接返回迭代器的下一条（零开销快路径）。
+        无 python 侧过滤时直接返回迭代器的下一条（零开销快路径）；否则先按
+        ``_id_set`` 丢弃非命中 fid，再按表达式求值。
         """
         while True:
             feat = next(iterator)
+            if self._filter_ids_py and feat.id() not in self._id_set:
+                continue
             if self._expr is None:
                 return feat
             self._expr_ctx.setFeature(feat)

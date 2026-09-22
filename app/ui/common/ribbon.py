@@ -1,7 +1,8 @@
 """Ribbon 风格工具条基类：按钮行下方绘制「组名」。
 
 对标设计原型（``D:\\work\\code01``）的顶部工具条：同类型按钮成组，组间用竖线分隔，
-**组名以 10px 灰色小字居中显示在每组按钮下方**。Qt 的 :class:`QToolBar` 布局只会
+**组名以 :data:`~app.ui.common.theme.RIBBON_FONT_PX` 灰色小字居中显示在每组按钮下方**。
+Qt 的 :class:`QToolBar` 布局只会
 横向排列按钮、不会在下方留白，因此在子类里：
 
 - 用 ``set_groups()`` 记录 ``[(组名, [该组的 QAction, ...]), ...]``；
@@ -20,15 +21,23 @@ from qgis.PyQt.QtCore import QRect, QSize, Qt
 from qgis.PyQt.QtGui import QAction, QColor, QPainter
 from qgis.PyQt.QtWidgets import QToolBar
 
-from app.ui.common.theme import TOOLBAR_ITEM_GAP
+from app.ui.common.theme import RIBBON_FONT_PX, TOOLBAR_ITEM_GAP
 
 #: 按钮行下方留给组名的高度（px）
 GROUP_BAND = 15
 
+#: 工具条**底边**额外留白（px）：给组名文字下方留呼吸空间。
+#: Qt 把 QToolBar 内容垂直居中，QSS ``padding-bottom`` 对布局无效（只会均分到上下），
+#: 因此用 ``setContentsMargins(0, 0, 0, BOTTOM_PAD)`` 只在底边加高：内容位置不变，
+#: 工具条只向下长高。仅含组名的 Ribbon 工具条（通用 / 编辑）需要。
+BOTTOM_PAD = 5
+
 #: 所有 ribbon 按钮统一宽度（对标原型 ``.core-tool-group button { width: 62px }``）。
 #: 按钮宽度交给代码固定，而非 QSS：QSS ``min-width`` 会与文字宽度**相加**，
 #: 结果是文字越长按钮越宽（2 字 49px / 4 字 69px），无法统一。
-BUTTON_WIDTH = 51
+#: 字号是 :data:`~app.ui.common.theme.RIBBON_FONT_PX` = 11px，最长的 4 字按钮
+#: （取消选择 / 在线底图 …）文字约 44px，扣掉边框 + 内边距后需 ≥ 48px 才不裁字。
+BUTTON_WIDTH = 54
 
 
 class RibbonToolBar(QToolBar):
@@ -40,6 +49,9 @@ class RibbonToolBar(QToolBar):
         self._group_color = QColor("#66727c")
         # 让 toolbar_qss 能按 [ribbon="true"] 选择器放大本工具条的按钮
         self.setProperty("ribbon", True)
+        # 底边额外留白：QSS padding-bottom 对 QToolBar 布局无效，用 contentsMargins
+        # 只在底边加高（内容垂直居中，位置不变）
+        self.setContentsMargins(0, 0, 0, BOTTOM_PAD)
         # 项间距走 QLayout（QSS ``spacing`` 在首次布局早于样式 polish 时会失效，
         # 表现为按钮彼此贴死；这里程序化兜底，见 theme.TOOLBAR_ITEM_GAP）
         layout = self.layout()
@@ -97,7 +109,7 @@ class RibbonToolBar(QToolBar):
         painter = QPainter(self)
         painter.setPen(self._group_color)
         font = painter.font()
-        font.setPixelSize(10)
+        font.setPixelSize(RIBBON_FONT_PX)
         painter.setFont(font)
         for name, actions in self._groups:
             rects = []
@@ -119,4 +131,4 @@ class RibbonToolBar(QToolBar):
         painter.end()
 
 
-__all__ = ["BUTTON_WIDTH", "GROUP_BAND", "RibbonToolBar"]
+__all__ = ["BOTTOM_PAD", "BUTTON_WIDTH", "GROUP_BAND", "RibbonToolBar"]

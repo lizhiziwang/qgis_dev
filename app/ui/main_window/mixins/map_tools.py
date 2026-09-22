@@ -68,14 +68,17 @@ class MapToolsMixin:
         self.tool_bar_builder.set_active("select_box")
 
     def _on_clear_selection(self) -> None:
-        """取消选择：清空**所有矢量图层**的当前选择并刷新画布。"""
+        """取消选择：清空**所有矢量图层**的当前选择（画布重绘由 QGIS 自己驱动）。
+
+        ``removeSelection()`` 会发 ``selectionChanged`` → 图层 ``triggerRepaint()``
+        → ``repaintRequested``，画布据此重画这一层（其它层复用缓存），不需要再显式
+        ``canvas.refresh()`` 刷第二遍整幅图。
+        """
         from qgis.core import QgsVectorLayer
-        from qgis.PyQt.QtCore import QTimer
 
         for layer in self.project.mapLayers().values():
             if isinstance(layer, QgsVectorLayer) and layer.selectedFeatureCount() > 0:
                 layer.removeSelection()
-        QTimer.singleShot(0, self.canvas.refresh)
 
     def _on_identify(self) -> None:
 

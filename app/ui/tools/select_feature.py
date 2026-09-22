@@ -23,7 +23,7 @@
 图层即使有选中也不动）。两个工具都继承 :meth:`SelectFeatureToolBase.keyPressEvent`。
 
 空间过滤复用 :func:`app.core.domain.check.query.intersect_features`
-（空间索引粗筛 + 精确相交），几何坐标从画布 CRS 变换到各图层 CRS。
+（走 provider 的空间过滤 + 精确相交）；几何坐标从画布 CRS 变换到各图层 CRS。
 """
 
 from __future__ import annotations
@@ -88,8 +88,11 @@ class SelectFeatureToolBase(QgsMapTool):
             elif behavior == Qgis.SelectBehavior.SetSelection:
                 # 无修饰键点到空白处：清空该层选中（Ctrl 追加时保留现有选中）
                 layer.removeSelection()
-        # 显式刷新，确保选中高亮立即渲染（selectByIds 不会自动触发重绘）
-        self.canvas.refresh()
+        # 不在这里显式 ``canvas.refresh()``：``selectByIds`` / ``removeSelection``
+        # 会发 ``selectionChanged`` -> 图层 ``triggerRepaint()`` -> ``repaintRequested``，
+        # 画布自己就会重画（实测两条各发 1 次 ``repaintRequested``）。
+        # 再显式刷一次就是白刷第二遍整幅图；而且 ``AppMapCanvas`` 下画布缓存只在
+        # ``triggerRepaint`` 通路里生效，多余的显式 refresh 反而会清缓存变慢。
 
     def _selection_behavior(self, event) -> Qgis.SelectBehavior:
         """按住 Ctrl 追加选择，否则替换上一次选中（对齐 QGIS Select Features）。"""
@@ -124,8 +127,9 @@ class SelectFeatureToolBase(QgsMapTool):
         图层才会被删，未编辑的图层即使有选中也不受影响。每个图层各包一个
         撤销步骤（``beginEditCommand`` / ``deleteFeatures`` /
         ``endEditCommand``），可整体 ``Ctrl+Z`` 撤销。删除成功后清掉该层
-        空间索引缓存（:func:`intersect_features` 内部缓存可能残留已删 fid，
-        不清会导致下次命中测试读到失效要素），并推迟出栈刷新画布。
+        空间索引缓存（质检批量检查用的 Python 侧 ``QgsSpatialIndex`` 是快照，
+        不清会读到已删要素），并推迟出栈刷新画布（``deleteFeatures`` 自身已发
+        ``repaintRequested``，这里只做兜底）。
         """
         deleted = 0
         for layer in self._selectable_layers():

@@ -225,8 +225,21 @@ THEMES: dict[str, Theme] = {
 }
 
 
+#: 启动时是否恢复上次选择的主题（``QSettings`` 的 ``ui/theme``）。
+#:
+#: 产品规定「系统启动主题 = 浅色」，所以默认 **False**：启动固定浅色，
+#: 在标题栏切主题只在本次运行内生效。原因：偏好会被任何 ``set_theme`` 写进注册表，
+#: 离屏验证脚本 ``for t in THEMES: set_theme(t)``、测试、手点主题按钮都会落盘，
+#: 一恢复就会出现「上次跑脚本把主题改绿了 → 下次启动是绿色」（见 memory 04）。
+#: 要改回「记住上次选择」把这个常量置 True 即可。
+_RESTORE_SAVED_THEME = False
+
+
 class ThemeManager(QObject):
-    """主题切换器（单例）。切换时发 :attr:`theme_changed`，并把选择写入 QSettings。"""
+    """主题切换器（单例）。切换时发 :attr:`theme_changed`，并把选择写入 QSettings。
+
+    启动主题固定浅色（见 :data:`_RESTORE_SAVED_THEME`），**不**恢复上次选择。
+    """
 
     theme_changed = pyqtSignal(object)  # Theme
 
@@ -235,7 +248,7 @@ class ThemeManager(QObject):
     def __init__(self, parent: QObject = None) -> None:
         super().__init__(parent)
         self._current_key = "light"
-        if QCoreApplication.instance() is not None:
+        if _RESTORE_SAVED_THEME and QCoreApplication.instance() is not None:
             saved = QSettings("qgis_dev", "qgis_dev").value("ui/theme")
             if saved in THEMES:
                 self._current_key = saved
@@ -311,13 +324,21 @@ TOOLBAR_ITEM_GAP = 6
 #: 工具条按钮圆角（px）。比原型 ``border-radius:4px`` 更圆，视觉更柔和。
 TOOLBAR_BUTTON_RADIUS = 8
 
+#: Ribbon 工具条（通用 / 编辑）按钮与组名字号（px）。比普通工具条（10px）大一号，
+#: 因为图标在下且带组名的方块按钮信息量更大，字太小不易读；
+#: :class:`RibbonToolBar` 画组名时也用它，两处保持一致。
+RIBBON_FONT_PX = 11
+
 
 def toolbar_qss(t: Theme) -> str:
     """主工具条 QSS（对标设计原型的 Ribbon 方形图标按钮）。
 
-    按钮为方形圆角块（图标在上 + 10px 小字在下），浅底细边框，hover 用主题
+    按钮为方形圆角块（图标在上 + 小字在下），浅底细边框，hover 用主题
     强调色淡底 + 强调色边框，选中态用稍深的强调色底。所有颜色走主题 token
     （``input_bg`` / ``input_border`` / ``input_focus``），四个主题自动适配。
+
+    普通工具条按钮字号 10px；Ribbon 工具条（``[ribbon="true"]``，即通用 / 编辑）
+    按 :data:`RIBBON_FONT_PX` 放大一号。
     """
     hover_bg = _with_alpha(t.input_focus, 38)
     checked_bg = _with_alpha(t.input_focus, 74)
@@ -344,11 +365,13 @@ def toolbar_qss(t: Theme) -> str:
         color: {t.toolbar_text};
         font-size: 10px;
     }}
-    /* 原型组按钮：方形块，图标在上 + 10px 小字在下；
-       宽度由 RibbonToolBar._apply_button_widths() 统一定成 BUTTON_WIDTH */
+    /* 原型组按钮：方形块，图标在上 + 小字在下；
+       宽度由 RibbonToolBar._apply_button_widths() 统一定成 BUTTON_WIDTH，
+       字号比普通工具条大一号（通用 / 编辑工具条）。 */
     QToolBar[ribbon="true"] QToolButton {{
         min-height: 48px;
         padding: 3px 2px;
+        font-size: {RIBBON_FONT_PX}px;
     }}
     QToolButton:hover {{
         background-color: {hover_bg};
@@ -609,6 +632,9 @@ def app_qss(t: Theme) -> str:
     "所有要素颜色统一走主题"。主窗体 chrome 仍由 ``window_qss``（窗体自身
     QSS，优先级更高）负责。
     """
+    primary = QColor(t.input_focus)
+    primary_hover = primary.darker(112).name()
+    primary_pressed = primary.darker(126).name()
     return f"""
     QToolTip {{
         background-color: {t.tooltip_bg};
@@ -641,6 +667,32 @@ def app_qss(t: Theme) -> str:
        信息层级靠"加粗"而非"换色"区分。*/
     QLabel#PropValue {{ color: {t.menu_text}; font-weight: bold; }}
     QLabel#PropHint {{ color: {t.text_secondary}; }}
+    QLabel#SectionLabel {{ color: {t.menu_text}; font-weight: 600; }}
+    /* 通用弹窗控件（质检「狭长面处理」等）：
+       - #DialogPrimary 主色实心按钮，与 LoginPrimary/StartupPrimary 同源
+         （t.input_focus + hover/按下自动加深），刻意不绑业务名；
+       - #SectionLabel 分栏小标题（如「参考提示」）；
+       - #CheckDesc 说明 / 参考提示框（左侧红色强调条）。 */
+    QPushButton#DialogPrimary {{
+        background-color: {t.input_focus};
+        color: #ffffff;
+        border: none;
+        border-radius: 4px;
+        padding: 6px 26px;
+        font-size: 13px;
+        font-weight: 600;
+    }}
+    QPushButton#DialogPrimary:hover {{ background-color: {primary_hover}; }}
+    QPushButton#DialogPrimary:pressed {{ background-color: {primary_pressed}; }}
+    QPushButton#DialogPrimary:focus {{ outline: none; }}
+    /* 参考提示框：底色 + 左侧红色强调条，对应设计稿的红框提示卡片 */
+    QLabel#CheckDesc {{
+        background-color: {t.input_bg};
+        border: 1px solid {t.input_border};
+        border-left: 3px solid {t.text_error};
+        border-radius: 3px;
+        padding: 10px;
+    }}
 
     QLineEdit, QTextEdit, QPlainTextEdit, QComboBox, QSpinBox,
     QDateTimeEdit, QDateEdit, QDoubleSpinBox {{

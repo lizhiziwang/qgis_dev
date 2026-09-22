@@ -31,22 +31,25 @@ class SpaceLongThinCheck(BaseCheck):
         except (TypeError, ValueError):
             return 5.0
 
-    def run(self, p: CheckParam) -> CheckResult:
-        if p.layer is None or not p.layer.isValid():
-            return CheckResult(
-                status=CheckStatus.FAIL,
-                severity=CheckSeverity.ERROR,
-                info={"error": "layer 无效"},
-            )
+    def iter_failed(self, p: CheckParam):
+        """流式产出命中要素 ``(seen, fid, ratio)``。
+
+        ``seen`` 是累计已处理要素数（含未命中），供界面分批执行时更新进度。
+        供界面分批驱动（避免长循环阻塞 UI）的同时，也供 :meth:`run` 复用。
+
+        调用方需保证 ``p.layer`` 有效；无效图层直接不产出。
+        """
+        layer: "QgsVectorLayer" = p.layer
+        if layer is None or not layer.isValid():
+            return
         from qgis.core import QgsFeatureRequest  # 延迟 import：纯 Python 单测无需 qgis
 
-        layer: "QgsVectorLayer" = p.layer
         ratio_limit = self._ratio(p)
         req = QgsFeatureRequest().setFilterExpression(self.build_where(p))
 
-        failed: List[int] = []
-        ratios: dict[int, float] = {}
+        seen = 0
         for feat in layer.getFeatures(req):
+            seen += 1
             geom = feat.geometry()
             if geom.isEmpty():
                 continue
@@ -66,8 +69,21 @@ class SpaceLongThinCheck(BaseCheck):
                 continue
             ratio = e1 / e2 if e1 > e2 else e2 / e1
             if ratio > ratio_limit:
-                failed.append(feat.id())
-                ratios[feat.id()] = ratio
+                yield seen, feat.id(), ratio
+
+    def run(self, p: CheckParam) -> CheckResult:
+        if p.layer is None or not p.layer.isValid():
+            return CheckResult(
+                status=CheckStatus.FAIL,
+                severity=CheckSeverity.ERROR,
+                info={"error": "layer 无效"},
+            )
+        ratio_limit = self._ratio(p)
+        failed: List[int] = []
+        ratios: dict[int, float] = {}
+        for _seen, fid, ratio in self.iter_failed(p):
+            failed.append(fid)
+            ratios[fid] = ratio
 
         return CheckResult(
             status=CheckStatus.PASS if not failed else CheckStatus.FAIL,
