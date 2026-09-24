@@ -25,13 +25,22 @@
 行为约定：
 
 - 项目**已实现**的工具直接接主窗口既有回调（与顶部工具条同一入口）：
-  选择 / 框选 / 漫游 / 缩放 / 全图 / 清除 / 条件查询 / 分屏；
+  选择 / 框选 / 漫游 / 缩放 / 全图 / 清除 / 条件查询 / 分屏 / 坐标定位 /
+  线测量 / 面测量；
 - 「分屏」复用 :mod:`app.ui.tools.qmap_compare` 的「地图对比」入口
   （``MainWindow._on_qmap_compare``：镜像分屏 / 垂直分割 / 水平分割 /
   放大镜），与顶部工具条「地图对比」同一实现，不再用旧的卷帘覆盖层；
+- 「坐标定位」点击后弹出 :class:`~app.ui.main_window.coord_locate_overlay.CoordLocateOverlay`
+  气泡（浮在地图**右上角**），由主窗口
+  :meth:`~app.ui.main_window.mixins.shell.WindowShellMixin._on_coord_locate`
+  接管：再点同按钮或点气泡上的 ``×`` 都能关闭，按钮随气泡显隐独立常亮
+  （会话型，与分屏同高亮组 :data:`_SESSION_KEYS`）；
+- 「线测量」「面测量」接 :mod:`app.ui.tools.measure`：激活后连续左键落点，
+  实时在画布底部读数条显示折线长度 / 多边形面积（右键结束、``Esc`` 清除），
+  属地图工具（单选高亮，见 :data:`_TOOL_KEYS`）；
 - 其余工具为占位：点击时经消息条提示「该工具正在开发中」（气泡悬浮在
   地图上，不挤压画布）；
-- 地图工具（选择 / 框选 / 漫游 / 缩放）为单选高亮：跟随画布
+- 地图工具（选择 / 框选 / 漫游 / 缩放 / 线测量 / 面测量）为单选高亮：跟随画布
   激活的 :class:`QgsMapTool`，由 ``MainWindow._on_map_tool_set`` 调
   :meth:`set_active` 与顶部工具条同步；会话型工具「分屏」独立常亮
   （:meth:`set_session_active`）；其余按钮为一次性动作，不高亮。
@@ -42,7 +51,7 @@
 
 from __future__ import annotations
 
-from typing import Callable
+from collections.abc import Callable
 
 from qgis.core import Qgis
 from qgis.PyQt.QtCore import QSize, Qt
@@ -54,9 +63,11 @@ from app.ui.common.frosted import FrostedPanel
 from app.ui.common.theme import TOOLBAR_BUTTON_RADIUS, Theme, ThemeManager
 
 #: 地图工具 key（单选高亮组，与顶部工具条 key 一致便于同步）
-_TOOL_KEYS = frozenset({"select_point", "select_box", "pan", "zoom_in"})
-#: 会话型工具 key（独立常亮，不受地图工具切换影响；与顶部工具条同 key）
-_SESSION_KEYS = frozenset({"qmap_compare"})
+_TOOL_KEYS = frozenset({"select_point", "select_box", "pan", "zoom_in", "measure_line", "measure_area"})
+#: 会话型工具 key（独立常亮，不受地图工具切换影响；与顶部工具条同 key）。
+#: 「坐标定位」也归这里：点开气泡 → 按钮保持高亮表示"气泡在显示"，
+#: 关闭气泡（再点同按钮或气泡上的 ×）→ 按钮弹起，与分屏会话同一套高亮逻辑。
+_SESSION_KEYS = frozenset({"qmap_compare", "coord_locate"})
 #: 侧栏图标逻辑边长（原型左侧工具列 44×36 按钮 / 17px 图标）
 _ICON = 17
 
@@ -120,11 +131,9 @@ class SideToolBar:
 
         layout.addStretch(1)
         # 窄条 + 两行文案会顶高按钮：压掉 app_qss 给 QToolButton 的 3px 上下内边距
-        #（每个按钮省 6px；挂在本面板上只作用于 15 个侧栏按钮，不影响其它按钮）
+        # （每个按钮省 6px；挂在本面板上只作用于 15 个侧栏按钮，不影响其它按钮）
         # 圆角跟主/编辑工具条保持一致
-        widget.setStyleSheet(
-            f"QToolButton {{ padding: 0px; border-radius: {TOOLBAR_BUTTON_RADIUS}px; }}"
-        )
+        widget.setStyleSheet(f"QToolButton {{ padding: 0px; border-radius: {TOOLBAR_BUTTON_RADIUS}px; }}")
         widget.setFixedWidth(52)
         widget.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Expanding)
         self.widget = widget
@@ -142,7 +151,7 @@ class SideToolBar:
         btn.setObjectName(f"SideTool_{key}")
         # 文案排版：2~3 字单行（≤ 33px，45px 按钮放得下）；4 字折两行（44px 会顶到边）。
         # 注意 len <= 3 的文案**不能**加 "\n"：尾随换行会多出一个空行，白白高一行
-        #（实测 40px → 52px，15 个按钮共 +180px）。
+        # （实测 40px → 52px，15 个按钮共 +180px）。
         btn.setText(text if len(text) <= 3 else f"{text[:2]}\n{text[2:]}")
 
         font = QFont()

@@ -37,13 +37,6 @@
   zmax: 18
 
 - group: 高德地图
-  name: 高德·影像
-  type: xyz
-  url: https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}
-  zmin: 1
-  zmax: 19
-
-- group: 高德地图
   name: 高德·矢量
   type: xyz
   url: https://webrd01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=8&x={x}&y={y}&z={z}
@@ -61,3 +54,10 @@
   name: arcgis
   type: arcgis
   url: http://127.0.0.1:6080/arcgis/rest/services/%E6%B1%9F%E8%A5%BF%E7%9C%81%E5%8E%BF%E7%BA%A7%E8%A1%8C%E6%94%BF%E5%8C%BA%E5%9F%9F/MapServer
+
+- group: 高德地图
+  name: 高德·影像
+  type: xyz
+  url: https://webst01.is.autonavi.com/appmaptile?style=6&x={x}&y={y}&z={z}
+  zmin: 1
+  zmax: 19

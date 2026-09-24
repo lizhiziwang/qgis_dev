@@ -34,6 +34,7 @@ from app.infra.messagebar import FloatingMessageBar
 from app.ui.common.map_canvas import AppMapCanvas
 from app.ui.common.theme import ThemeManager
 from app.ui.main_window.browser_dock import BrowserDock
+from app.ui.main_window.coord_locate_overlay import CoordLocateOverlay
 from app.ui.main_window.layer_dock import LayerDock
 from app.ui.main_window.side_toolbar import SideToolBar
 
@@ -63,9 +64,7 @@ class WindowShellMixin:
         self._undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), canvas)
         self._undo_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._undo_shortcut.activated.connect(self._undo_edit)
-        self._redo_shortcuts = [
-            QShortcut(QKeySequence(seq), canvas) for seq in ("Ctrl+Shift+Z", "Ctrl+Y")
-        ]
+        self._redo_shortcuts = [QShortcut(QKeySequence(seq), canvas) for seq in ("Ctrl+Shift+Z", "Ctrl+Y")]
         for redo_sc in self._redo_shortcuts:
             redo_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             redo_sc.activated.connect(self._redo_edit)
@@ -126,11 +125,16 @@ class WindowShellMixin:
                 "clear_selection": self._on_clear_selection,
                 "condition_query": self._on_condition_query,
                 "qmap_compare": self._on_qmap_compare,
+                "coord_locate": self._on_coord_locate,
+                "measure_line": self._on_measure_line,
+                "measure_area": self._on_measure_area,
             },
         )
         layout.addWidget(self.canvas)
         # 竖排工具条悬浮在地图画布左上角（left 4px / top 3px）
         self._attach_side_toolbar_overlay()
+        # 坐标定位气泡悬浮在地图画布右上角；侧栏「坐标定位」按钮点亮时弹出
+        self._attach_coord_locate_overlay()
 
         crs = QgsCoordinateReferenceSystem("EPSG:4490")
         self.project.setCrs(crs)
@@ -198,6 +202,81 @@ class WindowShellMixin:
             side.widget.raise_()
         except RuntimeError:
             pass  # 窗口关闭流程中 C++ 对象已销毁
+
+    # ===================================================== 画布右上角坐标定位气泡
+
+    def _attach_coord_locate_overlay(self) -> None:
+        """把坐标定位气泡悬浮到画布右上角（与侧栏工具条互为对角覆盖层）。
+
+        装配模式与 :meth:`_attach_side_toolbar_overlay` 一致：setParent 到画布
+        父容器（与画布同级）→ raise_() 永远盖在画布及其所有子覆盖层之上。
+        初始隐藏，由侧栏「坐标定位」按钮的回调 :meth:`_on_coord_locate` 唤起。
+        """
+        self._coord_locate_overlay = CoordLocateOverlay(self.canvas)
+        # 父容器优先：有父才能提到画布**之上**（与侧栏同款）
+        host = self.canvas.parentWidget() or self.canvas
+        self._coord_locate_overlay.setParent(host)
+        self._coord_locate_overlay.adjustSize()
+        self._coord_locate_overlay.hide()
+        # 用户点气泡 × 或外部 toggle 关闭时，同步侧栏按钮高亮
+        self._coord_locate_overlay.closed.connect(self._on_coord_locate_overlay_closed)
+        # 重绘 / 范围变化时跟随画布重摆位置 + 置顶（与侧栏同样的 keep-on-top 思路）
+        self.canvas.mapCanvasRefreshed.connect(self._place_coord_locate_overlay)
+        self.canvas.extentsChanged.connect(self._place_coord_locate_overlay)
+
+    def _place_coord_locate_overlay(self) -> None:
+        """把坐标定位气泡摆到画布右上角（与侧栏左上角互为对角，互不遮挡）。"""
+        overlay = getattr(self, "_coord_locate_overlay", None)
+        canvas = getattr(self, "canvas", None)
+        if overlay is None or canvas is None:
+            return
+        # 隐藏态不摆位（避免 0 高度窗口闪一下）
+        if not overlay.isVisible():
+            return
+        host = overlay.parentWidget()
+        if host is None:
+            return
+        try:
+            # 画布左上角在 host 坐标系里的位置
+            origin = canvas.mapToGlobal(QPoint(0, 0)) - host.mapToGlobal(QPoint(0, 0))
+        except RuntimeError:
+            return  # 窗口关闭流程中 C++ 对象已销毁
+        # 悬浮子控件首次 show() 后可能 height()==0；先 adjustSize 兜底
+        if overlay.width() <= 0 or overlay.height() <= 0:
+            overlay.adjustSize()
+        margin = 8
+        overlay.move(
+            origin.x() + canvas.width() - overlay.width() - margin,
+            origin.y() + margin,
+        )
+        overlay.raise_()
+
+    def _on_coord_locate(self) -> None:
+        """侧栏「坐标定位」按钮回调：toggle 气泡显示，按钮随显隐独立常亮。
+
+        与 :meth:`_on_qmap_compare` 一致——按钮在 :data:`SideToolBar._SESSION_KEYS`
+        里，由 :meth:`SideToolBar.set_session_active` 控高亮。
+        """
+        overlay = getattr(self, "_coord_locate_overlay", None)
+        if overlay is None:
+            return
+        # overlay.toggle() 内部会 emit closed（如已显示则关闭）；先同步好侧栏按钮再
+        # 让 overlay.open() / close() 自己在显隐后 emit closed 做"用户主动关闭"通知
+        side = getattr(self, "side_toolbar", None)
+        is_open = overlay.is_open()
+        overlay.toggle()
+        new_open = overlay.is_open()
+        if side is not None:
+            side.set_session_active("coord_locate", new_open)
+        # 第一次打开时（或画布尺寸变了）气泡首次可见，需要摆位
+        if new_open and not is_open:
+            self._place_coord_locate_overlay()
+
+    def _on_coord_locate_overlay_closed(self) -> None:
+        """用户点 × 关闭气泡：同步把侧栏按钮弹起（与 toggle 关闭对称）。"""
+        side = getattr(self, "side_toolbar", None)
+        if side is not None:
+            side.set_session_active("coord_locate", False)
 
     def _build_docks(self) -> None:
         # 1. 图层树
@@ -283,6 +362,7 @@ class WindowShellMixin:
             if event.type() == QEvent.Type.Resize:
                 self._relayout_floating_message_bar()
                 self._place_side_toolbar()
+                self._place_coord_locate_overlay()
             if event.type() in (
                 QEvent.Type.DragEnter,
                 QEvent.Type.DragMove,

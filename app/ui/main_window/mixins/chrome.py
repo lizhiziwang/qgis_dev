@@ -93,6 +93,8 @@ class WindowChromeMixin:
         self._pan_tool = QgsMapToolPan(self.canvas)
         self._zoom_in_tool = QgsMapToolZoom(self.canvas, False)
         self._zoom_out_tool = QgsMapToolZoom(self.canvas, True)
+        #: 启动测量前的常规画布工具（再次点测量按钮取消使用时还原）
+        self._measure_previous_tool = None
 
     def _build_digitizing_toolbar(self) -> None:
         """兼容旧接口（占位）：由 :class:`DigitizingToolbar` 直接接管。"""
