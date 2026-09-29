@@ -2,8 +2,15 @@
 
 ``QgsMessageBar`` 的消息过期/关闭移除都在 C++ 内部完成、没有对外信号，靠
 遍历子控件判空在版本间不可靠（实测空条也会被误判为有内容、空卡片常驻）。
-本模块用子类接管 Python 侧全部 push 入口，把“有没有消息”变成确定性状态，
-供宿主窗口（如主窗口把消息条悬浮盖在画布顶部）按回调显示/隐藏。
+本模块用子类接管 Python 侧全部 push 入口：
+
+- 每条 push **顶掉上一条**（条内最多一条消息，见
+  :meth:`FloatingMessageBar._drop_previous`）——C++ 侧一律 ``duration=0``
+  （永不过期），不清的话旧消息会一直堆在条里，下次任何工具 push 时被一起
+  重新显示（QgsMessageBar 折叠成「N more」），看上去像“别的面板刚推的旧提示
+  又冒出来”；
+- 把“有没有消息”变成确定性状态，供宿主窗口（如主窗口把消息条悬浮盖在画布
+  顶部）按回调显示/隐藏。
 
 **鼠标停留不收起**：提示文字长时，用户常来不及看完就被 duration 收掉。租约
 到期时若鼠标正停在提示条上，则不收起、改为持续复检；鼠标移开后再**重新开始**
@@ -46,7 +53,8 @@ class FloatingMessageBar(QgsMessageBar):
       → 回调不触发 → 消息条保持隐藏，绝不会出现空卡片。
 
     传给 C++ 的消息一律 ``duration=0``（禁用其内部过期移除，避免与租约
-    计时打架），过期与否完全由租约计时器说了算。
+    计时打架），过期与否完全由租约计时器说了算；也因此每条 push 都要
+    先摘掉上一条，否则旧消息会攒在条里被一起重新显示。
     """
 
     def __init__(self, parent=None):
@@ -74,17 +82,30 @@ class FloatingMessageBar(QgsMessageBar):
 
     # ---- 展示租约：push 即显示，到期即收起 ----
 
-    def _replace_items(self) -> None:
-        """清掉条里已有的条目——本消息条只显示**最新一条**。
+    # def _replace_items(self) -> None:
+    #     """清掉条里已有的条目——本消息条只显示**最新一条**。
+    #
+    #     QGIS 的 ``QgsMessageBar`` 会把每条 push 都留成一条持久条目（我们给 C++
+    #     传的 duration 恒为 0，好让租约计时器独占过期控制），不主动清就会无限
+    #     堆积：右侧冒出内置的「N more」计数标签 + 一个下拉菜单，而那个菜单里
+    #     只有「Close All」、列不出消息内容，看起来就是个点不开的入口，两个按钮
+    #     还挤在一起。清掉后计数标签与下拉自然消失，条高也恒定。
+    #     """
+    #     try:
+    #         self.clearWidgets()
+    #     except RuntimeError:
+    #         pass  # 窗口关闭流程中 C++ 对象已销毁
 
-        QGIS 的 ``QgsMessageBar`` 会把每条 push 都留成一条持久条目（我们给 C++
-        传的 duration 恒为 0，好让租约计时器独占过期控制），不主动清就会无限
-        堆积：右侧冒出内置的「N more」计数标签 + 一个下拉菜单，而那个菜单里
-        只有「Close All」、列不出消息内容，看起来就是个点不开的入口，两个按钮
-        还挤在一起。清掉后计数标签与下拉自然消失，条高也恒定。
+    def _drop_previous(self) -> None:
+        """清掉条里已有的消息：整条同时只保留一条（新消息顶掉旧的）。
+
+        C++ 侧一律 ``duration=0``（永不过期），不主动清就不会自己消失；旧消息
+        留在条里，下次任何工具 push 时会被一起重新显示（QgsMessageBar 折叠成
+        「N more」），表现为“别的面板刚推的旧提示又冒出来”。
         """
         try:
-            self.clearWidgets()
+            if self.items():
+                self.clearWidgets()
         except RuntimeError:
             pass  # 窗口关闭流程中 C++ 对象已销毁
 
@@ -169,45 +190,53 @@ class FloatingMessageBar(QgsMessageBar):
                     level = args[1]
                 if len(args) >= 3:
                     duration = int(args[2] or 0)
-        self._replace_items()
+        # self._replace_items()
         if title:
+            self._drop_previous()
             item = super().pushMessage(title, text or "", level, 0)
         else:
+            self._drop_previous()
             item = super().pushMessage(text or "", level, 0)
         self._kick(duration)
         return item
 
+    # 带标题的各入口统一走 pushMessage(title, text, level, 0)：
+    # ``QgsMessageBar.pushSuccess/Warning/Critical/Info`` 只有 ``(title, text)`` 两个参数
+    # （没有 duration，C++ 侧用自带默认过期），传第三个参数会 TypeError；而本类要求
+    # C++ 永不过期、由自家租约统一管显隐，所以改用 ``pushMessage`` 显式传 duration=0。
+
     def pushSuccess(self, title, text="", duration=0):
-        self._replace_items()
-        super().pushSuccess(title, text, 0)
+        self._drop_previous()
+        super().pushMessage(title, text or "", Qgis.MessageLevel.Success, 0)
         self._kick(duration)
 
     def pushWarning(self, title, text="", duration=0):
-        self._replace_items()
-        super().pushWarning(title, text, 0)
+        self._drop_previous()
+        super().pushMessage(title, text or "", Qgis.MessageLevel.Warning, 0)
         self._kick(duration)
 
     def pushCritical(self, title, text="", duration=0):
-        self._replace_items()
-        super().pushCritical(title, text, 0)
+        self._drop_previous()
+        super().pushMessage(title, text or "", Qgis.MessageLevel.Critical, 0)
         self._kick(duration)
 
     def pushError(self, title, text="", duration=0):
-        self._replace_items()
-        super().pushError(title, text, 0)
+        # ``QgsMessageBar`` 没有 pushError，错误一律按 critical 呈现
+        self._drop_previous()
+        super().pushMessage(title, text or "", Qgis.MessageLevel.Critical, 0)
         self._kick(duration)
 
     def pushInfo(self, title, text="", duration=0):
-        self._replace_items()
-        super().pushInfo(title, text, 0)
+        self._drop_previous()
+        super().pushMessage(title, text or "", Qgis.MessageLevel.Info, 0)
         self._kick(duration)
 
     def pushWidget(self, widget, level=Qgis.MessageLevel.Info, duration=0):
-        self._replace_items()
+        self._drop_previous()
         super().pushWidget(widget, level, 0)
         self._kick(duration)
 
     def pushItem(self, item):
-        self._replace_items()
+        self._drop_previous()
         super().pushItem(item)
         self._kick(0)
