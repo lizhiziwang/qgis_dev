@@ -6,7 +6,9 @@
 分组默认折叠，避免打开 dock 时铺满整屏；搜索时会自动展开命中的分组。
 点击工具节点弹出对应参数对话框（对话框内部是"左参数 + 右算法描述"布局，
 描述逻辑见 :mod:`app.ui.common.algo_desc`）；同一算法只维护一个对话框实例，
-已打开时点击置前。
+已打开时点击置前。``destroy_on_close=True`` 的面板（如「质检」，
+见 :mod:`app.ui.docks.quality_dock`）则在窗口关闭后立即销毁实例，下次点击
+重新创建，不复用上一次的进度 / 结果状态。
 
 本模块只提供通用树 dock 与「分析工具」这一实例；其它专题面板（如「质检」，
 见 :mod:`app.ui.docks.quality_dock`）通过 ``title`` / ``groups`` /
@@ -282,6 +284,8 @@ class ToolsDock(QDockWidget):
     :param simple_actions: code → 一次性动作；``None`` 时用 :data:`_SIMPLE_ACTIONS`
     :param tips: code → 树节点 tooltip；``None`` 时用 :data:`_TOOL_TIPS`
     :param dialog_factories: code → 对话框工厂；``None`` 时用 :data:`_DIALOG_FACTORIES`
+    :param destroy_on_close: ``True`` 时对话框关闭（确认 / 取消 / 标题栏关闭）即销毁
+        实例，下次点击重新创建；``False``（默认）时缓存实例，关闭后复用
     """
 
     def __init__(
@@ -293,6 +297,7 @@ class ToolsDock(QDockWidget):
         simple_actions: dict | None = None,
         tips: dict | None = None,
         dialog_factories: dict | None = None,
+        destroy_on_close: bool = False,
     ) -> None:
         super().__init__(title, parent)
         self.topParent = parent
@@ -302,6 +307,8 @@ class ToolsDock(QDockWidget):
         self._simple_actions: dict = _SIMPLE_ACTIONS if simple_actions is None else simple_actions
         self._tips: dict = _TOOL_TIPS if tips is None else tips
         self._dialog_factories: dict = _DIALOG_FACTORIES if dialog_factories is None else dialog_factories
+        #: 关闭即销毁（质检面板开）：窗口关闭后不保留实例，下次点击重新创建
+        self._destroy_on_close: bool = destroy_on_close
         self.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable | QDockWidget.DockWidgetFeature.DockWidgetMovable | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
         self.setAllowedAreas(
             Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.BottomDockWidgetArea
@@ -463,7 +470,33 @@ class ToolsDock(QDockWidget):
             if dlg is None:
                 dlg = factory(self.topParent)
                 self._dialogs[code] = dlg
+                if self._destroy_on_close:
+                    self._bind_destroy_on_close(code, dlg)
             dlg.show()
         except Exception as exc:  # noqa: BLE001
             # 不静默吞掉：曾因静默异常导致功能"无反应"难排查（见 CanvasZoomTool 教训）
             logger.error("打开工具对话框失败 code=%s: %s", code, exc, exc_info=True)
+
+    def _bind_destroy_on_close(self, code: str, dlg) -> None:
+        """绑定「关闭即销毁」：窗口结束后摘掉缓存引用并 ``deleteLater``，下次点击重建。
+
+        无边框标题栏的「关闭」按钮走 :meth:`QDialog.reject`（不是 ``close``），吃不到
+        ``WA_DeleteOnClose``；统一挂在 ``finished`` 上——确认 / 取消 / 关闭按钮 / Esc
+        各条路径都会发出该信号。
+
+        回调里只捕获缓存字典与对话框本身（不捕获 ``self``）：即使面板先被销毁，回调
+        也不会摸到已析构的 dock。
+        """
+        dialogs = self._dialogs
+
+        def _release(*_args, code=code, dlg=dlg, dialogs=dialogs):
+            dialogs.pop(code, None)
+            dlg.deleteLater()
+
+        finished = getattr(dlg, "finished", None)
+        if finished is None:
+            # 非 QDialog（理论上不会有）：退回 Qt 原生「关闭即销毁」，只摘缓存引用
+            dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+            dlg.destroyed.connect(lambda *_a, code=code, dialogs=dialogs: dialogs.pop(code, None))
+            return
+        finished.connect(_release)

@@ -6,15 +6,19 @@
 分组树 / 一次性动作 / 对话框工厂 / tooltip。
 
 当前挂「狭长面」「细碎面」「面几何角检查」「面自相交」「跨边界面不相交」「面多部件检查」
-六个专项质检节点（分别打开
+「面重叠」七个专项质检节点（分别打开
 :class:`app.ui.dialogs.sliver_face.SliverFaceDialog`、
 :class:`app.ui.dialogs.small_face.SmallFaceDialog`、
 :class:`app.ui.dialogs.polygon_angle.PolygonAngleDialog`、
 :class:`app.ui.dialogs.self_intersect.SelfIntersectDialog`、
-:class:`app.ui.dialogs.cross_boundary.CrossBoundaryDialog` 与
-:class:`app.ui.dialogs.multipart.MultipartDialog`)；「矢量质检」入口
+:class:`app.ui.dialogs.cross_boundary.CrossBoundaryDialog`、
+:class:`app.ui.dialogs.multipart.MultipartDialog` 与
+:class:`app.ui.dialogs.overlap.OverlapDialog`)；「矢量质检」入口
 :func:`_make_open_check_viewer` 仍保留（复用主窗口既有入口，不写第二套逻辑），
 按需再挂到分组树里。后续各专项质检继续往 :data:`_QUALITY_GROUPS` 里加。
+
+专项窗口一律 ``destroy_on_close``：确认 / 取消 / 标题栏关闭后实例立即销毁，
+下次点击重新创建，不复用上一次的进度、选中图层与结果状态。
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ _QUALITY_GROUPS: list = [
             ("面自相交", "check:self_intersect"),
             ("跨边界面不相交", "check:cross_boundary"),
             ("面多部件检查", "check:multipart"),
+            ("面重叠", "check:overlap"),
         ],
     ),
 ]
@@ -46,6 +51,7 @@ _QUALITY_TIPS: dict = {
     "check:self_intersect": "面自相交检查：检查源图层中自相交的面要素",
     "check:cross_boundary": "跨边界面不相交检查：检查源图层中超出参考图层范围的面要素",
     "check:multipart": "面多部件检查：检查源图层有多个部分的面要素",
+    "check:overlap": "面重叠检查：检查源图层中重叠的面要素",
 }
 
 
@@ -98,6 +104,13 @@ def _make_multipart_dialog(parent):
     return MultipartDialog(parent)
 
 
+def _make_overlap_dialog(parent):
+    """面重叠处理对话框（懒 import，避免 dock 构造时拉进质检模块）。"""
+    from app.ui.dialogs.overlap import OverlapDialog  # noqa: PLC0415 - 懒 import
+
+    return OverlapDialog(parent)
+
+
 #: 质检工具节点 code → 一次性动作
 _QUALITY_ACTIONS: dict = {
     "check:vector": _make_open_check_viewer,
@@ -111,11 +124,17 @@ _QUALITY_DIALOG_FACTORIES: dict = {
     "check:self_intersect": _make_self_intersect_dialog,
     "check:cross_boundary": _make_cross_boundary_dialog,
     "check:multipart": _make_multipart_dialog,
+    "check:overlap": _make_overlap_dialog,
 }
 
 
 class QualityDock(ToolsDock):
-    """质检面板：一个「质检」分组，下挂「狭长面」「细碎面」等专项质检节点。"""
+    """质检面板：一个「质检」分组，下挂「狭长面」「细碎面」等专项质检节点。
+
+    与「分析工具」不同，本面板的专项窗口**关闭即销毁**（``destroy_on_close``）：
+    确认 / 取消 / 标题栏关闭后实例不再保留，下次点击重新创建，免得下次打开看到
+    上次的进度条、选中图层与结果状态。
+    """
 
     def __init__(self, parent=None) -> None:
         super().__init__(
@@ -125,6 +144,7 @@ class QualityDock(ToolsDock):
             simple_actions=_QUALITY_ACTIONS,
             tips=_QUALITY_TIPS,
             dialog_factories=_QUALITY_DIALOG_FACTORIES,
+            destroy_on_close=True,
         )
 
 
