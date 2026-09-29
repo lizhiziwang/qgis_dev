@@ -13,6 +13,7 @@ from qgis.core import (
     QgsApplication,
     QgsCoordinateReferenceSystem,
 )
+from qgis.PyQt import sip
 from qgis.gui import QgsMapCanvas
 from qgis.PyQt.QtCore import (
     QEvent,
@@ -30,6 +31,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from app.infra.logging import get_logger
 from app.infra.messagebar import FloatingMessageBar
 from app.ui.common.map_canvas import AppMapCanvas
 from app.ui.common.theme import ThemeManager
@@ -37,6 +39,8 @@ from app.ui.main_window.browser_dock import BrowserDock
 from app.ui.main_window.coord_locate_overlay import CoordLocateOverlay
 from app.ui.main_window.layer_dock import LayerDock
 from app.ui.main_window.side_toolbar import SideToolBar
+
+logger = get_logger(__name__)
 
 
 class WindowShellMixin:
@@ -56,7 +60,7 @@ class WindowShellMixin:
         canvas.setCanvasColor(QColor(ThemeManager.instance().current().canvas_bg))
         canvas.enableAntiAliasing(True)
         # ---- 编辑撤销 / 重做快捷键（Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y）----
-        # 编辑工具（点选/框选 Delete、要素编辑、融合、分割、属性录入）每个动作都
+        # 编辑工具（点选/框选 Delete、要素编辑、合并、分割、属性录入）每个动作都
         # 是一条 beginEditCommand…endEditCommand 记录，存在图层 undoStack；这里
         # 把快捷键接到「当前编辑图层」的撤销/重做上（QGIS 删除选中同一套语义）。
         # 作用域限定画布子树（WidgetWithChildrenShortcut）：焦点在画布时才生效，
@@ -122,6 +126,7 @@ class WindowShellMixin:
                 "pan": self._on_pan,
                 "zoom_in": self._on_zoom_in,
                 "zoom_full": self._on_zoom_full,
+                "identify": self._on_identify,
                 "clear_selection": self._on_clear_selection,
                 "condition_query": self._on_condition_query,
                 "qmap_compare": self._on_qmap_compare,
@@ -305,6 +310,34 @@ class WindowShellMixin:
 
         # 3. 日志（默认隐藏，由菜单唤起）
         self.log_dock = None  # 懒加载
+
+    # ===================================================== 右侧 Dock 停靠
+
+    def place_right_dock(self, dock) -> None:
+        """把 ``dock`` 停靠到右侧；右侧已有面板时与之**叠放**（占满整条右侧）。
+
+        Qt 的 ``addDockWidget`` 在同一区域默认是**上下堆叠**：先点「属性」再点
+        「属性录入」，第二个会挤在第一个下面、各占一半高，两个都看不清。这里
+        ``tabifyDockWidget`` + ``raise_()``：同一时刻只显示一个、占满整条右侧，
+        点各自的按钮（或标签页）即可切换。
+
+        **所有停靠到右侧的面板都应走本方法**，不要直接 ``addDockWidget``。
+        """
+        area = Qt.DockWidgetArea.RightDockWidgetArea
+        placed = [
+            other
+            for other in getattr(self, "_right_docks", [])
+            if other is not dock and not sip.isdeleted(other)
+        ]
+        self._right_docks = [*placed, dock]
+        self.addDockWidget(area, dock)
+        for other in placed:
+            try:
+                self.tabifyDockWidget(other, dock)
+            except Exception:  # noqa: BLE001 —— 叠放失败只会退化成堆叠，不该中断
+                logger.exception("右侧面板叠放失败: %s", type(dock).__name__)
+        dock.show()
+        dock.raise_()
 
     def _on_floating_message_state(self, active: bool) -> None:
         """悬浮消息条显隐回调（由消息条自己的租约驱动）。

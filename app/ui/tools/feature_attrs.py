@@ -6,8 +6,8 @@
   面积字段 → ``geometry.area()``、周长字段 → ``geometry.length()``
   （QGIS 4.2 已移除 ``QgsGeometry.perimeter()``，多边形的 ``length()``
   即周长）；线图层：一律 ``length()``）；
-- **全局唯一标识字段**（FGUID / GUID / GlobalID）：新要素必须生成**新的
-  唯一值**（字符串字段生成 ``uuid4``；其它类型无法安全生成 → 置 NULL）；
+- **全局唯一标识字段**（FGUID / GUID / GlobalID / **mzguid**）：新要素必须生成
+  **新的唯一值**（字符串字段生成 ``uuid4``；其它类型无法安全生成 → 置 NULL）；
 - **主键字段**（``layer.primaryKeyAttributes()``）：新要素置 NULL，交给
   数据源自动分配。实测手工 ``addFeature`` 时若不把主键字段清空，提交到
   GPKG 会把原要素的主键值复制过去 → ``UNIQUE constraint failed``；
@@ -32,12 +32,15 @@ except Exception:  # noqa: BLE001
     QgsWkbTypes = None  # type: ignore[assignment]
     QVariant = None  # type: ignore[assignment]
 
-#: 面积类字段名关键字（小写子串匹配，含别名）
-_AREA_TOKENS = ("面积", "area", "mj", "sqm", "shape_area", "tbmj")
+#: 面积类字段名关键字（小写子串匹配，含别名）。成果数据里面积字段既有中文
+#: （``面积``）也有拼音缩写（``mj`` / ``txmj`` / ``xbmj`` / ``tb_mj``）与全拼
+#: （``bh_mian_ji``），三种写法都要能命中
+_AREA_TOKENS = ("面积", "area", "mj", "sqm", "shape_area", "tbmj", "mian_ji", "mianji")
 #: 周长 / 长度类字段名关键字（小写子串匹配，含别名）
 _LENGTH_TOKENS = ("周长", "perimeter", "zc", "length")
-#: 全局唯一标识字段名关键字（小写全名匹配，含别名）
-_UID_TOKENS = ("fguid", "guid", "globalid")
+#: 全局唯一标识字段名关键字（小写全名匹配，含别名）。``mzguid`` 是成果数据里
+#: 图斑的唯一标识，和 FGUID / GUID / GlobalID 一样属于「新要素必须重新生成」的列
+_UID_TOKENS = ("fguid", "guid", "globalid", "mzguid")
 
 
 def _field_key(field: "QgsField") -> str:

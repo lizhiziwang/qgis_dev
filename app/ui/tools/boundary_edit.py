@@ -351,7 +351,7 @@ class BoundaryEditTool(QgsMapTool):
                     if before[idx] != value:
                         layer.changeAttributeValue(fid, idx, value)
                 changed += 1
-        except RuntimeError:
+        except Exception:  # noqa: BLE001 —— 收宽：任何异常都必须关掉编辑命令
             layer.destroyEditCommand()
             logger.exception("边界修改失败: layer=%s", layer.name())
             self._hint("边界修改失败：图层编辑 API 异常")

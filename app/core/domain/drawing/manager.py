@@ -16,7 +16,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, List, Optional
 
 if TYPE_CHECKING:
-    from qgis.core import QgsGeometry, QgsVectorLayer
+    from qgis.core import QgsGeometry
     from qgis.gui import QgsMapCanvas, QgsRubberBand
 
 from qgis.core import QgsWkbTypes
@@ -83,7 +83,16 @@ class DrawManager(QObject):
         return self._active
 
     def clear_draw_tool(self) -> None:
-        """清掉当前激活的绘制工具。"""
+        """清掉当前激活的绘制工具，并清掉绘制预览（临时图形）。"""
+        self._detach_tool()
+        self.clear_preview()
+
+    def _detach_tool(self) -> None:
+        """卸下画布上的绘制工具 + 清临时点，**保留**共享 rubber_band 里的预览。
+
+        与 :meth:`clear_preview` 分开是为了「绘制完成 → 属性弹窗关闭」这段：
+        那期间工具不该再响应画布交互，但刚画的那一笔要留在地图上。
+        """
         if self._active_tool is not None:
             try:
                 if hasattr(self._active_tool, "cleanup"):
@@ -98,14 +107,26 @@ class DrawManager(QObject):
             except Exception:  # noqa: BLE001
                 logger.exception("从画布卸下绘制工具 %s 失败", type(self._active_tool).__name__)
         self._active_tool = None
-        if self._shared_rubber_band is not None:
-            self._shared_rubber_band.reset()
         self._temp_points.clear()
 
+    def clear_preview(self) -> None:
+        """清掉共享 rubber_band 里的临时图形。
+
+        绘制完成到属性弹窗关闭之间**不要**调它——临时图形要留在地图上给用户
+        对照着填属性（见 :meth:`finish_draw`）。
+        """
+        if self._shared_rubber_band is not None:
+            self._shared_rubber_band.reset()
+
     def finish_draw(self, geometry: "QgsGeometry") -> None:
-        """绘制工具回调：发出 finished 信号并清理。"""
+        """绘制工具回调：发出 finished 信号并卸下工具。
+
+        **不在这里清预览**：``finished`` 的订阅方（工具条）会弹属性对话框，刚画的
+        那一笔要一直留到那个对话框关闭为止——清早了用户填属性时就看不到自己画的
+        是哪一块。UI 层在对话框关闭时调 :meth:`clear_preview`。
+        """
         self.finished.emit(geometry)
-        self.clear_draw_tool()
+        self._detach_tool()
 
     def _on_finished(self, geometry) -> None:
         # ActiveDraw.finished 已经透传过来了；这里清理

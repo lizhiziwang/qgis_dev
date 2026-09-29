@@ -10,7 +10,6 @@
 from __future__ import annotations
 
 from qgis.core import Qgis
-from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QDialog,
     QMessageBox,
@@ -55,7 +54,7 @@ class OnlineBasemapMixin:
                 on_delete=self._delete_online_basemap,
             )
             self._online_basemap_dock = dock
-            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+            self.place_right_dock(dock)
         dock.set_layers(self._online_basemap_defs())
         dock.show()
         dock.raise_()

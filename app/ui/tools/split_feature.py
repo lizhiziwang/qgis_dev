@@ -1,31 +1,40 @@
 """线分割工具。
 
-编辑工具条「线分割」按钮激活的交互工具，**先双击选中要分割的要素，再画
-切割线分割**：
+编辑工具条「线分割」按钮激活的交互工具，**对当前选中的要素直接画切割线**：
 
-- **左键双击要素** → 选中为分割目标（黄色描边高亮；双击空白处取消，双击
-  其它要素可切换）。**未选中任何要素时不能画线**——绘制阶段以此为前提；
-- **左键按下（需先选中）** → 从按下位置开始采集切割线（不松开继续移动 =
-  沿线加点；松开后再次左键按下可在其它位置续画折线段）；
-- **移动预览** → 只要已画出起点，鼠标移动（按住或松手均可）时，从最近一
-  个已定点到光标之间始终有红色预览线实时跟手，方便预判下一段落点；
-- **右键单击** → 完成：把光标处预览端点收进切割线后，**只分割双击选中的
-  那一要素**（线要素 / 面要素都支持；点要素不参与），写入编辑缓冲、可整体
-  撤销；完成后清空切割线与选择，需重新双击选择下一要素；
-- **Esc** → 依次：清切割线 → 取消选中要素 → 退出工具。
+- **左键按下** → 从按下位置开始采集切割线（不松开继续移动 = 沿线加点；松开后
+  再次左键按下可在其它位置续画折线段）；
+- **移动预览** → 只要已画出起点，鼠标移动（按住或松手均可）时，从最近一个
+  已定点到光标之间始终有红色预览线实时跟手，方便预判下一段落点；
+- **左键双击** → 完成：把双击点收作末点后执行分割，**只切当前选中的要素**
+  （线要素 / 面要素都支持；点要素不参与），写入编辑缓冲、可整体撤销；完成后
+  清空切割线，可接着画下一条；
+- **右键单击** → 清除已画的切割线（可重画）；
+- **Esc** → 依次：清切割线 → 退出工具。
+
+**流程**：先用选择工具选中要分割的图形 → 点「线分割」→ 直接画线。不再需要
+在工具内双击挑目标（老流程），选中集就是它作用的范围——与「面分割」「挖洞」
+等编辑类工具一致。
 
 分割实现走 QGIS 核心 ``QgsVectorLayer.splitFeatures``（以**图层当前选中**为
-准：调用前临时 ``select`` 选中目标要素，调用后还原原选择，因此只分割双击
-选中的那一要素）——而不是手动 ``changeGeometry`` + ``addFeature``：后者给
-新增块发负临时 fid，提交到 GPKG 等强 fid 数据源时 OGR 直接按负 ID 建要素，
-报 “Cannot create feature of ID … already exists” / ``UNIQUE constraint
-failed``；核心 API 自行完成新 fid 分配，各数据源都能干净提交。调用前会先在
-**拷贝**几何上用 ``QgsGeometry.splitGeometry`` 预演一遍：判定线是否完整穿过
-要素边界（未穿过则提示、不落库），并统计将产生的块数用于提示文案。切割线
-以 ``QgsLineString``（曲线重载）传入：3.40 下直传 ``list[QgsPoint]`` 会误中
-已废弃的 ``Iterable[QgsPointXY]`` 重载抛 TypeError，曲线重载两版本签名一致
-且不废弃。整个过程包成一个编辑命令（``beginEditCommand`` …），Ctrl+Z 可
-整体撤销。
+准——正好就是本工具要切的那些，不需要临时改选中再还原）——而不是手动
+``changeGeometry`` + ``addFeature``：后者给新增块发负临时 fid，提交到 GPKG 等
+强 fid 数据源时 OGR 直接按负 ID 建要素，报 “Cannot create feature of ID …
+already exists” / ``UNIQUE constraint failed``；核心 API 自行完成新 fid 分配，
+各数据源都能干净提交。落库前会先在**拷贝**几何上用 ``QgsGeometry.splitGeometry``
+预演一遍：一个都切不开时提示并保留切割线，不白开一个空的编辑命令。
+
+**编辑命令必须成对关闭**：``beginEditCommand`` 与 ``endEditCommand`` 之间一旦
+有异常逃出去，命令就悬着不关，图层撤销栈从此 ``canUndo()`` 为假、后续所有编辑
+也撤不了（历史 bug：中间那步 ``layer.select(set)`` 抛 ``TypeError``，而 except
+只接了 ``RuntimeError``）。所以这里 except 收宽到 ``Exception``，并且**分割成功
+之后不做任何可能抛异常的收尾**——选中集、提示、刷新都放在命令关闭之后。
+
+失败路径用 ``destroyEditCommand()``（丢弃改动）收尾——注意**不是**
+``cancelEditCommand()``：**PyQGIS 根本没有这个方法**（本机实测
+``hasattr(layer, "cancelEditCommand") is False``），写了会在 except 块里再抛
+``AttributeError``，异常逃逸、命令照样悬着，比不写还坏。``destroyEditCommand()``
+才是「丢弃本次改动并关闭命令」的语义（实测：调用后几何回退、``canUndo()`` 为假）。
 
 安全约束（仓库既定结论，见 ``swipe.py`` docstring）：不在 Qt 事件栈内调
 ``canvas.refresh()`` / ``unsetMapTool``，一律 ``QTimer.singleShot(0, ...)``
@@ -44,7 +53,6 @@ from qgis.core import (
     QgsPoint,
     QgsPointXY,
     QgsProject,
-    QgsRectangle,
     QgsVectorLayer,
     QgsWkbTypes,
 )
@@ -52,17 +60,17 @@ from qgis.gui import QgsMapTool, QgsRubberBand
 from qgis.PyQt.QtCore import QPoint, QPointF, Qt, QTimer
 from qgis.PyQt.QtGui import QColor
 
-from app.core.domain.check.query import intersect_features
 from app.core.domain.check.space_index import clear_spatial_index
+from app.infra.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class SplitFeatureTool(QgsMapTool):
-    """双击选要素 → 画切割线 → 右键分割的编辑工具（线 / 面图层）。"""
+    """对选中要素画切割线分割的编辑工具（左键画线 / 右键完成 / Esc 退出）。"""
 
     #: 采集采样最小间距（像素）：按住左键移动时，过密点会被跳过
     MIN_SPACING_PX = 3
-    #: 候选要素拾取容差（像素，画布坐标扩边用）
-    TOLERANCE_PX = 4
 
     def __init__(
         self,
@@ -84,10 +92,10 @@ class SplitFeatureTool(QgsMapTool):
         self._preview_pt: QgsPointXY | None = None
         #: 切割线预览橡皮筋（线型）
         self._band: QgsRubberBand | None = None
-        #: 双击选中的待分割要素 fid（None = 未选中，此时不允许画切割线）
-        self._selected_fid: int | None = None
-        #: 选中要素的高亮橡皮筋（黄色描边，线 / 面通用）
-        self._select_band: QgsRubberBand | None = None
+        #: Qt 的双击事件序列是 ``press → release → dblclick → release``：双击完成的
+        #: 那次末尾还会**补一个 release**，不吞掉它就会在已清空的顶点表里立刻落新点，
+        #: 看起来像「刚分割完又开始画」。
+        self._skip_next_release = False
         self.setCursor(Qt.CursorShape.CrossCursor)
 
     # -------------------------------------------------- 工具生命周期
@@ -97,7 +105,6 @@ class SplitFeatureTool(QgsMapTool):
 
     def deactivate(self) -> None:
         self._clear_line()
-        self._clear_selection(hint=False)
         super().deactivate()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
@@ -112,10 +119,7 @@ class SplitFeatureTool(QgsMapTool):
         self._capturing = False
         if self._cut_pts:
             self._clear_line()
-            self._hint("已清除切割线：可继续画线；再按 Esc 取消选中")
-            return
-        if self._selected_fid is not None:
-            self._clear_selection()
+            self._hint("已清除切割线：可继续画线；再按 Esc 退出")
             return
         self._quit()
 
@@ -128,43 +132,60 @@ class SplitFeatureTool(QgsMapTool):
     # -------------------------------------------------- 交互
 
     def canvasPressEvent(self, event) -> None:  # noqa: N802
-        """左键按下：有选中要素时开始 / 续画切割线；右键按下：完成分割选中要素。"""
-        button = event.button()
-        if button == Qt.MouseButton.RightButton:
-            # 右键完成：若正按住左键采集，先停止采集再分割
+        """左键按下：新笔手势开始；绘制期落点见 :meth:`canvasReleaseEvent`。"""
+        if event.button() == Qt.MouseButton.RightButton:
+            # 右键：清除已画的切割线（可重画），不完成分割
             self._capturing = False
-            self._finish_split()
-        elif button == Qt.MouseButton.LeftButton:
-            if self._selected_fid is None:
-                # 双击选中要素前的第一次按下会先到这儿：未选中则只提示、不起笔
-                self._hint("请先左键双击选择要分割的要素")
-                return
+            if self._cut_pts:
+                self._clear_line()
+                self._hint("已清除切割线：按住左键重新画，双击完成分割")
+            return
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._skip_next_release = False
             self._start_or_continue(event)
 
-    def canvasDoubleClickEvent(self, event) -> None:  # noqa: N802
-        """左键双击：选中 / 切换待分割要素（点空白处则取消选中）。"""
+    def canvasReleaseEvent(self, event) -> None:  # noqa: N802
+        """左键松开：把**松开位置**收作顶点后停止采样。
+
+        松开点必须收进去：用户「按住拖到终点再松开」是最自然的画法，而移动事件的
+        采样是按 3px 间距跳着采的——只靠它，末点会停在离终点一小段的地方，线到不了
+        要素边界就切不开。
+        """
+        if self._skip_next_release:
+            # 双击序列末尾补发的那个 release：只用于抵消标记，不落点
+            self._skip_next_release = False
+            return
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        layer = self._current_layer()
-        if layer is None:
+        if not self._capturing:
             return
-        if not layer.isEditable():
-            self._hint("图层未处于编辑态，无法分割要素")
+        self._append_vertex(self._map_point_of_event(event))
+        self._capturing = False
+
+    def canvasDoubleClickEvent(self, event) -> None:  # noqa: N802
+        """左键双击：完成分割。"""
+        if event.button() != Qt.MouseButton.LeftButton:
             return
-        if self._geom_type_is_point(layer):
-            self._hint("点要素无法分割，请切换到线 / 面图层")
+        # 先立标记：这次双击末尾补发的 release 不该再落点
+        self._skip_next_release = True
+        self._capturing = False
+        # 双击前的第一次单击可能已把该点收进 _cut_pts → 末点间距过近时不再重复加
+        self._append_vertex(self._map_point_of_event(event))
+        self._finish_split()
+
+    def _append_vertex(self, pt: QgsPointXY | None) -> None:
+        """把一个顶点收进切割线（与上一顶点过近则只放到预览端）。"""
+        if pt is None:
             return
-        # 双击切换选中时，前一次单击可能已起笔留点 → 先清掉再选
-        if self._cut_pts:
-            self._clear_line()
-        fid = self._hit_fid(event)
-        if fid is None:
-            self._clear_selection(hint=False)
-            self._hint("未命中要素：双击要素可选中，Esc 退出")
-            return
-        self._selected_fid = fid
-        self._refresh_select_band()
-        self._hint("已选中要素：按住左键画切割线，右键完成分割")
+        last = self._cut_pts[-1] if self._cut_pts else None
+        if last is None or self._px_distance(last, pt) >= self.MIN_SPACING_PX:
+            self._cut_pts.append(pt)
+            self._preview_pt = None
+        else:
+            self._preview_pt = pt
+        self._refresh_band()
+
+    # -------------------------------------------------- 切割线采集
 
     def canvasMoveEvent(self, event) -> None:  # noqa: N802
         """鼠标移动：按住左键时采样加点；否则/间距不足时把预览端跟到光标。"""
@@ -185,78 +206,8 @@ class SplitFeatureTool(QgsMapTool):
                 self._preview_pt = pt
                 self._refresh_band()
 
-    def canvasReleaseEvent(self, event) -> None:  # noqa: N802
-        """左键松开：停止采样（切割线保留，等待续画或右键完成）。"""
-        if event.button() == Qt.MouseButton.LeftButton:
-            self._capturing = False
-
-    # -------------------------------------------------- 选中要素
-
-    def _hit_fid(self, event) -> int | None:
-        """点击像素 → 命中要素 fid（10px 容差矩形求交；多要素命中取最上层）。"""
-        layer = self._current_layer()
-        if layer is None:
-            return None
-        px = self._pixel_of_event(event)
-        if px is None:
-            return None
-        try:
-            map_pt = self.canvas.getCoordinateTransform().toMapCoordinates(px)
-        except RuntimeError:
-            return None
-        tol = self.TOLERANCE_PX * self.canvas.mapSettings().mapUnitsPerPixel()
-        rect = QgsRectangle(
-            map_pt.x() - tol, map_pt.y() - tol, map_pt.x() + tol, map_pt.y() + tol
-        )
-        project = self.canvas.project() or QgsProject.instance()
-        fids = intersect_features(
-            layer,
-            QgsGeometry.fromRect(rect),
-            self.canvas.mapSettings().destinationCrs(),
-            project,
-        )
-        # 过滤已删除 / 失效要素（空间索引缓存可能含已删 fid）
-        fids = [fid for fid in fids if layer.getFeature(fid).isValid()]
-        return fids[-1] if fids else None  # 后添加的要素通常绘制在上层
-
-    def _refresh_select_band(self) -> None:
-        """把选中要素几何画成黄色描边高亮（图层 CRS → 画布 CRS）。"""
-        layer = self._current_layer()
-        if layer is None or self._selected_fid is None:
-            return
-        feature = layer.getFeature(self._selected_fid)
-        if not feature.isValid():
-            return
-        geom = feature.geometry()
-        if geom is None or geom.isNull() or geom.isEmpty():
-            return
-        if self._select_band is None:
-            self._select_band = QgsRubberBand(self.canvas, QgsWkbTypes.LineGeometry)
-            self._select_band.setColor(QColor(255, 200, 0, 230))
-            self._select_band.setWidth(3)
-        canvas_geom = self._to_canvas_geom(layer, geom)
-        band = self._select_band
-        band.reset(QgsWkbTypes.LineGeometry)
-        for v in canvas_geom.vertices():
-            band.addPoint(QgsPointXY(v.x(), v.y()))
-        band.show()
-
-    def _clear_selection(self, hint: bool = True) -> None:
-        """取消选中要素并隐藏高亮。"""
-        self._selected_fid = None
-        if self._select_band is not None:
-            try:
-                self._select_band.reset(QgsWkbTypes.LineGeometry)
-                self._select_band.hide()
-            except RuntimeError:
-                pass
-        if hint:
-            self._hint("已取消选择：左键双击重选要素，Esc 退出")
-
-    # -------------------------------------------------- 切割线采集
-
     def _start_or_continue(self, event) -> None:
-        """左键按下：校验编辑态后把按下点加入切割线并开始采样。"""
+        """左键按下：校验后把按下点收作顶点并开始采样。"""
         layer = self._current_layer()
         if layer is None:
             return
@@ -266,18 +217,10 @@ class SplitFeatureTool(QgsMapTool):
         if self._geom_type_is_point(layer):
             self._hint("点要素无法分割，请切换到线 / 面图层")
             return
-        pt = self._map_point_of_event(event)
-        if pt is None:
+        if not layer.selectedFeatureIds():
+            self._hint("请先用点选 / 框选选中要分割的要素，再画切割线")
             return
-        last = self._cut_pts[-1] if self._cut_pts else None
-        if last is None or self._px_distance(last, pt) >= self.MIN_SPACING_PX:
-            # 续画点离上一已定点够远 → 收作实点；否则仅把预览端放到位
-            self._cut_pts.append(pt)
-            self._preview_pt = None
-            self._refresh_band()
-        else:
-            self._preview_pt = pt
-            self._refresh_band()
+        self._append_vertex(self._map_point_of_event(event))
         self._capturing = True
 
     def _clear_line(self) -> None:
@@ -312,19 +255,20 @@ class SplitFeatureTool(QgsMapTool):
     # -------------------------------------------------- 分割
 
     def _finish_split(self) -> None:
-        """右键完成：按切割线分割**选中的那一要素**（走核心 splitFeatures，入编辑缓冲）。"""
+        """双击完成：按切割线分割**选中的**要素（走核心 splitFeatures，入编辑缓冲）。"""
         layer = self._current_layer()
         if layer is None:
             return
-        fid = self._selected_fid
-        if fid is None:
-            self._hint("请先左键双击选择要分割的要素")
+        if not layer.isEditable():
+            self._hint("图层未处于编辑态，无法分割要素")
             return
-        feature = layer.getFeature(fid)
-        if not feature.isValid():
-            # 选中要素已被外部删除 / 撤销 → 失效，提示重选
-            self._clear_selection(hint=False)
-            self._hint("所选要素已不存在，请重新双击选择")
+        if self._geom_type_is_point(layer):
+            self._hint("点要素无法分割，请切换到线 / 面图层")
+            return
+        fids = list(layer.selectedFeatureIds())
+        if not fids:
+            self._hint("请先用点选 / 框选选中要分割的要素，再画切割线")
+            self._clear_line()
             return
         # 若光标带了一段预览线（最近已定点 → 光标），把它收作切割线末点，所见即所切
         if self._preview_pt is not None and self._cut_pts:
@@ -334,82 +278,78 @@ class SplitFeatureTool(QgsMapTool):
         if len(self._cut_pts) < 2:
             self._hint("请先按住左键在要素上画一条切割线，再右键完成")
             return
-        if not layer.isEditable():
-            self._hint("图层未处于编辑态，无法分割要素")
-            return
-        if self._geom_type_is_point(layer):
-            self._hint("点要素无法分割，请切换到线 / 面图层")
-            return
 
-        # 切割线顶点 → 图层 CRS（分割 API 要求与几何同 CRS）
-        line_pts = [self._to_layer_point(p) for p in self._cut_pts]
-        line_pts = [pt for pt in line_pts if pt is not None]
-        cleaned: list[QgsPoint] = []
-        for pt in line_pts:
-            if cleaned and abs(cleaned[-1].x() - pt.x()) < 1e-9 and abs(cleaned[-1].y() - pt.y()) < 1e-9:
-                continue
-            cleaned.append(pt)
+        cleaned = self._layer_line_points()
         if len(cleaned) < 2:
             self._hint("切割线太短，无法分割；请按住左键画完整穿过要素的线")
             self._clear_line()
             return
 
-        # 只分割双击选中的那一要素。实现走 QGIS 核心 splitFeatures（以图层
-        # 当前选中为准，先临时选中再还原），而不是手动 changeGeometry +
-        # addFeature：后者给新块发负临时 fid，提交到 GPKG 等强 fid 数据源时
-        # OGR 会直接按负 ID 建要素，报 “Cannot create feature of ID …
-        # already exists” / UNIQUE 冲突；核心 API 自行完成新 fid 分配，
-        # 各数据源都能干净提交，且仍是单个撤销步骤。
-        geom = feature.geometry()
-        if geom is None or geom.isNull() or geom.isEmpty():
-            self._clear_selection(hint=False)
-            self._hint("所选要素几何为空，请重新双击选择")
-            return
-        # 拷贝几何预演一次，只为统计将产生的块数（提示文案），不落库
-        work = QgsGeometry(geom)
-        code, new_geoms, _tp = work.splitGeometry(cleaned, False, True)
-        parts = [work, *list(new_geoms)]
-        valid = [
-            part
-            for part in parts
-            if part is not None and not part.isNull() and not part.isEmpty()
-        ]
-        if code != Qgis.GeometryOperationResult.Success or len(valid) < 2:
-            # 线没完整穿过边界（NothingHappened 等）→ 切不开，保留选中可重画
-            self._hint("所选要素未被切开：切割线需完整穿过要素边界")
+        # 预演：在**拷贝**几何上试切一遍，统计会被切开的要素数。一个都切不开就
+        # 不落库、也不开编辑命令（beginEditCommand 会截断 redo 历史，空开一次
+        # 会白白破坏撤销历史）。
+        cut_count = 0
+        for fid in fids:
+            feature = layer.getFeature(fid)
+            if not feature.isValid():
+                continue
+            geom = feature.geometry()
+            if geom is None or geom.isNull() or geom.isEmpty():
+                continue
+            work = QgsGeometry(geom)
+            code, new_geoms, _tp = work.splitGeometry(cleaned, False, True)
+            if code != Qgis.GeometryOperationResult.Success:
+                continue
+            parts = [work, *list(new_geoms)]
+            if any(p is not None and not p.isNull() and not p.isEmpty() for p in parts):
+                cut_count += 1
+        if cut_count == 0:
+            self._hint("没有要素被切开：切割线需完整穿过选中要素的边界")
             self._clear_line()
             return
-        prev_sel = set(layer.selectedFeatureIds())
+
         # 用曲线重载（QgsCurve）避开旧版 Iterable[QgsPointXY] 重载在 PyQt 的
         # 过载解析问题：直接传 list[QgsPoint] 会先撞上已废弃的 QgsPointXY
         # 重载并抛 TypeError，曲线重载两版本签名一致且不废弃。
         cut_line = QgsLineString(cleaned)
         layer.beginEditCommand("线分割")
         try:
-            layer.select([fid])  # 核心 API 只切当前选中的要素
+            # 核心 API 只切图层**当前选中**的要素——正是上面读到的 fids，
+            # 不需要临时改选中（改完还得还原，那一步出错会把编辑命令悬着不关）
             code, _split_pts = layer.splitFeatures(cut_line, False, False)
-            # 还原调用前的图层选中状态（本工具用自绘高亮，不长期占用图层选择）
-            if prev_sel:
-                layer.select(prev_sel)
-            else:
-                layer.removeSelection()
-        except RuntimeError:
-            layer.cancelEditCommand()
+        except Exception:  # noqa: BLE001 —— 收宽：任何异常都必须关掉编辑命令
+            layer.destroyEditCommand()
+            logger.exception("线分割失败: layer=%s", layer.name())
             self._hint("分割失败：图层编辑 API 异常")
+            self._clear_line()
             return
         if code != Qgis.GeometryOperationResult.Success:
-            layer.cancelEditCommand()
-            self._hint("所选要素未被切开：切割线需完整穿过要素边界")
+            layer.destroyEditCommand()
+            self._hint("没有要素被切开：切割线需完整穿过选中要素的边界")
             self._clear_line()
             return
         layer.endEditCommand()
-        # 新增 / 改了要素，空间索引缓存失效 → 清掉让下次命中重建
+
+        # ↓ 编辑命令已关闭，下面全是收尾：任何失败都不该再影响撤销栈
         clear_spatial_index(layer)
         self._clear_line()
-        self._clear_selection(hint=False)
-        self._hint(f"已按切割线分割为 {len(valid)} 个要素（可 Ctrl+Z 撤销）；双击选择下一要素")
+        self._hint(
+            f"已按切割线分割 {cut_count} 个要素（可 Ctrl+Z 撤销）；继续画线可再分割"
+        )
         # 编辑命令栈外刷新画布（仓库约束：事件栈内不直接 refresh）
         QTimer.singleShot(0, self._safe_refresh)
+
+    def _layer_line_points(self) -> list[QgsPoint]:
+        """切割线顶点换算到图层 CRS 并去重（分割 API 要求与几何同 CRS）。"""
+        pts = [self._to_layer_point(p) for p in self._cut_pts]
+        cleaned: list[QgsPoint] = []
+        for pt in pts:
+            if pt is None:
+                continue
+            if cleaned and abs(cleaned[-1].x() - pt.x()) < 1e-9 and abs(cleaned[-1].y() - pt.y()) < 1e-9:
+                continue
+            cleaned.append(pt)
+        return cleaned
 
     # -------------------------------------------------- 图层 / 坐标
 
@@ -420,7 +360,6 @@ class SplitFeatureTool(QgsMapTool):
             return None
         if self._layer is not None and layer is not self._layer:
             self._clear_line()
-            self._clear_selection(hint=False)
         self._layer = layer
         return layer
 
@@ -433,8 +372,6 @@ class SplitFeatureTool(QgsMapTool):
             self.canvas.refresh()
         except RuntimeError:
             pass
-
-    # -------------------------------------------------- 坐标换算
 
     def _pixel_of_event(self, event) -> QPoint | None:
         """事件像素坐标（QPointF 测试桩 / 真实 QPoint 都兼容）。"""
@@ -463,22 +400,6 @@ class SplitFeatureTool(QgsMapTool):
             return float("inf")
         return ((a.x() - b.x()) ** 2 + (a.y() - b.y()) ** 2) ** 0.5 / mupp
 
-    def _to_canvas_geom(self, layer: QgsVectorLayer, geom: QgsGeometry) -> QgsGeometry:
-        """图层 CRS 几何 → 画布 CRS 几何（CRS 相同 / 无效时恒等）。"""
-        src = layer.crs()
-        dst = self.canvas.mapSettings().destinationCrs()
-        if not src.isValid() or not dst.isValid() or src == dst:
-            return geom
-        try:
-            xform = QgsCoordinateTransform(
-                src, dst, self.canvas.project() or QgsProject.instance()
-            )
-            g = QgsGeometry(geom)
-            g.transform(xform)
-            return g
-        except Exception:
-            return geom
-
     def _to_layer_point(self, map_pt: QgsPointXY) -> QgsPoint | None:
         """画布地图坐标 → 图层 CRS 坐标（CRS 相同 / 无效时恒等）。"""
         layer = self._layer
@@ -492,6 +413,7 @@ class SplitFeatureTool(QgsMapTool):
             xform = QgsCoordinateTransform(src, dst, self.canvas.project() or QgsProject.instance())
             return QgsPoint(xform.transform(QgsPointXY(map_pt)))
         except Exception:
+            logger.warning("线分割切割线坐标转换失败，回退原坐标", exc_info=True)
             return QgsPoint(map_pt)
 
 

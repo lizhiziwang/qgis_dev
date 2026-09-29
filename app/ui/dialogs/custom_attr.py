@@ -1,6 +1,14 @@
 """新建要素时的属性编辑 Dialog。
 
-迁自 :class:`component.CustomAttrDialog.CustomAttrDialog`。"""
+迁自 :class:`component.CustomAttrDialog.CustomAttrDialog`。
+
+**输入框初值取自要素本身**（不是一律 ``"NULL"``）：新建要素在调用前已经过
+:func:`app.ui.tools.feature_attrs.new_feature_attributes` 预填——面积 / 周长类
+字段按刚画的几何算好、唯一标识（FGUID / mzguid…）生成新值。早期实现把每个框
+硬写成 ``"NULL"``，保存时再原样解析回真 NULL，等于把预填的值又抹掉了（用户看到
+的是"明明有 MZGUID 字段却没赋值"）。只有要素上确实是空值时才用 ``"NULL"`` 占位
+（聚焦即清空，保存时写真 NULL，见 :meth:`_parse_field_value`）。
+"""
 
 from __future__ import annotations
 
@@ -24,6 +32,9 @@ from qgis.core import QgsField, QgsVectorLayer
 
 from app.core.domain.check.space_index import clear_spatial_index
 from app.ui.common.base_dialog import BaseDialog
+
+#: 空值占位文本：既表示"没值"，也是保存时转真 NULL 的判据
+_NULL_TEXT = "NULL"
 
 
 class CustomAttrDialog(BaseDialog):
@@ -61,11 +72,11 @@ class CustomAttrDialog(BaseDialog):
         form.setFormAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
 
-        for field in self.layer.fields():
+        for idx, field in enumerate(self.layer.fields()):
             label = QLabel(field.name())
             label.setMinimumWidth(80)
             line_edit = QLineEdit()
-            line_edit.setText("NULL")
+            line_edit.setText(self._initial_text(idx, field))
             line_edit.focusInEvent = lambda e, le=line_edit: self._on_focus(le, e)
             self.attr_values[field.name()] = line_edit
             self._attr_fields[field.name()] = field
@@ -87,8 +98,44 @@ class CustomAttrDialog(BaseDialog):
         main.addWidget(button_container)
         self.setLayout(main)
 
+    def _initial_text(self, idx: int, field: QgsField) -> str:
+        """输入框初值：要素上已有的值（新增要素已预填面积 / GUID）；无值用占位文本。"""
+        value = self._feature_value(idx)
+        if value is None:
+            return _NULL_TEXT
+        text = self._format_field_value(field, value).strip()
+        return text or _NULL_TEXT
+
+    def _feature_value(self, idx: int):
+        """要素第 ``idx`` 个字段的值；没有要素 / 取不到返回 ``None``。"""
+        if self.feature is None:
+            return None
+        try:
+            attrs = self.feature.attributes()
+        except Exception:  # noqa: BLE001 —— 要素已销毁等收尾场景
+            return None
+        return attrs[idx] if 0 <= idx < len(attrs) else None
+
+    @staticmethod
+    def _format_field_value(field: QgsField, value) -> str:
+        """字段值 → 输入框文本（与 :meth:`_parse_field_value` 互逆）。
+
+        日期 / 时间必须按解析时的格式串输出——直接 ``str(QDate)`` 会得到
+        ``'PyQt6.QtCore.QDate(2026, 9, 29)'`` 这种 repr，保存时解析失败。
+        """
+        ftype = field.type()
+        if ftype == QVariant.Date and isinstance(value, QDate):
+            return value.toString("yyyy-MM-dd")
+        if ftype == QVariant.Time and isinstance(value, QTime):
+            return value.toString("HH:mm:ss")
+        if ftype == QVariant.DateTime and isinstance(value, QDateTime):
+            return value.toString("yyyy-MM-dd HH:mm:ss")
+        if ftype == QVariant.Bool:
+            return "是" if value else "否"
+        return str(value)
+
     def _on_focus(self, line_edit, event) -> None:
-        if line_edit.text() == "NULL":
+        if line_edit.text() == _NULL_TEXT:
             line_edit.clear()
         QLineEdit.focusInEvent(line_edit, event)
 
@@ -132,7 +179,7 @@ class CustomAttrDialog(BaseDialog):
         非法输入抛 :class:`ValueError`（调用方弹窗提示）。
         """
         raw = (text or "").strip()
-        if raw == "" or raw.upper() == "NULL":
+        if raw == "" or raw.upper() == _NULL_TEXT:
             return None
         ftype = field.type()
         if ftype in (QVariant.Int, QVariant.LongLong, QVariant.UInt, QVariant.ULongLong):

@@ -99,7 +99,7 @@ def explode_features(
                 layer.addFeature(new_feature)
                 new_fids.append(new_feature.id())
             changed_fids.append(fid)
-    except RuntimeError:
+    except Exception:  # noqa: BLE001 —— 收宽：任何异常都必须关掉编辑命令
         layer.destroyEditCommand()
         logger.exception("分解要素失败: layer=%s", layer.name())
         say("分解失败：图层编辑 API 异常")

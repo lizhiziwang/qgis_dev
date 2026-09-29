@@ -199,11 +199,14 @@ class AttributeEntryDock(QDockWidget):
         try:
             for i, value in changes:
                 if not layer.changeAttributeValue(fid, i, value):
-                    layer.cancelEditCommand()
+                    # destroyEditCommand = 丢弃本次改动并关闭命令（PyQGIS 没有
+                    # cancelEditCommand 这个方法，写了会在 except 里再抛
+                    # AttributeError，把命令留在悬着状态、撤销栈永久失效）
+                    layer.destroyEditCommand()
                     self._set_status(f"字段「{layer.fields()[i].name()}」写入失败，本次修改已全部取消。")
                     return
-        except RuntimeError:
-            layer.cancelEditCommand()
+        except Exception:  # noqa: BLE001 —— 收宽：任何异常都必须关掉编辑命令
+            layer.destroyEditCommand()
             self._set_status("写入失败：图层编辑 API 异常，本次修改已全部取消。")
             return
         layer.endEditCommand()

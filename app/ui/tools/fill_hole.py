@@ -6,6 +6,9 @@
 几何重算（见 :mod:`app.ui.tools.feature_attrs`）。**不新增要素**——只是把
 要素自己的洞删掉。
 
+**只作用于当前选中的要素**（按钮可用性同样要求「有选中 + 编辑态」）：点击点
+落在没选中的图形的洞里也不动它；候选只在选中要素里找，顺带省掉全图层扫描。
+
 实现：洞一定落在要素的**外接框**内（按外接框包含点击点筛候选），再逐部件
 逐内环判断哪个环包含点击点（环连成面后 contains 点击点），取**离点击点最近**
 的那个环删除。支持多部件几何；改动写进一个 ``beginEditCommand("补洞")``，
@@ -106,14 +109,25 @@ class FillHoleTool(QgsMapTool):
     # -------------------------------------------------- 补洞
 
     def _fill_at(self, layer: QgsVectorLayer, layer_pt: QgsPoint) -> None:
-        """在点击点处找洞并填补（一个撤销命令；找不到提示）。"""
+        """在点击点处找洞并填补（一个撤销命令；找不到提示）。
+
+        **只作用于当前选中的要素**（按钮可用性同样要求「有选中 + 编辑态」）：
+        点击点落在没选中的图形的洞里也不动它。只遍历选中要素同时也是性能优化
+        ——不必全图层扫描。
+        """
+        selected = list(layer.selectedFeatureIds())
+        if not selected:
+            self._hint("请先用点选 / 框选选中要补洞的面要素，再点击洞的内部")
+            return
+
         # 洞内部不属于要素本体 → 按点击点相交查询必然查不到；洞一定落在要素
         # **外接框**内 → 用「外接框包含点击点」筛候选，再逐内环判定归属。
         pt_xy = QgsPointXY(layer_pt.x(), layer_pt.y())
         pt_geom = QgsGeometry.fromPointXY(pt_xy)
 
         target: tuple[int, int, int, float] | None = None  # (fid, part_idx, ring_idx, dist)
-        for feature in layer.getFeatures():
+        for fid in selected:
+            feature = layer.getFeature(fid)
             if not feature.isValid():
                 continue
             geom = feature.geometry()
@@ -135,7 +149,7 @@ class FillHoleTool(QgsMapTool):
                     if target is None or dist < target[3]:
                         target = (feature.id(), part_idx, ring_idx, dist)
         if target is None:
-            self._hint("未找到洞：请点击面要素洞的内部（挖洞产生的内环区域）")
+            self._hint("未找到洞：请点击**选中的**面要素洞里（挖洞产生的内环区域）")
             return
 
         fid, part_idx, ring_idx, _dist = target
@@ -156,7 +170,7 @@ class FillHoleTool(QgsMapTool):
             for idx, value in enumerate(refreshed):
                 if before[idx] != value:
                     layer.changeAttributeValue(fid, idx, value)
-        except RuntimeError:
+        except Exception:  # noqa: BLE001 —— 收宽：任何异常都必须关掉编辑命令
             layer.destroyEditCommand()
             self._hint("补洞失败：图层编辑 API 异常")
             return

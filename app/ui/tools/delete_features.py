@@ -43,7 +43,7 @@ def delete_selected_features(
     layer.beginEditCommand("删除要素")
     try:
         deleted = layer.deleteFeatures(fids)
-    except RuntimeError:
+    except Exception:  # noqa: BLE001 —— 收宽：任何异常都必须关掉编辑命令
         layer.destroyEditCommand()
         logger.exception("删除要素失败: layer=%s", layer.name())
         say("删除要素失败：图层编辑 API 异常")

@@ -133,10 +133,40 @@ def collect_cutter_curves(
     return (curves, geometries)
 
 
+def _measure(geometry: QgsGeometry, is_polygon: bool) -> float:
+    """分块度量：面用面积、线用长度（点图层不参与分割，无意义）。"""
+    if geometry is None or geometry.isNull() or geometry.isEmpty():
+        return 0.0
+    try:
+        return geometry.area() if is_polygon else geometry.length()
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+def _meaningful_parts(
+    geometry: QgsGeometry, parts: list[QgsGeometry], is_polygon: bool
+) -> list[QgsGeometry]:
+    """丢掉退化分块，只留真正占面积的（占长度）。
+
+    **为什么必须过滤**：切割要素只是与目标**相邻**（共边）时，它的边界与目标边界
+    重合，``splitGeometry`` 仍可能报 ``Success`` 并吐出零面积 / 零长度的碎片——
+    不过滤就会「明明没相交也提示分割成功，还凭空多出几块」，统计数也跟着错。
+    真正的切开一定把原几何**分割**成若干都有正度量的块。
+    """
+    total = _measure(geometry, is_polygon)
+    eps = max(total * 1e-9, 1e-12)
+    return [p for p in parts if _measure(p, is_polygon) > eps]
+
+
 def _split_geometry(
     geometry: QgsGeometry, curves: Sequence[Sequence[QgsPoint]]
 ) -> list[QgsGeometry]:
-    """用 ``curves`` 逐条切分 ``geometry``，返回切出的块（未切动时长度为 1）。"""
+    """用 ``curves`` 逐条切分 ``geometry``，返回切出的块（未切动时长度为 1）。
+
+    末了会滤掉退化块（见 :func:`_meaningful_parts`）——相邻共边的切割要素会产出
+    零面积碎片，滤完往往只剩 1 块，调用方据 ``len(parts) < 2`` 判定"没切开"。
+    """
+    is_polygon = geometry.type() == Qgis.GeometryType.Polygon
     parts = [QgsGeometry.fromWkt(geometry.asWkt())]
     for curve in curves:
         next_parts: list[QgsGeometry] = []
@@ -153,9 +183,10 @@ def _split_geometry(
                     if piece is not None and not piece.isNull() and not piece.isEmpty():
                         next_parts.append(piece)
         parts = next_parts
-    return [
+    parts = [
         part for part in parts if part is not None and not part.isNull() and not part.isEmpty()
     ]
+    return _meaningful_parts(geometry, parts, is_polygon)
 
 
 def _intersecting_fids(
@@ -248,7 +279,7 @@ def split_by_selected_features(
                 result_fids.append(new_feature.id())
                 added += 1
             changed += 1
-    except RuntimeError:
+    except Exception:  # noqa: BLE001 —— 收宽：任何异常都必须关掉编辑命令
         layer.destroyEditCommand()
         logger.exception("要素分割失败: layer=%s", layer.name())
         say("要素分割失败：图层编辑 API 异常")

@@ -757,7 +757,11 @@ class MirrorCompare(QObject):
             QDockWidget.DockWidgetFeature.DockWidgetMovable
             | QDockWidget.DockWidgetFeature.DockWidgetFloatable
         )
-        self._main_window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+        placer = getattr(self._main_window, "place_right_dock", None)
+        if callable(placer):
+            placer(dock)
+        else:  # 测试桩 / 旧窗口
+            self._main_window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
 
         # 2) 主画布临时隐藏对比图层（互补显示），记录可见性
         for layer in compare_layers:

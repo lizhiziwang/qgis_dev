@@ -150,7 +150,7 @@ def apply_gap_repair(
                         layer.changeAttributeValue(fid, idx, value)
             changed += 1
             filled += count
-    except RuntimeError:
+    except Exception:  # noqa: BLE001 —— 收宽：任何异常都必须关掉编辑命令
         layer.destroyEditCommand()
         logger.exception("补缝失败: layer=%s", layer.name())
         say("补缝失败：图层编辑 API 异常")

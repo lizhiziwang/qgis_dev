@@ -86,7 +86,7 @@ class AppActionsMixin:
         if dock is None:
             dock = QualityDock(self)
             self._quality_dock = dock
-            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+            self.place_right_dock(dock)
         dock.show()
         dock.raise_()
 
@@ -111,7 +111,7 @@ class AppActionsMixin:
         # 复用单个"分析工具"dock，避免每次点"分析"都新建一个
         if getattr(self, "_analyse_dock", None) is None:
             self._analyse_dock = ToolsDock(self)
-            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._analyse_dock)
+            self.place_right_dock(self._analyse_dock)
         self._analyse_dock.show()
         self._analyse_dock.raise_()
 

@@ -229,7 +229,7 @@ class MoveFeaturesTool(QgsMapTool):
             for fid, geometry in moved_geoms:
                 layer.changeGeometry(fid, geometry)
                 changed += 1
-        except RuntimeError:
+        except Exception:  # noqa: BLE001 —— 收宽：任何异常都必须关掉编辑命令
             layer.destroyEditCommand()
             logger.exception("移动要素失败: layer=%s", layer.name())
             self._hint("移动要素失败：图层编辑 API 异常")

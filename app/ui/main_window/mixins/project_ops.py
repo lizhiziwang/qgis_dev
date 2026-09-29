@@ -20,7 +20,6 @@ from qgis.core import (
     QgsCoordinateReferenceSystem,
     QgsLayerTreeGroup,
 )
-from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QMessageBox
 
 from app.core.domain.basemap import add_base_tile_layer
@@ -66,7 +65,7 @@ class ProjectOpsMixin:
             self.project_dock.render_requested.connect(self._show_style_editor)
             self.project_dock.label_requested.connect(self._show_label_settings)
             self.project_dock.layer_context_menu_requested.connect(self._on_layer_context_menu)
-            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self.project_dock)
+            self.place_right_dock(self.project_dock)
         self._on_project_create(name)
         self.project_dock.show()
         self.project_dock.raise_()

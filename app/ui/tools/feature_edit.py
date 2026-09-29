@@ -347,10 +347,13 @@ class FeatureEditTool(QgsMapTool):
         layer.beginEditCommand(command_text)
         try:
             ok = layer.changeGeometry(self._fid, geom)
-        except RuntimeError:
+        except Exception:  # noqa: BLE001 —— 收宽：任何异常都必须关掉编辑命令
             ok = False
         if not ok:
-            layer.cancelEditCommand()
+            # destroyEditCommand = 丢弃本次改动并关闭命令（PyQGIS 没有
+            # cancelEditCommand，写了会在 except 里再抛 AttributeError，
+            # 命令悬着 → 图层撤销栈永久失效）
+            layer.destroyEditCommand()
             self._hint("修改失败：图层编辑 API 异常")
             return False
         layer.endEditCommand()
@@ -416,10 +419,10 @@ class FeatureEditTool(QgsMapTool):
         layer.beginEditCommand("删除要素")
         try:
             ok = layer.deleteFeatures([fid])
-        except RuntimeError:
+        except Exception:  # noqa: BLE001 —— 收宽：任何异常都必须关掉编辑命令
             ok = False
         if not ok:
-            layer.cancelEditCommand()
+            layer.destroyEditCommand()
             self._hint("删除要素失败：图层编辑 API 异常")
             return
         layer.endEditCommand()

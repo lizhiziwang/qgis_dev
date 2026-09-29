@@ -4,7 +4,8 @@
 （:class:`app.ui.docks.attribute_entry_dock.AttributeEntryDock`）中编辑该
 要素的属性**，点「确认修改」把改动写回图层编辑缓冲：
 
-- **左键单击要素** → 命中后回调 ``on_feature(layer, fid)``（由工具条接
+- **左键单击要素** → 命中后**把图层选中集换成该要素**（QGIS 自身的选中高亮，
+  一眼看出正在录入的是哪一块），再回调 ``on_feature(layer, fid)``（由工具条接
   入 Dock 的 :meth:`AttributeEntryDock.load_feature`）；
 - **点击空白** → 提示未命中；
 - **Esc** → 退出工具。
@@ -23,6 +24,7 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from qgis.core import (
+    Qgis,
     QgsGeometry,
     QgsProject,
     QgsRectangle,
@@ -32,6 +34,9 @@ from qgis.gui import QgsMapTool
 from qgis.PyQt.QtCore import QPoint, QPointF, Qt, QTimer
 
 from app.core.domain.check.query import intersect_features
+from app.infra.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class AttributeEntryTool(QgsMapTool):
@@ -98,10 +103,22 @@ class AttributeEntryTool(QgsMapTool):
         if fid is None:
             self._hint("未命中要素：请点击当前编辑图层上的要素")
             return
+        # 点击即把图层选中集换成这一个：地图上用 QGIS 自身的选中高亮标出正在
+        # 录入的是哪一块。**替换**而非追加（SetSelection）——属性录入一次只针对
+        # 一个要素，累积选中没有意义。
+        self._select_only(layer, fid)
         if self._loaded == (layer, fid):
             return  # 已在编辑该要素，忽略重复点击（Dock 里的输入不清空）
         self._loaded = (layer, fid)
         self._on_feature(layer, fid)
+
+    def _select_only(self, layer: QgsVectorLayer, fid: int) -> None:
+        """把图层选中集换成 ``fid`` 这一个（失败不影响录入流程）。"""
+        try:
+            layer.selectByIds([fid], Qgis.SelectBehavior.SetSelection)
+        except (RuntimeError, AttributeError):
+            # 图层销毁 / 构建不支持 selectByIds：高亮缺失，但属性录入照常
+            logger.warning("属性录入选中要素失败（不影响录入）", exc_info=True)
 
     # -------------------------------------------------- 拾取
 

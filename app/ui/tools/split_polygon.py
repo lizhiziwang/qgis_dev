@@ -1,7 +1,8 @@
 """面分割工具。
 
 编辑工具条「面分割」按钮激活的交互工具：在要分割的要素上**左键画多边形**
-作为切割区域（支持磁性捕捉），**双击完成**后，多边形覆盖到的要素被切开：
+作为切割区域（支持磁性捕捉），**双击完成**后，多边形覆盖到的**选中**要素被
+切开：
 
 - **左键单击** → 添加多边形顶点，顶点经画布吸附管线吸附一次（可吸到已有
   要素的顶点 / 边，磁吸标记实时反馈）；
@@ -10,12 +11,15 @@
 - **右键单击** → 清除已画的多边形（可重新画）；
 - **Esc** → 依次：清多边形 → 退出工具。
 
+**只作用于当前选中的要素**（按钮可用性同样要求「有选中 + 编辑态」）：画出来
+的切割区盖到没选中的图形也不动它们，避免一次画框顺手切了旁边没打算动的图斑。
+
 分割语义：画的多边形是**切割区域**——多边形覆盖的要素部分被切出成为**新
 要素**（属性继承：主键清空、FGUID 重新生成、面积 / 周长按新几何重算，其余
 照抄，见 :mod:`app.ui.tools.feature_attrs`），原要素保留剩余部分
-（``difference``）。一次可同时切多个被覆盖的要素；**未被真正切开**（多边形
-没盖住要素 / 完全盖住要素）时提示并清空多边形，可继续画下一个。线 / 面图
-层都支持（点图层不参与）。
+（``difference``）。一次可同时切多个被覆盖的**选中**要素；**未被真正切开**
+（多边形没盖住要素 / 完全盖住要素）时提示并清空多边形，可继续画下一个。线 /
+面图层都支持（点图层不参与）。
 
 分割写进编辑缓冲（要求图层处于编辑态）：``beginEditCommand`` 把每个受影响
 要素的 ``changeGeometry`` + ``changeAttributeValue``（面积类字段重算）+
@@ -197,13 +201,25 @@ class SplitPolygonTool(QgsMapTool):
     # -------------------------------------------------- 分割
 
     def _run_cutter_action(self) -> None:
-        """双击完成：闭合多边形并执行切割动作（子类重写以改变语义，默认面分割）。"""
+        """双击完成：闭合多边形并执行切割动作（子类重写以改变语义，默认面分割）。
+
+        **只作用于当前选中的要素**：画出来的切割区盖到没选中的图形也不动它们。
+        选中集由按钮可用性把关（见 ``draw_toolbar._refresh_button_states``），
+        这里再兜一层，防止绕过按钮直接调工具。
+        """
         layer, cutter = self._prepare_cutter()
         if cutter is None:
             return
-        # 用切割面（已换算到图层 CRS）找被覆盖的要素 → 逐个切
-        fids = intersect_features(layer, cutter, layer.crs())
-        fids = [fid for fid in fids if layer.getFeature(fid).isValid()]
+        selected = set(layer.selectedFeatureIds())
+        if not selected:
+            self._hint("请先用点选 / 框选选中要分割的要素，再画切割区")
+            self._clear_polygon()
+            return
+        # 用切割面（已换算到图层 CRS）找被覆盖的要素 → 逐个切；未选中的跳过
+        covered = intersect_features(layer, cutter, layer.crs())
+        covered = [fid for fid in covered if layer.getFeature(fid).isValid()]
+        fids = [fid for fid in covered if fid in selected]
+        skipped_unselected = len(covered) - len(fids)
         plans: list[tuple[int, QgsGeometry, QgsGeometry, list]] = []
         for fid in fids:
             feature = layer.getFeature(fid)
@@ -221,7 +237,10 @@ class SplitPolygonTool(QgsMapTool):
                 continue
             plans.append((fid, outside, inside, list(feature.attributes())))
         if not plans:
-            self._hint("多边形未切开任何要素：请把多边形画在要素上（部分覆盖），双击分割")
+            msg = "多边形未切开任何要素：请把多边形画在选中的要素上（部分覆盖），双击分割"
+            if skipped_unselected:
+                msg = f"{msg}（{skipped_unselected} 个被覆盖但未选中的要素已跳过）"
+            self._hint(msg)
             self._clear_polygon()
             return
         self._commit_split(layer, plans)
@@ -247,7 +266,7 @@ class SplitPolygonTool(QgsMapTool):
                 new_feature.setAttributes(new_attr)
                 layer.addFeature(new_feature)
                 new_fids.append(new_feature.id())
-        except RuntimeError:
+        except Exception:  # noqa: BLE001 —— 收宽：任何异常都必须关掉编辑命令
             layer.destroyEditCommand()
             self._hint("面分割失败：图层编辑 API 异常")
             self._clear_polygon()

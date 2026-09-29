@@ -1,321 +1,323 @@
-"""融合几何工具。
+"""合并：把选中的多个要素并成一个，属性保留「要并入的那个图斑」。
 
-编辑工具条「融合几何」按钮激活的交互工具，把多个要素融合成一个：
+**流程**：先用选择工具选中 **2 个及以上**要素 → 点编辑工具条「合并」→ 弹
+:class:`~app.ui.dialogs.merge_geometry.MergeGeometryDialog`：左侧列出选中的
+要素、右侧显示当前高亮要素的全部属性（点列表项会在图上高亮闪烁，便于在密集
+数据里定位到底选的是哪一块）→ 选定「要并入哪个图斑」后确认，一次性写回。
 
-- **右键单击**要素 → 加入融合集合（再次右键同一要素取消），选中的要素用
-  红色高亮框标出；
-- **左键双击** → 融合成一个**几何面**：几何 ``unaryUnion`` 求并（相邻/重叠
-  要素合并公共边界，**保留全部原始顶点、不做简化**）；若结果是多部件
-  （角对角 / 微缝隙 / 完全分离），按部件间距分级处理：
-  - 间距小（≤ 包围盒短边 5%，角对角 / 微缝隙等矢量化误差）→ **微膨胀缝合**
-    ``buffer(+w).buffer(-w)``：只在缝隙处补上窄带，面积几乎不变；
-  - 间距大（真分离）→ **多边形凹包** ``concaveHullOfPolygons``（参照 JTS
-    ConcaveHull 的 GEOS 移植）：输入多边形边界保持不变、只填充部件间
-    间隙，实测**不丢面积**（GEOS 版 concave_hull 只保点不保面，会丢面积）；
-  属性保留**第一个选中**要素的；
-- **Esc** → 退出工具。
+几何规则：
 
-安全约束（仓库既定结论，见 ``swipe.py`` docstring）：不在 Qt 事件栈内调
-``canvas.refresh()`` / ``unsetMapTool``，一律 ``QTimer.singleShot(0, ...)``
-推迟出栈。
+- **只合并相邻接的图形**——共享一段边或面积重叠（见 :func:`_adjacent`）。仅角
+  对角相接、中间隔一条矢量化细缝、以及完全分离的，都**不算相邻**：前一版会
+  用微膨胀缝合 / 凹包把它们硬填成一块，现在改为直接提示不能合并（细缝属于
+  「补缝」要处理的情形，不该被合并顺手吞掉）；
+- 选中图形可能分成好几组互不相邻的（例如 A B C 连成一片、D 在别处），只取
+  **最大**的那一组来合并，其余在弹窗里标注「与其余不相邻，已排除」；
+- 求并用 ``unaryUnion``（合并公共边界，**保留全部原始顶点、不做简化**）；相邻
+  分组用同一套判据，保证「判为相邻」的输入一定并得成单块。
 
-融合写进编辑缓冲（要求图层处于编辑态）：``beginEditCommand`` 把
-``changeGeometry`` + ``deleteFeatures`` 合成**一个**撤销步骤，可整体撤销。
+属性规则：
+
+- 结果要素保留**目标图斑**的全部属性（含 ``mzguid`` 等唯一标识，不重新生成——
+  合并出来的图斑在业务上仍是「要并入的那个」）；
+- 面积 / 周长类字段按合并后的几何重算（:func:`~app.ui.tools.feature_attrs.refresh_area_fields`），
+  目前按图层坐标单位直接取值（约定为**平方米**）；以后若要按配置换算单位，
+  改 ``feature_attrs._geometry_value`` 一处即可。
+
+安全约束（仓库既定结论，见 ``swipe.py`` docstring）：本模块不在 Qt 事件栈内调
+``canvas.refresh()``，画布刷新由调用方（工具条）用 ``QTimer.singleShot(0, ...)``
+推迟出栈后执行。
+
+全部改动包进**一个** ``beginEditCommand("合并")``，Ctrl+Z 一次撤销整个合并。
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 
-from qgis.PyQt.QtCore import QPointF, Qt, QTimer
-from qgis.PyQt.QtGui import QColor
-from qgis.core import QgsGeometry, QgsProject, QgsRectangle, QgsVectorLayer, QgsWkbTypes
-from qgis.gui import QgsMapTool, QgsRubberBand
+from qgis.core import Qgis, QgsGeometry, QgsVectorLayer
+from qgis.PyQt.QtWidgets import QDialog
 
-from app.core.domain.check.query import intersect_features
 from app.core.domain.check.space_index import clear_spatial_index
+from app.infra.logging import get_logger
+from app.ui.tools.feature_attrs import refresh_area_fields
+
+logger = get_logger(__name__)
 
 
-class MergeGeometryTool(QgsMapTool):
-    """右键选要素、左键双击融合的编辑工具。"""
+# ==================================================================== 邻接判定
 
-    TOLERANCE_PX = 10  # 右键点击容差（像素）
 
-    #: 部件间距 ≤ 包围盒短边 × 此比例 才做微膨胀缝合（角对角/微缝隙等
-    #: 矢量化误差），更大间距视为真分离走多边形凹包
-    STITCH_MAX_RATIO = 0.05
-    #: 缝合桥宽：间距×0.6 + 短边×0.005（保证焊上且变形可忽略）
-    STITCH_W_RATIO = (0.6, 0.005)
-    #: 多边形凹包参数（0~1，越小越贴合点集）：concaveHullOfPolygons 是
-    #: 参照 JTS ConcaveHull 的 GEOS 实现，多边形边界不变、只填间隙，
-    #: 实测各场景均不丢面积
-    CONCAVE_HULL_RATIO = 0.3
+def _adjacent(a: QgsGeometry, b: QgsGeometry) -> bool:
+    """两几何是否**相邻接**：共享一段边或面积重叠（并集仍是一块）。
 
-    def __init__(
-        self,
-        canvas,
-        editing_layer_getter: Callable[[], QgsVectorLayer | None] = lambda: None,
-        hint: Callable[[str], None] | None = None,
-    ) -> None:
-        super().__init__(canvas)
-        self.canvas = canvas
-        self._layer_getter = editing_layer_getter
-        self._hint = hint or (lambda text: None)
-        #: 融合集合（保持选中顺序，第一个 = 融合后保留属性的要素）
-        self._fids: list[int] = []
-        #: 工具锁定的图层；切换图层时清空集合（防跨层 fid 误删）
-        self._layer: QgsVectorLayer | None = None
-        self._band_type: QgsWkbTypes.GeometryType | None = None
-        self._band: QgsRubberBand | None = None
-        self._init_band()
-        self.setCursor(Qt.CursorShape.CrossCursor)
+    只在一个点上相接（角对角）不算相邻——那样的并集是多部件，合并出来还是
+    两块；隔一条细缝同理（``distance > 0``）。判据直接用 ``unaryUnion`` 的结果
+    形态，与合并本身用的是同一个运算，不用「边界求交长度 > 0」那一套：实测重
+    结点化后的相邻边界 ``distance`` 为 0，但求交会被 GEOS 塌成点、``length()``
+    算出 0，按共享边长判定会全军覆没。
+    """
+    if a is None or b is None:
+        return False
+    try:
+        if a.isNull() or b.isNull() or a.isEmpty() or b.isEmpty():
+            return False
+        # 快筛：包围盒不相交 / 有间距 → 必然不相邻，省掉一次 union
+        if not a.boundingBox().intersects(b.boundingBox()):
+            return False
+        if a.distance(b) > 0:
+            return False
+        merged = QgsGeometry.unaryUnion([a, b])
+        return merged is not None and not merged.isEmpty() and not merged.isMultipart()
+    except Exception:  # noqa: BLE001 —— 几何运算异常一律按不相邻处理
+        logger.warning("邻接判定失败，按不相邻处理", exc_info=True)
+        return False
 
-    # -------------------------------------------------- 工具生命周期
 
-    def activate(self) -> None:
-        self._init_band()
-        super().activate()
+def adjacency_groups(layer: QgsVectorLayer | None, fids: Sequence[int]) -> list[list[int]]:
+    """把 ``fids`` 按「相邻接」关系分成连通分量（分量内两两可达）。
 
-    def deactivate(self) -> None:
-        self._reset_band()
-        super().deactivate()
+    单元素分量 = 与其余选中图形都不相接的孤立要素。几何读不出来（已删除 / 为空）
+    的 fid 直接不出现在结果里。返回顺序沿用 ``fids`` 顺序，保证结果稳定。
+    """
+    if layer is None:
+        return []
+    order = list(dict.fromkeys(int(fid) for fid in fids))
+    geometries: dict[int, QgsGeometry] = {}
+    kept: list[int] = []
+    for fid in order:
+        feature = layer.getFeature(fid)
+        if not feature.isValid():
+            continue
+        geom = feature.geometry()
+        if geom is None or geom.isNull() or geom.isEmpty():
+            continue
+        geometries[fid] = geom
+        kept.append(fid)
+    if not kept:
+        return []
 
-    def keyPressEvent(self, event) -> None:  # noqa: N802
-        if event.key() == Qt.Key.Key_Escape:
-            event.ignore()
-            # 不在键盘事件栈内 unsetMapTool，推迟出栈
-            QTimer.singleShot(0, self._quit)
-        else:
-            super().keyPressEvent(event)
+    # 并查集：两两判定相邻，同组的直接合并
+    parent = {fid: fid for fid in kept}
 
-    def _quit(self) -> None:
-        try:
-            self.canvas.unsetMapTool(self)
-        except RuntimeError:
-            pass
+    def find(fid: int) -> int:
+        while parent[fid] != fid:
+            parent[fid] = parent[parent[fid]]  # 路径压缩
+            fid = parent[fid]
+        return fid
 
-    # -------------------------------------------------- 交互
+    for i, fid_a in enumerate(kept):
+        for fid_b in kept[i + 1 :]:
+            if find(fid_a) == find(fid_b):
+                continue  # 已经连通，不必再算一次 union
+            if _adjacent(geometries[fid_a], geometries[fid_b]):
+                parent[find(fid_b)] = find(fid_a)
 
-    def canvasReleaseEvent(self, event) -> None:  # noqa: N802
-        """右键单击：切换点击位置要素的选中态（加入 / 移出融合集合）。"""
-        if event.button() != Qt.MouseButton.RightButton:
-            return
-        fid = self._hit_fid(event)
-        if fid is None:
-            return
-        if fid in self._fids:
-            self._fids.remove(fid)
-            self._hint(f"已移出融合集合（当前 {len(self._fids)} 个），双击融合")
-        else:
-            self._fids.append(fid)
-            self._hint(f"已选择 {len(self._fids)} 个要素，双击融合；右键再次点击取消")
-        self._refresh_band()
+    groups: dict[int, list[int]] = {}
+    for fid in kept:
+        groups.setdefault(find(fid), []).append(fid)
+    return list(groups.values())
 
-    def canvasDoubleClickEvent(self, event) -> None:  # noqa: N802
-        """左键双击：融合集合内所有要素为一个。"""
-        if event.button() != Qt.MouseButton.LeftButton:
-            return
-        self._merge()
 
-    # -------------------------------------------------- 命中测试
+def mergeable_group(
+    layer: QgsVectorLayer | None, fids: Sequence[int]
+) -> tuple[list[int], list[int]]:
+    """挑出可合并的**一组**相邻要素，以及被排除的其余选中要素。
 
-    def _hit_fid(self, event) -> int | None:
-        """点击像素 → 命中要素 fid（10px 容差矩形求交；多要素命中取最上层）。"""
-        layer = self._current_layer()
-        if layer is None:
+    选中图形分成多组互不相邻时取**最大**的那组（并列取先选中的那组，结果稳定
+    可预期），其余作为「与其余不相邻」被排除，由调用方告知用户。
+
+    :return: ``(可合并的相邻要素 fid, 被排除的 fid)``；没有任何一对相邻时返回
+        ``([], 全部选中)``
+    """
+    order = list(dict.fromkeys(int(fid) for fid in fids))
+    eligible = [g for g in adjacency_groups(layer, order) if len(g) >= 2]
+    if not eligible:
+        return ([], order)
+    best = max(eligible, key=len)
+    chosen = set(best)
+    return (best, [fid for fid in order if fid not in chosen])
+
+
+# ==================================================================== 几何
+
+
+def merge_geometries(geometries: Sequence[QgsGeometry]) -> QgsGeometry | None:
+    """多个几何求并成一块；无效几何忽略，全部无效返回 ``None``。
+
+    ``unaryUnion`` 保形：相邻 / 重叠要素只合并公共边界、不简化顶点。调用方须
+    保证输入两两相邻（见 :func:`_adjacent`），否则结果会是多部件——由
+    :func:`merge_features` 拒绝写回，不会把「两块」当成一次合并存下来。
+    """
+    geoms = [
+        g for g in geometries if g is not None and not g.isNull() and not g.isEmpty()
+    ]
+    if not geoms:
+        return None
+    merged = QgsGeometry.unaryUnion(geoms)
+    if merged is None or merged.isEmpty():
+        # 兜底：并集失败时退化为多几何收集，形状 100% 保留
+        merged = QgsGeometry.collectGeometry(geoms)
+    if merged is None or merged.isEmpty():
+        return None
+    return merged
+
+
+# ==================================================================== 写回
+
+
+def merge_features(
+    layer: QgsVectorLayer | None,
+    target_fid: int,
+    source_fids: Sequence[int],
+    *,
+    hint: Callable[[str], None] | None = None,
+) -> int | None:
+    """把 ``source_fids`` 的几何并进 ``target_fid``，并删掉这些源要素。
+
+    **要求传入的要素两两相邻接**（共享边 / 重叠）：并集是多部件时直接拒绝写回，
+    不会把「互不相接的几块」当成一次合并存下来。正常入口是
+    :func:`merge_features_interactive`（先分组再调用本函数），直接调用本函数请
+    自行保证这一点。
+
+    :param layer: 目标矢量图层（须处于编辑态）
+    :param target_fid: 「要并入的图斑」——合并结果保留它的**全部属性**
+    :param source_fids: 参与合并的要素（可含 ``target_fid``，会自动去重）
+    :param hint: 可选状态提示回调
+    :return: 参与合并的要素个数（``>= 2``）；无编辑态 / 几何不可用 / 非相邻 /
+        写回失败返回 ``None``。**不会开空的编辑命令**（``beginEditCommand`` 会
+        截断 redo 历史，无操作也开会白白破坏撤销历史）。
+    """
+    say = hint or (lambda text: None)
+    if layer is None or layer.type() != layer.VectorLayer:
+        return None
+    if not layer.isEditable():
+        say("图层未处于编辑态，无法合并")
+        return None
+
+    # 目标排最前并去重；几何读不出来（要素已删 / 几何为空）的直接跳过
+    ordered = list(dict.fromkeys([int(target_fid), *(int(fid) for fid in source_fids)]))
+    used_fids: list[int] = []
+    geoms: list[QgsGeometry] = []
+    for fid in ordered:
+        feature = layer.getFeature(fid)
+        if not feature.isValid():
+            logger.warning("合并：要素 %s 已失效，跳过", fid)
+            continue
+        geom = feature.geometry()
+        if geom is None or geom.isNull() or geom.isEmpty():
+            logger.warning("合并：要素 %s 几何为空，跳过", fid)
+            continue
+        used_fids.append(fid)
+        geoms.append(geom)
+    delete_fids = [fid for fid in used_fids if fid != target_fid]
+    if len(geoms) < 2 or not delete_fids:
+        say("合并失败：可用要素不足两个")
+        return None
+
+    merged = merge_geometries(geoms)
+    if merged is None:
+        logger.warning("合并：几何求并失败，参与要素 %s", used_fids)
+        say("合并失败：要素几何无法求并（详见日志）")
+        return None
+    if merged.isMultipart():
+        # 相邻校验（mergeable_group）通过后仍多部件：调用方绕过了校验，或 GEOS
+        # 拓扑异常。这里拒绝而不是硬填间隙——填出来的形状不是用户选的那些图斑。
+        logger.warning("合并：要素并非相邻接（并集为多部件），已拒绝: %s", used_fids)
+        say("合并失败：所选要素之间并非相邻接（不共享边界）")
+        return None
+
+    # 结果要素属性继承目标图斑：只把面积 / 周长类字段按新几何重算
+    target_attrs = list(layer.getFeature(target_fid).attributes())
+    refreshed = refresh_area_fields(layer, list(target_attrs), merged)
+
+    layer.beginEditCommand("合并")
+    try:
+        # 换几何 + 删其余要素：合成一个撤销步骤（目标 fid 不参与删除，两者互不影响）
+        layer.changeGeometry(target_fid, merged)
+        deleted = layer.deleteFeatures(delete_fids)
+        if not deleted:
+            # 源要素一个都没删掉（被外部删过 / 数据源拒绝）→ 提交下去就是
+            # 「几何并了、源要素还在」的叠图半成品，宁可整体放弃
+            layer.destroyEditCommand()
+            logger.warning("合并：源要素未能删除，已放弃本次合并: %s", delete_fids)
+            say("合并失败：要并入的要素已不存在（详见日志）")
             return None
-        try:
-            pos = event.pixelPoint()
-            # 真实 Qt 事件是整数 QPoint；测试 / 兼容路径可能传 QPointF
-            if isinstance(pos, (QPointF,)):
-                pos = pos.toPoint()
-            map_pt = self.canvas.getCoordinateTransform().toMapCoordinates(pos)
-        except RuntimeError:
-            return None
-        tol = self.TOLERANCE_PX * self.canvas.mapSettings().mapUnitsPerPixel()
-        rect = QgsRectangle(
-            map_pt.x() - tol, map_pt.y() - tol, map_pt.x() + tol, map_pt.y() + tol
-        )
-        project = self.canvas.project() or QgsProject.instance()
-        fids = intersect_features(
-            layer,
-            QgsGeometry.fromRect(rect),
-            self.canvas.mapSettings().destinationCrs(),
-            project,
-        )
-        # 过滤已删除/失效的要素（空间索引缓存可能含已删 fid）
-        fids = [fid for fid in fids if layer.getFeature(fid).isValid()]
-        return fids[-1] if fids else None  # 后添加的要素通常绘制在上层
+        for idx, value in enumerate(refreshed):
+            if idx < len(target_attrs) and target_attrs[idx] != value:
+                layer.changeAttributeValue(target_fid, idx, value)
+    except Exception:  # noqa: BLE001 —— 收宽：任何异常都必须关掉编辑命令
+        # destroyEditCommand = 丢弃本次改动并关闭命令（PyQGIS 没有
+        # cancelEditCommand，写了会在 except 里再抛 AttributeError，
+        # 命令悬着 → 图层撤销栈永久失效）
+        layer.destroyEditCommand()
+        logger.exception("合并失败: layer=%s target=%s", layer.name(), target_fid)
+        say("合并失败：图层编辑 API 异常")
+        return None
+    layer.endEditCommand()
 
-    # -------------------------------------------------- 融合
-
-    def _merge(self) -> None:
-        """把集合内要素融合成一个（unaryUnion 保形 + 保留首个要素属性）。"""
-        layer = self._current_layer()
-        if layer is None or len(self._fids) < 2:
-            return
-        if not layer.isEditable():
-            self._hint("图层未处于编辑态，无法融合")
-            return
-
-        keep_fid: int | None = None
-        geoms: list[QgsGeometry] = []
-        delete_fids: list[int] = []
-        for fid in self._fids:
-            feature = layer.getFeature(fid)
-            if not feature.isValid():
-                continue
-            geom = feature.geometry()
-            if geom is not None and not geom.isNull() and not geom.isEmpty():
-                geoms.append(geom)
-                delete_fids.append(fid)
-                # 保留第一个**有效**要素（防御：首个选中要素几何无效的极端情况）
-                if keep_fid is None:
-                    keep_fid = fid
-        if len(geoms) < 2 or keep_fid is None:
-            return
-
-        merged = QgsGeometry.unaryUnion(geoms)
-        if merged is None or merged.isEmpty():
-            # 兜底：并集失败时退化为多几何收集，形状 100% 保留
-            merged = QgsGeometry.collectGeometry(geoms)
-        elif merged.isMultipart():
-            merged = self._merge_multipart_to_single(merged)
-        if merged is None or merged.isEmpty():
-            return
-
-        # 一个撤销步骤：换几何 + 删其余要素（保留第一个选中要素的属性）
-        layer.beginEditCommand("融合几何")
-        try:
-            layer.changeGeometry(keep_fid, merged)
-            layer.deleteFeatures(delete_fids[1:])
-        except RuntimeError:
-            layer.cancelEditCommand()
-            self._hint("融合失败：图层编辑 API 异常")
-            return
-        layer.endEditCommand()
-
-        count = len(delete_fids)
-        self._fids = []
-        self._refresh_band()
-        # 结果要素高亮选中，便于确认
-        layer.select([keep_fid])
-        # 融合删除了要素，空间索引缓存失效 → 清掉让下次命中重建
-        clear_spatial_index(layer)
-        self._hint(f"已融合 {count} 个要素为一个；继续右键选择、双击融合")
-        # 双击事件栈内不直接 refresh（仓库约束），推迟出栈后再刷新
-        QTimer.singleShot(0, self._safe_refresh)
-
-    def _safe_refresh(self) -> None:
-        try:
-            self.canvas.refresh()
-        except RuntimeError:
-            pass
-
-    # -------------------------------------------------- 多部件融合
-
-    def _parts_min_dist(self, multi: QgsGeometry) -> float:
-        """多部件几何的部件间最小距离（两两顶点距离）。"""
-        it = multi.constGet()
-        n = it.numGeometries()
-        # 深拷贝防所有权转移；单部件无意义
-        parts = [
-            QgsGeometry.fromWkt(it.geometryN(i).asWkt()) for i in range(n)
-        ]
-        best = float("inf")
-        for i in range(n):
-            for j in range(i + 1, n):
-                d = parts[i].distance(parts[j])
-                if d < best:
-                    best = d
-        return best
-
-    def _merge_multipart_to_single(self, multi: QgsGeometry) -> QgsGeometry:
-        """多部件几何融成单面：近距缝合，远距多边形凹包，凸包兜底。
-
-        - **微膨胀缝合**（``buffer(+w).buffer(-w)``）：适用于角对角 / 微缝隙
-          等矢量化误差（部件间距 ≤ 包围盒短边 5%），只在缝隙处补窄带，
-          面积几乎不变（实测 extra≈0.001~0.2）；
-        - **多边形凹包**（``concaveHullOfPolygons``）：真分离部件，参照 JTS
-          ConcaveHull 的 GEOS 移植——输入多边形边界保持不变、只填充间隙，
-          实测各场景均不丢面积（GEOS 版 ``concave_hull`` 只保证包含输入点、
-          不保证包含多边形面积，会丢 50%~99%）；
-        - **凸包兜底**：理论不可达（凹包失败时），数学上保证不丢面积。
-        """
-        bbox = multi.boundingBox()
-        short = min(bbox.width(), bbox.height())
-        dmin = self._parts_min_dist(multi)
-        if dmin <= max(short * self.STITCH_MAX_RATIO, 1e-9):
-            w = dmin * self.STITCH_W_RATIO[0] + short * self.STITCH_W_RATIO[1]
-            stitched = multi.buffer(w, 8).buffer(-w, 8)
-            if (
-                stitched is not None
-                and not stitched.isEmpty()
-                and not stitched.isMultipart()
-            ):
-                return stitched
-        # 真分离 / 缝合失败：多边形凹包（保形且不丢面积）。
-        # concaveHullOfPolygons 是 QGIS 3.42+ 新 API（JTS ConcaveHull 移植）；
-        # 3.40 及更早（如麒麟/conda 源默认的 3.40）没有 → 直接走凸包兜底。
-        hull = None
-        if hasattr(QgsGeometry, "concaveHullOfPolygons"):
-            hull = QgsGeometry.concaveHullOfPolygons(
-                multi, self.CONCAVE_HULL_RATIO, False
-            )
-        if hull is None or hull.isEmpty() or hull.isMultipart():
-            return multi.convexHull()
-        return hull
-
-    # -------------------------------------------------- 图层 / 高亮
-
-    def _current_layer(self) -> QgsVectorLayer | None:
-        """当前编辑图层；切换图层时清空集合（防跨层 fid 误删）。"""
-        layer = self._layer_getter()
-        if layer is None or layer.type() != layer.VectorLayer:
-            return None
-        if self._layer is not None and layer is not self._layer:
-            self._fids = []
-            self._reset_band()
-        self._layer = layer
-        return layer
-
-    def _init_band(self) -> None:
-        """按图层几何类型建橡皮筋（点 / 线 / 面各用对应类型）。"""
-        layer = self._layer_getter()
-        if layer is None or layer.type() != layer.VectorLayer:
-            return
-        band_type = {
-            QgsWkbTypes.PointGeometry: QgsWkbTypes.PointGeometry,
-            QgsWkbTypes.LineGeometry: QgsWkbTypes.LineGeometry,
-            QgsWkbTypes.PolygonGeometry: QgsWkbTypes.PolygonGeometry,
-        }.get(layer.geometryType(), QgsWkbTypes.PolygonGeometry)
-        if self._band is None or band_type != self._band_type:
-            self._band_type = band_type
-            self._band = QgsRubberBand(self.canvas, band_type)
-            self._band.setColor(QColor(255, 0, 0, 160))
-            self._band.setWidth(2)
-            self._band.setFillColor(QColor(255, 0, 0, 40))
-
-    def _refresh_band(self) -> None:
-        if self._band is None or self._layer is None:
-            return
-        self._band.reset(self._band_type)
-        for fid in self._fids:
-            feature = self._layer.getFeature(fid)
-            if feature.isValid() and not feature.geometry().isNull():
-                self._band.addGeometry(feature.geometry(), self._layer.crs())
-        if self._fids:
-            self._band.show()
-        else:
-            self._band.hide()
-
-    def _reset_band(self) -> None:
-        if self._band is not None:
-            try:
-                self._band.reset(self._band_type)
-                self._band.hide()
-            except RuntimeError:
-                pass
+    # 几何已变、要素已删，空间索引缓存失效 → 清掉让下次命中重建
+    clear_spatial_index(layer)
+    try:
+        # 显式 SetSelection：本构建 select() 是追加语义，不能用来替换选中
+        layer.selectByIds([target_fid], Qgis.SelectBehavior.SetSelection)
+    except (RuntimeError, AttributeError):
+        logger.warning("合并后选中结果要素失败（不影响合并结果）", exc_info=True)
+    return len(used_fids)
 
 
-__all__ = ["MergeGeometryTool"]
+def merge_features_interactive(
+    layer: QgsVectorLayer | None,
+    canvas=None,
+    parent=None,
+    *,
+    hint: Callable[[str], None] | None = None,
+) -> int | None:
+    """弹窗选「要并入的图斑」→ 执行合并。
+
+    只有**相邻接**的要素才谈得上合并（见 :func:`mergeable_group`）：选中图形里
+    最大的那组相邻要素作为可合并的一组，其余在弹窗里标注「与其余不相邻，已排除」。
+
+    :param canvas: 画布；传入后弹窗会在用户点选要素时于地图上高亮闪烁该要素
+    :return: 参与合并的要素个数；选中的图形之间没有相邻接的（**不弹窗**）返回
+        ``0``；用户取消 / 执行失败返回 ``None``
+    """
+    say = hint or (lambda text: None)
+    if layer is None or layer.type() != layer.VectorLayer:
+        return None
+    if not layer.isEditable():
+        say("图层未处于编辑态，无法合并")
+        return None
+    fids = list(layer.selectedFeatureIds())
+    if len(fids) < 2:
+        # 按钮可用性已挡住（选中不足即置灰），这里兜底防直接调用
+        say("请先用选择工具选中两个及以上要合并的要素")
+        return None
+
+    group, excluded = mergeable_group(layer, fids)
+    if len(group) < 2:
+        # 一组相邻的都没有 → 不弹窗，由调用方给出明确提示
+        say("选中的图形之间没有相邻接的，无法合并")
+        return 0
+
+    # 延迟 import：对话框只在真正要合并时才需要，也避免 UI 模块间的循环引用
+    from app.ui.dialogs.merge_geometry import MergeGeometryDialog
+
+    dialog = MergeGeometryDialog(
+        layer, group, excluded=excluded, canvas=canvas, parent=parent
+    )
+    if dialog.exec() != QDialog.DialogCode.Accepted:
+        return None
+    target_fid = dialog.target_fid()
+    if target_fid is None:
+        return None
+    return merge_features(layer, target_fid, group, hint=hint)
+
+
+__all__ = [
+    "adjacency_groups",
+    "merge_features",
+    "merge_features_interactive",
+    "merge_geometries",
+    "mergeable_group",
+]

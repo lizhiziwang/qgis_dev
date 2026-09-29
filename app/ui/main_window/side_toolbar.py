@@ -18,15 +18,20 @@
 
 工具清单（自上而下，与设计稿一致）::
 
-    选择 / 框选 / 漫游 / 缩放 / 全图 / 清除
+    选择 / 框选 / 漫游 / 缩放 / 全图 / **属性** / 清除
     一键查询 / 条件查询 / 选择屏蔽 / 取消屏蔽 / 分屏 / 坐标定位
     线测量 / 面测量 / 范围裁剪
 
 行为约定：
 
 - 项目**已实现**的工具直接接主窗口既有回调（与顶部工具条同一入口）：
-  选择 / 框选 / 漫游 / 缩放 / 全图 / 清除 / 条件查询 / 分屏 / 坐标定位 /
-  线测量 / 面测量；
+  选择 / 框选 / 漫游 / 缩放 / 全图 / **属性** / 清除 / 条件查询 / 分屏 /
+  坐标定位 / 线测量 / 面测量；
+- 「属性」与顶部「通用」tab 工具条里的「属性」是**同一个工具**
+  （``identify`` → :class:`~app.ui.tools.find_feature.FindFeatureTool`，点击要素
+  在右侧 Dock 显示其全部属性），只是多给了一个离地图更近的入口，放在「全图」
+  下面；两边按钮共用 ``identify`` key，单选高亮由
+  ``MainWindow._on_map_tool_set`` 统一同步；
 - 「分屏」复用 :mod:`app.ui.tools.qmap_compare` 的「地图对比」入口
   （``MainWindow._on_qmap_compare``：镜像分屏 / 垂直分割 / 水平分割 /
   放大镜），与顶部工具条「地图对比」同一实现，不再用旧的卷帘覆盖层；
@@ -63,7 +68,15 @@ from app.ui.common.frosted import FrostedPanel
 from app.ui.common.theme import TOOLBAR_BUTTON_RADIUS, Theme, ThemeManager
 
 #: 地图工具 key（单选高亮组，与顶部工具条 key 一致便于同步）
-_TOOL_KEYS = frozenset({"select_point", "select_box", "pan", "zoom_in", "measure_line", "measure_area"})
+_TOOL_KEYS = frozenset({
+    "select_point",
+    "select_box",
+    "pan",
+    "zoom_in",
+    "identify",
+    "measure_line",
+    "measure_area",
+})
 #: 会话型工具 key（独立常亮，不受地图工具切换影响；与顶部工具条同 key）。
 #: 「坐标定位」也归这里：点开气泡 → 按钮保持高亮表示"气泡在显示"，
 #: 关闭气泡（再点同按钮或气泡上的 ×）→ 按钮弹起，与分屏会话同一套高亮逻辑。
@@ -111,6 +124,7 @@ class SideToolBar:
             ("漫游", "pan", False),
             ("缩放", "zoom_in", False),
             ("全图", "zoom_full", False),
+            ("属性", "identify", False),
             ("清除", "clear_selection", True),
             ("一键查询", "one_key_query", False),
             ("条件查询", "condition_query", False),

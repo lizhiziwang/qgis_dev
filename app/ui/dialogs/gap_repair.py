@@ -20,9 +20,7 @@ from collections.abc import Sequence
 from typing import Optional
 
 from qgis.core import QgsVectorLayer
-from qgis.gui import QgsRubberBand
-from qgis.PyQt.QtCore import Qt, QTimer
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QComboBox,
     QDialogButtonBox,
@@ -35,14 +33,11 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.feature_highlight import FeatureHighlighter
 from app.ui.common.widgets import make_table
 
 #: 下拉首项：不处理该缝隙（``currentData()`` 为 None）
 _SKIP_TEXT = "不补（跳过）"
-
-#: 高亮闪烁：每次切换的间隔（毫秒）与总切换次数（偶数次 → 结束时可见）
-_FLASH_INTERVAL_MS = 160
-_FLASH_TOGGLES = 6
 
 
 #: 视为「无值」的文本：真 NULL 之外，数据里常把空值写成字面量字符串
@@ -100,10 +95,8 @@ class GapRepairDialog(BaseDialog):
         self.setModal(True)
         self._layer = layer
         self._targets = list(targets)
-        self._canvas = canvas
-        self._band: Optional[QgsRubberBand] = None
-        self._flash_timer: Optional[QTimer] = None
-        self._flash_left = 0
+        # 选中目标面时在画布上闪烁定位（见 app.ui.common.feature_highlight）
+        self._highlighter = FeatureHighlighter(canvas, layer, parent=self)
         self._build_ui()
 
     # ============================================================== UI
@@ -178,77 +171,11 @@ class GapRepairDialog(BaseDialog):
         """下拉换目标面 → 地图高亮闪烁 + 下方加载其属性。"""
         fid = combo.currentData()
         if fid is None:
-            self._clear_highlight()
+            self._highlighter.clear()
             self._load_attributes(None)
             return
-        self._flash_feature(int(fid))
+        self._highlighter.flash(int(fid))
         self._load_attributes(int(fid))
-
-    def _ensure_band(self) -> Optional[QgsRubberBand]:
-        if self._canvas is None:
-            return None
-        if self._band is None:
-            try:
-                band = QgsRubberBand(self._canvas, self._layer.geometryType())
-                band.setColor(QColor(255, 0, 220))
-                band.setWidth(3)
-                band.setFillColor(QColor(255, 0, 220, 70))
-                self._band = band
-            except RuntimeError:  # 画布已销毁
-                return None
-        return self._band
-
-    def _flash_feature(self, fid: int) -> None:
-        """把要素画到高亮带上并闪烁几下，闪完保持可见。"""
-        band = self._ensure_band()
-        if band is None:
-            return
-        try:
-            feature = self._layer.getFeature(fid)
-            geometry = feature.geometry() if feature.isValid() else None
-            if geometry is None or geometry.isNull() or geometry.isEmpty():
-                self._clear_highlight()
-                return
-            band.setToGeometry(geometry, self._layer)
-            band.show()
-        except RuntimeError:
-            return
-
-        self._flash_left = _FLASH_TOGGLES
-        if self._flash_timer is None:
-            self._flash_timer = QTimer(self)
-            self._flash_timer.timeout.connect(self._on_flash_tick)
-        self._flash_timer.start(_FLASH_INTERVAL_MS)
-
-    def _on_flash_tick(self) -> None:
-        self._flash_left -= 1
-        if self._band is not None:
-            try:
-                if self._band.isVisible():
-                    self._band.hide()
-                else:
-                    self._band.show()
-            except RuntimeError:
-                pass
-        if self._flash_left <= 0:
-            self._stop_flash()
-            if self._band is not None:
-                try:
-                    self._band.show()  # 闪完保持高亮，便于对照
-                except RuntimeError:
-                    pass
-
-    def _stop_flash(self) -> None:
-        if self._flash_timer is not None:
-            self._flash_timer.stop()
-
-    def _clear_highlight(self) -> None:
-        self._stop_flash()
-        if self._band is not None:
-            try:
-                self._band.hide()
-            except RuntimeError:
-                pass
 
     def _load_attributes(self, fid: Optional[int]) -> None:
         """把 ``fid`` 的全部字段值填进属性表；``None`` 清空。"""
@@ -304,17 +231,5 @@ class GapRepairDialog(BaseDialog):
 
     def done(self, result: int) -> None:  # noqa: N802 —— Qt 命名
         """关闭（确定 / 取消 / Esc）时务必收掉高亮带与定时器。"""
-        self._stop_flash()
-        if self._band is not None:
-            try:
-                self._band.reset()
-            except RuntimeError:
-                pass
-            self._band = None
-        if self._canvas is not None:
-            try:
-                # 高亮带已 reset，重绘一次把残留清掉
-                self._canvas.refresh()
-            except RuntimeError:
-                pass
+        self._highlighter.close()
         super().done(result)

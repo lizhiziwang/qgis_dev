@@ -141,10 +141,13 @@ class SelectFeatureToolBase(QgsMapTool):
             layer.beginEditCommand("删除选中要素")
             try:
                 ok = layer.deleteFeatures(list(fids))
-            except RuntimeError:
+            except Exception:  # noqa: BLE001 —— 收宽：任何异常都必须关掉编辑命令
                 ok = False
             if not ok:
-                layer.cancelEditCommand()
+                # destroyEditCommand = 丢弃本次改动并关闭命令（PyQGIS 没有
+                # cancelEditCommand，写了会在 except 里再抛 AttributeError，
+                # 命令悬着 → 图层撤销栈永久失效）
+                layer.destroyEditCommand()
                 logger.warning("Delete 键删除要素失败: layer=%s", layer.name())
                 continue
             layer.endEditCommand()

@@ -5,6 +5,17 @@
 本模块用子类接管 Python 侧全部 push 入口，把“有没有消息”变成确定性状态，
 供宿主窗口（如主窗口把消息条悬浮盖在画布顶部）按回调显示/隐藏。
 
+**鼠标停留不收起**：提示文字长时，用户常来不及看完就被 duration 收掉。租约
+到期时若鼠标正停在提示条上，则不收起、改为持续复检；鼠标移开后再**重新开始**
+算一个完整的展示时长，而不是当场消失（见
+:meth:`FloatingMessageBar._lease_expired` / :meth:`FloatingMessageBar.leaveEvent`）。
+
+**只显示最新一条**：本消息条是浮动 toast，不是通知中心。每次 push 前先
+``clearWidgets()`` 清掉旧条目——不清的话条目会无限堆积，右侧冒出 QGIS 自带的
+「3 more」计数标签和下拉菜单，而那个菜单里只有「Close All」、**列不出消息内容**
+（实测），用户看到一个点不开的入口，两个按钮还挤在一起。见
+:meth:`FloatingMessageBar._replace_items`。
+
 用法::
 
     bar = FloatingMessageBar(canvas)
@@ -16,6 +27,10 @@ from __future__ import annotations
 from qgis.core import Qgis
 from qgis.gui import QgsMessageBar
 from qgis.PyQt.QtCore import QTimer
+from qgis.PyQt.QtGui import QCursor
+
+#: 租约到期但鼠标仍停在提示条上时，以此间隔复检鼠标是否已移开（毫秒）
+_HOVER_POLL_MS = 200
 
 
 class FloatingMessageBar(QgsMessageBar):
@@ -24,6 +39,9 @@ class FloatingMessageBar(QgsMessageBar):
     - 每次 push 立即显示，``duration`` 秒后自动收起（由自带单次 QTimer
       触发，不依赖 C++ 内部移除机制）；``duration<=0`` 表示常驻，直到
       下一条消息顶掉或窗口关闭；
+    - **到期时鼠标若正停在提示条上，则不收起**：改为每隔
+      :data:`_HOVER_POLL_MS` 复检一次；鼠标移开后再重新计满一个展示时长才收起
+      ——文字太长时用户可以把鼠标停在上面慢慢看，看完移开也有足够时间收尾；
     - 是否显示通过 :meth:`set_on_state` 回调通知宿主——启动时从未 push 过
       → 回调不触发 → 消息条保持隐藏，绝不会出现空卡片。
 
@@ -37,26 +55,99 @@ class FloatingMessageBar(QgsMessageBar):
         self._lease.setSingleShot(True)
         self._lease.timeout.connect(self._lease_expired)
         self._on_state = None
+        #: 本次消息的完整展示时长（毫秒）；None = 常驻（duration<=0）或已收起
+        self._duration_ms: int | None = None
+        #: 到期后因鼠标停留而处于「等待移开」态：leaveEvent 据此重新开始计时
+        self._holding = False
 
     def set_on_state(self, cb) -> None:
         """注册显隐回调：``cb(active: bool)``。"""
         self._on_state = cb
 
+    def dismiss(self) -> None:
+        """立刻收起（公共入口）：清掉租约并通知宿主隐藏。
+
+        宿主/工具条在「用户按 Esc 取消」这类语义上主动收起时调它——提示框属于
+        本次操作，操作取消了提示也该跟着消失。
+        """
+        self._dismiss()
+
     # ---- 展示租约：push 即显示，到期即收起 ----
+
+    def _replace_items(self) -> None:
+        """清掉条里已有的条目——本消息条只显示**最新一条**。
+
+        QGIS 的 ``QgsMessageBar`` 会把每条 push 都留成一条持久条目（我们给 C++
+        传的 duration 恒为 0，好让租约计时器独占过期控制），不主动清就会无限
+        堆积：右侧冒出内置的「N more」计数标签 + 一个下拉菜单，而那个菜单里
+        只有「Close All」、列不出消息内容，看起来就是个点不开的入口，两个按钮
+        还挤在一起。清掉后计数标签与下拉自然消失，条高也恒定。
+        """
+        try:
+            self.clearWidgets()
+        except RuntimeError:
+            pass  # 窗口关闭流程中 C++ 对象已销毁
 
     def _kick(self, duration: int) -> None:
         """（重新）记一条展示租约：立即显示，duration 秒后自动收起。"""
         self._lease.stop()
+        self._holding = False
         if self._on_state:
             self._on_state(True)
-        if duration and duration > 0:
-            self._lease.start(int(duration) * 1000)
+        seconds = int(duration or 0)
+        # duration<=0 → 常驻：不设自动收起
+        self._duration_ms = seconds * 1000 if seconds > 0 else None
+        if not self._duration_ms:
+            return
+        if self._cursor_on_bar():
+            # 新消息顶上来时鼠标可能正停在条上：先挂住不启动计时，等移开再算
+            self._holding = True
+            self._lease.start(_HOVER_POLL_MS)
+        else:
+            self._lease.start(self._duration_ms)
 
     def _lease_expired(self) -> None:
+        """租约到期：鼠标还停在提示条上就继续留着，等移开再重新计时。
+
+        到期那一刻鼠标仍在上面的，转到「等待移开」态并按 :data:`_HOVER_POLL_MS`
+        周期复检——光标判定不依赖 ``enterEvent`` / ``leaveEvent``（鼠标移进条内
+        的子控件时父控件收不到可靠的离开事件），所以轮询是必要的兜底。
+        """
+        if self._cursor_on_bar():
+            self._holding = True
+            self._lease.start(_HOVER_POLL_MS)
+            return
+        self._dismiss()
+
+    def _cursor_on_bar(self) -> bool:
+        """鼠标当前是否落在提示条上（按全局光标位置判定）。"""
+        try:
+            return self.isVisible() and self.rect().contains(
+                self.mapFromGlobal(QCursor.pos())
+            )
+        except RuntimeError:
+            return False  # 窗口关闭流程中 C++ 对象已销毁
+
+    def _dismiss(self) -> None:
+        """收起提示：清掉租约状态并通知宿主隐藏。"""
+        self._lease.stop()
+        self._duration_ms = None
+        self._holding = False
         if self._on_state:
             self._on_state(False)
 
-    # ---- 接管 push 入口（把 duration 转为租约，C++ 一律传 0）----
+    def leaveEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        """鼠标移开：**重新开始**算消失时间，而不是当场收起。
+
+        用户看完才把鼠标移开，此时再留足一个完整展示时长才合理——不然「停得
+        越久、一移开就没」正好与「让人看清提示」的初衷相反。
+        """
+        if self._holding and not self._cursor_on_bar():
+            self._holding = False
+            self._lease.start(self._duration_ms)
+        super().leaveEvent(event)
+
+    # ---- 接管 push 入口（清掉旧条目 + 把 duration 转为租约，C++ 一律传 0）----
 
     def pushMessage(self, *args, **kwargs):
         title = kwargs.get("title")
@@ -78,6 +169,7 @@ class FloatingMessageBar(QgsMessageBar):
                     level = args[1]
                 if len(args) >= 3:
                     duration = int(args[2] or 0)
+        self._replace_items()
         if title:
             item = super().pushMessage(title, text or "", level, 0)
         else:
@@ -86,29 +178,36 @@ class FloatingMessageBar(QgsMessageBar):
         return item
 
     def pushSuccess(self, title, text="", duration=0):
+        self._replace_items()
         super().pushSuccess(title, text, 0)
         self._kick(duration)
 
     def pushWarning(self, title, text="", duration=0):
+        self._replace_items()
         super().pushWarning(title, text, 0)
         self._kick(duration)
 
     def pushCritical(self, title, text="", duration=0):
+        self._replace_items()
         super().pushCritical(title, text, 0)
         self._kick(duration)
 
     def pushError(self, title, text="", duration=0):
+        self._replace_items()
         super().pushError(title, text, 0)
         self._kick(duration)
 
     def pushInfo(self, title, text="", duration=0):
+        self._replace_items()
         super().pushInfo(title, text, 0)
         self._kick(duration)
 
     def pushWidget(self, widget, level=Qgis.MessageLevel.Info, duration=0):
+        self._replace_items()
         super().pushWidget(widget, level, 0)
         self._kick(duration)
 
     def pushItem(self, item):
+        self._replace_items()
         super().pushItem(item)
         self._kick(0)

@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import QMessageBox
 
 from app.ui.docks.feature_info_dock import FeatureInfoDock
@@ -87,12 +86,15 @@ class MapToolsMixin:
         self._find_feature_tool = FindFeatureTool(self.canvas, parent=self)
         self.canvas.setMapTool(self._find_feature_tool)
         self.tool_bar_builder.set_active("identify")
+        # 侧栏也有「属性」按钮（同一个工具）：setMapTool 到新工具时 mapToolSet
+        # 会同步，但同工具重复激活不发信号，这里显式校正一次
+        self.side_toolbar.set_active("identify")
 
     def show_feature_info(self, result, highlight=None) -> None:
         """点击识别后把要素详情显示到右侧 Dock（懒创建，内容就地刷新）。"""
         if not hasattr(self, "_feature_info_dock") or self._feature_info_dock is None:
             self._feature_info_dock = FeatureInfoDock(self)
-            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, self._feature_info_dock)
+            self.place_right_dock(self._feature_info_dock)
         self._feature_info_dock.show_feature(result, highlight=highlight)
 
     def _on_zoom_in(self) -> None:

@@ -3,11 +3,13 @@
 编辑工具条「挖洞」按钮激活的交互工具（与「面分割」同一套画多边形交互：
 左键加点（磁性捕捉）、移动预览、双击执行、右键清除、Esc 退出/清多边形）：
 
-- 双击完成 → 画的多边形作为**挖除区域**，被它覆盖的面要素执行
+- 双击完成 → 画的多边形作为**挖除区域**，被它覆盖的**选中**面要素执行
   ``difference``——区域内部分被挖去：完全在区域内部画的坑变成**洞**（内环），
   压着边画的则是削角 / 削边；
-- 一次可同时挖多个被覆盖的要素；没挖到任何要素（没覆盖 / 完全覆盖被跳过 /
-  退化接触）时提示并可重画；
+- **只作用于当前选中的要素**（按钮可用性同样要求「有选中 + 编辑态」）：挖除区
+  盖到没选中的图形也不动它们；
+- 一次可同时挖多个被覆盖的**选中**要素；没挖到任何要素（没覆盖 / 完全覆盖被
+  跳过 / 退化接触 / 覆盖到的都没选中）时提示并可重画；
 - 属性：仅几何变化，FGUID / 普通属性不动；面积 / 周长类字段按挖洞后的几何
   重算（见 :mod:`app.ui.tools.feature_attrs`）。
 
@@ -33,7 +35,11 @@ class DigHoleTool(SplitPolygonTool):
     """在面要素上画挖除区域（复用面分割的画多边形交互），双击挖洞。"""
 
     def _run_cutter_action(self) -> None:
-        """双击完成：把画的多边形区域从被覆盖的面要素中挖去。"""
+        """双击完成：把画的多边形区域从被覆盖的**选中**面要素中挖去。
+
+        只作用于当前选中的要素（与「面分割」一致）：挖除区盖到没选中的图形也不
+        动它们。选中集由按钮可用性把关，这里再兜一层防绕过按钮直接调工具。
+        """
         layer, cutter = self._prepare_cutter()
         if cutter is None:
             return
@@ -41,14 +47,20 @@ class DigHoleTool(SplitPolygonTool):
             self._hint("挖洞只支持面图层，请切换到面图层")
             self._clear_polygon()
             return
+        selected = set(layer.selectedFeatureIds())
+        if not selected:
+            self._hint("请先用点选 / 框选选中要挖洞的面要素，再画挖除区域")
+            self._clear_polygon()
+            return
 
-        fids = intersect_features(layer, cutter, layer.crs())
+        covered = intersect_features(layer, cutter, layer.crs())
+        covered = [fid for fid in covered if layer.getFeature(fid).isValid()]
+        fids = [fid for fid in covered if fid in selected]
+        skipped_unselected = len(covered) - len(fids)
         plans: list[tuple[int, QgsGeometry, list]] = []
         skipped_covered = 0
         for fid in fids:
             feature = layer.getFeature(fid)
-            if not feature.isValid():
-                continue
             geom = feature.geometry()
             if geom is None or geom.isNull() or geom.isEmpty():
                 continue
@@ -62,9 +74,11 @@ class DigHoleTool(SplitPolygonTool):
                 continue
             plans.append((fid, dug, list(feature.attributes())))
         if not plans:
-            msg = "多边形未挖到任何面要素：请把挖除区域画在要素内部（不要完全盖住要素）"
+            msg = "多边形未挖到任何面要素：请把挖除区域画在选中的要素内部（不要完全盖住要素）"
             if skipped_covered:
                 msg = f"{msg}（{skipped_covered} 个要素被完全覆盖，已跳过）"
+            if skipped_unselected:
+                msg = f"{msg}（{skipped_unselected} 个被覆盖但未选中的要素已跳过）"
             self._hint(msg)
             self._clear_polygon()
             return
@@ -79,7 +93,7 @@ class DigHoleTool(SplitPolygonTool):
                 for idx, value in enumerate(refreshed):
                     if before[idx] != value:
                         layer.changeAttributeValue(fid, idx, value)
-        except RuntimeError:
+        except Exception:  # noqa: BLE001 —— 收宽：任何异常都必须关掉编辑命令
             layer.destroyEditCommand()
             self._hint("挖洞失败：图层编辑 API 异常")
             self._clear_polygon()
