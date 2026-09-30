@@ -321,14 +321,14 @@ class WindowShellMixin:
         self.layer_dock.move_up_requested.connect(lambda: self._on_move_layer_node(-1))
         self.layer_dock.move_down_requested.connect(lambda: self._on_move_layer_node(1))
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.layer_dock)
-        self.watch_dock_float_state(self.layer_dock)
+        self.watch_dock_layout(self.layer_dock)
 
         # 2. 数据浏览器
         self.browser_dock = BrowserDock(self)
         self.browser_dock.double_clicked.connect(self._on_browser_double_clicked)
         self.browser_dock.context_menu_requested.connect(self._on_browser_context_menu)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.browser_dock)
-        self.watch_dock_float_state(self.browser_dock)
+        self.watch_dock_layout(self.browser_dock)
 
         # 3. 日志（默认隐藏，由菜单唤起）
         self.log_dock = None  # 懒加载
@@ -353,8 +353,8 @@ class WindowShellMixin:
         ]
         self._right_docks = [*placed, dock]
         self.addDockWidget(area, dock)
-        # 停靠 ↔ 浮动切换后要重排顶部区域，否则切 tab 时工具条高度会收不回去
-        self.watch_dock_float_state(dock)
+        # 拖出浮动后 Qt 会停摆、不再重排（见 heal_stalled_layout），挂上自愈
+        self.watch_dock_layout(dock)
         for other in placed:
             try:
                 self.tabifyDockWidget(other, dock)

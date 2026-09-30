@@ -14,14 +14,14 @@ from qgis.gui import (
     QgsMapToolPan,
     QgsMapToolZoom,
 )
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import (
     QAction,
     QColor,
     QKeySequence,
     QShortcut,
 )
-from qgis.PyQt.QtWidgets import QDialog, QToolBar
+from qgis.PyQt.QtWidgets import QApplication, QDialog, QDockWidget, QToolBar
 
 from app.infra.logging import get_logger
 from app.infra.shortcuts import DEFAULT_SHORTCUTS, effective_sequences, load_overrides
@@ -303,45 +303,104 @@ class WindowChromeMixin:
         return tb
 
     def _on_tab_changed(self, index: int) -> None:
-        """tab 切换：只显示当前 tab 对应的工具条，其余隐藏（模拟"换工具栏"）。"""
+        """tab 切换：只显示当前 tab 对应的工具条，其余隐藏（模拟"换工具栏"）。
+
+        工具条显隐后由 ``QMainWindow`` 自己发 ``LayoutRequest`` 重算中央区，正常情况
+        画布顶边依次为 213 / 89 / 159 / 89（编辑 / 文件 / 通用 / 查看），**不要**手动
+        ``layout.activate()`` 插队——那只会在下面这种布局停摆的场景里帮倒忙。
+        """
         for idx, toolbars in self._tab_toolbars.items():
             visible = idx == index
             for tb in toolbars:
                 tb.setVisible(visible)
-        self.relayout_chrome()
+        # 兜底：布局一旦停摆（见 :meth:`heal_stalled_layout`），这里是用户最先看出来的地方
+        self.heal_stalled_layout()
 
-    def relayout_chrome(self) -> None:
-        """强制主窗口重算一遍布局（工具条显隐 / Dock 停靠↔浮动之后调）。
+    # ================================================= dock 布局停摆的自愈
 
-        **为什么需要**：工具条显隐会改变顶部区域的高度，但 Qt 不总会因此重算
-        ``QMainWindow`` 的布局。实测**把 Dock 拖出成浮动面板之后**再切 tab，
-        上一个 tab 的工具条占的那截高度不会被收回——空白留在 tab 栏下方，把工具条
-        和画布一起往下推（"查看"tab 的工具条本该在 y≈85，实际跑到 y≈182）。因为
-        顶部菜单容器是唯一能拉伸的项，多出来的空间全被它吃掉，看着就像"菜单栏的
-        高度没跟着菜单变"。重新停靠 Dock 会恢复正常，也是因为它顺带触发了一次完整
-        重排。
+    def watch_dock_layout(self, dock) -> None:
+        """Dock 停靠↔浮动 / 换停靠区后登记一次布局自愈。
 
-        这里显式让布局失效并立即重算，把这个不确定性抹掉。
+        **不能同步做**：``topLevelChanged`` / ``dockLocationChanged`` 是 Qt 在收尾
+        dock 拖拽的过程中同步发出来的，此刻布局处在拖拽中间态——这时套
+        ``restoreState`` 会把其它浮动 dock 的位置一起搅乱甚至让它们消失。所以这里只
+        排一个延迟任务，等鼠标松开、事件循环空下来再执行。
         """
-        try:
-            layout = self.layout()
-            if layout is not None:
-                layout.invalidate()
-                layout.activate()
-            for widget in (self.menuWidget(), self.centralWidget(), self._tab_bar):
-                if widget is not None:
-                    widget.updateGeometry()
-        except RuntimeError:
-            pass  # 窗口销毁流程中，忽略
-
-    def watch_dock_float_state(self, dock) -> None:
-        """Dock 停靠 ↔ 浮动切换后重排一次顶部区域（原因见 :meth:`relayout_chrome`）。"""
         if dock is None:
             return
+        for signal in (dock.topLevelChanged, dock.dockLocationChanged):
+            try:
+                signal.connect(lambda *_a: self.schedule_layout_heal())
+            except Exception:  # noqa: BLE001 —— 非 Dock / 已销毁，忽略
+                logger.warning("挂接 Dock 布局信号失败: %s", type(dock).__name__, exc_info=True)
+
+    def schedule_layout_heal(self) -> None:
+        """把自愈排到「鼠标已松开」之后（拖拽还在进行时反复重排会更乱）。"""
+        if QApplication.mouseButtons() != Qt.MouseButton.NoButton:
+            QTimer.singleShot(80, self.schedule_layout_heal)
+            return
+        self.heal_stalled_layout()
+
+    def _expected_central_top(self) -> int:
+        """按「菜单容器 + 可见的顶部工具条」算中央区应有的顶边（实测严丝合缝）。
+
+        顶部**停靠区**（DockWidgetArea.TopDockWidgetArea）也有 dock 时不参与计算——
+        那种情况下 ``central.y()`` 本就该比工具条更低，硬比会一路误判成停摆。
+        """
+        menu = self.menuWidget()
+        top = menu.geometry().bottom() + 1 if menu is not None else 0
+        for dock in self.findChildren(QDockWidget):
+            if dock.isVisible() and self.dockWidgetArea(dock) == Qt.DockWidgetArea.TopDockWidgetArea:
+                return -1  # 顶区还有 dock，这套算法不适用（返回哨兵，调用方跳过）
+        for tb in self.findChildren(QToolBar):
+            if tb.isVisible() and self.toolBarArea(tb) == Qt.ToolBarArea.TopToolBarArea:
+                top = max(top, tb.geometry().bottom() + 1)
+        return top
+
+    def heal_stalled_layout(self) -> None:
+        """中央区顶边跟顶部实际占用对不上时，重套一次 dock 布局把它救回来。
+
+        **救的是什么**：拖 dock 出浮动之后，``QMainWindowLayout`` 会停止重排——
+        工具条按 tab 正确显隐，但中央容器几何再也不更新：切 tab 在工具条下方留一条
+        空白带，**连最大化 / 拖窗口边缘改尺寸都不动**，只有重启才恢复。
+
+        **为什么会停摆**：``QMainWindowLayout::setGeometry()`` 开头有一道守卫
+
+            if (savedState.isValid() || (restoredState && isInApplyState))
+                return;
+
+        拖 dock 时 Qt 用 ``savedState`` 存布局快照，正常由 ``animationFinished()``
+        清掉；本项目跑的 Qt 6.11.0 上（见 QTBUG-147209，6.8/6.11 的回归）拖出成浮动
+        之后它不再被清，于是 ``setGeometry()`` 永远早返回。
+
+        **为什么这么救**：实测（``.tmp/verify_nudge.py``）能解开的只有
+        ``saveState()`` 走一圈 ``restoreState()`` —— 让 Qt 重新套一遍布局状态，顺带把
+        卡住的 ``savedState`` 清掉。副作用核对过：健康布局下往返一次，各 dock 的停靠区 /
+        浮动状态 / 位置 / 尺寸、以及画布几何**逐项不变**。
+        网上另外几种绕法（加个假 dock 再删、``layout().invalidate() + activate()``、
+        ``resizeDocks()``、±1px 改窗口尺寸）在本仓库实测**全都无效**，别再试。
+        """
+        central = self.centralWidget()
+        if central is None:
+            return
         try:
-            dock.topLevelChanged.connect(lambda _floating: self.relayout_chrome())
-        except Exception:  # noqa: BLE001 —— 非 Dock / 已销毁，忽略
-            logger.warning("挂接 Dock 停浮信号失败: %s", type(dock).__name__, exc_info=True)
+            expected = self._expected_central_top()
+        except RuntimeError:
+            return  # 窗口销毁流程中，忽略
+        if expected < 0:
+            return  # 顶区有 dock，_expected_central_top 不适用
+        if abs(central.y() - expected) <= 1:
+            return
+        logger.warning(
+            "顶部布局停摆：中央区 y=%s，按顶部实际占用应为 %s，重套一次 dock 布局",
+            central.y(), expected,
+        )
+        try:
+            state = self.saveState()
+            if not state.isEmpty():
+                self.restoreState(state)
+        except RuntimeError:
+            pass  # 窗口销毁流程中，忽略
 
     def _build_status_bar(self) -> None:
         self.status_bar_builder = StatusBar(self)

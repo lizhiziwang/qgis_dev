@@ -324,7 +324,7 @@ class AppActionsMixin:
                 layer, page_size=50, parent=self, filter_str=filter_str, show_ids=show_ids
             )
             self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.current_attribute_dock)
-            self.watch_dock_float_state(self.current_attribute_dock)
+            self.watch_dock_layout(self.current_attribute_dock)
             self.current_attribute_dock.show()
             self.current_attribute_dock.raise_()
         else:
