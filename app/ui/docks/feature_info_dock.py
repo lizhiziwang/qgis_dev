@@ -172,16 +172,6 @@ class FeatureInfoDock(QDockWidget):
         <table style='width:100%; border-collapse:collapse; table-layout:auto;'>
             <colgroup><col style='width: 35%;' /><col style='width: 65%;' /></colgroup>
         """
-        geom = self.feature.geometry() if self.feature is not None else None
-        if geom is not None and not geom.isEmpty():
-            try:
-                wkt = geom.asWkt()
-                info += f"""
-            <tr><td style='padding:8px; border-bottom:1px solid {t.panel_border};'>几何文本</td>
-                <td style='padding:8px; border-bottom:1px solid {t.panel_border};'>{wkt}</td></tr>
-        """
-            except Exception:  # noqa: BLE001
-                pass
         for i, (name, value) in enumerate(items):
             bg = t.panel_bg if i % 2 == 0 else t.input_bg
             val = str(value) if value is not None else f"<span style='color:{t.text_secondary}'>无</span>"

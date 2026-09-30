@@ -81,6 +81,7 @@ from qgis.gui import QgsRubberBand
 from qgis.PyQt.QtCore import QObject, QSize, Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QAction, QColor
 from qgis.PyQt.QtWidgets import (
+    QDialog,
     QMainWindow,
     QMessageBox,
 )
@@ -92,10 +93,12 @@ from app.infra.messagebar import send
 from app.ui.common import tool_icons
 from app.ui.common.ribbon import RibbonToolBar
 from app.ui.common.theme import ThemeManager
+from app.ui.dialogs.copy_to_layer import CopyToLayerDialog
 from app.ui.dialogs.custom_attr import CustomAttrDialog
 from app.ui.docks.attribute_entry_dock import AttributeEntryDock
 from app.ui.tools.attribute_entry import AttributeEntryTool
 from app.ui.tools.boundary_edit import BoundaryEditTool
+from app.ui.tools.copy_to_layer import copy_features_to as run_copy_to
 from app.ui.tools.delete_features import delete_selected_features as run_delete
 from app.ui.tools.dig_hole import DigHoleTool
 from app.ui.tools.explode_parts import explode_features as run_explode
@@ -217,6 +220,10 @@ class DigitizingToolbar(QObject):
 
         self._build_toolbar()
         self._connect_map_tool_hook()
+        # 选中集钩子是**工程级**的，跟着本工具条的生命周期走，与"有没有编辑目标"
+        # 无关——早先它挂在 :meth:`_connect_edit_stop_hook` 里，于是没设过编辑目标
+        # 时选要素根本不刷新按钮（「复制到」这种不要求编辑态的动作因此永远点不亮）。
+        self._connect_selection_hook(None)
 
     def _connect_map_tool_hook(self) -> None:
         """监听画布工具变化，兜住各工具自己按 Esc 退出的路径。
@@ -371,6 +378,18 @@ class DigitizingToolbar(QObject):
         )
         self.split_by_selection_action.triggered.connect(self.split_by_selection)
 
+        # ---- 复制到（**只要求有选中要素**，不要求编辑态；源 = 选中要素所在图层）----
+        self.copy_to_action = QAction("复制到", self.digitizing_toolbar)
+        self.copy_to_action.setToolTip(
+            "用选择工具选中要素后点此，把要素复制到另一个图层（可逐字段搬运属性）"
+        )
+        self.copy_to_action.triggered.connect(self.copy_to_layer)
+
+        # ---- 快捷键（工具条最末尾；点击弹出面板列出全系统快捷键，可改可恢复默认）----
+        self.shortcuts_action = QAction("快捷键", self.digitizing_toolbar)
+        self.shortcuts_action.setToolTip("查看 / 修改系统全局快捷键（改完保存即生效，可恢复默认）")
+        self.shortcuts_action.triggered.connect(self.show_shortcuts_panel)
+
         # ---- 初始态：编辑动作全禁用（「开始编辑」例外——恒可用，点击弹窗选层）
         #     最后统一由 _refresh_button_states 推导，这里只组装不动状态
 
@@ -405,6 +424,7 @@ class DigitizingToolbar(QObject):
             "boundary_edit": self.boundary_edit_action,
             "move": self.move_action,
             "attr_entry": self.attribute_entry_action,
+            "copy_to": self.copy_to_action,
         }
 
         self.digitizing_toolbar.addAction(self.add_point_action)
@@ -432,6 +452,7 @@ class DigitizingToolbar(QObject):
                     self.boundary_edit_action,
                     self.move_action,
                     self.delete_action,
+                    self.copy_to_action,
                 ],
             ),
             (
@@ -449,6 +470,10 @@ class DigitizingToolbar(QObject):
             (
                 "绘制",
                 [self.add_point_action, self.add_line_action, self.add_polygon_action],
+            ),
+            (
+                "其它",
+                [self.shortcuts_action],
             ),
         ]
         for idx, (_group_name, acts) in enumerate(tool_groups):
@@ -480,6 +505,8 @@ class DigitizingToolbar(QObject):
             self.add_point_action: "draw",
             self.add_line_action: "draw",
             self.add_polygon_action: "draw",
+            self.copy_to_action: "copy_to_layer",
+            self.shortcuts_action: "shortcut",
         }
         self._apply_icons()
 
@@ -1318,11 +1345,102 @@ class DigitizingToolbar(QObject):
         # 事件栈内不直接 refresh（仓库约束），推迟出栈后再刷新
         QTimer.singleShot(0, self._safe_refresh)
 
+    def copy_to_layer(self) -> None:
+        """「复制到」一次性动作：把选中要素复制到另一个图层（可搬运字段属性）。
+
+        **只要求有选中要素**，不要求编辑态 —— 这是编辑工具条里唯一的例外：源是
+        「选中要素**所在的**图层」（对齐 B/S），它未必是当前编辑图层；而目标图层
+        由本工具自己开编辑缓冲（见 :func:`app.ui.tools.copy_to_layer.copy_features_to`）。
+        """
+        # 源图层：画布渲染顺序里**最上面那个有选中要素**的图层（同「点选只取最顶层」
+        # 的规则）；B/S 取的是"第一个选中要素所属图层"，桌面端选择跨图层、没有可靠的
+        # "第一个"，按渲染顺序取最上面的更有确定性。
+        source = next(
+            (
+                layer
+                for layer in self.canvas.layers()
+                if isinstance(layer, QgsVectorLayer)
+                and layer.isValid()
+                and layer.selectedFeatureIds()
+            ),
+            None,
+        )
+        if source is None:
+            QMessageBox.warning(self.main_window, "警告", "请先用选择工具选中要复制的要素")
+            return
+
+        # 目标候选：工程里的矢量图层，排除源图层自己、且几何类型要相同（对齐 B/S）
+        targets = [
+            layer
+            for layer in self.canvas.layers()
+            if isinstance(layer, QgsVectorLayer)
+            and layer.isValid()
+            and layer.id() != source.id()
+            and layer.geometryType() == source.geometryType()
+        ]
+        if not targets:
+            QMessageBox.warning(
+                self.main_window,
+                "警告",
+                f"没有可作为目标的图层：需要几何类型与「{source.name()}」相同的其它矢量图层",
+            )
+            return
+
+        dialog = CopyToLayerDialog(
+            source, targets, len(source.selectedFeatureIds()), parent=self.main_window
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        target = dialog.target_layer()
+        if target is None:
+            return
+
+        result = run_copy_to(
+            source,
+            target,
+            dialog.field_mappings(),
+            dialog.copy_attributes_checked(),
+            hint=self._tool_hint,
+        )
+        if result.ok:
+            self._toast(f"已复制 {result.added} 个要素到「{target.name()}」（可 Ctrl+Z 撤销）")
+            QTimer.singleShot(0, self._safe_refresh)
+            return
+        # 校验失败 / 写入失败：面板已关，这里把原因讲清楚（附带涉及的字段名）
+        detail = f"【{'】【'.join(result.fields)}】" if result.fields else ""
+        QMessageBox.warning(self.main_window, "复制到失败", f"{result.reason}{detail}")
+
+    def show_shortcuts_panel(self) -> None:
+        """「快捷键」一次性动作：弹面板列出 / 编辑全系统快捷键（保存即生效）。
+
+        面板与落盘都在 :class:`MainWindow`（:meth:`apply_shortcut_panel`）——快捷键
+        真正挂在那些 QAction / QShortcut 上，只有主窗口拿得到它们。
+        """
+        fn = getattr(self.main_window, "apply_shortcut_panel", None)
+        if not callable(fn):
+            QMessageBox.information(self.main_window, "提示", "当前窗口不支持快捷键设置")
+            return
+        fn()
+
     def _safe_refresh(self) -> None:
         try:
             self.canvas.refresh()
         except RuntimeError:
             pass
+
+    def _load_attribute_entry_feature(self, layer: QgsVectorLayer, fid: int) -> None:
+        """「属性录入」点中要素：把属性载入右侧面板。
+
+        面板若已被用户手动关掉（标题栏 ×），这里**先重新显示**再载入——不然点了
+        要素什么都没发生，看起来像工具失灵。
+        """
+        dock = self._attribute_entry_dock
+        if dock is None:
+            return
+        if dock.isHidden():
+            dock.show()
+            dock.raise_()
+        dock.load_feature(layer, fid)
 
     def _tool_hint(self, text: str) -> None:
         """工具运行期提示：推到浮动消息条，**不自动关闭**。
@@ -1395,7 +1513,7 @@ class DigitizingToolbar(QObject):
         self.attribute_entry_tool = AttributeEntryTool(
             self.canvas,
             editing_layer_getter=self._editing_layer_getter,
-            on_feature=dock.load_feature,
+            on_feature=self._load_attribute_entry_feature,
             hint=self._tool_hint,
         )
         self._activate_map_tool(self.attribute_entry_tool)
@@ -1658,9 +1776,10 @@ class DigitizingToolbar(QObject):
         图层再连当前图层，同一时刻只挂一个钩子。
         """
         self._disconnect_edit_stop_hook()
-        # 撤销栈信号、选中集信号与停编钩子同生命周期：目标图层切换时一并换绑
+        # 撤销栈信号与停编钩子同生命周期：目标图层切换时一并换绑。
+        # **选中集钩子不在这里**——它是工程级、与本工具条有没有编辑目标无关，
+        # 见 :meth:`_connect_map_tool_hook` 旁边的说明。
         self._connect_undo_stack(layer)
-        self._connect_selection_hook(layer)
         if layer is None or layer.type() != layer.VectorLayer:
             return
         try:
@@ -1673,9 +1792,8 @@ class DigitizingToolbar(QObject):
 
     def _disconnect_edit_stop_hook(self) -> None:
         """断开当前图层的 ``editingStopped`` 钩子（目标切换 / 钩子已触发）。"""
-        # 撤销栈信号、选中集信号与停编钩子同生命周期：一并断开
+        # 撤销栈信号与停编钩子同生命周期：一并断开（选中集钩子不归这里管）
         self._disconnect_undo_stack()
-        self._disconnect_selection_hook()
         layer = self._edit_stop_hook_layer
         self._edit_stop_hook_layer = None
         if layer is None:
@@ -1812,6 +1930,17 @@ class DigitizingToolbar(QObject):
     def _current_layer(self) -> QgsVectorLayer | None:
         return self._editing_layer_getter()
 
+    def _any_layer_has_selection(self) -> bool:
+        """画布上是否有**任意**可见矢量图层存在选中要素（「复制到」的可用性依据）。"""
+        try:
+            return any(
+                layer.selectedFeatureIds()
+                for layer in self.canvas.layers()
+                if isinstance(layer, QgsVectorLayer) and layer.isValid()
+            )
+        except RuntimeError:
+            return False
+
     def _require_selection(self, layer: QgsVectorLayer, action: str) -> bool:
         """「有选中」兜底校验：返回 False 时已弹过警告，调用方直接 return。
 
@@ -1891,6 +2020,10 @@ class DigitizingToolbar(QObject):
         self.move_action.setEnabled(has_selection)
         # 「删除」删的是编辑图层的选中要素；「要素分割」要求**其它图层**上有选中的切割要素
         self.delete_action.setEnabled(has_selection)
+        # 「复制到」是编辑工具条里**唯一不要求编辑态**的动作：源是"选中要素**所在**的
+        # 图层"（未必是当前编辑图层），目标图层由工具自己开编辑缓冲。只要有选中就能用
+        # ——所以这里看的是**所有可见矢量图层**的选中，而不只是编辑图层。
+        self.copy_to_action.setEnabled(self._any_layer_has_selection())
         self.split_by_selection_action.setEnabled(
             bool(editing and has_cutter_selection(layer))
         )

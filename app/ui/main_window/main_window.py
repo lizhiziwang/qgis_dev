@@ -185,6 +185,10 @@ class MainWindow(
         self._build_tabs()
         self._build_status_bar()
 
+        # ---- 应用快捷键（含用户在「快捷键」面板里的自定义）----
+        # 放在最后：撤销 / 重做的 QShortcut、文件/查看工具条的 QAction 都已建好
+        self._init_shortcuts()
+
         # ---- 默认激活平移 ----
         self.canvas.setMapTool(self._pan_tool)
 

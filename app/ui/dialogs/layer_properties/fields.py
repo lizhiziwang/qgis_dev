@@ -44,6 +44,7 @@ from qgis.PyQt.QtWidgets import (
 from app.infra.logging import get_logger
 from app.ui.dialogs.layer_properties.add_field_dialog import AddFieldDialog
 from app.ui.dialogs.layer_properties.base import LayerPropertyTab
+from app.ui.tools.feature_attrs import field_alias
 
 logger = get_logger(__name__)
 
@@ -272,8 +273,12 @@ class FieldsTab(LayerPropertyTab):
             name_item.setData(Qt.ItemDataRole.UserRole, fld.name())
             self.table.setItem(i, 1, name_item)
 
-            # 列 2：字段别名（可编辑）
-            alias_item = QTableWidgetItem(fld.alias() or "")
+            # 列 2：字段别名（可编辑）。
+            # 用 ``field_alias`` 而不是裸 ``fld.alias()``：某些 GDB（实测 FileGDB 的
+            # 中文别名）取回来是「UTF-8 字节被当成 Latin-1」的乱码，直接显示用户
+            # 根本读不了。这里显示修好的文本，用户点「确定」时也会把修好的写进图层
+            # 字段配置（``setFieldAlias`` 是**图层级**的，不落数据源）。
+            alias_item = QTableWidgetItem(field_alias(fld))
             self.table.setItem(i, 2, alias_item)
 
             # 列 3：类型
@@ -401,7 +406,7 @@ class FieldsTab(LayerPropertyTab):
         self.display_combo.clear()
         for i in range(fields.size()):
             name = fields.at(i).name()
-            alias = fields.at(i).alias() or name
+            alias = field_alias(fields.at(i)) or name
             self.display_combo.addItem(f"{name} · {alias}", name)
         # 选中 current；current 可能不是裸字段名（如 "concat(a, b)"），找不着就保持 index=0
         if current_expr:

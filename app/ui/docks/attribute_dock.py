@@ -39,6 +39,7 @@ from app.ui.common.icons import Icons
 from app.ui.common.theme import ThemeManager
 from app.ui.dialogs.organize_columns import OrganizeColumnsDialog
 from app.ui.dialogs.query_builder import QueryBuilderDialog
+from app.ui.tools.feature_attrs import field_alias
 
 logger = get_logger(__name__)
 
@@ -266,7 +267,7 @@ class PagedAttributeTableModel(QAbstractTableModel):
         self.field_names = [f.name() for f in layer.fields()]
         # 列头显示名：优先字段别名，无别名降级为字段名（attributeAlias 返回空串即无）
         self.header_names = [
-            layer.attributeAlias(i) or name for i, name in enumerate(self.field_names)
+            field_alias(layer.fields().at(i)) or name for i, name in enumerate(self.field_names)
         ]
         #: 结果 **fid 列表**（内存主驻留物；要素按需取，见 ``feature_at``）
         self._fids: List[int] = []
@@ -427,7 +428,7 @@ class PagedAttributeTableModel(QAbstractTableModel):
         self.field_names = [f.name() for f in self.layer.fields()]
         # 列头显示名：优先字段别名，无别名降级为字段名（同 __init__ 逻辑）
         self.header_names = [
-            self.layer.attributeAlias(i) or name for i, name in enumerate(self.field_names)
+            field_alias(self.layer.fields().at(i)) or name for i, name in enumerate(self.field_names)
         ]
         self._feature_cache.clear()
         self.beginResetModel()
@@ -914,8 +915,9 @@ class AttributeDock(QDockWidget):
                 self.layer.setSubsetString("")
             if self.layer.isEditable():
                 self.content_widget._stop_edit()
-            if self.topParent is not None:
-                self.topParent.current_attribute_dock = None
+            # **不清** ``topParent.current_attribute_dock``：清了下次打开就以为是
+            # "没建过"，重新 new 一个 —— 新 Dock 没有位置记忆，用户把它浮动到地图上
+            # 再关掉后，再打开会直接落回左上角。保留实例复用，Qt 才会记住浮动位置。
         except Exception:  # noqa: BLE001
             pass
         super().closeEvent(event)

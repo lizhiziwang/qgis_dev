@@ -623,6 +623,40 @@ def _check_url(color: str) -> str:
     return url
 
 
+#: 「半选」横杠 PNG 缓存（与 :data:`_CHECK_CACHE` 同理）
+_DASH_CACHE: dict[str, str] = {}
+
+
+def _dash_url(color: str) -> str:
+    """按颜色生成一个「半选」横杠 PNG（三态勾选框的 PartiallyChecked），返回 url(...)。
+
+    三态勾选框（如「全选」）的半选态必须有自己的图形：只靠背景色的话，跟"没勾"
+    几乎看不出区别。与 :func:`_check_url` 同一套做法。
+    """
+    if color in _DASH_CACHE:
+        return _DASH_CACHE[color]
+
+    from qgis.PyQt.QtCore import QPoint, Qt
+    from qgis.PyQt.QtGui import QColor, QPainter, QPen, QPixmap
+
+    pm = QPixmap(14, 14)
+    pm.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    pen = QPen(QColor(color))
+    pen.setWidth(2)
+    painter.setPen(pen)
+    painter.drawLine(QPoint(4, 7), QPoint(10, 7))
+    painter.end()
+
+    path = Path(tempfile.gettempdir()) / f"qgis_dev_dash_{color.lstrip('#').upper()}.png"
+    if not pm.save(str(path), "PNG"):
+        raise RuntimeError(f"无法写入半选横杠 PNG: {path}")
+    url = path.as_posix()
+    _DASH_CACHE[color] = url
+    return url
+
+
 def app_qss(t: Theme) -> str:
     """全局控件 QSS（QApplication 级）。
 
@@ -811,6 +845,40 @@ def app_qss(t: Theme) -> str:
 
     QCheckBox, QRadioButton {{ color: {t.menu_text}; }}
     QCheckBox:disabled, QRadioButton:disabled {{ color: {t.text_secondary}; }}
+
+    /* 勾选框：**显式画 indicator**。只靠平台原生样式的话，选中态在部分环境下会
+       退化成"实心方块、看不出勾"（见 :func:`_check_url` 的说明），用户反映
+       "勾选的颜色看不清"。这里统一成：未选 = 空框，选中 = 强调色描边 + 现画的
+       对勾 PNG，半选 = 强调色描边 + 现画的横杠，任何主题 / 平台都清楚。
+       ``QTableView::indicator`` 覆盖表格里 ``setCheckState`` 的复选框
+       （QTableWidget 是 QTableView 的子类，同一条规则生效）。 */
+    QCheckBox::indicator,
+    QTableView::indicator {{
+        width: 14px;
+        height: 14px;
+        border: 1px solid {t.input_border};
+        border-radius: 2px;
+        background: {t.input_bg};
+    }}
+    QCheckBox::indicator:hover,
+    QTableView::indicator:hover {{ border-color: {t.input_focus}; }}
+    QCheckBox::indicator:checked,
+    QTableView::indicator:checked {{
+        border: 1px solid {t.input_focus};
+        background: {t.input_bg};
+        image: url({_check_url(t.input_focus)});
+    }}
+    QCheckBox::indicator:indeterminate,
+    QTableView::indicator:indeterminate {{
+        border: 1px solid {t.input_focus};
+        background: {t.input_bg};
+        image: url({_dash_url(t.input_focus)});
+    }}
+    QCheckBox::indicator:disabled,
+    QTableView::indicator:disabled {{
+        border-color: {t.text_secondary};
+        background: {t.panel_bg};
+    }}
 
     QGroupBox {{
         /* 不显式设背景时 Qt 会落到系统默认色（Windows 上偏灰），导致内部控件

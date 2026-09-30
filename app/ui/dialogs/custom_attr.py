@@ -8,6 +8,10 @@
 硬写成 ``"NULL"``，保存时再原样解析回真 NULL，等于把预填的值又抹掉了（用户看到
 的是"明明有 MZGUID 字段却没赋值"）。只有要素上确实是空值时才用 ``"NULL"`` 占位
 （聚焦即清空，保存时写真 NULL，见 :meth:`_parse_field_value`）。
+
+**唯一标识字段只读且不参与写回**：它只能由系统赋值——手工改会破坏"一要素一标识"
+的约定，也会绕过分割 / 分解 / 绘制的赋新值逻辑。只设为 ``setReadOnly`` 不够：本
+对话框写回是读输入框文本，框里值一变照样会写库，所以 ``_save`` 里直接跳过它们。
 """
 
 from __future__ import annotations
@@ -32,6 +36,7 @@ from qgis.core import QgsField, QgsVectorLayer
 
 from app.core.domain.check.space_index import clear_spatial_index
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.tools.feature_attrs import uid_field_index
 
 #: 空值占位文本：既表示"没值"，也是保存时转真 NULL 的判据
 _NULL_TEXT = "NULL"
@@ -46,6 +51,10 @@ class CustomAttrDialog(BaseDialog):
         self.feature = feature
         self.attr_values = {}
         self._attr_fields = {}
+        #: 只读字段下标：全局唯一标识（MZGUID / FGUID / GlobalID…）**只给自动赋值**，
+        #: 手工改会破坏"一要素一标识"的约定，也会绕过分割 / 分解 / 绘制的赋新值逻辑
+        uid_idx = uid_field_index(layer.fields())
+        self._readonly_indices: set[int] = {uid_idx} if uid_idx is not None else set()
         self._init_ui()
 
     def _init_ui(self) -> None:
@@ -78,6 +87,9 @@ class CustomAttrDialog(BaseDialog):
             line_edit = QLineEdit()
             line_edit.setText(self._initial_text(idx, field))
             line_edit.focusInEvent = lambda e, le=line_edit: self._on_focus(le, e)
+            if idx in self._readonly_indices:
+                line_edit.setReadOnly(True)
+                line_edit.setToolTip("该字段由系统自动赋值，不可手工修改")
             self.attr_values[field.name()] = line_edit
             self._attr_fields[field.name()] = field
             form.addRow(label, line_edit)
@@ -97,6 +109,13 @@ class CustomAttrDialog(BaseDialog):
         button_layout.addWidget(bb)
         main.addWidget(button_container)
         self.setLayout(main)
+
+    def _is_readonly(self, field: QgsField) -> bool:
+        """字段是否只读（按下标判定，避免同名字段 / 别名造成的误判）。"""
+        try:
+            return self.layer.fields().indexOf(field.name()) in self._readonly_indices
+        except Exception:  # noqa: BLE001
+            return False
 
     def _initial_text(self, idx: int, field: QgsField) -> str:
         """输入框初值：要素上已有的值（新增要素已预填面积 / GUID）；无值用占位文本。"""
@@ -153,6 +172,10 @@ class CustomAttrDialog(BaseDialog):
         for name, editor in self.attr_values.items():
             field = self._attr_fields.get(name)
             if field is None:
+                continue
+            # 只读字段不参与写回：setReadOnly 只挡用户输入，这里是读框里的文本，
+            # 框里值一变就会被原样写库（唯一标识只能由系统赋值）
+            if self._is_readonly(field):
                 continue
             try:
                 value = self._parse_field_value(field, editor.text())

@@ -82,6 +82,7 @@ from qgis.PyQt.QtWidgets import (
 
 from app.infra.logging import get_logger
 from app.ui.dialogs.layer_properties.base import LayerPropertyTab
+from app.ui.tools.feature_attrs import field_alias
 
 logger = get_logger(__name__)
 
@@ -401,7 +402,7 @@ class _FieldExpressionSelector(QWidget):
             for i in range(fields.size()):
                 fld = fields.at(i)
                 self.combo.addItem(
-                    f"{fld.name()} · {fld.alias() or fld.name()}", fld.name()
+                    f"{fld.name()} · {field_alias(fld) or fld.name()}", fld.name()
                 )
         self.combo.addItem("〈表达式…〉", _EXPR)
         self.combo.blockSignals(False)

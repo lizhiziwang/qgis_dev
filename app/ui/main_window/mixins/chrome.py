@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+from qgis.core import Qgis
 from qgis.gui import (
     QgsMapToolPan,
     QgsMapToolZoom,
@@ -18,10 +19,12 @@ from qgis.PyQt.QtGui import (
     QAction,
     QColor,
     QKeySequence,
+    QShortcut,
 )
-from qgis.PyQt.QtWidgets import QToolBar
+from qgis.PyQt.QtWidgets import QDialog, QToolBar
 
 from app.infra.logging import get_logger
+from app.infra.shortcuts import DEFAULT_SHORTCUTS, effective_sequences, load_overrides
 from app.ui.common.theme import (
     TOOLBAR_ITEM_GAP,
     ThemeManager,
@@ -135,7 +138,7 @@ class WindowChromeMixin:
         self._on_tab_changed(tab_bar.currentIndex())
 
     def _build_file_toolbar(self) -> QToolBar:
-        """「文件」tab 工具条：新建工程 / 保存为工程 / 打开工程 / 打开文件 / 退出。"""
+        """「文件」tab 工具条：新建工程 / 保存工程 / 另存为工程 / 打开工程 / 打开文件 / 退出。"""
         tb = QToolBar("文件", self)
         tb.setObjectName("FileTabToolbar")
         tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
@@ -144,21 +147,31 @@ class WindowChromeMixin:
         act_new.setShortcut("Ctrl+N")
         act_new.triggered.connect(self._on_new_project)
         tb.addAction(act_new)
+        self._act_new_project = act_new
 
-        act_save_as = QAction("保存为工程", self)
-        act_save_as.setShortcut(QKeySequence.StandardKey.SaveAs)
+        act_save = QAction("保存工程", self)
+        act_save.setShortcut("Ctrl+S")
+        act_save.triggered.connect(self._save_current_project)
+        tb.addAction(act_save)
+        self._act_save_project = act_save
+
+        act_save_as = QAction("另存为工程", self)
+        act_save_as.setShortcut("Ctrl+Shift+S")
         act_save_as.triggered.connect(self._on_save_project_as)
         tb.addAction(act_save_as)
+        self._act_save_project_as = act_save_as
 
         act_open_proj = QAction("打开工程", self)
         act_open_proj.setShortcut("Ctrl+Shift+O")
         act_open_proj.triggered.connect(self._on_open_project)
         tb.addAction(act_open_proj)
+        self._act_open_project = act_open_proj
 
         act_open = QAction("打开文件", self)
-        act_open.setShortcut(QKeySequence.StandardKey.Open)
+        act_open.setShortcut("Ctrl+O")
         act_open.triggered.connect(self._on_open_file)
         tb.addAction(act_open)
+        self._act_open_file = act_open
 
         tb.addSeparator()
 
@@ -166,6 +179,7 @@ class WindowChromeMixin:
         act_exit.setShortcut("Ctrl+Q")
         act_exit.triggered.connect(self.close)
         tb.addAction(act_exit)
+        self._act_exit = act_exit
 
         self.addToolBar(tb)
         return tb
@@ -180,14 +194,99 @@ class WindowChromeMixin:
         act_log.setShortcut("Ctrl+L")
         act_log.triggered.connect(self._show_log_dock)
         tb.addAction(act_log)
+        self._act_log = act_log
 
         act_flow = QAction("流程节点编辑器", self)
         act_flow.setShortcut("Ctrl+Shift+F")
         act_flow.triggered.connect(self._open_flow_editor)
         tb.addAction(act_flow)
+        self._act_flow_editor = act_flow
 
         self.addToolBar(tb)
         return tb
+
+    # ===================================================== 全局快捷键
+
+    def _shortcuts_config_path(self):
+        """用户自定义快捷键的落盘位置（与 ``app.yaml`` 同目录）。"""
+        from pathlib import Path
+
+        return Path(self._map_config_path()).with_name("shortcuts.yaml")
+
+    def _init_shortcuts(self) -> None:
+        """登记全系统快捷键并套用用户自定义值（启动时调一次）。
+
+        登记表见 :data:`app.infra.shortcuts.DEFAULT_SHORTCUTS`；这里只把 ``key``
+        映射到实际控件（QAction / QShortcut），值怎么套由
+        :meth:`set_app_shortcut` 统一处理。
+        """
+        redo_shortcuts = list(getattr(self, "_redo_shortcuts", []))
+        self._shortcut_targets: dict = {
+            "undo": getattr(self, "_undo_shortcut", None),
+            "redo": redo_shortcuts[0] if len(redo_shortcuts) > 0 else None,
+            "redo_alt": redo_shortcuts[1] if len(redo_shortcuts) > 1 else None,
+            "new_project": getattr(self, "_act_new_project", None),
+            "save_project": getattr(self, "_act_save_project", None),
+            "save_project_as": getattr(self, "_act_save_project_as", None),
+            "open_project": getattr(self, "_act_open_project", None),
+            "open_file": getattr(self, "_act_open_file", None),
+            "exit_app": getattr(self, "_act_exit", None),
+            "log_dock": getattr(self, "_act_log", None),
+            "flow_editor": getattr(self, "_act_flow_editor", None),
+        }
+        overrides = load_overrides(self._shortcuts_config_path())
+        for key, sequence in effective_sequences(overrides).items():
+            self.set_app_shortcut(key, sequence)
+
+    def set_app_shortcut(self, key: str, sequence: str) -> None:
+        """把 ``key`` 对应控件的快捷键设为 ``sequence``（空串 = 不绑定）。
+
+        QAction 走 ``setShortcut``；撤销 / 重做是画布上作用域受限的 QShortcut
+        （避免抢文本框的 Ctrl+Z），走 ``setKey``，空串时一并 ``setEnabled(False)``。
+        """
+        target = getattr(self, "_shortcut_targets", {}).get(key)
+        if target is None:
+            return
+        if isinstance(target, QShortcut):
+            target.setKey(QKeySequence(sequence) if sequence else QKeySequence())
+            target.setEnabled(bool(sequence))
+            return
+        target.setShortcut(QKeySequence(sequence) if sequence else QKeySequence())
+
+    def apply_shortcut_panel(self) -> None:
+        """「快捷键」按钮：弹面板编辑，保存后立即生效并落盘。"""
+        from app.infra.shortcuts import diff_from_defaults, save_overrides
+        from app.ui.dialogs.shortcuts import ShortcutsDialog
+
+        current = {
+            spec.key: self._current_shortcut_text(spec.key, spec.default)
+            for spec in DEFAULT_SHORTCUTS
+        }
+        dlg = ShortcutsDialog(current, parent=self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        sequences = dlg.sequences()
+        for key, sequence in sequences.items():
+            self.set_app_shortcut(key, sequence)
+        try:
+            save_overrides(self._shortcuts_config_path(), diff_from_defaults(sequences))
+        except Exception:  # noqa: BLE001 —— 写盘失败不该回滚已生效的快捷键
+            logger.exception("保存快捷键配置失败")
+            self.messageBar.pushMessage(
+                "快捷键已生效，但写入配置文件失败（下次启动会回到默认）",
+                level=Qgis.MessageLevel.Warning,
+            )
+            return
+        self.messageBar.pushMessage("快捷键已保存并生效")
+
+    def _current_shortcut_text(self, key: str, default: str) -> str:
+        """当前生效的键序列文本（读控件本身，保证面板显示的就是真实值）。"""
+        target = getattr(self, "_shortcut_targets", {}).get(key)
+        if isinstance(target, QShortcut):
+            return target.key().toString(QKeySequence.SequenceFormat.PortableText)
+        if target is not None:
+            return target.shortcut().toString(QKeySequence.SequenceFormat.PortableText)
+        return default
 
     def _build_quality_toolbar(self) -> QToolBar:
         """「质检」tab 工具条：当前只有一个「质检」工具，打开质检面板 dock。"""
@@ -209,6 +308,40 @@ class WindowChromeMixin:
             visible = idx == index
             for tb in toolbars:
                 tb.setVisible(visible)
+        self.relayout_chrome()
+
+    def relayout_chrome(self) -> None:
+        """强制主窗口重算一遍布局（工具条显隐 / Dock 停靠↔浮动之后调）。
+
+        **为什么需要**：工具条显隐会改变顶部区域的高度，但 Qt 不总会因此重算
+        ``QMainWindow`` 的布局。实测**把 Dock 拖出成浮动面板之后**再切 tab，
+        上一个 tab 的工具条占的那截高度不会被收回——空白留在 tab 栏下方，把工具条
+        和画布一起往下推（"查看"tab 的工具条本该在 y≈85，实际跑到 y≈182）。因为
+        顶部菜单容器是唯一能拉伸的项，多出来的空间全被它吃掉，看着就像"菜单栏的
+        高度没跟着菜单变"。重新停靠 Dock 会恢复正常，也是因为它顺带触发了一次完整
+        重排。
+
+        这里显式让布局失效并立即重算，把这个不确定性抹掉。
+        """
+        try:
+            layout = self.layout()
+            if layout is not None:
+                layout.invalidate()
+                layout.activate()
+            for widget in (self.menuWidget(), self.centralWidget(), self._tab_bar):
+                if widget is not None:
+                    widget.updateGeometry()
+        except RuntimeError:
+            pass  # 窗口销毁流程中，忽略
+
+    def watch_dock_float_state(self, dock) -> None:
+        """Dock 停靠 ↔ 浮动切换后重排一次顶部区域（原因见 :meth:`relayout_chrome`）。"""
+        if dock is None:
+            return
+        try:
+            dock.topLevelChanged.connect(lambda _floating: self.relayout_chrome())
+        except Exception:  # noqa: BLE001 —— 非 Dock / 已销毁，忽略
+            logger.warning("挂接 Dock 停浮信号失败: %s", type(dock).__name__, exc_info=True)
 
     def _build_status_bar(self) -> None:
         self.status_bar_builder = StatusBar(self)

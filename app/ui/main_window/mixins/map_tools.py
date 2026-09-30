@@ -8,8 +8,13 @@
 
 from __future__ import annotations
 
+from qgis.core import Qgis
 from qgis.PyQt import sip
 from qgis.PyQt.QtWidgets import QMessageBox
+
+from app.infra.logging import get_logger
+
+logger = get_logger(__name__)
 
 from app.ui.docks.feature_info_dock import FeatureInfoDock
 from app.ui.tools.find_feature import FindFeatureTool
@@ -58,28 +63,324 @@ class MapToolsMixin:
 
     def _on_select_point(self) -> None:
 
-        self._select_point_tool = PointSelectTool(self.canvas)
+        self._select_point_tool = PointSelectTool(
+            self.canvas, visible_filter_getter=self.display_filter_for
+        )
         self.canvas.setMapTool(self._select_point_tool)
         self.tool_bar_builder.set_active("select_point")
 
     def _on_select_box(self) -> None:
 
-        self._select_box_tool = RectSelectTool(self.canvas)
+        self._select_box_tool = RectSelectTool(
+            self.canvas, visible_filter_getter=self.display_filter_for
+        )
         self.canvas.setMapTool(self._select_box_tool)
         self.tool_bar_builder.set_active("select_box")
 
     def _on_clear_selection(self) -> None:
-        """取消选择：清空**所有矢量图层**的当前选择（画布重绘由 QGIS 自己驱动）。
+        """清除：清空**所有图层**的选中集，并抹掉临时绘制的辅助图形。
 
-        ``removeSelection()`` 会发 ``selectionChanged`` → 图层 ``triggerRepaint()``
-        → ``repaintRequested``，画布据此重画这一层（其它层复用缓存），不需要再显式
-        ``canvas.refresh()`` 刷第二遍整幅图。
+        「清除」不只是清选择——用户画到一半的测量图形、测量读数条这些**临时
+        辅助图形**同样归它管（与 QGIS 桌面「清除测量」的直觉一致）。目前临时
+        图形来自「线测量 / 面测量」，各自 :meth:`clear` 会同时收掉图形与读数条。
+
+        工具**保持激活**（清完可以接着量），与 QGIS 的测量行为一致。
         """
         from qgis.core import QgsVectorLayer
 
+        cleared = 0
         for layer in self.project.mapLayers().values():
             if isinstance(layer, QgsVectorLayer) and layer.selectedFeatureCount() > 0:
                 layer.removeSelection()
+                cleared += 1
+        cleared += self._clear_temp_graphics()
+        logger.debug("清除：清了 %d 个图层的选中 + %d 个临时图形", cleared, cleared)
+
+    def _clear_temp_graphics(self) -> int:
+        """抹掉临时绘制的辅助图形（线 / 面测量的图形与读数条），返回处理了几个。"""
+        n = 0
+        for attr in ("_measure_line_tool", "_measure_area_tool"):
+            tool = getattr(self, attr, None)
+            if tool is None or sip.isdeleted(tool):
+                continue
+            try:
+                tool.clear()
+                n += 1
+            except Exception:  # noqa: BLE001 —— 收尾失败不该影响清除本身
+                logger.exception("清除测量临时图形失败: %s", attr)
+        return n
+
+    # ===================================================== 选择屏蔽
+
+    def _mask_state(self) -> dict:
+        """屏蔽前的现场 ``{layer_id: {"renderer": <克隆>}}``（懒建）。"""
+        if not hasattr(self, "_select_mask_saved"):
+            self._select_mask_saved: dict = {}
+        return self._select_mask_saved
+
+    @staticmethod
+    def _masked_renderer(layer, fids):
+        """按当前渲染器造一个「只渲染 ``fids``」的等价规则渲染器；造不出返回 None。
+
+        过滤条件用**固定的 ``$id IN (…)``，不能用 ``is_selected()``**：后者是渲染
+        时实时求值的——用户一按「清除」清空选中，整层就什么都不画了；点选别的图形，
+        显示还会跟着变。那不是屏蔽，是个跟着选中集走的显示开关。屏蔽的语义是
+        「屏蔽那一刻选中的这些要素留下，其余藏起来」，与之后改不改选中集无关。
+        """
+        condition = "$id IN ({})".format(",".join(str(int(f)) for f in sorted(fids)))
+        return MapToolsMixin._renderer_filtered_by(layer, condition)
+
+    def _on_select_mask(self) -> None:
+        """选择屏蔽：各图层只**显示**屏蔽那一刻选中的要素，其余隐藏。
+
+        为什么不用图层过滤表达式（``subsetString``）：实测只要图层处于编辑态，
+        ``setSubsetString`` 就恒返回 False（与有没有未提交改动无关），而用户恰恰
+        经常在编辑中屏蔽。渲染级方案不动数据、不动查询、不碰编辑缓冲，编辑态照样
+        生效；过滤条件是屏蔽时固定下来的 ``$id IN (…)``，之后清除选择 / 改选别的
+        都不影响已屏蔽的结果。取消屏蔽时把**屏蔽前克隆的渲染器**原样交还。
+
+        注意 ``layer.setRenderer()`` 会**接管所有权并删掉旧渲染器**，所以现场必须
+        先 ``clone()`` 存下来，不能存裸引用（存了就是悬垂指针，还原时直接崩）。
+        """
+        from qgis.core import QgsVectorLayer
+
+        saved = self._mask_state()
+        masked = 0
+        for layer in self.project.mapLayers().values():
+            if not isinstance(layer, QgsVectorLayer) or not layer.isValid():
+                continue
+            fids = layer.selectedFeatureIds()
+            if not fids:
+                continue
+            if layer.id() in saved:
+                continue  # 已在屏蔽态，不重复套
+            current = layer.renderer()
+            if current is None:
+                continue
+            renderer = self._masked_renderer(layer, fids)
+            if renderer is None:
+                continue
+            # fids 一起存下来：点选 / 框选要靠它把命中结果收窄到"可见的那些"
+            saved[layer.id()] = {"renderer": current.clone(), "fids": {int(f) for f in fids}}
+            layer.setRenderer(renderer)
+            layer.triggerRepaint()
+            masked += 1
+
+        if masked == 0:
+            self._notify("请先用点选 / 框选选中要显示的图形，再点「选择屏蔽」", level="info")
+            return
+        self._notify(f"已屏蔽 {masked} 个图层中未选中的图形（清除/改选不影响已屏蔽结果）")
+
+    def _on_unmask(self) -> None:
+        """取消屏蔽：各图层还原到屏蔽前的渲染器。"""
+        from qgis.core import QgsVectorLayer
+
+        saved = self._mask_state()
+        if not saved:
+            self._notify("当前没有开启选择屏蔽", level="info")
+            return
+        restored = 0
+        for layer_id, info in list(saved.items()):
+            layer = self.project.mapLayer(layer_id)
+            if not isinstance(layer, QgsVectorLayer) or not layer.isValid():
+                continue
+            renderer = info.get("renderer")
+            if renderer is None:
+                continue
+            try:
+                layer.setRenderer(renderer)
+                layer.triggerRepaint()
+                restored += 1
+            except Exception:  # noqa: BLE001 —— 单层还原失败不影响其它层
+                logger.exception("取消屏蔽：还原渲染器失败: %s", layer.name())
+        saved.clear()
+        self._notify(f"已取消屏蔽，还原 {restored} 个图层")
+
+    def display_filter_for(self, layer):
+        """该图层当前的「可见性」判定（选择屏蔽 / 范围裁剪）；无过滤时返回 None。
+
+        **点选 / 框选必须用它**：屏蔽与裁剪都是**渲染级**过滤（只决定画不画），
+        要素本身还在图层里，``intersect_features`` 查的是数据、不看渲染器——不过滤
+        的话就会出现"屏蔽/裁剪后还能选中看不见的图形"。
+
+        :return: ``callable(fid) -> bool``（True = 当前可见 / 可选中），或 ``None``。
+        """
+        if layer is None:
+            return None
+        layer_id = layer.id()
+        info = self._mask_state().get(layer_id)
+        if info and "fids" in info:
+            allowed = info["fids"]
+            return lambda fid: int(fid) in allowed
+        info = self._clip_state().get(layer_id)
+        if info and "box" in info:
+            box = info["box"]
+            return lambda fid: self._feature_hits_box(layer, fid, box)
+        return None
+
+    @staticmethod
+    def _feature_hits_box(layer, fid, box) -> bool:
+        """要素是否与 ``box``（已换算到该图层 CRS）相交；取不到几何按不可见处理。"""
+        try:
+            feature = layer.getFeature(fid)
+            if not feature.isValid():
+                return False
+            geom = feature.geometry()
+            if geom is None or geom.isNull() or geom.isEmpty():
+                return False
+            return bool(geom.intersects(box))
+        except RuntimeError:
+            return False
+
+    def _notify(self, message: str, level: str = "success") -> None:
+        """侧栏工具的结果提示：走浮动消息条，不自动关闭（由用户点 × 收起）。"""
+        bar = getattr(self, "messageBar", None)
+        if bar is None:
+            return
+        bar.pushMessage(message, level=Qgis.MessageLevel.Success if level == "success"
+                        else Qgis.MessageLevel.Info)
+
+    # ===================================================== 范围裁剪
+
+    def _clip_state(self) -> dict:
+        """裁剪前的现场 ``{layer_id: {"renderer": <克隆>}}``（懒建）。"""
+        if not hasattr(self, "_extent_clip_saved"):
+            self._extent_clip_saved: dict = {}
+        return self._extent_clip_saved
+
+    def _on_extent_clip(self) -> None:
+        """范围裁剪：在地图上拉一个矩形，只显示框内的图形（影像图层除外）。
+
+        与「选择屏蔽」同一套做法 —— **渲染级**过滤，不动数据、不碰编辑缓冲，
+        编辑态照样生效（``setSubsetString`` 在编辑态一律被拒，实测）。区别在
+        过滤条件：这里是「与矩形框相交」而不是「属于某几个 fid」。
+
+        栅格 / 影像图层不动：用户明确要求排除，而且渲染级过滤对栅格本来也不适用。
+        再点一次本按钮（取消勾选）即还原。
+        """
+        from app.ui.tools.extent_clip import ExtentClipTool
+
+        # 已经是裁剪态 → 本次是「取消」：还原现场
+        if self._clip_state():
+            self._clear_extent_clip()
+            return
+
+        self._extent_clip_tool = ExtentClipTool(self.canvas, on_clip=self._apply_extent_clip)
+        previous = self.canvas.mapTool()
+        if previous is not None and previous is not self._extent_clip_tool:
+            self._extent_clip_previous_tool = previous
+        self.canvas.setMapTool(self._extent_clip_tool)
+        self.side_toolbar.set_session_active("extent_clip", True)
+        self._notify("范围裁剪：在地图上按住左键拉一个矩形框", level="info")
+
+    def _apply_extent_clip(self, rect) -> None:
+        """拉框完成：把各矢量图层过滤到框内（``rect`` 为画布 CRS 的矩形）。"""
+        from qgis.core import QgsCoordinateTransform, QgsGeometry, QgsVectorLayer
+
+        saved = self._clip_state()
+        clipped = 0
+        for layer in self.project.mapLayers().values():
+            if not isinstance(layer, QgsVectorLayer) or not layer.isValid():
+                continue
+            if layer.id() in saved:
+                continue
+            current = layer.renderer()
+            if current is None:
+                continue
+            # 把画布 CRS 的矩形换算到该图层 CRS，再拼成固定的 WKT 条件
+            box = QgsGeometry.fromRect(rect)
+            try:
+                if layer.crs() != self.canvas.mapSettings().destinationCrs():
+                    box.transform(QgsCoordinateTransform(
+                        self.canvas.mapSettings().destinationCrs(), layer.crs(), self.project
+                    ))
+            except Exception:  # noqa: BLE001
+                logger.warning("范围裁剪：坐标转换失败: %s", layer.name(), exc_info=True)
+                continue
+            renderer = self._renderer_filtered_by(layer, f"intersects($geometry, geom_from_wkt('{box.asWkt()}'))")
+            if renderer is None:
+                continue
+            # box 一起存下来（已是该图层 CRS）：点选 / 框选要靠它收窄命中结果
+            saved[layer.id()] = {"renderer": current.clone(), "box": box}
+            layer.setRenderer(renderer)
+            layer.triggerRepaint()
+            clipped += 1
+
+        if clipped == 0:
+            self._notify("范围内没有可裁剪的矢量图层", level="info")
+        else:
+            self._notify(f"已按范围裁剪 {clipped} 个矢量图层（影像图层不受影响）")
+        # 拉完框即退出拉框模式（按钮弹起），要改范围就再点一次
+        self._finish_extent_clip_tool()
+
+    def _finish_extent_clip_tool(self) -> None:
+        """收掉拉框工具并恢复激活前的画布工具。"""
+        tool = getattr(self, "_extent_clip_tool", None)
+        self._extent_clip_tool = None
+        previous = getattr(self, "_extent_clip_previous_tool", None)
+        self._extent_clip_previous_tool = None
+        try:
+            if tool is not None and self.canvas.mapTool() is tool:
+                self.canvas.unsetMapTool(tool)
+        except Exception:  # noqa: BLE001 —— 收尾失败不该影响裁剪结果
+            logger.exception("卸载范围裁剪拉框工具失败")
+        if previous is not None and not sip.isdeleted(previous):
+            self.canvas.setMapTool(previous)
+        self.side_toolbar.set_session_active(
+            "extent_clip", bool(self._clip_state())
+        )
+
+    def _clear_extent_clip(self) -> None:
+        """取消范围裁剪：各图层还原到裁剪前的渲染器。"""
+        from qgis.core import QgsVectorLayer
+
+        saved = self._clip_state()
+        if not saved:
+            self._notify("当前没有开启范围裁剪", level="info")
+            return
+        restored = 0
+        for layer_id, info in list(saved.items()):
+            layer = self.project.mapLayer(layer_id)
+            if not isinstance(layer, QgsVectorLayer) or not layer.isValid():
+                continue
+            renderer = info.get("renderer")
+            if renderer is None:
+                continue
+            try:
+                layer.setRenderer(renderer)
+                layer.triggerRepaint()
+                restored += 1
+            except Exception:  # noqa: BLE001
+                logger.exception("取消范围裁剪：还原渲染器失败: %s", layer.name())
+        saved.clear()
+        self._finish_extent_clip_tool()
+        self._notify(f"已取消范围裁剪，还原 {restored} 个图层")
+
+    @staticmethod
+    def _renderer_filtered_by(layer, condition: str):
+        """按 ``condition`` 造一个「只渲染满足该条件的要素」的等价规则渲染器。
+
+        与 :meth:`_masked_renderer` 同构，只是过滤条件由调用方给（屏蔽用
+        ``$id IN (…)``，范围裁剪用 ``intersects($geometry, …)``）。
+        """
+        from qgis.core import QgsRuleBasedRenderer
+
+        try:
+            renderer = QgsRuleBasedRenderer.convertFromRenderer(layer.renderer())
+        except Exception:  # noqa: BLE001
+            logger.warning("渲染器转换失败: %s", layer.name(), exc_info=True)
+            return None
+        if renderer is None:
+            return None
+        root = renderer.rootRule()
+        for rule in root.children():
+            old = (rule.filterExpression() or "").strip()
+            rule.setFilterExpression(f"({old}) AND ({condition})" if old else condition)
+        hidden = QgsRuleBasedRenderer.Rule(None)
+        hidden.setLabel("范围外（不显示）")
+        root.appendChild(hidden)
+        root.setActive(True)
+        return renderer
 
     def _on_identify(self) -> None:
 

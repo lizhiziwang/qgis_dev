@@ -324,6 +324,12 @@ class AppActionsMixin:
                 layer, page_size=50, parent=self, filter_str=filter_str, show_ids=show_ids
             )
             self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.current_attribute_dock)
+            self.watch_dock_float_state(self.current_attribute_dock)
             self.current_attribute_dock.show()
+            self.current_attribute_dock.raise_()
         else:
             self.current_attribute_dock.add_new_layer(layer, self, filter_str, show_ids, 50, f"属性表 - {layer.name()}")
+            # 复用同一个 Dock 实例（位置记忆留着），关过的就再显示出来。
+            # 早先这里靠 "关掉时把引用置空 → 下次重建" 来重新显示，代价是位置全丢。
+            self.current_attribute_dock.show()
+            self.current_attribute_dock.raise_()

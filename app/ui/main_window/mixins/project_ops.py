@@ -178,13 +178,13 @@ class ProjectOpsMixin:
         return True
 
     def _on_save_project_as(self) -> bool:
-        """保存为工程（另存为）：选路径后写入。返回是否已保存。"""
+        """另存为工程：选路径后写入。返回是否已保存。"""
         if not self.project.mapLayers():
             QMessageBox.information(self, "提示", "当前没有可保存的图层")
             return False
         path = save_file(
             self,
-            title="保存为工程",
+            title="另存为工程",
             init_path=str(getattr(self, "_paths", Paths.default()).project_root),
             filter_=_PROJECT_FILTER,
         )
@@ -195,7 +195,7 @@ class ProjectOpsMixin:
         return self._save_project_to(path)
 
     def _save_current_project(self) -> bool:
-        """保存当前工程：已有工程文件则更新，否则走“保存为工程”另存。
+        """保存工程：**已经打开着某个工程文件就直接覆盖保存**，否则走「另存为」。
 
         返回是否已保存（用户取消另存对话框 / 写盘失败均返回 ``False``）。
         """

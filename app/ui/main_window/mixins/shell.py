@@ -34,6 +34,7 @@ from qgis.PyQt.QtWidgets import (
 from app.infra.logging import get_logger
 from app.infra.messagebar import FloatingMessageBar
 from app.ui.common.map_canvas import AppMapCanvas
+from app.ui.common.selection_overlay import SelectionOverlay
 from app.ui.common.theme import ThemeManager
 from app.ui.main_window.browser_dock import BrowserDock
 from app.ui.main_window.coord_locate_overlay import CoordLocateOverlay
@@ -89,13 +90,21 @@ class WindowShellMixin:
         self.messageBar.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
         # 悬浮 toast 外观：消息条自带浅底圆角卡片，文字盖在地图上也可读
         # （该应用不引入 QGIS 桌面 qss，消息条/条目本身无样式，需自备）。
-        self.messageBar.setStyleSheet(
+        # 走 set_appearance 而不是 setStyleSheet：QgsMessageBar 每次 push 都会把
+        # 自带样式表盖回来，得由消息条在每次 push 后重新贴一遍。
+        self.messageBar.set_appearance(
             "#FloatingMessageBar {"
             "  background-color: rgba(255, 255, 255, 240);"
             "  border: 1px solid rgba(120, 120, 120, 120);"
             "  border-radius: 6px;"
             "}"
             "#FloatingMessageBar QLabel { color: #202020; }"
+            # 条目内的文字框是 QTextBrowser（QTextEdit 的子类），会被全局「输入框」
+            # 规则套上 1px 边框 —— 浮动提示里看着就是个带框的输入框。在消息条作用域
+            # 内去掉边框与底色，只留文字。
+            "#FloatingMessageBar QTextBrowser, #FloatingMessageBar QTextEdit {"
+            "  border: none; background: transparent;"
+            "}"
             "#FloatingMessageBar QToolButton {"
             "  border: none; background: transparent; color: #606060;"
             "}"
@@ -116,6 +125,14 @@ class WindowShellMixin:
         self.messageBar.set_on_state(self._on_floating_message_state)
         self.messageBar.hide()
 
+        # ---- 选中要素置顶覆盖层 ----
+        # QGIS 自带的选中高亮画在**各图层自己的渲染流程里**，下层被选中的图形会
+        # 被上层图层 / 同层后画的图形盖住。画布橡皮筋在所有图层之后绘制，用它把
+        # 选中几何重画一遍，保证"选中就看得见"。
+        self.selection_overlay = SelectionOverlay(self.canvas, parent=self)
+        self.selection_overlay.attach(self.project)
+        self.destroyed.connect(lambda *_a: self.selection_overlay.detach())
+
         # 左侧竖排工具条：已实现工具接主窗口回调，未实现的由 SideToolBar 占位
         # 提示开发中；控件本体悬浮装配见 :meth:`_attach_side_toolbar_overlay`
         self.side_toolbar = SideToolBar(
@@ -128,11 +145,14 @@ class WindowShellMixin:
                 "zoom_full": self._on_zoom_full,
                 "identify": self._on_identify,
                 "clear_selection": self._on_clear_selection,
+                "select_mask": self._on_select_mask,
+                "unmask": self._on_unmask,
                 "condition_query": self._on_condition_query,
                 "qmap_compare": self._on_qmap_compare,
                 "coord_locate": self._on_coord_locate,
                 "measure_line": self._on_measure_line,
                 "measure_area": self._on_measure_area,
+                "extent_clip": self._on_extent_clip,
             },
         )
         layout.addWidget(self.canvas)
@@ -301,12 +321,14 @@ class WindowShellMixin:
         self.layer_dock.move_up_requested.connect(lambda: self._on_move_layer_node(-1))
         self.layer_dock.move_down_requested.connect(lambda: self._on_move_layer_node(1))
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.layer_dock)
+        self.watch_dock_float_state(self.layer_dock)
 
         # 2. 数据浏览器
         self.browser_dock = BrowserDock(self)
         self.browser_dock.double_clicked.connect(self._on_browser_double_clicked)
         self.browser_dock.context_menu_requested.connect(self._on_browser_context_menu)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.browser_dock)
+        self.watch_dock_float_state(self.browser_dock)
 
         # 3. 日志（默认隐藏，由菜单唤起）
         self.log_dock = None  # 懒加载
@@ -331,6 +353,8 @@ class WindowShellMixin:
         ]
         self._right_docks = [*placed, dock]
         self.addDockWidget(area, dock)
+        # 停靠 ↔ 浮动切换后要重排顶部区域，否则切 tab 时工具条高度会收不回去
+        self.watch_dock_float_state(dock)
         for other in placed:
             try:
                 self.tabifyDockWidget(other, dock)

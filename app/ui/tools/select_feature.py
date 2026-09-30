@@ -3,7 +3,8 @@
 通用工具条上的「点选」「框选」两个按钮激活的交互工具：
 
 - :class:`PointSelectTool` —— 单击：选中落在点击位置附近（默认 10px 容差）
-  的要素；光标为**箭头**（对齐 QGIS 的选择手感）；
+  的要素；**多个图形叠压时只选最上面的那一个**（与 QGIS 的"点一下就选中你
+  看到的那块"一致）；光标为**箭头**（对齐 QGIS 的选择手感）；
 - :class:`RectSelectTool` —— 左键拖拽画矩形，松开时选中矩形内的要素；
   光标为**十字**（提示正在拖框）。
 
@@ -11,9 +12,13 @@
 （画完面之后是十字），看起来就像「选择工具的光标不对」。
 
 选择范围 = 画布当前可见的矢量图层（``canvas.layers()`` 只含渲染图层，
-隐藏图层不在其中）。默认（无修饰键）每次选中**替换**上一次的选中集，
-点空白处清空该层选中；按住 ``Ctrl`` 时**追加**到现有选中（多选）——
-行为对齐 QGIS 的 Select Features。
+隐藏图层不在其中）。修饰键（与 QGIS 的 Select Features 一致）：
+
+- **无修饰键** → 每次选中**替换**上一次的选中集，点空白处清空该层选中；
+- **Ctrl** → **追加**到现有选中（多选）；
+- **Shift** → 把点中的要素从选中里**移除**（反选移除）。
+
+点选在多个图形叠压时只取**最顶层**那一个；框选取范围内全部。
 
 注意：本 QGIS 构建里 ``QgsVectorLayer.select()`` 是**追加**语义，替换必须
 显式 ``selectByIds(fids, Qgis.SelectBehavior.SetSelection)``。
@@ -58,13 +63,22 @@ logger = get_logger(__name__)
 class SelectFeatureToolBase(QgsMapTool):
     """点选 / 框选公共逻辑：按几何在可见矢量图层上选要素。"""
 
-    def __init__(self, canvas: "QgsMapCanvas") -> None:
+    def __init__(self, canvas: "QgsMapCanvas", visible_filter_getter=None) -> None:
+        """
+        :param visible_filter_getter: 可选回调 ``(layer) -> callable(fid) -> bool``，
+            返回该图层当前的「可见性」判定（选择屏蔽 / 范围裁剪）；``None`` = 无过滤。
+            屏蔽与裁剪是**渲染级**过滤，要素本身还在图层里——不在这里把命中结果
+            收窄，就会出现"屏蔽/裁剪后还能框选到看不见的图形"。
+        """
         super().__init__(canvas)
         self.canvas = canvas
+        self._visible_filter_getter = visible_filter_getter
 
     # -------------------------------------------------- 核心
 
-    def _select_geometry(self, geom: "QgsGeometry", behavior: Qgis.SelectBehavior) -> None:
+    def _select_geometry(
+        self, geom: "QgsGeometry", behavior: Qgis.SelectBehavior, *, topmost_only: bool = False
+    ) -> None:
         """在画布可见矢量图层上，按 ``geom`` 选中要素（逐层处理选中集）。
 
         ``behavior`` 取 :class:`Qgis.SelectBehavior`：
@@ -73,6 +87,11 @@ class SelectFeatureToolBase(QgsMapTool):
         - ``AddToSelection`` —— Ctrl 追加：把命中要素并进现有选中，
           点空白处不清空。
 
+        ``topmost_only=True``（点选用）时**只选叠压在最上面的那一个**：按
+        :meth:`_selectable_layers` 的顺序（``canvas.layers()``，索引 0 画在最上）
+        取第一个有命中的图层，层内取命中的最后一个 fid（后添加的要素画在上层）
+        ——与各编辑工具的命中约定一致。框选不传这个参数，仍选中范围内的全部要素。
+
         ``geom`` 位于画布 CRS；与图层 CRS 不同时由
         :func:`intersect_features` 内部做坐标变换。
         """
@@ -80,8 +99,25 @@ class SelectFeatureToolBase(QgsMapTool):
             return
         project = self.canvas.project() or QgsProject.instance()
         source_crs = self.canvas.mapSettings().destinationCrs()
-        for layer in self._selectable_layers():
+        layers = self._selectable_layers()
+        # 先把命中查完再动选中集：查询与选中集无关，边查边改没有好处
+        hits = []
+        for layer in layers:
             fids = intersect_features(layer, geom, source_crs, project)
+            if fids:
+                fids = self._keep_visible(layer, fids)
+            hits.append((layer, fids))
+
+        if topmost_only:
+            topmost = next(((layer, fids) for layer, fids in hits if fids), None)
+            for layer, fids in hits:
+                if topmost is not None and layer is topmost[0]:
+                    layer.selectByIds([fids[-1]], behavior)
+                elif behavior == Qgis.SelectBehavior.SetSelection:
+                    layer.removeSelection()
+            return
+
+        for layer, fids in hits:
             if fids:
                 # 显式 behavior：本 QGIS 构建里 select() 是追加语义，不能替换
                 layer.selectByIds(fids, behavior)
@@ -94,9 +130,35 @@ class SelectFeatureToolBase(QgsMapTool):
         # 再显式刷一次就是白刷第二遍整幅图；而且 ``AppMapCanvas`` 下画布缓存只在
         # ``triggerRepaint`` 通路里生效，多余的显式 refresh 反而会清缓存变慢。
 
+    def _keep_visible(self, layer: "QgsVectorLayer", fids: list[int]) -> list[int]:
+        """把命中结果收窄到**当前可见**的要素（选择屏蔽 / 范围裁剪时用）。
+
+        没有过滤（未屏蔽也未裁剪）时原样返回，不额外开销。
+        """
+        if self._visible_filter_getter is None:
+            return fids
+        try:
+            keep = self._visible_filter_getter(layer)
+        except Exception:  # noqa: BLE001 —— 取过滤失败就退化为"不过滤"，不挡住选择
+            logger.exception("取图层可见性过滤失败，按不过滤处理: %s", layer.name())
+            return fids
+        if keep is None:
+            return fids
+        return [fid for fid in fids if keep(fid)]
+
     def _selection_behavior(self, event) -> Qgis.SelectBehavior:
-        """按住 Ctrl 追加选择，否则替换上一次选中（对齐 QGIS Select Features）。"""
-        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+        """修饰键语义（对齐 QGIS 的 Select Features）：
+
+        - 无修饰键 → **替换**：本次命中的就是你选中的（点空白处清空该层）；
+        - **Ctrl** → **追加**：把命中要素并进现有选中，点空白处不清空；
+        - **Shift** → **移除**：把命中要素从现有选中里去掉（反选移除），点空白不清空。
+
+        Shift 优先于 Ctrl（同时按住时按移除处理，与 QGIS 一致）。
+        """
+        mods = event.modifiers()
+        if mods & Qt.KeyboardModifier.ShiftModifier:
+            return Qgis.SelectBehavior.RemoveFromSelection
+        if mods & Qt.KeyboardModifier.ControlModifier:
             return Qgis.SelectBehavior.AddToSelection
         return Qgis.SelectBehavior.SetSelection
 
@@ -170,8 +232,8 @@ class PointSelectTool(SelectFeatureToolBase):
     #: 点击容差（像素）：把点击点扩成小矩形再求交，点 / 线 / 面要素都能命中。
     TOLERANCE_PX = 10
 
-    def __init__(self, canvas: "QgsMapCanvas") -> None:
-        super().__init__(canvas)
+    def __init__(self, canvas: "QgsMapCanvas", visible_filter_getter=None) -> None:
+        super().__init__(canvas, visible_filter_getter=visible_filter_getter)
         # 显式设光标：不设的话画布会沿用上一个工具遗留的光标（比如画完面之后的
         # 十字），看起来就像「选择工具的光标不对」。点选对齐 QGIS 的选择手感 → 箭头。
         self.setCursor(Qt.CursorShape.ArrowCursor)
@@ -188,15 +250,15 @@ class PointSelectTool(SelectFeatureToolBase):
             map_pt.y() + tol,
         )
         self._select_geometry(
-            QgsGeometry.fromRect(rect), self._selection_behavior(event)
+            QgsGeometry.fromRect(rect), self._selection_behavior(event), topmost_only=True
         )
 
 
 class RectSelectTool(SelectFeatureToolBase):
     """框选：左键拖拽画矩形，松开时选中矩形内要素。"""
 
-    def __init__(self, canvas: "QgsMapCanvas") -> None:
-        super().__init__(canvas)
+    def __init__(self, canvas: "QgsMapCanvas", visible_filter_getter=None) -> None:
+        super().__init__(canvas, visible_filter_getter=visible_filter_getter)
         # 框选用十字：提示「正在拖框」，也避免沿用上一个工具遗留的光标
         self.setCursor(Qt.CursorShape.CrossCursor)
         self._start: Optional[QgsPointXY] = None

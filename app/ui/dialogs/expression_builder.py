@@ -42,6 +42,7 @@ from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.code_editor import CodeEditor
 from app.ui.common.theme import ThemeManager
+from app.ui.tools.feature_attrs import field_alias
 
 logger = get_logger(__name__)
 
@@ -311,8 +312,8 @@ class ExpressionBuilderDialog(BaseDialog):
                             f"<p><b>{html.escape(name)}</b></p>"
                             f"<p>类型：{html.escape(fld.typeName())}"
                             + (
-                                f"<br>别名：{html.escape(fld.alias())}"
-                                if fld.alias()
+                                f"<br>别名：{html.escape(field_alias(fld))}"
+                                if field_alias(fld)
                                 else ""
                             )
                             + "</p>"

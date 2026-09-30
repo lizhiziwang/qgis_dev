@@ -47,6 +47,8 @@ from qgis.PyQt.QtWidgets import (
 
 from qgis.core import QgsField, QgsVectorLayer
 
+from app.ui.tools.feature_attrs import field_alias, uid_field_index
+
 #: 表示"空值"的日期下限（早于该值按 NULL 处理 / 显示"（空）"）
 NULL_DATE = QDate(1900, 1, 1)
 NULL_TIME = QTime(0, 0)
@@ -133,6 +135,10 @@ class AttributeEntryDock(QDockWidget):
 
         fields = layer.fields()
         self._head.setText(f"图层「{layer.name()}」 · 要素 FID {fid}：")
+        # 全局唯一标识（MZGUID / FGUID / GlobalID…）**只给自动赋值**，不给手改：
+        # 手工改这个值会破坏"一要素一标识"的约定，分割 / 分解 / 绘制的赋新值逻辑
+        # 也会被绕过。这里仍展示（用户要看得见），但输入框只读。
+        uid_idx = uid_field_index(fields)
         added = 0
         for i in range(fields.count()):
             fld = fields[i]
@@ -143,11 +149,12 @@ class AttributeEntryDock(QDockWidget):
             except Exception:  # noqa: BLE001
                 pass
             value = attrs.get(i)
-            row_widget, editor, read = self._make_editor(fld, value)
+            readonly = i == uid_idx
+            row_widget, editor, read = self._make_editor(fld, value, readonly=readonly)
             if row_widget is None:
                 continue
             name_label = QLabel(fld.name())
-            name_label.setToolTip(fld.alias() or fld.name())
+            name_label.setToolTip(field_alias(fld) or fld.name())
             name_label.setMinimumWidth(96)
             name_label.setMaximumWidth(140)
             name_label.setWordWrap(True)
@@ -158,6 +165,11 @@ class AttributeEntryDock(QDockWidget):
             row_widget.setLayout(hb)
             self._form.insertWidget(self._form.count() - 1, row_widget)
             self._rows.append((i, editor, read))
+            if readonly:
+                # 只读字段**不进写回清单**：setReadOnly 只挡用户输入，写回是读框里
+                # 的文本（程序改一下就会被原样写库）。唯一标识只能由系统赋值，所以
+                # 干脆不参与"读值 → 比较 → 写回"这条链。
+                continue
             self._readers.append((i, read))
             added += 1
 
@@ -218,14 +230,16 @@ class AttributeEntryDock(QDockWidget):
     # ========================================================== 表单构造
 
     def _make_editor(
-        self, fld: QgsField, value: object
+        self, fld: QgsField, value: object, readonly: bool = False
     ) -> tuple[Optional[QWidget], Optional[QWidget], Optional[Callable[[], object]]]:
         """按字段类型建编辑器行控件。
 
+        :param readonly: 只读（唯一标识字段用）：仍然展示值，但不给用户改。
         :returns: (行容器 widget, 编辑器 widget, 读值回调)。不支持的字段返回
             (None, None, None)（由调用方跳过，不占行）。
         """
         ftype = fld.type()
+        tip = "该字段由系统自动赋值，不可手工修改" if readonly else ""
         if ftype == QVariant.Bool:
             cb = QCheckBox()
             cb.setTristate(True)
@@ -233,6 +247,9 @@ class AttributeEntryDock(QDockWidget):
                 cb.setCheckState(Qt.CheckState.PartiallyChecked)
             else:
                 cb.setChecked(bool(value))
+            if readonly:
+                cb.setEnabled(False)   # QCheckBox 没有 setReadOnly，用禁用表达只读
+                cb.setToolTip(tip)
             box = QWidget()
 
             def read_bool(cb=cb) -> object:
@@ -252,6 +269,9 @@ class AttributeEntryDock(QDockWidget):
             de.setSpecialValueText("（空）")
             de.setMinimumDate(NULL_DATE)
             de.setDate(NULL_DATE if value is None else self._to_qdate(value))
+            if readonly:
+                de.setReadOnly(True)
+                de.setToolTip(tip)
             box = QWidget()
 
             def read_date(de=de) -> object:
@@ -265,6 +285,9 @@ class AttributeEntryDock(QDockWidget):
             te.setSpecialValueText("（空）")
             te.setMinimumTime(NULL_TIME)
             te.setTime(NULL_TIME if value is None else self._to_qtime(value))
+            if readonly:
+                te.setReadOnly(True)
+                te.setToolTip(tip)
             box = QWidget()
 
             def read_time(te=te) -> object:
@@ -278,6 +301,9 @@ class AttributeEntryDock(QDockWidget):
             dte.setSpecialValueText("（空）")
             dte.setMinimumDateTime(NULL_DATETIME)
             dte.setDateTime(NULL_DATETIME if value is None else self._to_qdatetime(value))
+            if readonly:
+                dte.setReadOnly(True)
+                dte.setToolTip(tip)
             box = QWidget()
 
             def read_datetime(dte=dte) -> object:
@@ -291,6 +317,9 @@ class AttributeEntryDock(QDockWidget):
             line.setText("")
         else:
             line.setText(str(value))
+        if readonly:
+            line.setReadOnly(True)
+            line.setToolTip(tip)
         numeric = ftype in (
             QVariant.Int,
             QVariant.LongLong,

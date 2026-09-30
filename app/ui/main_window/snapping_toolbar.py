@@ -146,7 +146,7 @@ class QgisSnappingToolbar(QObject):
         self._trace_btn.setText("追踪")
         self._trace_btn.setCheckable(True)
         self._trace_btn.setToolTip(
-            "开启追踪（类似 QGIS 追踪功能）：画线/画面时，前后两个顶点都吸到已有"
+            "追踪：画线/画面时，前后两个顶点都吸到已有"
             "要素上，两点之间会自动沿已有要素几何采点（需先开启捕捉）"
         )
         self._trace_btn.toggled.connect(self._on_trace_toggled)

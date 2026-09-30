@@ -67,10 +67,31 @@ class FloatingMessageBar(QgsMessageBar):
         self._duration_ms: int | None = None
         #: 到期后因鼠标停留而处于「等待移开」态：leaveEvent 据此重新开始计时
         self._holding = False
+        #: 宿主注入的外观 QSS（见 :meth:`set_appearance`）
+        self._appearance_qss = ""
 
     def set_on_state(self, cb) -> None:
         """注册显隐回调：``cb(active: bool)``。"""
         self._on_state = cb
+
+    def set_appearance(self, qss: str) -> None:
+        """设置宿主的外观 QSS（圆角卡片 / 文字色 / 去文字框边框等）。
+
+        **必须由本类在每次 push 之后重新贴一遍**：``QgsMessageBar`` 每推一条消息都会
+        用它自带的那份（``QgsMessageBar { background-color: #e7f5fe; border: 1px …}``）
+        覆盖掉宿主的样式表 —— 只设一次的话，推第一条消息起宿主的样式就全没了（实测
+        条底色一直是 QGIS 的浅蓝、里面文字框的边框也去不掉）。
+        """
+        self._appearance_qss = qss
+        self._apply_appearance()
+
+    def _apply_appearance(self) -> None:
+        if not self._appearance_qss:
+            return
+        try:
+            self.setStyleSheet(self._appearance_qss)
+        except RuntimeError:
+            pass  # 窗口关闭流程中 C++ 对象已销毁
 
     def dismiss(self) -> None:
         """立刻收起（公共入口）：清掉租约并通知宿主隐藏。
@@ -111,6 +132,7 @@ class FloatingMessageBar(QgsMessageBar):
 
     def _kick(self, duration: int) -> None:
         """（重新）记一条展示租约：立即显示，duration 秒后自动收起。"""
+        self._apply_appearance()   # push 会把 QGIS 自带的样式表盖回来，这里贴回宿主的
         self._lease.stop()
         self._holding = False
         if self._on_state:
