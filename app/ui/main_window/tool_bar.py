@@ -48,6 +48,7 @@ _TOOL_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         [
             ("在线底图", "online_basemap"),
             ("数据管理", "data_manage"),
+            ("新增数据", "create_data"),
             ("离线下载", "offline_download"),
         ],
     ),

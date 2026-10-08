@@ -45,6 +45,8 @@ _ALIASES: dict[str, str] = {
     "coord_locate": "locate",
     "measure_line": "measure_distance",
     "extent_clip": "clip",
+    # 「新增数据」复用「添加图层」的图层叠 + 加号图标（同为「往工程/盘上添一份数据」）
+    "create_data": "add_layer",
 }
 
 

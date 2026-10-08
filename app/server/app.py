@@ -55,7 +55,7 @@ def create_app() -> FastAPI:
 
 
 # 让 ``uvicorn app.server.app:app`` 也能直接跑
-app = create_app()
+# app = create_app()
 
 
 __all__ = ["app", "create_app"]
