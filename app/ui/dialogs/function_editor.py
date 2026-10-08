@@ -5,7 +5,14 @@
 它靠 ``QgsPythonRunner`` 取保存目录并执行代码，runner 无效时会写到
 ``<当前盘符>:\\<名>.py`` 且不会即时注册——这正是"保存之后识别不到"的原因。
 
-所以这里自建一个函数编辑器，绕开原生 Function Editor：
+所以这里自建一个函数编辑器，绕开原生 Function Editor。拆成可复用控件 + 对话框
+两层，和 QGIS 一样：
+
+- :class:`FunctionEditorWidget`：函数编辑器本体，作为表达式构建器的
+  「函数编辑器」tab 内嵌（也可单独用）；
+- :class:`FunctionEditorDialog`：把控件包成对话框（属性表工具栏按钮用）。
+
+功能：
 
 - 左侧列出 :func:`app.env.user_expressions.expressions_dir` 下的 ``*.py``；
 - 右侧用 :class:`CodeEditor` 编辑文件内容；
@@ -63,22 +70,21 @@ _TEMPLATE_HINT = (
 )
 
 
-class FunctionEditorDialog(BaseDialog):
-    """自定义函数文件的增删改 + 保存即注册。"""
+class FunctionEditorWidget(QWidget):
+    """函数文件增删改 + 保存即注册（可内嵌为表达式构建器的 tab）。"""
 
     def __init__(self, parent=None, select: str = "") -> None:
-        super().__init__(parent, "自定义函数")
+        super().__init__(parent)
         self._current_path: str | None = None
-        self.resize(920, 640)
         self._build()
         self._reload_list(select)
 
     # ------------------------------------------------------------- 构建
 
     def _build(self) -> None:
-        root = QVBoxLayout()
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(8)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
 
         hint = QLabel(_HELP, self)
         hint.setObjectName("PropHint")
@@ -107,7 +113,7 @@ class FunctionEditorDialog(BaseDialog):
         left_layout.addLayout(buttons_row)
         splitter.addWidget(left)
 
-        # 右：代码编辑器
+        # 右：代码编辑器 + 保存
         right = QWidget(self)
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -116,10 +122,16 @@ class FunctionEditorDialog(BaseDialog):
         self.editor = CodeEditor(right)
         self.editor.setPlaceholderText(_TEMPLATE_HINT)
         right_layout.addWidget(self.editor, 1)
+        action_row = QHBoxLayout()
+        self.save_btn = QPushButton("保存并加载", right)
+        self.save_btn.setToolTip("保存当前文件并立即注册其中的 @qgsfunction 函数")
+        self.save_btn.clicked.connect(self._save_current)
         self.status = QLabel("", right)
         self.status.setObjectName("PropHint")
         self.status.setWordWrap(True)
-        right_layout.addWidget(self.status)
+        action_row.addWidget(self.save_btn)
+        action_row.addWidget(self.status, 1)
+        right_layout.addLayout(action_row)
         splitter.addWidget(right)
 
         splitter.setStretchFactor(0, 0)
@@ -127,19 +139,6 @@ class FunctionEditorDialog(BaseDialog):
         splitter.setSizes([240, 680])
         splitter.setChildrenCollapsible(False)
         root.addWidget(splitter, 1)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Close,
-            Qt.Orientation.Horizontal,
-            self,
-        )
-        buttons.button(QDialogButtonBox.StandardButton.Save).setText("保存并加载")
-        buttons.button(QDialogButtonBox.StandardButton.Close).setText("关闭")
-        buttons.accepted.connect(self._save_current)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
-
-        self.setLayout(root)
 
     # ------------------------------------------------------------- 文件列表
 
@@ -160,6 +159,7 @@ class FunctionEditorDialog(BaseDialog):
 
         count = self.file_list.count()
         self.del_btn.setEnabled(count > 0)
+        self.save_btn.setEnabled(count > 0)
         if count == 0:
             self._current_path = None
             self.editor.clear()
@@ -170,10 +170,13 @@ class FunctionEditorDialog(BaseDialog):
             target_row = 0
         self.file_list.setCurrentRow(target_row)
 
+    def refresh(self) -> None:
+        """重新扫描函数文件目录（外部新增文件后调用）。"""
+        self._reload_list()
+
     def _on_file_changed(self, current, _previous) -> None:
         # 切换文件前先把上一份改动静默保存，避免丢失（与 QGIS 行为一致）
-        if self._current_path and self.editor.document().isModified():
-            self._save_path(self._current_path, silent=True)
+        self.save_if_modified()
         if current is None:
             self._current_path = None
             self.editor.clear()
@@ -203,6 +206,7 @@ class FunctionEditorDialog(BaseDialog):
         if not _NAME_RE.match(name):
             QMessageBox.warning(self, "新建函数文件", "文件名只能是字母、数字、下划线，且不能以数字开头。")
             return
+        self.save_if_modified()
         path = os.path.join(expressions_dir(), f"{name}.py")
         if os.path.exists(path):
             QMessageBox.warning(self, "新建函数文件", f"文件已存在：{name}.py")
@@ -240,6 +244,11 @@ class FunctionEditorDialog(BaseDialog):
             self._current_path = current.data(Qt.ItemDataRole.UserRole)
         return self._save_path(self._current_path, silent=False)
 
+    def save_if_modified(self) -> None:
+        """有未保存改动时静默落盘（切文件 / 关闭时用）。"""
+        if self._current_path and self.editor.document().isModified():
+            self._save_path(self._current_path, silent=True)
+
     def _save_path(self, path: str, silent: bool) -> bool:
         source = self.editor.toPlainText()
         count, error = save_function_file(path, source)
@@ -255,10 +264,33 @@ class FunctionEditorDialog(BaseDialog):
         self.status.setText(f"已保存并注册 {name}.py（{count} 个函数）")
         return True
 
-    # ------------------------------------------------------------- 关闭
+
+class FunctionEditorDialog(BaseDialog):
+    """把 :class:`FunctionEditorWidget` 包成对话框（属性表工具栏入口用）。"""
+
+    def __init__(self, parent=None, select: str = "") -> None:
+        super().__init__(parent, "自定义函数")
+        self.resize(920, 640)
+
+        root = QVBoxLayout()
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        self._widget = FunctionEditorWidget(self, select)
+        root.addWidget(self._widget, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Close,
+            Qt.Orientation.Horizontal,
+            self,
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Close).setText("关闭")
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+        self.setLayout(root)
 
     def reject(self) -> None:
         # 关闭前若还有未保存改动，静默落盘，避免用户白改
-        if self._current_path and self.editor.document().isModified():
-            self._save_path(self._current_path, silent=True)
+        self._widget.save_if_modified()
         super().reject()

@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from qgis.core import Qgis
+from qgis.core import Qgis, QgsCoordinateTransform
 from qgis.PyQt import sip
 from qgis.PyQt.QtWidgets import QMessageBox
 
@@ -480,13 +480,36 @@ class MapToolsMixin:
         self.side_toolbar.set_active(key)
 
     def _on_zoom_full(self) -> None:
-        layers = [layer for layer in self.project.mapLayers().values() if layer.isValid()]
-        if not layers:
+        """全图：合并所有有效图层的范围。
+
+        ``combineExtentWith`` 只做数值并集、不理解坐标系，因此每个图层的
+        ``extent()`` 必须先换算到画布 CRS 再合并，否则经纬度（度）与投影（米）
+        图层混用时全图会偏。
+        """
+        dest_crs = self.canvas.mapSettings().destinationCrs()
+        combined = None
+        for layer in self.project.mapLayers().values():
+            if not layer.isValid():
+                continue
+            extent = layer.extent()
+            if extent.isNull():
+                continue
+            if layer.crs() != dest_crs:
+                try:
+                    transform = QgsCoordinateTransform(layer.crs(), dest_crs, self.project)
+                    extent = transform.transformBoundingBox(extent)
+                except Exception:  # noqa: BLE001
+                    logger.warning(
+                        "全图：图层 %s 范围坐标转换失败，已跳过", layer.name(), exc_info=True
+                    )
+                    continue
+            if combined is None:
+                combined = extent
+            else:
+                combined.combineExtentWith(extent)
+        if combined is None or combined.isNull():
             QMessageBox.information(self, "提示", "当前无有效图层")
             return
-        combined = layers[0].extent()
-        for layer in layers[1:]:
-            combined.combineExtentWith(layer.extent())
         self.canvas.setExtent(combined)
         self.canvas.refresh()
 

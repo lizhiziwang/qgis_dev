@@ -9,31 +9,38 @@
 原生函数编辑器"添加新文件"会写到盘符根目录、且不即时注册——用户侧的
 "保存之后识别不到"。
 
-这个对话框用自建的 :class:`ExpressionBuilderDialog`（内含「自定义函数…」
-入口）来选表达式，绕开原生组件，功能对齐原生：新建字段 / 更新已有字段。
+界面按 QGIS ``qgsfieldcalculatorbase.ui`` 的排布对齐（保留本应用主题）：
+
+- 顶部：「只更新选中要素」复选框；
+- 并排两个可勾选分组：「创建新字段」（字段名 / 类型 / 长度 / 精度，可选虚拟字段）
+  与「更新已有字段」（字段下拉），互斥；
+- 中部：**内嵌** :class:`ExpressionBuilderWidget`（与 QGIS 字段计算器一样，
+  表达式编辑 / 字段与函数树 / 函数描述 / 预览都在这里，含「自定义函数…」入口）；
+- 底部：「确定 / 取消」。
 """
 
 from __future__ import annotations
 
-from qgis.core import QgsExpression, QgsField, QgsVectorLayer
-from qgis.PyQt.QtCore import QVariant, Qt, QTimer
+from qgis.core import QgsExpression, QgsFeatureRequest, QgsField, QgsVectorLayer
+from qgis.PyQt.QtCore import QVariant, Qt
 from qgis.PyQt.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialogButtonBox,
-    QFormLayout,
-    QHBoxLayout,
+    QGridLayout,
+    QGroupBox,
     QLabel,
     QLineEdit,
     QMessageBox,
-    QPushButton,
-    QRadioButton,
     QSpinBox,
     QVBoxLayout,
+    QWidget,
 )
 
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.dialogs.expression_builder import ExpressionBuilderWidget
 
 logger = get_logger(__name__)
 
@@ -50,89 +57,41 @@ _TYPE_OPTIONS = (
 
 
 class FieldCalculatorDialog(BaseDialog):
-    """按表达式新建 / 更新字段。"""
+    """按表达式新建 / 更新字段（布局对齐 QGIS 字段计算器）。"""
 
     def __init__(self, layer: QgsVectorLayer, parent=None) -> None:
         super().__init__(parent, f"字段计算器 - {layer.name()}")
         self._layer = layer
         self._result_field: str | None = None
-        self.resize(720, 480)
-
-        self._preview_timer = QTimer(self)
-        self._preview_timer.setSingleShot(True)
-        self._preview_timer.setInterval(250)
-        self._preview_timer.timeout.connect(self._update_preview)
+        self._syncing_mode = False
+        self.resize(820, 680)
 
         self._build()
-        self._on_mode_changed()
-        self._update_preview()
+        self._on_new_toggled(True)
 
     # ------------------------------------------------------------- 构建
 
     def _build(self) -> None:
-        root = QVBoxLayout()
+        root = QGridLayout()
         root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(8)
+        root.setHorizontalSpacing(8)
+        root.setVerticalSpacing(8)
 
-        # 模式
-        mode_row = QHBoxLayout()
-        self.new_radio = QRadioButton("新建字段", self)
-        self.update_radio = QRadioButton("更新已有字段", self)
-        self.new_radio.setChecked(True)
-        self.new_radio.toggled.connect(self._on_mode_changed)
-        mode_row.addWidget(self.new_radio)
-        mode_row.addWidget(self.update_radio)
-        mode_row.addStretch(1)
-        root.addLayout(mode_row)
+        # 只更新选中要素
+        self.only_selected_check = QCheckBox("只更新选中要素", self)
+        root.addWidget(self.only_selected_check, 0, 0, 1, 2)
 
-        # 新建字段表单
-        self.new_form = QFormLayout()
-        self.name_edit = QLineEdit()
-        self.name_edit.setPlaceholderText("新字段名（必填，例：area）")
-        self.new_form.addRow("字段名", self.name_edit)
+        # 创建新字段 / 更新已有字段（互斥的可勾选分组）
+        self.new_group = self._build_new_group()
+        root.addWidget(self.new_group, 1, 0)
+        self.update_group = self._build_update_group()
+        root.addWidget(self.update_group, 1, 1)
 
-        self.type_combo = QComboBox()
-        for label, qtype, type_name, def_len, def_prec in _TYPE_OPTIONS:
-            self.type_combo.addItem(label, (qtype, type_name, def_len, def_prec))
-        self.type_combo.currentIndexChanged.connect(self._on_type_changed)
-        self.new_form.addRow("字段类型", self.type_combo)
+        # 表达式区：内嵌表达式构建器控件（同 QGIS 字段计算器）
+        self.builder = ExpressionBuilderWidget(self._layer, self)
+        root.addWidget(self.builder, 2, 0, 1, 2)
 
-        self.length_spin = QSpinBox()
-        self.length_spin.setRange(0, 65535)
-        self.length_spin.setSpecialValueText("默认")
-        self.new_form.addRow("长度", self.length_spin)
-
-        self.precision_spin = QSpinBox()
-        self.precision_spin.setRange(0, 20)
-        self.precision_spin.setSpecialValueText("默认")
-        self.new_form.addRow("小数位数", self.precision_spin)
-        root.addLayout(self.new_form)
-
-        # 更新字段下拉
-        self.update_combo = QComboBox()
-        for field in self._layer.fields():
-            self.update_combo.addItem(field.name())
-        root.addWidget(self.update_combo)
-
-        # 表达式
-        expr_row = QHBoxLayout()
-        self.expr_edit = QLineEdit()
-        self.expr_edit.setPlaceholderText("表达式，或用右侧按钮打开表达式构建器")
-        self.expr_edit.textChanged.connect(self._preview_timer.start)
-        self.builder_btn = QPushButton("表达式…")
-        self.builder_btn.clicked.connect(self._open_builder)
-        expr_row.addWidget(QLabel("表达式"))
-        expr_row.addWidget(self.expr_edit, 1)
-        expr_row.addWidget(self.builder_btn)
-        root.addLayout(expr_row)
-
-        # 预览
-        self.preview_label = QLabel("", self)
-        self.preview_label.setObjectName("PropHint")
-        self.preview_label.setWordWrap(True)
-        root.addWidget(self.preview_label)
-        root.addStretch(1)
-
+        # 按钮
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
             Qt.Orientation.Horizontal,
@@ -142,24 +101,120 @@ class FieldCalculatorDialog(BaseDialog):
         buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         buttons.accepted.connect(self._apply)
         buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
+        root.addWidget(buttons, 3, 0, 1, 2)
 
+        root.setRowStretch(2, 1)
         self.setLayout(root)
-        self._on_type_changed(self.type_combo.currentIndex())
+
+    def _build_new_group(self) -> QGroupBox:
+        group = QGroupBox("创建新字段", self)
+        group.setCheckable(True)
+        group.setChecked(True)
+        group.setFlat(True)
+        grid = QGridLayout(group)
+        grid.setContentsMargins(3, 9, 3, 0)
+        grid.setVerticalSpacing(3)
+
+        self.virtual_check = QCheckBox("创建虚拟字段", group)
+        self.virtual_check.setToolTip(
+            "虚拟字段每次使用时重算，定义保存在工程文件里，不写入数据源。"
+        )
+        grid.addWidget(self.virtual_check, 0, 0, 1, 4)
+
+        grid.addWidget(QLabel("输出字段名", group), 1, 0)
+        self.name_edit = QLineEdit(group)
+        self.name_edit.setPlaceholderText("例：area")
+        grid.addWidget(self.name_edit, 1, 1, 1, 3)
+
+        grid.addWidget(QLabel("输出字段类型", group), 2, 0)
+        self.type_combo = QComboBox(group)
+        for label, qtype, type_name, def_len, def_prec in _TYPE_OPTIONS:
+            self.type_combo.addItem(label, (qtype, type_name, def_len, def_prec))
+        self.type_combo.currentIndexChanged.connect(self._on_type_changed)
+        grid.addWidget(self.type_combo, 2, 1, 1, 3)
+
+        length_label = QLabel("输出字段长度", group)
+        length_label.setToolTip(
+            "字段总长度（含小数位数）。例如 123.45 需要长度 5，123456 需要长度 6。"
+        )
+        grid.addWidget(length_label, 3, 0)
+        self.length_spin = QSpinBox(group)
+        self.length_spin.setRange(0, 65535)
+        self.length_spin.setSpecialValueText("默认")
+        grid.addWidget(self.length_spin, 3, 1)
+
+        precision_label = QLabel("精度", group)
+        precision_label.setToolTip("小数点后最大位数。例如 123.45 需要精度 2。")
+        grid.addWidget(precision_label, 3, 2)
+        self.precision_spin = QSpinBox(group)
+        self.precision_spin.setRange(0, 20)
+        self.precision_spin.setSpecialValueText("默认")
+        grid.addWidget(self.precision_spin, 3, 3)
+
+        group.toggled.connect(self._on_new_toggled)
+        return group
+
+    def _build_update_group(self) -> QGroupBox:
+        group = QGroupBox("更新已有字段", self)
+        group.setCheckable(True)
+        group.setChecked(False)
+        group.setFlat(True)
+        layout = QVBoxLayout(group)
+        layout.setContentsMargins(3, 9, 3, 0)
+        self.update_combo = QComboBox(group)
+        for field in self._layer.fields():
+            self.update_combo.addItem(field.name())
+        layout.addWidget(self.update_combo)
+        group.toggled.connect(self._on_update_toggled)
+        return group
 
     # ------------------------------------------------------------- 交互
 
-    def _on_mode_changed(self) -> None:
-        creating = self.new_radio.isChecked()
-        for i in range(self.new_form.rowCount()):
-            item = self.new_form.itemAt(i, QFormLayout.ItemRole.FieldRole)
-            label = self.new_form.itemAt(i, QFormLayout.ItemRole.LabelRole)
-            if item is not None and item.widget() is not None:
-                item.widget().setVisible(creating)
-            if label is not None and label.widget() is not None:
-                label.widget().setVisible(creating)
-        self.update_combo.setVisible(not creating)
-        self.name_edit.setFocus()
+    def _on_new_toggled(self, checked: bool) -> None:
+        if self._syncing_mode:
+            return
+        self._syncing_mode = True
+        try:
+            if checked:
+                self.update_group.setChecked(False)
+        finally:
+            self._syncing_mode = False
+        if not checked and not self.update_group.isChecked():
+            # 两个都取消 → 至少保留一个
+            self._set_group_checked("new", True)
+            return
+        self._set_subtree_enabled(self.new_group, checked)
+        self._set_subtree_enabled(self.update_group, not checked)
+        self.virtual_check.setEnabled(checked)
+
+    def _on_update_toggled(self, checked: bool) -> None:
+        if self._syncing_mode:
+            return
+        self._syncing_mode = True
+        try:
+            if checked:
+                self.new_group.setChecked(False)
+        finally:
+            self._syncing_mode = False
+        if not checked and not self.new_group.isChecked():
+            self._set_group_checked("update", True)
+            return
+        self._set_subtree_enabled(self.new_group, not checked)
+        self._set_subtree_enabled(self.update_group, checked)
+        self.virtual_check.setEnabled(not checked)
+
+    def _set_group_checked(self, which: str, checked: bool) -> None:
+        """在不触发互斥逻辑的情况下设置勾选（用于兜底）。"""
+        self._syncing_mode = True
+        try:
+            (self.new_group if which == "new" else self.update_group).setChecked(checked)
+        finally:
+            self._syncing_mode = False
+
+    @staticmethod
+    def _set_subtree_enabled(group: QGroupBox, enabled: bool) -> None:
+        for widget in group.findChildren(QWidget):
+            widget.setEnabled(enabled)
 
     def _on_type_changed(self, index: int) -> None:
         data = self.type_combo.itemData(index)
@@ -171,60 +226,10 @@ class FieldCalculatorDialog(BaseDialog):
         if self.precision_spin.value() == self.precision_spin.minimum():
             self.precision_spin.setValue(def_prec)
 
-    def _open_builder(self) -> None:
-        try:
-            from app.ui.dialogs.expression_builder import ExpressionBuilderDialog
-
-            dlg = ExpressionBuilderDialog(self._layer, self.expr_edit.text().strip(), self)
-            if dlg.exec():
-                self.expr_edit.setText(dlg.expression_text())
-        except Exception as exc:  # noqa: BLE001
-            logger.error("打开表达式构建器失败: %s", exc, exc_info=True)
-            QMessageBox.warning(self, "字段计算器", f"打开表达式构建器失败：{exc}")
-
-    def _first_feature(self):
-        try:
-            return next(self._layer.getFeatures(), None)
-        except Exception:  # noqa: BLE001
-            return None
-
-    def _update_preview(self) -> None:
-        text = self.expr_edit.text().strip()
-        if not text:
-            self._show_preview("", error=False)
-            return
-        expr = QgsExpression(text)
-        if expr.hasParserError():
-            self._show_preview(f"语法错误：{expr.parserErrorString()}", error=True)
-            return
-        feature = self._first_feature()
-        if feature is None:
-            self._show_preview("（无要素，无法预览）", error=False)
-            return
-        ctx = self._layer.createExpressionContext()
-        ctx.setFeature(feature)
-        try:
-            expr.prepare(ctx)
-            if expr.hasEvalError():
-                self._show_preview(f"无法求值：{expr.evalErrorString()}", error=True)
-                return
-            value = expr.evaluate(ctx)
-        except Exception as exc:  # noqa: BLE001
-            self._show_preview(f"无法求值：{exc}", error=True)
-            return
-        if expr.hasEvalError():
-            self._show_preview(f"无法求值：{expr.evalErrorString()}", error=True)
-            return
-        self._show_preview(f"首行预览：{value}", error=False)
-
-    def _show_preview(self, text: str, error: bool) -> None:
-        self.preview_label.setText(text)
-        self.preview_label.setStyleSheet("color: #c0392b;" if error else "")
-
     # ------------------------------------------------------------- 应用
 
     def _apply(self) -> None:
-        text = self.expr_edit.text().strip()
+        text = self.builder.expression_text()
         if not text:
             QMessageBox.warning(self, "字段计算器", "表达式不能为空")
             return
@@ -234,23 +239,33 @@ class FieldCalculatorDialog(BaseDialog):
             return
 
         layer = self._layer
-        creating = self.new_radio.isChecked()
+        creating = self.new_group.isChecked()
+        only_selected = self.only_selected_check.isChecked()
+
         if creating:
             name = self.name_edit.text().strip()
             if not name:
-                QMessageBox.warning(self, "字段计算器", "请填写新字段名")
+                QMessageBox.warning(self, "字段计算器", "请填写输出字段名")
                 return
             if layer.fields().indexFromName(name) >= 0:
                 QMessageBox.warning(self, "字段计算器", f"字段已存在：{name}")
                 return
             qtype, type_name, _, _ = self.type_combo.currentData()
             field = QgsField(name, qtype, type_name, self.length_spin.value(), self.precision_spin.value())
+            if self.virtual_check.isChecked():
+                self._create_virtual_field(expr, field, name)
+                return
             target_name = name
         else:
             target_name = self.update_combo.currentText()
             if not target_name:
                 QMessageBox.warning(self, "字段计算器", "请选择要更新的字段")
                 return
+            field = None
+
+        if only_selected and not layer.selectedFeatureIds():
+            QMessageBox.warning(self, "字段计算器", "没有选中要素")
+            return
 
         was_editable = layer.isEditable()
         if not was_editable and not layer.startEditing():
@@ -259,7 +274,7 @@ class FieldCalculatorDialog(BaseDialog):
 
         if creating:
             if not layer.dataProvider().addAttributes([field]):
-                self._fail(was_editable, f"添加字段失败：{name}")
+                self._fail(was_editable, f"添加字段失败：{target_name}")
                 return
             layer.updateFields()
 
@@ -268,13 +283,17 @@ class FieldCalculatorDialog(BaseDialog):
             self._fail(was_editable, f"找不到字段：{target_name}")
             return
 
+        fids = layer.selectedFeatureIds() if only_selected else None
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         updated = 0
         error_msg: str | None = None
         ctx = layer.createExpressionContext()
         try:
             expr.prepare(ctx)
-            for feature in layer.getFeatures():
+            request = QgsFeatureRequest()
+            if fids is not None:
+                request.setFilterFids(fids)
+            for feature in layer.getFeatures(request):
                 ctx.setFeature(feature)
                 value = expr.evaluate(ctx)
                 if expr.hasEvalError():
@@ -294,6 +313,17 @@ class FieldCalculatorDialog(BaseDialog):
         self._result_field = target_name
         logger.info("字段计算完成：图层=%s，字段=%s，更新 %d 个要素", layer.name(), target_name, updated)
         QMessageBox.information(self, "字段计算器", f"已更新 {updated} 个要素（字段：{target_name}）")
+        self.accept()
+
+    def _create_virtual_field(self, expr: QgsExpression, field: QgsField, name: str) -> None:
+        """创建虚拟字段（定义存工程文件，不写数据源）。"""
+        index = self._layer.addExpressionField(expr.expression(), field)
+        if index < 0:
+            QMessageBox.warning(self, "字段计算器", f"创建虚拟字段失败：{name}")
+            return
+        self._result_field = name
+        logger.info("已创建虚拟字段：图层=%s，字段=%s", self._layer.name(), name)
+        QMessageBox.information(self, "字段计算器", f"已创建虚拟字段：{name}")
         self.accept()
 
     def _fail(self, was_editable: bool, message: str) -> None:

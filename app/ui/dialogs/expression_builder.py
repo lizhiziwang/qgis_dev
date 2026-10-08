@@ -1,10 +1,16 @@
-"""自建表达式构建器对话框。
+"""自建表达式构建器。
 
-替代 QGIS 原生 ``QgsExpressionBuilderDialog``（qgis.gui 组件）：界面全部用
-``QtWidgets`` 手搭，逻辑只依赖 ``qgis.core``，不再引入 qgis.gui 带来的
-初始化 / 崩溃风险。
+替代 QGIS 原生 ``QgsExpressionBuilderDialog`` / ``QgsExpressionBuilderWidget``
+（qgis.gui 组件）：界面全部用 ``QtWidgets`` 手搭，逻辑只依赖 ``qgis.core``，
+不再引入 qgis.gui 带来的初始化 / 崩溃风险。
 
-一行三栏（编辑器 / 树 / 函数描述）+ 底部预览：
+拆成可复用的控件 + 对话框两层，和 QGIS 一样：
+
+- :class:`ExpressionBuilderWidget`：表达式构建器本体（可内嵌，字段计算器的
+  表达式区直接用它）；
+- :class:`ExpressionBuilderDialog`：把控件包成一个对话框（原调用方用）。
+
+控件布局与 QGIS 表达式构建器一致——一行三栏 + 底部预览：
 
 - 左栏：表达式编辑框（自建 :class:`CodeEditor`，等宽 + 语法高亮 + 行号 + 补全）；
 - 中栏：``QTreeWidget``（窄）：字段与值 / 运算符 / 函数（按 ``group`` 归类）/
@@ -31,6 +37,7 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QMessageBox,
     QSplitter,
+    QTabWidget,
     QTextBrowser,
     QTreeWidget,
     QTreeWidgetItem,
@@ -200,11 +207,11 @@ def _quote_field(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
-class ExpressionBuilderDialog(BaseDialog):
-    """自建表达式构建器（无 qgis.gui 依赖）。"""
+class ExpressionBuilderWidget(QWidget):
+    """表达式构建器本体（可内嵌，字段计算器的表达式区就用它）。"""
 
-    def __init__(self, layer=None, expression: str = "", parent=None) -> None:
-        super().__init__(parent, "表达式构建器")
+    def __init__(self, layer=None, parent=None) -> None:
+        super().__init__(parent)
         self._layer = layer
         #: 预览用的首个要素（惰性取一次）
         self._first_feature = None
@@ -214,24 +221,39 @@ class ExpressionBuilderDialog(BaseDialog):
         self._preview_timer.setInterval(250)
         self._preview_timer.timeout.connect(self._update_preview)
 
-        self.setMinimumSize(0, 0)
-        self.resize(760, 520)
         self._build()
         self._populate()
-        self.expr_edit.setPlainText(expression or "")
-        self.expr_edit.setFocus()
         self._update_preview()
 
     # ------------------------------------------------------------- 构建
 
     def _build(self) -> None:
-        root = QVBoxLayout()
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(8)
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # 与 QGIS 表达式构建器一致：顶部 tab 切换「表达式」/「函数编辑器」
+        self.tabs = QTabWidget(self)
+        root.addWidget(self.tabs)
+
+        self.tabs.addTab(self._build_expression_page(), "表达式")
+
+        from app.ui.dialogs.function_editor import FunctionEditorWidget
+
+        self.function_editor = FunctionEditorWidget(self)
+        self.tabs.addTab(self.function_editor, "函数编辑器")
+        self.tabs.currentChanged.connect(self._on_tab_changed)
+
+    def _build_expression_page(self) -> QWidget:
+        """「表达式」tab 的内容：三栏 + 底部预览。"""
+        page = QWidget(self)
+        root = QVBoxLayout(page)
+        root.setContentsMargins(8, 8, 8, 8)
+        root.setSpacing(6)
 
         def make_pane(title: str, widget: QWidget) -> QWidget:
             """给控件配一个顶部标题，作为一个 splitter 面板。"""
-            pane = QWidget(self)
+            pane = QWidget(page)
             lay = QVBoxLayout(pane)
             lay.setContentsMargins(0, 0, 0, 0)
             lay.setSpacing(4)
@@ -239,23 +261,23 @@ class ExpressionBuilderDialog(BaseDialog):
             lay.addWidget(widget, 1)
             return pane
 
-        splitter = QSplitter(Qt.Orientation.Horizontal, self)
+        splitter = QSplitter(Qt.Orientation.Horizontal, page)
 
-        self.expr_edit = CodeEditor()
+        self.expr_edit = CodeEditor(page)
         self.expr_edit.setPlaceholderText("例如 upper(name)")
         self.expr_edit.setMinimumHeight(120)
         self._highlighter = _ExpressionHighlighter(self.expr_edit.document())
         self.expr_edit.textChanged.connect(self._preview_timer.start)
         splitter.addWidget(make_pane("表达式", self.expr_edit))
 
-        self.tree = QTreeWidget()
+        self.tree = QTreeWidget(page)
         self.tree.setHeaderHidden(True)
         self.tree.setMinimumWidth(120)
         self.tree.itemDoubleClicked.connect(self._on_double_clicked)
         self.tree.currentItemChanged.connect(self._on_current_changed)
         splitter.addWidget(make_pane("字段与函数", self.tree))
 
-        self.help_view = QTextBrowser()
+        self.help_view = QTextBrowser(page)
         self.help_view.setOpenExternalLinks(False)
         self.help_view.setHtml(_DEFAULT_HELP)
         splitter.addWidget(make_pane("函数描述", self.help_view))
@@ -268,26 +290,19 @@ class ExpressionBuilderDialog(BaseDialog):
         splitter.setChildrenCollapsible(False)
         root.addWidget(splitter, 1)
 
-        self.preview_label = QLabel("", self)
+        self.preview_label = QLabel("", page)
         self.preview_label.setObjectName("PropHint")
         self.preview_label.setWordWrap(True)
         self.preview_label.setTextInteractionFlags(
             Qt.TextInteractionFlag.TextSelectableByMouse
         )
         root.addWidget(self.preview_label)
+        return page
 
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
-            Qt.Orientation.Horizontal,
-            self,
-        )
-        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
-        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
-        buttons.accepted.connect(self._on_accept)
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
-
-        self.setLayout(root)
+    def _on_tab_changed(self, index: int) -> None:
+        # 切回「表达式」时刷新函数树 / 补全（函数编辑器里可能刚加了函数）
+        if index == 0:
+            self._populate()
 
     def _populate(self) -> None:
         """填左侧树：字段 / 运算符 / 函数（按组）/ 特殊变量。"""
@@ -410,26 +425,17 @@ class ExpressionBuilderDialog(BaseDialog):
         else:
             self.help_view.setHtml(_DEFAULT_HELP)
 
-    def _on_accept(self) -> None:
-        text = self.expression_text()
-        if not text:
-            QMessageBox.warning(self, "表达式构建器", "表达式不能为空")
-            self.expr_edit.setFocus()
-            return
-        expr = QgsExpression(text)
-        if expr.hasParserError():
-            QMessageBox.warning(
-                self, "表达式构建器", f"表达式有语法错误：\n{expr.parserErrorString()}"
-            )
-            self.expr_edit.setFocus()
-            return
-        self.accept()
-
     # ------------------------------------------------------------- 预览
 
     def expression_text(self) -> str:
         """当前表达式（去首尾空白）。"""
         return self.expr_edit.toPlainText().strip()
+
+    def set_expression_text(self, expression: str) -> None:
+        """设置表达式内容并把焦点放到编辑器。"""
+        self.expr_edit.setPlainText(expression or "")
+        self.expr_edit.setFocus()
+        self._update_preview()
 
     def _context(self):
         layer = self._layer
@@ -475,6 +481,53 @@ class ExpressionBuilderDialog(BaseDialog):
     def _show_preview(self, text: str, error: bool) -> None:
         self.preview_label.setText(text)
         self.preview_label.setStyleSheet("color: #c0392b;" if error else "")
+
+
+class ExpressionBuilderDialog(BaseDialog):
+    """把 :class:`ExpressionBuilderWidget` 包成一个对话框（兼容原调用方）。"""
+
+    def __init__(self, layer=None, expression: str = "", parent=None) -> None:
+        super().__init__(parent, "表达式构建器")
+        self.setMinimumSize(0, 0)
+        self.resize(760, 520)
+
+        root = QVBoxLayout()
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        self._widget = ExpressionBuilderWidget(layer, self)
+        root.addWidget(self._widget, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
+            Qt.Orientation.Horizontal,
+            self,
+        )
+        buttons.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
+        buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        root.addWidget(buttons)
+
+        self.setLayout(root)
+        self._widget.set_expression_text(expression)
+
+    def expression_text(self) -> str:
+        """当前表达式（去首尾空白）。"""
+        return self._widget.expression_text()
+
+    def _on_accept(self) -> None:
+        text = self.expression_text()
+        if not text:
+            QMessageBox.warning(self, "表达式构建器", "表达式不能为空")
+            return
+        expr = QgsExpression(text)
+        if expr.hasParserError():
+            QMessageBox.warning(
+                self, "表达式构建器", f"表达式有语法错误：\n{expr.parserErrorString()}"
+            )
+            return
+        self.accept()
 
 
 def _fmt_value(value) -> str:

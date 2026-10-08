@@ -29,6 +29,7 @@ from app.infra.logging import get_logger
 from app.server.cli import main as server_main
 from app.ui.dialogs.add_connection import AddConnectionDialog
 from app.ui.dialogs.check_viewer import CheckViewerDialog
+from app.ui.dialogs.create_data_dialog import CreateDataDialog
 from app.ui.dialogs.offline_download import OfflineDownloadDialog
 from app.ui.dialogs.qmap_compare import QMapCompareDialog
 from app.ui.dialogs.query_builder import QueryBuilderDialog
@@ -129,6 +130,7 @@ class AppActionsMixin:
                 self,
                 on_add_connection=self._on_dm_add_connection,
                 on_add_layer=self._on_dm_add_layer,
+                on_create_data=self._on_create_data
             )
             self._data_manage_dock = dock
             self.place_bottom_dock(dock)
@@ -149,6 +151,27 @@ class AppActionsMixin:
         dock = getattr(self, "_data_manage_dock", None)
         if dock is not None:
             dock.add_connection(dlg.connection())
+
+    def _on_create_data(self) -> None:
+        """创建数据：弹窗收集参数 → 落盘建空矢量数据 → 加入工程。
+
+        两个入口共用：数据管理 Dock 的「创建数据」按钮与主工具条「数据」组的
+        「新增数据」（``tool_bar`` 的 ``create_data`` key）。建文件是
+        :class:`~app.core.domain.create_data.CreateDataService` 的事（对话框在
+        ``accept()`` 里调），这里只管把建出来的图层放进工程。
+        """
+        dlg = CreateDataDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        layer = dlg.created_layer()
+        if layer is None:
+            return
+        self.project.addMapLayer(layer)
+        self.messageBar.pushMessage(
+            f"已创建数据「{layer.name()}」并加入工程：{layer.source()}",
+            level=Qgis.MessageLevel.Success,
+            duration=4,
+        )
 
     def _on_dm_add_layer(self, db: dict, category: str, name: str) -> None:
         """数据管理表格行双击：把注册表作为图层加入工程。
@@ -288,8 +311,8 @@ class AppActionsMixin:
         try:
 
 
-            threading.Thread(target=server_main, daemon=True).start()
-            self.messageBar.pushMessage("已启动服务（8000）", level=Qgis.MessageLevel.Info, duration=3)
+            # threading.Thread(target=server_main, daemon=True).start()
+            self.messageBar.pushMessage("测试消息！", level=Qgis.MessageLevel.Info, duration=3)
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "失败", str(e))
 
