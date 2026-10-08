@@ -30,6 +30,7 @@ from app.infra.logging import get_logger
 from app.server.cli import main as server_main
 from app.ui.dialogs.add_connection import AddConnectionDialog
 from app.ui.dialogs.check_viewer import CheckViewerDialog
+from app.ui.dialogs.create_data_dialog import CreateDataDialog
 from app.ui.dialogs.offline_download import OfflineDownloadDialog
 from app.ui.dialogs.qmap_compare import QMapCompareDialog
 from app.ui.dialogs.query_builder import QueryBuilderDialog
@@ -130,6 +131,7 @@ class AppActionsMixin:
                 self,
                 on_add_connection=self._on_dm_add_connection,
                 on_add_layer=self._on_dm_add_layer,
+                on_create_data=self._on_dm_create_data
             )
             self._data_manage_dock = dock
             self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
@@ -150,6 +152,25 @@ class AppActionsMixin:
         dock = getattr(self, "_data_manage_dock", None)
         if dock is not None:
             dock.add_connection(dlg.connection())
+
+    def _on_dm_create_data(self) -> None:
+        """数据管理「创建数据」：弹窗收集参数 → 落盘建空矢量数据 → 加入工程。
+
+        建文件是 :class:`~app.core.domain.create_data.CreateDataService` 的事
+        （对话框在 ``accept()`` 里调），这里只管把建出来的图层放进工程。
+        """
+        dlg = CreateDataDialog(self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        layer = dlg.created_layer()
+        if layer is None:
+            return
+        self.project.addMapLayer(layer)
+        self.messageBar.pushMessage(
+            f"已创建数据「{layer.name()}」并加入工程：{layer.source()}",
+            level=Qgis.MessageLevel.Success,
+            duration=4,
+        )
 
     def _on_dm_add_layer(self, db: dict, category: str, name: str) -> None:
         """数据管理表格行双击：把注册表作为图层加入工程。
