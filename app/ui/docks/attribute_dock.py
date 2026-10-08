@@ -25,6 +25,7 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMessageBox,
     QPushButton,
     QSizePolicy,
     QTableView,
@@ -635,13 +636,19 @@ class PagedAttributeTableWidget(QWidget):
         )
         self.columns_btn.setToolTip("组织列")
         self.columns_btn.setFixedSize(26, 26)
+        self.funcs_btn = QPushButton()
+        self.funcs_btn.setObjectName("customFuncsBtn")
+        self.funcs_btn.setIcon(Icons.edit())
+        self.funcs_btn.setToolTip("自定义函数")
+        self.funcs_btn.setFixedSize(26, 26)
         self.start_btn.clicked.connect(self._start_edit)
         self.save_btn.clicked.connect(self._save_edit)
         self.stop_btn.clicked.connect(self._stop_edit)
         self.filter_btn.clicked.connect(self._filter)
         self.calc_btn.clicked.connect(self._field_calc)
         self.columns_btn.clicked.connect(self._organize_columns)
-        for b in (self.start_btn, self.save_btn, self.stop_btn, self.filter_btn, self.calc_btn, self.columns_btn):
+        self.funcs_btn.clicked.connect(self._edit_functions)
+        for b in (self.start_btn, self.save_btn, self.stop_btn, self.filter_btn, self.calc_btn, self.columns_btn, self.funcs_btn):
             tb.addWidget(b)
         tb.addStretch(0)
         main_layout.addLayout(tb)
@@ -784,36 +791,36 @@ class PagedAttributeTableWidget(QWidget):
             self._refresh_load_state()
 
     def _field_calc(self) -> None:
-        """打开 QGIS 内置字段计算器（复用矢量图层属性窗口字段页的那个）。
+        """打开自建字段计算器（含自建表达式构建器与自定义函数入口）。
 
-        对话框 OK 时直接把计算结果应用到图层（必要时自动进入编辑态），
-        关闭后刷新表格列/值。
+        不用 QGIS 原生 ``QgsFieldCalculator``：其函数编辑器依赖未初始化的
+        ``QgsPythonRunner``，保存会写到盘符根目录且不注册。对话框 OK 时把
+        结果应用到图层（必要时自动进入编辑态），关闭后刷新表格列/值。
         """
-        from qgis.gui import QgsFieldCalculator
+        from app.ui.dialogs.field_calculator import FieldCalculatorDialog
 
-        before_names = [f.name() for f in self.layer.fields()]
-        dlg = QgsFieldCalculator(self.layer, self)
-        dlg.exec()
-        if dlg.result() != QDialog.DialogCode.Accepted:
+        dlg = FieldCalculatorDialog(self.layer, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
             return
-        # 内置对话框不暴露表达式/输出字段，日志按字段状态变化记录
-        after_names = [f.name() for f in self.layer.fields()]
-        new_fields = [n for n in after_names if n not in before_names]
-        if new_fields:
-            logger.info(
-                "字段计算完成：图层=%s，新增字段 %s（字段数 %d→%d）",
-                self.layer.name(), new_fields, len(before_names), len(after_names),
-            )
-        else:
-            logger.info(
-                "字段计算完成：图层=%s，更新已有字段（字段数 %d）",
-                self.layer.name(), len(after_names),
-            )
         # 计算器可能启动了编辑：同步"保存编辑/停止编辑"按钮可用性
         self._sync_edit_buttons()
         # 新增字段 → 列定义刷新；仅更新值 → 可视行重取新值，两者都覆盖
         if self.model is not None:
             self.model.reload_fields()
+
+    def _edit_functions(self) -> None:
+        """打开自建的自定义表达式函数编辑器（保存后立即注册到本进程）。
+
+        原生字段计算器里的 QGIS Function Editor 在本应用不可用（``QgsPythonRunner``
+        未初始化，保存会写到盘符根目录且不注册），改从这里管理函数。
+        """
+        try:
+            from app.ui.dialogs.function_editor import FunctionEditorDialog
+
+            FunctionEditorDialog(self).exec()
+        except Exception as exc:  # noqa: BLE001
+            logger.error("打开自定义函数编辑器失败: %s", exc, exc_info=True)
+            QMessageBox.warning(self, "自定义函数", f"打开自定义函数编辑器失败：{exc}")
 
     def _sync_edit_buttons(self) -> None:
         """按图层编辑态同步"保存编辑/停止编辑"按钮可用性。"""
