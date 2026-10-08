@@ -25,6 +25,7 @@ from qgis.PyQt.QtGui import (
     QKeySequence,
 )
 from qgis.PyQt.QtWidgets import (
+    QDockWidget,
     QHBoxLayout,
     QShortcut,
     QSizePolicy,
@@ -360,6 +361,36 @@ class WindowShellMixin:
                 self.tabifyDockWidget(other, dock)
             except Exception:  # noqa: BLE001 —— 叠放失败只会退化成堆叠，不该中断
                 logger.exception("右侧面板叠放失败: %s", type(dock).__name__)
+        dock.show()
+        dock.raise_()
+
+    def place_bottom_dock(self, dock) -> None:
+        """把 ``dock`` 停靠到底部；底部已有面板时与之**叠放**（占满整条底部）。
+
+        与 :meth:`place_right_dock` 同一套逻辑、同一套理由：Qt 的 ``addDockWidget``
+        在同一区域默认是**并排**——底部区会把两个面板拆成左右各一半宽，两个都看不清
+        （右侧区则是上下各一半高）。这里 ``tabifyDockWidget`` + ``raise_()``：同一
+        时刻只显示一个、占满整条底部，点各自的标签页切换。
+
+        **所有停靠到底部的面板都应走本方法**，不要直接 ``addDockWidget``。
+
+        叠放目标取「当前真的停在底部区、且没浮动」的面板——直接扫现役成员，不用登记
+        表：用户可以把「工具 / 要素信息 / 在线底图」自己拖到底部（这几个都允许
+        Bottom），登记表认不全它们。
+        """
+        area = Qt.DockWidgetArea.BottomDockWidgetArea
+        self.addDockWidget(area, dock)
+        # 拖出浮动后 Qt 会停摆、不再重排（见 heal_stalled_layout），挂上自愈
+        self.watch_dock_layout(dock)
+        for other in self.findChildren(QDockWidget):
+            if other is dock or sip.isdeleted(other):
+                continue
+            if other.isFloating() or self.dockWidgetArea(other) != area:
+                continue  # 不在底部区（多半还在右侧），别把新面板拽过去叠
+            try:
+                self.tabifyDockWidget(other, dock)
+            except Exception:  # noqa: BLE001 —— 叠放失败只会退化成并排，不该中断
+                logger.exception("底部面板叠放失败: %s", type(dock).__name__)
         dock.show()
         dock.raise_()
 

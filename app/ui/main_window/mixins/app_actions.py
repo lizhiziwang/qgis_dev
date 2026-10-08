@@ -15,7 +15,6 @@ from qgis.core import (
     Qgis,
     QgsRasterLayer,
 )
-from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QDialog,
     QMessageBox,
@@ -132,7 +131,7 @@ class AppActionsMixin:
                 on_add_layer=self._on_dm_add_layer,
             )
             self._data_manage_dock = dock
-            self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, dock)
+            self.place_bottom_dock(dock)
             # 打开工程时若数据管理还没开过，连接状态暂存在 MainWindow，
             # 这里首次建 Dock 时应用上去
             apply_pending = getattr(self, "_apply_pending_data_manage_state", None)
@@ -297,7 +296,7 @@ class AppActionsMixin:
     def _show_log_dock(self) -> None:
         if self.log_dock is None:
             self.log_dock = LogDock(self)
-            self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.log_dock)
+            self.place_bottom_dock(self.log_dock)
         self.log_dock.show()
         self.log_dock.raise_()
 
@@ -323,8 +322,7 @@ class AppActionsMixin:
             self.current_attribute_dock = AttributeDock(
                 layer, page_size=50, parent=self, filter_str=filter_str, show_ids=show_ids
             )
-            self.addDockWidget(Qt.DockWidgetArea.BottomDockWidgetArea, self.current_attribute_dock)
-            self.watch_dock_layout(self.current_attribute_dock)
+            self.place_bottom_dock(self.current_attribute_dock)
             self.current_attribute_dock.show()
             self.current_attribute_dock.raise_()
         else:
