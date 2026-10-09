@@ -26,15 +26,16 @@ from app.ui.dialogs.layer_properties.base import PlaceholderTab
 from app.ui.dialogs.layer_properties.fields import FieldsTab
 from app.ui.dialogs.layer_properties.general import GeneralTab
 from app.ui.dialogs.layer_properties.labeling import LabelingTab
+from app.ui.dialogs.layer_properties.render import RenderTab
 
 logger = get_logger(__name__)
 
 #: 只对矢量图层有意义的页（栅格图层下禁用）
-_VECTOR_ONLY = frozenset({"字段", "选择", "标注"})
+_VECTOR_ONLY = frozenset({"字段", "选择", "标注", "渲染"})
 
 
 class LayerPropertiesDialog(BaseDialog):
-    """图层属性对话框（常规 / 字段 / 标注页已实现，其余页占位）。"""
+    """图层属性对话框（常规 / 字段 / 标注 / 渲染页已实现，其余页占位）。"""
 
     #: (标签名, 页类)；页类为 None → 占位页
     _TAB_SPECS = (
@@ -42,7 +43,7 @@ class LayerPropertiesDialog(BaseDialog):
         ("字段", FieldsTab),
         ("选择", None),
         ("标注", LabelingTab),
-        ("渲染", None),
+        ("渲染", RenderTab),
         ("条件", None),
     )
 
