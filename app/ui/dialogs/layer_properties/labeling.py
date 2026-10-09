@@ -56,7 +56,6 @@ from qgis.PyQt.QtGui import QColor, QFont
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
-    QColorDialog,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -82,6 +81,7 @@ from qgis.PyQt.QtWidgets import (
 
 from app.infra.logging import get_logger
 from app.ui.dialogs.layer_properties.base import LayerPropertyTab
+from app.ui.dialogs.layer_properties.widgets import ColorButton
 from app.ui.tools.feature_attrs import field_alias
 
 logger = get_logger(__name__)
@@ -318,45 +318,6 @@ def _field_values(layer, field: str, limit: int = _VALUE_LIMIT) -> list[str]:
     return sorted(
         (str(v) for v in values if v is not None), key=lambda s: (len(s), s)
     )
-
-
-class _ColorButton(QPushButton):
-    """自绘颜色选择按钮（跟随本应用主题，不用 QgsColorButton 的原生 chrome）。"""
-
-    def __init__(self, color=None, parent=None) -> None:
-        super().__init__(parent)
-        self._color = QColor(color) if color is not None else QColor(0, 0, 0)
-        self.setObjectName("PropColorBtn")
-        self.setFixedSize(34, 22)
-        self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("点击选择颜色")
-        self.clicked.connect(self._pick)
-        self._sync()
-
-    def color(self) -> QColor:
-        return QColor(self._color)
-
-    def setColor(self, color) -> None:
-        if color is None:
-            return
-        c = QColor(color)
-        if c.isValid():
-            self._color = c
-            self._sync()
-
-    def _sync(self) -> None:
-        # 内联样式只作用于这一颗按钮：色块背景 + 中性描边
-        self.setStyleSheet(
-            "QPushButton#PropColorBtn {"
-            f" background-color: {self._color.name()};"
-            " border: 1px solid palette(mid); border-radius: 3px; }"
-            "QPushButton#PropColorBtn:hover { border-color: palette(highlight); }"
-        )
-
-    def _pick(self) -> None:
-        chosen = QColorDialog.getColor(self._color, self, "选择颜色")
-        if chosen.isValid():
-            self.setColor(chosen)
 
 
 class _FieldExpressionSelector(QWidget):
@@ -745,7 +706,7 @@ class LabelingTab(LayerPropertyTab):
         sr.setContentsMargins(0, 0, 0, 0)
         sr.setSpacing(8)
         sr.addWidget(QLabel("颜色", style_row))
-        self.text_color_btn = _ColorButton(QColor(0, 0, 0), style_row)
+        self.text_color_btn = ColorButton(QColor(0, 0, 0), style_row)
         sr.addWidget(self.text_color_btn)
         self.bold_check = QCheckBox("加粗", style_row)
         self.italic_check = QCheckBox("斜体", style_row)
@@ -775,7 +736,7 @@ class LabelingTab(LayerPropertyTab):
         self.buffer_unit_combo = self._new_unit_combo(row)
         rl.addWidget(self.buffer_unit_combo)
         rl.addWidget(QLabel("颜色", row))
-        self.buffer_color_btn = _ColorButton(QColor(255, 255, 255), row)
+        self.buffer_color_btn = ColorButton(QColor(255, 255, 255), row)
         rl.addWidget(self.buffer_color_btn)
         rl.addWidget(QLabel("不透明度", row))
         self.buffer_opacity_spin = self._new_opacity_spin(row)
@@ -904,13 +865,13 @@ class LabelingTab(LayerPropertyTab):
         self.strikeout_check.setChecked(font.strikeOut())
         self.font_size_spin.setValue(tf.size() or 10.0)
         _select_enum(self.font_unit_combo, tf.sizeUnit())
-        self.text_color_btn.setColor(tf.color())
+        self.text_color_btn.set_color(tf.color())
 
         buf = tf.buffer()
         self.buffer_check.setChecked(buf.enabled())
         self.buffer_size_spin.setValue(buf.size())
         _select_enum(self.buffer_unit_combo, buf.sizeUnit())
-        self.buffer_color_btn.setColor(buf.color())
+        self.buffer_color_btn.set_color(buf.color())
         self.buffer_opacity_spin.setValue(round(buf.opacity() * 100))
 
     def _load_placement(self, settings: QgsPalLayerSettings) -> None:
