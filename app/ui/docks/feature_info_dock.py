@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+from html import escape as html_escape
 from typing import Optional
 
 from qgis.PyQt.QtCore import Qt
@@ -17,6 +18,7 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QPushButton,
     QTextEdit,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -26,6 +28,60 @@ from qgis.gui import QgsHighlight
 
 from app.core.domain.identify import IdentifyResult
 from app.ui.common.theme import ThemeManager
+from app.ui.tools.feature_attrs import field_alias
+
+
+class _FieldInfoTextEdit(QTextEdit):
+    """要素详情只读文本框：字段行支持**即时**悬浮提示。
+
+    富文本自带的 ``QTextCharFormat.setToolTip`` 要等 Qt 默认的 ~700ms 唤醒延时
+    才弹，而且只覆盖文字本身（别名很短时很难停准），所以不用它；这里开鼠标跟踪，
+    划过哪一行就立刻 :meth:`QToolTip.showText` 弹出该行提示，命中区域覆盖整格。
+    """
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setReadOnly(True)
+        self.setFont(QFont("Segoe UI", 10))
+        self.setMouseTracking(True)
+        #: 行号 → 提示文本（空 = 该行无提示），由 :meth:`set_row_tips` 设置
+        self._row_tips: list[str] = []
+        #: 当前已弹出提示，避免同一行反复 showText 造成闪烁
+        self._shown_tip: Optional[str] = None
+
+    def set_row_tips(self, tips) -> None:
+        """设置每行的悬浮提示（按表格行号；空文本表示该行不弹）。"""
+        self._row_tips = [t or "" for t in tips] if tips else []
+        self._shown_tip = None
+        QToolTip.hideText()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        tip = self._tip_at(event.position().toPoint())
+        if tip != self._shown_tip:
+            self._shown_tip = tip
+            if tip:
+                QToolTip.showText(event.globalPosition().toPoint(), tip, self)
+            else:
+                QToolTip.hideText()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        self._shown_tip = None
+        QToolTip.hideText()
+        super().leaveEvent(event)
+
+    def _tip_at(self, pos) -> Optional[str]:
+        """取 ``pos``（视口坐标）所在表格行的提示；不在表格内返回 ``None``。"""
+        if not self._row_tips:
+            return None
+        cursor = self.cursorForPosition(pos)
+        table = cursor.currentTable()
+        if table is None:
+            return None
+        row = table.cellAt(cursor).row()
+        if 0 <= row < len(self._row_tips):
+            return self._row_tips[row] or None
+        return None
 
 
 class FeatureInfoDock(QDockWidget):
@@ -57,9 +113,7 @@ class FeatureInfoDock(QDockWidget):
         self.title_label.setWordWrap(True)
         layout.addWidget(self.title_label)
 
-        self.info_text = QTextEdit()
-        self.info_text.setReadOnly(True)
-        self.info_text.setFont(QFont("Segoe UI", 10))
+        self.info_text = _FieldInfoTextEdit()
         layout.addWidget(self.info_text, stretch=1)
 
         btn = QHBoxLayout()
@@ -154,11 +208,13 @@ class FeatureInfoDock(QDockWidget):
         self.info_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.info_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.info_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.info_text.set_row_tips([])  # 波段无字段别名，关闭悬浮提示
 
     def _load_info(self) -> None:
         t = ThemeManager.instance().current()
         result = self.result
         attrs = dict(result.attributes)
+        info_map = self._field_info_map()
         if attrs:
             items = list(attrs.items())
             header = f"属性字段（共 {len(items)} 个）："
@@ -175,9 +231,10 @@ class FeatureInfoDock(QDockWidget):
         for i, (name, value) in enumerate(items):
             bg = t.panel_bg if i % 2 == 0 else t.input_bg
             val = str(value) if value is not None else f"<span style='color:{t.text_secondary}'>无</span>"
+            display, _tip = self._display_and_tip(name, info_map)
             info += (
                 f"<tr style='background-color:{bg}'>"
-                f"<td style='padding:8px; border-bottom:1px solid {t.panel_border};'>{name}</td>"
+                f"<td style='padding:8px; border-bottom:1px solid {t.panel_border};'>{html_escape(display)}</td>"
                 f"<td style='padding:8px; border-bottom:1px solid {t.panel_border};'>{val}</td></tr>"
             )
         info += "</table></div>"
@@ -185,6 +242,53 @@ class FeatureInfoDock(QDockWidget):
         self.info_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.info_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.info_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.info_text.set_row_tips(
+            self._display_and_tip(name, info_map)[1] for name, _ in items
+        )
+
+    def _field_info_map(self) -> dict:
+        """字段名 → ``(别名, 类型名, 字段长度)``；别名无则为空串、长度无则 0。
+        再补一份小写键兜底大小写差异。"""
+        mapping: dict = {}
+        layer = getattr(self, "layer", None)
+        if layer is None:
+            return mapping
+        try:
+            fields = layer.fields()
+        except Exception:  # noqa: BLE001
+            return mapping
+        for i in range(fields.count()):
+            fld = fields.at(i)
+            try:
+                type_name = fld.typeName() or ""
+            except Exception:  # noqa: BLE001
+                type_name = ""
+            try:
+                length = int(fld.length())
+            except Exception:  # noqa: BLE001
+                length = 0
+            info = (field_alias(fld) or "", type_name, length)
+            mapping[fld.name()] = info
+            mapping.setdefault(fld.name().lower(), info)
+        return mapping
+
+    def _display_and_tip(self, name, info_map: dict) -> tuple:
+        """字段显示名与悬浮提示。
+
+        显示名：有别名用别名，否则用真实字段名。悬浮提示：有别名时第一行
+        ``别名（真实字段名）``、第二行字段类型（有长度带在类型后，如
+        ``String(50)``）；无别名时只显示真实字段名。
+        """
+        real = str(name)
+        alias, type_name, length = info_map.get(name) or info_map.get(real.lower()) or ("", "", 0)
+        if alias and alias != real:
+            tip = f"{alias}（{real}）"
+            if type_name:
+                tip += f"\n{type_name}"
+                if length > 0:
+                    tip += f"({length})"
+            return alias, tip
+        return real, real
 
     def _copy(self) -> None:
         if not hasattr(self, "layer"):
