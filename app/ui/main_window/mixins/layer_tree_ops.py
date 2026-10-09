@@ -174,11 +174,12 @@ class LayerTreeOpsMixin:
             node = node.parent()
         return node
 
-    def _on_header_style_panel(self) -> None:
-        """头部「打开图层样式面板」：给当前选中图层打开样式编辑。
+    def _on_header_render_tab(self) -> None:
+        """头部「打开图层渲染设置」：弹自建图层属性对话框并跳到「渲染」tab。
 
-        本应用无常驻样式 Dock，与图层右键菜单一致复用模态样式编辑器
-        （:meth:`_show_style_editor`）。
+        走 :class:`app.ui.dialogs.layer_properties.dialog.LayerPropertiesDialog`
+        （继承本应用主题/无边框标题栏） + 跳到"渲染"tab，不再复用 QGIS 原生
+        :class:`QgsRendererPropertiesDialog`——后者样式与本应用 chrome 不一致。
         """
         try:
             layer = self.layer_dock.view.currentLayer()
@@ -188,12 +189,12 @@ class LayerTreeOpsMixin:
             layer = getattr(self, "_selected_layer", None)
         if layer is None:
             self.messageBar.pushMessage(
-                "请先在图层列表中选择要设置样式的图层",
+                "请先在图层列表中选择要设置渲染的图层",
                 level=Qgis.MessageLevel.Warning,
                 duration=3,
             )
             return
-        self._show_style_editor(layer)
+        self._show_render_tab(layer)
 
     def _on_header_remove(self) -> None:
         """头部「删除图层/组」：当前选中节点（图层或组）。

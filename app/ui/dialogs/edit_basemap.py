@@ -117,7 +117,7 @@ class EditBasemapDialog(CustomBasemapDialog):
         idx = self.type_combo.findData(svc)
         self.type_combo.setCurrentIndex(idx if idx >= 0 else 0)
         self.name_edit.setText(d.name)
-        self.group_edit.setText(d.group or "在线底图")
+        self.group_edit.setCurrentText(d.group or "在线底图")
 
         url = d.url
         embedded_tk: Optional[str] = None
