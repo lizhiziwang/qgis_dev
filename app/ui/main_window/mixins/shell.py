@@ -142,7 +142,7 @@ class WindowShellMixin:
                 "select_point": self._on_select_point,
                 "select_box": self._on_select_box,
                 "pan": self._on_pan,
-                "zoom_in": self._on_zoom_in,
+                "side_zoom": self._on_side_zoom,
                 "zoom_full": self._on_zoom_full,
                 "identify": self._on_identify,
                 "clear_selection": self._on_clear_selection,

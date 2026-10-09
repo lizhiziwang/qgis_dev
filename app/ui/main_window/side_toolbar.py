@@ -32,6 +32,9 @@
   全部属性），只是多给一个离地图更近的入口。**原先的「一键查询」占位按钮已删除**
   —— 它本来就是同一个识别工具的重复入口；两边按钮共用 ``identify`` key，单选
   高亮由 ``MainWindow._on_map_tool_set`` 统一同步；
+- 「缩放」用 :class:`~app.ui.tools.pan_zoom.ZoomClickTool`：**左键单击放大、
+  按住 Shift 单击缩小**（以点击点为缩放中心），与顶部工具条上独立的「放大 /
+  缩小」按钮（拉框缩放）不是同一个入口；
 - 「分屏」复用 :mod:`app.ui.tools.qmap_compare` 的「地图对比」入口
   （``MainWindow._on_qmap_compare``：镜像分屏 / 垂直分割 / 水平分割 /
   放大镜），与顶部工具条「地图对比」同一实现，不再用旧的卷帘覆盖层；
@@ -67,16 +70,20 @@ from app.ui.common import tool_icons
 from app.ui.common.frosted import FrostedPanel
 from app.ui.common.theme import TOOLBAR_BUTTON_RADIUS, Theme, ThemeManager
 
-#: 地图工具 key（单选高亮组，与顶部工具条 key 一致便于同步）
+#: 地图工具 key（单选高亮组）。多数与顶部工具条同 key 便于同步；「缩放」用独立
+#: 的 ``side_zoom``，避免与顶部「放大」联动高亮。
 _TOOL_KEYS = frozenset({
     "select_point",
     "select_box",
     "pan",
-    "zoom_in",
+    "side_zoom",
     "identify",
     "measure_line",
     "measure_area",
 })
+#: 图标 key 别名：按钮的**高亮 key** 与顶部工具条区分（``side_zoom`` 独立高亮），
+#: 但图标复用 ``zoom_in`` 的那张，外观不变。
+_ICON_ALIAS = {"side_zoom": "zoom_in"}
 #: 会话型工具 key（独立常亮，不受地图工具切换影响；与顶部工具条同 key）。
 #: 「坐标定位」也归这里：点开气泡 → 按钮保持高亮表示"气泡在显示"，
 #: 关闭气泡（再点同按钮或气泡上的 ×）→ 按钮弹起，与分屏会话同一套高亮逻辑。
@@ -123,7 +130,7 @@ class SideToolBar:
             ("选择", "select_point", False),
             ("框选", "select_box", False),
             ("漫游", "pan", False),
-            ("缩放", "zoom_in", False),
+            ("缩放", "side_zoom", False),
             ("全图", "zoom_full", False),
             ("清除", "clear_selection", True),
             ("属性", "identify", False),
@@ -173,7 +180,8 @@ class SideToolBar:
         btn.setFont(font)
 
         btn.setToolTip(text)
-        btn.setIcon(tool_icons.icon(key, color, _ICON))
+        icon_key = _ICON_ALIAS.get(key, key)
+        btn.setIcon(tool_icons.icon(icon_key, color, _ICON))
         btn.setIconSize(QSize(_ICON, _ICON))
         btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         btn.setAutoRaise(True)
@@ -185,7 +193,7 @@ class SideToolBar:
         btn.clicked.connect(
             callback if callback is not None else (lambda checked=False, t=text: self._not_implemented(t))
         )
-        self._icon_items.append((btn, key))
+        self._icon_items.append((btn, icon_key))
         return btn
 
     @staticmethod
