@@ -16,6 +16,7 @@ from app.infra.logging import get_logger
 
 logger = get_logger(__name__)
 
+from app.ui.dialogs.selection_set import SelectionSetDialog
 from app.ui.docks.feature_info_dock import FeatureInfoDock
 from app.ui.tools.find_feature import FindFeatureTool
 from app.ui.tools.measure import MeasureAreaTool, MeasureLengthTool
@@ -23,6 +24,14 @@ from app.ui.tools.select_feature import (
     PointSelectTool,
     RectSelectTool,
 )
+
+
+#: 「操作指引」类提示的展示时长（秒）。这类提示是让用户**看完再动手**（"按住左键拉框"
+#: "请先选中要素"），3 秒常来不及；结果类提示保持 :data:`_NOTIFY_SECONDS`。
+_HINT_NOTIFY_SECONDS = 6
+
+#: 结果类提示的展示时长（秒）：与其它工具一致（重命名 2 / 删除 3 / 建数据 4）
+_NOTIFY_SECONDS = 3
 
 
 class MapToolsMixin:
@@ -72,10 +81,35 @@ class MapToolsMixin:
     def _on_select_box(self) -> None:
 
         self._select_box_tool = RectSelectTool(
-            self.canvas, visible_filter_getter=self.display_filter_for
+            self.canvas,
+            visible_filter_getter=self.display_filter_for,
+            on_select_complete=self._on_box_select_complete,
         )
         self.canvas.setMapTool(self._select_box_tool)
         self.tool_bar_builder.set_active("select_box")
+
+    # ===================================================== 选择集
+
+    def _on_box_select_complete(self) -> None:
+        """框选结束：弹出或刷新「选择集」面板。
+
+        已开着的就刷新 + 置前，不另开一个（面板是常驻观察窗，见
+        :class:`~app.ui.dialogs.selection_set.SelectionSetDialog`）。
+
+        **不调 ``activateWindow()``**：面板的承诺是「可继续用选择工具增减」，抢焦点会让
+        用户没法接着拖下一个框、也没法直接按 Delete 删选中——这一点与
+        ``_on_offline_download`` 的做法有意不同。
+        """
+        dlg = getattr(self, "_selection_set_dialog", None)
+        if dlg is None or sip.isdeleted(dlg):
+            dlg = SelectionSetDialog(self.canvas, parent=self)
+            self._selection_set_dialog = dlg
+        dlg.refresh()
+        if dlg.isMinimized():
+            dlg.showNormal()
+        else:
+            dlg.show()
+        dlg.raise_()
 
     def _on_clear_selection(self) -> None:
         """清除：清空**所有图层**的选中集，并抹掉临时绘制的辅助图形。
@@ -167,7 +201,8 @@ class MapToolsMixin:
             masked += 1
 
         if masked == 0:
-            self._notify("请先用点选 / 框选选中要显示的图形，再点「选择屏蔽」", level="info")
+            self._notify("请先用点选 / 框选选中要显示的图形，再点「选择屏蔽」",
+                         level="info", duration=_HINT_NOTIFY_SECONDS)
             return
         self._notify(f"已屏蔽 {masked} 个图层中未选中的图形（清除/改选不影响已屏蔽结果）")
 
@@ -232,13 +267,24 @@ class MapToolsMixin:
         except RuntimeError:
             return False
 
-    def _notify(self, message: str, level: str = "success") -> None:
-        """侧栏工具的结果提示：走浮动消息条，不自动关闭（由用户点 × 收起）。"""
+    def _notify(self, message: str, level: str = "success", duration: int = _NOTIFY_SECONDS) -> None:
+        """侧栏工具的结果提示：走浮动消息条，**过几秒自动收起**（默认 3 秒）。
+
+        以前这里不带 ``duration``（= 常驻，只能点 × 收起）：屏蔽 / 取消屏蔽 / 范围
+        裁剪这些操作会做很多次，条子老挂着挡视线，而且常驻提示被 × 关掉之后宿主那份
+        「有消息」状态还会残留（见 ``_relayout_floating_message_bar`` 的对账）。现在
+        与其它工具（重命名 2 秒、删除 3 秒、建数据 4 秒）一致走定时。
+
+        文案长也不用担心看不完：``FloatingMessageBar`` 的展示租约在**鼠标停在条上**
+        时会一直留着，移开后再重新计满一个时长才收。
+
+        **操作指引类**（让人看完再动手的）传 :data:`_HINT_NOTIFY_SECONDS`，3 秒常来不及。
+        """
         bar = getattr(self, "messageBar", None)
         if bar is None:
             return
         bar.pushMessage(message, level=Qgis.MessageLevel.Success if level == "success"
-                        else Qgis.MessageLevel.Info)
+                        else Qgis.MessageLevel.Info, duration=duration)
 
     # ===================================================== 范围裁剪
 
@@ -271,7 +317,8 @@ class MapToolsMixin:
             self._extent_clip_previous_tool = previous
         self.canvas.setMapTool(self._extent_clip_tool)
         self.side_toolbar.set_session_active("extent_clip", True)
-        self._notify("范围裁剪：在地图上按住左键拉一个矩形框", level="info")
+        self._notify("范围裁剪：在地图上按住左键拉一个矩形框",
+                     level="info", duration=_HINT_NOTIFY_SECONDS)
 
     def _apply_extent_clip(self, rect) -> None:
         """拉框完成：把各矢量图层过滤到框内（``rect`` 为画布 CRS 的矩形）。"""

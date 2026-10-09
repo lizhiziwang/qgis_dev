@@ -418,6 +418,14 @@ class WindowShellMixin:
         canvas = getattr(self, "canvas", None)
         if bar is None or canvas is None or not getattr(self, "_msg_active", False):
             return
+        if hasattr(bar, "has_message") and not bar.has_message():
+            # 用户点 × 把条目关掉了。C++ 侧删条目没有对外信号（见
+            # app/infra/messagebar/floating_bar.py 模块 docstring），我们这份
+            # 「有消息」状态不会跟着变；借重排的时机对一次账，否则画布一变窄
+            # （例如打开右侧某个 dock）就会把空条重新 show() 出来——空条没有条目、
+            # 也就没有 × 可点，用户关不掉，只能重启。
+            bar.dismiss()
+            return
         try:
             # 左侧让出永远置顶的悬浮工具条（画布坐标 (4, 3)、宽 52），消息条从
             # 其右侧开始，避免开头的图标/文字被工具条盖住；顶部 + 右侧各留 6px。

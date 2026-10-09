@@ -101,6 +101,18 @@ class FloatingMessageBar(QgsMessageBar):
         """
         self._dismiss()
 
+    def has_message(self) -> bool:
+        """条里当前**真的**有没有消息条目——「有没有消息」这件事的唯一事实来源。
+
+        用来发现用户点了 × ：C++ 侧删条目/过期都在内部完成、没有对外信号（见模块
+        docstring），本类那份租约状态不会跟着变。宿主在「要显示」之前拿这个对一次账，
+        就不会把空条重新显示出来——空条既没有内容、也没有 × 可点，用户关不掉。
+        """
+        try:
+            return bool(self.items())
+        except RuntimeError:
+            return False  # 窗口关闭流程中 C++ 对象已销毁
+
     # ---- 展示租约：push 即显示，到期即收起 ----
 
     # def _replace_items(self) -> None:

@@ -169,6 +169,8 @@ class MainWindow(
         self._flow_editor_window = None
         #: 离线下载弹窗（懒建单实例，保留用户勾选/进度状态）
         self._offline_download_dialog = None
+        #: 「选择集」面板（懒建单实例，保留窗口位置，见 MapToolsMixin._on_box_select_complete）
+        self._selection_set_dialog = None
         #: 可用离线任务列表（平台任务接口就绪后由此注入 TaskInfo，见 TaskInfo.from_dict）
         self.offline_tasks: list = []
         #: 数据管理 Dock 加载策略(image/spatial/dict 分流,见 app.core.util.local_layer_loader)

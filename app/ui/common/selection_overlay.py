@@ -100,7 +100,7 @@ class SelectionOverlay(QObject):
             return
         canvas_crs = self._canvas.mapSettings().destinationCrs()
         project = self._canvas.project() or QgsProject.instance()
-        added = 0
+        geoms: list[QgsGeometry] = []
         for layer in self._layers():
             fids = layer.selectedFeatureIds()
             if not fids:
@@ -113,15 +113,23 @@ class SelectionOverlay(QObject):
                     geom = feature.geometry()
                     if geom is None or geom.isNull() or geom.isEmpty():
                         continue
+                    if QgsWkbTypes.geometryType(geom.wkbType()) != QgsWkbTypes.PolygonGeometry:
+                        continue  # 本覆盖层是面类型的带子，点 / 线画不了
                     if xform is not None:
                         geom = QgsGeometry(geom)
                         geom.transform(xform)
-                    band.addGeometry(geom, None)
-                    added += 1
+                    geoms.append(geom)
             except RuntimeError:
                 continue  # 图层 / 画布已销毁
         try:
-            if added:
+            if geoms:
+                # **一次设入**，不要逐个 ``addGeometry``：后者是**超线性**的——内存
+                # 实测 5 千个选中要素 1.9 秒、2 万个 33 秒（QTBUG 级别的大坑），
+                # 框选一大片时会把界面活活冻住几十秒，连事件循环都进不去。
+                # 先合成一个多部件几何再设一次：同样两万个只要几十毫秒。
+                combined = QgsGeometry.collectGeometry(geoms)
+                combined.convertToMultiType()
+                band.setToGeometry(combined, None)
                 band.show()
             else:
                 band.hide()

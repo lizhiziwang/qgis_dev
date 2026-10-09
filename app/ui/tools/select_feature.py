@@ -6,7 +6,8 @@
   的要素；**多个图形叠压时只选最上面的那一个**（与 QGIS 的"点一下就选中你
   看到的那块"一致）；光标为**箭头**（对齐 QGIS 的选择手感）；
 - :class:`RectSelectTool` —— 左键拖拽画矩形，松开时选中矩形内的要素；
-  光标为**十字**（提示正在拖框）。
+  光标为**十字**（提示正在拖框）。可传 ``on_select_complete`` 回调，拖框收尾后
+  调用一次（主窗口据此弹「选择集」面板）；点选没有这个边界，不调用。
 
 两个工具都**显式** ``setCursor``：不设的话画布会沿用上一个工具遗留的光标
 （画完面之后是十字），看起来就像「选择工具的光标不对」。
@@ -63,16 +64,32 @@ logger = get_logger(__name__)
 class SelectFeatureToolBase(QgsMapTool):
     """点选 / 框选公共逻辑：按几何在可见矢量图层上选要素。"""
 
-    def __init__(self, canvas: "QgsMapCanvas", visible_filter_getter=None) -> None:
+    def __init__(
+        self, canvas: "QgsMapCanvas", visible_filter_getter=None, on_select_complete=None
+    ) -> None:
         """
         :param visible_filter_getter: 可选回调 ``(layer) -> callable(fid) -> bool``，
             返回该图层当前的「可见性」判定（选择屏蔽 / 范围裁剪）；``None`` = 无过滤。
             屏蔽与裁剪是**渲染级**过滤，要素本身还在图层里——不在这里把命中结果
             收窄，就会出现"屏蔽/裁剪后还能框选到看不见的图形"。
+        :param on_select_complete: 可选无参回调，**框选**拖拽结束、选中集已提交后
+            调用一次；主窗口据此弹出/刷新「选择集」面板。**点选不调用它**（点选是
+            单击即得，没有"选完这一批"的边界）。``None`` = 不通知——既有调用方与
+            测试传的都是 ``None``，行为不变。
         """
         super().__init__(canvas)
         self.canvas = canvas
         self._visible_filter_getter = visible_filter_getter
+        self._on_select_complete = on_select_complete
+
+    def _notify_select_complete(self) -> None:
+        """框选收尾通知外部；回调里的异常不该把选择本身带崩。"""
+        if self._on_select_complete is None:
+            return
+        try:
+            self._on_select_complete()
+        except Exception:  # noqa: BLE001 —— 通知失败只影响面板，不影响选中结果
+            logger.exception("框选完成回调失败")
 
     # -------------------------------------------------- 核心
 
@@ -257,8 +274,14 @@ class PointSelectTool(SelectFeatureToolBase):
 class RectSelectTool(SelectFeatureToolBase):
     """框选：左键拖拽画矩形，松开时选中矩形内要素。"""
 
-    def __init__(self, canvas: "QgsMapCanvas", visible_filter_getter=None) -> None:
-        super().__init__(canvas, visible_filter_getter=visible_filter_getter)
+    def __init__(
+        self, canvas: "QgsMapCanvas", visible_filter_getter=None, on_select_complete=None
+    ) -> None:
+        super().__init__(
+            canvas,
+            visible_filter_getter=visible_filter_getter,
+            on_select_complete=on_select_complete,
+        )
         # 框选用十字：提示「正在拖框」，也避免沿用上一个工具遗留的光标
         self.setCursor(Qt.CursorShape.CrossCursor)
         self._start: Optional[QgsPointXY] = None
@@ -293,6 +316,9 @@ class RectSelectTool(SelectFeatureToolBase):
         self._select_geometry(
             QgsGeometry.fromRect(rect), self._selection_behavior(event)
         )
+        # 选中集已提交，通知主窗口弹「选择集」面板。放在零尺寸早返回之后：
+        # 误点一下不弹，但"拖了框却没框到东西"要弹（面板显示 0 个，是有用信息）。
+        self._notify_select_complete()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         if event.key() == Qt.Key.Key_Escape:

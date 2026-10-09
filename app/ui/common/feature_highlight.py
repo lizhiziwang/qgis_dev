@@ -11,6 +11,10 @@
     hl.clear()      # 隐藏（实例保留，可继续 flash 别的要素）
     hl.close()      # 收尾：停定时器 + 清高亮带 + 重绘画布
 
+默认「闪完保持可见」是给「补缝 / 合并」那类**要对照着挑要素**的对话框用的。
+只想闪一下说明「是哪一个」的场景接 :attr:`FeatureHighlighter.finished`，在回调里
+自己 ``clear()`` 收掉（默认行为不受影响）。
+
 ``canvas`` 为 None（无画布调用场景 / 测试）时全部方法退化为无操作。
 """
 
@@ -20,7 +24,7 @@ from typing import Optional
 
 from qgis.core import QgsVectorLayer
 from qgis.gui import QgsRubberBand
-from qgis.PyQt.QtCore import QObject, QTimer
+from qgis.PyQt.QtCore import QObject, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QColor
 
 #: 闪烁间隔（毫秒）与总切换次数（偶数次 → 结束时高亮带可见）
@@ -33,6 +37,10 @@ _FLASH_COLOR = (255, 0, 220)
 
 class FeatureHighlighter(QObject):
     """把要素画到临时橡皮筋上并闪烁几下；闪完保持可见便于对照。"""
+
+    #: 一次闪烁跑完（高亮带已按默认行为留在可见态）。调用方可以据此再收掉它——
+    #: 例如「选择集」面板只要闪一下说明「是哪一个」，不需要它一直亮着对照。
+    finished = pyqtSignal()
 
     def __init__(self, canvas, layer: QgsVectorLayer, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
@@ -125,6 +133,7 @@ class FeatureHighlighter(QObject):
                     self._band.show()  # 闪完保持高亮，便于对照
                 except RuntimeError:
                     pass
+            self.finished.emit()
 
     def _stop_flash(self) -> None:
         if self._timer is not None:
