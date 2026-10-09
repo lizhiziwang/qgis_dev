@@ -15,6 +15,7 @@ from qgis.core import (
     QgsFeature,
     QgsFeatureRequest,
     QgsField,
+    QgsProject,
     QgsVectorLayer,
 )
 from qgis.PyQt.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, QTimer, QVariant, pyqtSignal
@@ -899,6 +900,11 @@ class AttributeDock(QDockWidget):
         self.topParent = parent
         self.layer = layer
         self.show_ids = list(show_ids) if show_ids else []
+        # 图层被删（任何入口：面板删除 / 分组删除 / 算法替换 / 清空工程）时，
+        # **抢在其 C++ 对象销毁前**关闭本 Dock。否则 Dock 仍持有已删图层，视图
+        # 重绘会经 model.flags/data 访问它 → RuntimeError: wrapped C/C++ object
+        # of type QgsVectorLayer has been deleted。
+        QgsProject.instance().layersWillBeRemoved.connect(self._on_layers_will_be_removed)
         self.content_widget = PagedAttributeTableWidget(layer, page_size, self, filter_str=filter_str, show_ids=show_ids)
         self.setWidget(self.content_widget)
         self.content_widget.zoom_to_map.connect(self.zoom_to_map)
@@ -913,6 +919,21 @@ class AttributeDock(QDockWidget):
         self.content_widget = PagedAttributeTableWidget(layer, page_size, self, filter_str=filter_str, show_ids=show_ids)
         self.setWidget(self.content_widget)
         self.setWindowTitle(title)
+
+    def _on_layers_will_be_removed(self, layer_ids) -> None:
+        """本 Dock 正显示的图层即将被删 → 立即关闭（见 ``__init__`` 注释）。
+
+        关掉后视图不再重绘；``closeEvent`` 会取消后台流式并清子集，避免后续
+        访问已删的 ``QgsVectorLayer``。
+        """
+        if self.layer is None or not layer_ids:
+            return
+        try:
+            lid = self.layer.id()
+        except RuntimeError:
+            return  # 已是悬空对象，无需处理
+        if lid in set(layer_ids):
+            self.close()
 
     def closeEvent(self, event) -> None:
         try:
