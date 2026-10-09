@@ -23,7 +23,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from qgis.core import QgsWkbTypes
+from qgis.core import QgsProject, QgsWkbTypes
 from qgis.gui import QgsHighlight
 
 from app.core.domain.identify import IdentifyResult
@@ -101,6 +101,12 @@ class FeatureInfoDock(QDockWidget):
         )
         self.setMinimumSize(320, 200)
         self._highlight: Optional[QgsHighlight] = None
+        self.layer = None
+        self.feature = None
+        self.result = None
+        # 图层被删（任何入口）时清空本面板：否则残留的已删图层引用会在「复制信息」
+        # 等处抛 RuntimeError: wrapped C/C++ object ... has been deleted。
+        QgsProject.instance().layersWillBeRemoved.connect(self._on_layers_will_be_removed)
         self._init_ui()
 
     def _init_ui(self) -> None:
@@ -156,6 +162,29 @@ class FeatureInfoDock(QDockWidget):
             self._load_info()
         self.show()
         self.raise_()
+
+    def clear(self) -> None:
+        """清空已显示的数据并断开对图层的引用（图层被移除时调用）。"""
+        if self._highlight is not None:
+            self._highlight.hide()
+            self._highlight = None
+        self.layer = None
+        self.feature = None
+        self.result = None
+        self.title_label.clear()
+        self.info_text.clear()
+        self.info_text.set_row_tips([])
+
+    def _on_layers_will_be_removed(self, layer_ids) -> None:
+        """本面板正显示其要素的图层即将被删 → 抢在 C++ 对象销毁前清空数据。"""
+        if self.layer is None or not layer_ids:
+            return
+        try:
+            lid = self.layer.id()
+        except RuntimeError:
+            return  # 已是悬空对象，无需处理
+        if lid in set(layer_ids):
+            self.clear()
 
     def _display_fid(self) -> str:
         """标题里的要素号：富化结果取 OBJECTID，矢量结果取 feature.id()。"""
@@ -275,25 +304,28 @@ class FeatureInfoDock(QDockWidget):
     def _display_and_tip(self, name, info_map: dict) -> tuple:
         """字段显示名与悬浮提示。
 
-        显示名：有别名用别名，否则用真实字段名。悬浮提示：有别名时第一行
-        ``别名（真实字段名）``、第二行字段类型（有长度带在类型后，如
-        ``String(50)``）；无别名时只显示真实字段名。
+        显示名：有别名用别名，否则用真实字段名。悬浮提示：第一行为
+        ``别名（真实字段名）``（无别名时即真实字段名），第二行字段类型
+        （有长度带在类型后，如 ``String(50)``）。
         """
         real = str(name)
         alias, type_name, length = info_map.get(name) or info_map.get(real.lower()) or ("", "", 0)
         if alias and alias != real:
+            display = alias
             tip = f"{alias}（{real}）"
-            if type_name:
-                tip += f"\n{type_name}"
-                if length > 0:
-                    tip += f"({length})"
-            return alias, tip
-        return real, real
+        else:
+            display = real
+            tip = real
+        if type_name:
+            tip += f"\n{type_name}"
+            if length > 0:
+                tip += f"({length})"
+        return display, tip
 
     def _copy(self) -> None:
-        if not hasattr(self, "layer"):
+        if self.layer is None:
             return
-        result = getattr(self, "result", None)
+        result = self.result
         attrs = dict(result.attributes) if result is not None else {}
         if result is not None and result.is_raster and not attrs:
             plain = f"图层: {result.layer.name()}\n"
