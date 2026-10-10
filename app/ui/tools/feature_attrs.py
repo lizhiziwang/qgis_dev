@@ -225,7 +225,98 @@ def new_feature_attributes(
     return attrs
 
 
+#: 「编号 / 名称」类字段名关键字（小写子串匹配，含别名），没有显示表达式时的兜底
+_LABEL_TOKENS = ("编号", "编码", "图斑号", "code", "tbbh", "bh", "名称", "name")
+
+
+def _field_text(feature, layer: "QgsVectorLayer", name: str) -> str:
+    """要素在 ``name`` 字段上的可展示文本；字段不存在 / 无值返回空串。"""
+    try:
+        idx = layer.fields().indexOf(name)
+        if idx < 0:
+            return ""
+        value = feature.attributes()[idx]
+    except Exception:  # noqa: BLE001 —— 取不到就当没值，别把调用方带崩
+        return ""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() in ("", "null", "none", "<null>") else text
+
+
+def feature_label(feature, layer: "QgsVectorLayer") -> str:
+    """要素对外的**显示名**（弹窗标题之类）；取不到就退回要素 ID 字符串。
+
+    优先级（第一个取到值即返回）：
+
+    1. 图层自己配置的**显示表达式 / 显示字段** —— 全应用其它面板展示要素名也用它，
+       成果数据里通常就是图斑编号；
+    2. 名称 / 别名命中 :data:`_LABEL_TOKENS` 的字段的**值**；
+    3. ``str(feature.id())``。
+
+    GUID 类字段（``mzguid`` / ``FGUID``…）永不参与第 2 步：那是一串 uuid，认不出来。
+    """
+    if feature is None:
+        return ""
+    label = _label_from_display(layer, feature)
+    if label:
+        return label
+
+    try:
+        fields = layer.fields()
+        attrs = feature.attributes()
+    except Exception:  # noqa: BLE001
+        fields, attrs = None, None
+    if fields is not None:
+        for idx in range(min(fields.count(), len(attrs))):
+            field = fields.at(idx)
+            key = f"{field.name()} {field_alias(field)}".strip().lower()
+            if key in _UID_TOKENS:
+                continue  # uuid 类字段认不出要素，跳过
+            if not any(token in key for token in _LABEL_TOKENS):
+                continue
+            text = _field_text(feature, layer, field.name())
+            if text:
+                return text
+    try:
+        return str(feature.id())
+    except Exception:  # noqa: BLE001 —— 销毁流程中
+        return ""
+
+
+def _label_from_display(layer: "QgsVectorLayer", feature) -> str:
+    """图层显示字段 / 显示表达式的值（取不到返回空串）。"""
+    try:
+        display = (layer.displayField() or "").strip()
+    except Exception:  # noqa: BLE001
+        display = ""
+    if display:
+        text = _field_text(feature, layer, display)
+        if text:
+            return text
+    try:
+        raw = (layer.displayExpression() or "").strip()
+    except Exception:  # noqa: BLE001
+        return ""
+    if not raw:
+        return ""
+    try:
+        from qgis.core import QgsExpression
+
+        expression = QgsExpression(raw)
+        if expression.hasParserError():
+            return ""
+        value = expression.evaluate(feature, layer.createExpressionContext())
+    except Exception:  # noqa: BLE001 —— 表达式脏了不该挡住标题
+        return ""
+    if value is None:
+        return ""
+    text = str(value).strip()
+    return "" if text.lower() in ("", "null", "none", "<null>") else text
+
+
 __all__ = [
+    "feature_label",
     "field_alias",
     "new_feature_attributes",
     "refresh_area_fields",

@@ -931,6 +931,38 @@ def app_qss(t: Theme) -> str:
         background: {t.input_bg};
         image: url({_check_url(t.input_focus)});
     }}
+    /* 树里的勾选框（节点列表的节点行）：QTreeView 此前没有 indicator 规则，
+       勾选框会退化成原生样式 —— Windows 原生样式常画成"实心方块、没有对勾"。
+       与上面「组织列」那份同一套画法。 */
+    QTreeView::indicator {{
+        width: 14px;
+        height: 14px;
+        border: 1px solid {t.input_border};
+        border-radius: 2px;
+        background: {t.input_bg};
+    }}
+    QTreeView::indicator:hover {{
+        border-color: {t.input_focus};
+    }}
+    QTreeView::indicator:checked {{
+        border: 1px solid {t.input_focus};
+        background: {t.input_bg};
+        image: url({_check_url(t.input_focus)});
+    }}
+    /* 节点列表那张表：X / Y 格是**直接在单元格里编辑**的。全局 QLineEdit 那条带
+       ``padding: 4px 6px`` + 1px 边框，光文字就占 22px，塞进表格行里必然被切 ——
+       这里把上下内距收掉只留左右，并把编辑文字也居中（与只读态对齐）。
+       行高本身在代码里显式设（字体高 + 12），不靠 QSS padding 撑。 */
+    QTableWidget#NodeListTable QLineEdit {{
+        padding: 0 4px;
+        border-radius: 0;
+        text-align: center;
+    }}
+    /* 环切换页签（放在表格外面）：轻量一点，别抢表格的视觉重心 */
+    QTabBar#NodeListRingBar::tab {{
+        padding: 4px 14px;
+        margin-right: 2px;
+    }}
     QHeaderView::section {{
         background-color: {t.menu_bg};
         color: {t.menu_text};

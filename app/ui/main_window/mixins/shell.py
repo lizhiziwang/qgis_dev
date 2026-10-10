@@ -62,7 +62,7 @@ class WindowShellMixin:
         canvas.setCanvasColor(QColor(ThemeManager.instance().current().canvas_bg))
         canvas.enableAntiAliasing(True)
         # ---- 编辑撤销 / 重做快捷键（Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y）----
-        # 编辑工具（点选/框选 Delete、要素编辑、合并、分割、属性录入）每个动作都
+        # 编辑工具（点选/框选 Delete、节点编辑、合并、分割、属性录入）每个动作都
         # 是一条 beginEditCommand…endEditCommand 记录，存在图层 undoStack；这里
         # 把快捷键接到「当前编辑图层」的撤销/重做上（QGIS 删除选中同一套语义）。
         # 作用域限定画布子树（WidgetWithChildrenShortcut）：焦点在画布时才生效，

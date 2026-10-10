@@ -30,15 +30,25 @@ from app.ui.common.icons import Icons
 class BaseDialog(FramelessMixin, QDialog):
     """所有自定义 Dialog 的基类（无边框 + 精简标题栏）。"""
 
-    def __init__(self, parent=None, title: str = "") -> None:
+    def __init__(
+        self,
+        parent=None,
+        title: str = "",
+        *,
+        show_min_button: bool = True,
+        show_max_button: bool = True,
+    ) -> None:
         super().__init__(parent)
         if title:
             self.setWindowTitle(title)
         # 无边框 + 精简标题栏：只留 图标/标题/最小化/最大化/关闭
+        # （小弹窗不需要最小化 / 最大化时，构造时传 False 即可，别去 hide 按钮）
         self.title_bar = self.enable_frameless(
             show_user_button=False,
             show_theme_button=False,
             show_mode_switch=False,
+            show_min_button=show_min_button,
+            show_max_button=show_max_button,
         )
         # 内容容器：标题栏之下，撑满剩余空间；子类布局经 setLayout 挂到它上面
         self._content = QWidget(self)

@@ -1,6 +1,6 @@
-"""要素编辑（顶点级几何编辑）工具。
+"""节点编辑（顶点级几何编辑）工具。
 
-编辑工具条「要素编辑」按钮激活的交互工具：**点击矢量要素即可编辑其几何图形**
+编辑工具条「节点编辑」按钮激活的交互工具：**点击矢量要素即可编辑其几何图形**
 （顶点级编辑，与旧 :class:`component.map_tool.FindFeatureTool` 无关）：
 
 - **左键单击**要素 → 载入该要素几何：红色描边 + 青色顶点手柄；
@@ -92,6 +92,8 @@ class FeatureEditTool(QgsMapTool):
         #: 拖拽状态
         self._drag_vid: QgsVertexId | None = None
         self._drag_orig: QgsPoint | None = None
+        #: 已挂 geometryChanged 的图层（收尾时断开）
+        self._hooked_layer = None
         self.setCursor(Qt.CursorShape.CrossCursor)
 
     # -------------------------------------------------- 工具生命周期
@@ -184,7 +186,7 @@ class FeatureEditTool(QgsMapTool):
         if fid is None:
             if self._fid is not None:
                 self._clear_overlay()
-                self._hint("已退出要素编辑；点击要素重新载入，Esc 退出工具")
+                self._hint("已退出节点编辑；点击要素重新载入，Esc 退出工具")
             return
         if self._fid == fid:
             return  # 已在编辑该要素，忽略重复点击
@@ -219,6 +221,9 @@ class FeatureEditTool(QgsMapTool):
         self._clear_overlay()
         self._layer = layer
         self._fid = fid
+        # 外部改动（撤销 / 重做 / 别的工具动了同一要素）要**立刻**反映到手柄与描边，
+        # 不能等用户下次下手势才同步 —— 否则撤销后画布上还停在旧位置
+        self._connect_layer_geometry(layer)
         # 拷贝一份作为编辑预览模型：原要素仍在图层里，提交时经 changeGeometry
         # 把修改写回**原 fid**（不新建要素、属性不变）。
         self._geom = QgsGeometry(geom)
@@ -382,7 +387,7 @@ class FeatureEditTool(QgsMapTool):
             return False
         if not layer.isEditable():
             self._clear_overlay()
-            self._hint("图层已停止编辑，要素编辑状态已退出")
+            self._hint("图层已停止编辑，节点编辑状态已退出")
             return False
         feature = layer.getFeature(self._fid)
         geom = feature.geometry() if feature.isValid() else None
@@ -591,8 +596,38 @@ class FeatureEditTool(QgsMapTool):
         band.addGeometry(self._geom, self._layer.crs() if self._layer is not None else None)
         band.show()
 
+    def _connect_layer_geometry(self, layer) -> None:
+        """挂上图层几何变化信号：撤销 / 重做 / 别的工具改了几何，手柄与描边要立刻跟上。"""
+        self._disconnect_layer_geometry()
+        try:
+            layer.geometryChanged.connect(self._on_layer_geometry_changed)
+            self._hooked_layer = layer
+        except Exception:  # noqa: BLE001 —— 挂不上也不该挡住编辑
+            self._hooked_layer = None
+            logger.warning("节点编辑：挂接 geometryChanged 失败", exc_info=True)
+
+    def _disconnect_layer_geometry(self) -> None:
+        layer = getattr(self, "_hooked_layer", None)
+        self._hooked_layer = None
+        if layer is None:
+            return
+        try:
+            layer.geometryChanged.disconnect(self._on_layer_geometry_changed)
+        except Exception:  # noqa: BLE001 —— 收尾场景属正常
+            pass
+
+    def _on_layer_geometry_changed(self, *_args) -> None:
+        """图层几何被改了：**推迟一拍**再同步。
+
+        推迟是必须的：``changeGeometry`` 在本工具自己的编辑命令窗口内同步发这个信号，
+        当场重读/重建手柄会踩在命令栈上（仓库约束：这类动作一律 ``singleShot(0)``）。
+        ``_sync_from_layer`` 自己会用 ``asWkb()`` 判断几何是否真变了，没变就不重建。
+        """
+        QTimer.singleShot(0, self._sync_from_layer)
+
     def _clear_overlay(self) -> None:
         """清空当前编辑状态（手柄 + 描边 + 模型 + 图层选中）。"""
+        self._disconnect_layer_geometry()
         if self._fid is not None and self._layer is not None:
             try:
                 self._layer.deselect([self._fid])
