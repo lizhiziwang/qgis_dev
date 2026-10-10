@@ -4,7 +4,7 @@
 
 Dock 内容顶部带一条 QGIS 风格的头部工具条（只发信号，行为由主窗口实现）：
 
-- 打开图层样式面板 → ``style_panel_requested``
+- 打开图层渲染设置（自建图层属性对话框 → 渲染 tab）→ ``render_tab_requested``
 - 添加图层组 → ``add_group_requested``
 - 删除图层/组 → ``remove_requested``
 - 全部展开 / 全部折叠 → ``expand_all_requested`` / ``collapse_all_requested``
@@ -72,7 +72,7 @@ _THEME_ICONS = {
 # (按钮属性名, 图标键, 信号名, 悬停提示)
 # 顺序按 QGIS 桌面图层面板：样式 → 添加组 → 删除 → 展开/折叠所有 → 上移/下移
 _HEADER_SPECS = (
-    ("btn_style_panel", "style", "style_panel_requested", "打开图层样式面板"),
+    ("btn_render_tab", "style", "render_tab_requested", "打开图层渲染设置"),
     ("btn_add_group", "group", "add_group_requested", "添加图层组"),
     ("btn_remove", "remove", "remove_requested", "删除图层/组"),
     ("btn_expand_all", "expand", "expand_all_requested", "全部展开"),
@@ -373,7 +373,7 @@ class LayerDock(QDockWidget):
     context_menu_requested = pyqtSignal(object, object)  # (QgsMapLayer, QPoint 全局坐标)
     layer_clicked = pyqtSignal(object)
     label_toggle_requested = pyqtSignal(object, bool)  # (QgsVectorLayer, 期望的标注开关)
-    style_panel_requested = pyqtSignal()
+    render_tab_requested = pyqtSignal()
     add_group_requested = pyqtSignal()
     remove_requested = pyqtSignal()
     expand_all_requested = pyqtSignal()

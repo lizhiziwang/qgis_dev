@@ -81,12 +81,25 @@ def _form_row(form: QFormLayout, label: str, widget: QWidget) -> None:
 class CustomBasemapDialog(BaseDialog):
     """自定义底图配置对话框（新增 / 编辑共用字段主体）。"""
 
-    def __init__(self, parent: Optional[QWidget] = None, title: str = "添加自定义底图") -> None:
+    def __init__(
+        self,
+        parent: Optional[QWidget] = None,
+        title: str = "添加自定义底图",
+        groups: Optional[list[str]] = None,
+    ) -> None:
+        """构造自定义底图 dialog。
+
+        :param groups: 已有分组名列表（v2 schema 持久化顺序）。传入后「分组」字段
+            为可编辑下拉（:class:`QComboBox`），用户可从已有分组里选，也可自由
+            输入新分组名（→ "建新分组并加条目"连贯动作）。缺省 / 列表为空时只
+            含占位项「自定义底图」。传入 ``None`` 同空列表。
+        """
         super().__init__(parent, title=title)
         # 缩小 BaseDialog 默认 800×600 的最小尺寸到紧凑表单
         self.setMinimumSize(0, 0)
         self.resize(640, 580)
         self.setModal(True)
+        self._initial_groups: list[str] = list(groups) if groups else []
         self._build_ui()
 
     # ============================================================== UI
@@ -106,7 +119,20 @@ class CustomBasemapDialog(BaseDialog):
         self.name_edit.setPlaceholderText("如 内网影像")
         _form_row(form, "名称", self.name_edit)
 
-        self.group_edit = QLineEdit("自定义底图")
+        # 分组 = 可编辑下拉：Dock 当前 _groups_order 为预设项（"先建组后加条目"
+        # 仍可通过手动输入新名实现，键入后 setCurrentText 直接生效）。空列表时
+        # 也保留「自定义底图」兜底选项，避免只输入未分组时的“看起来无选项”误导。
+        self.group_edit = QComboBox()
+        self.group_edit.setEditable(True)
+        seen: set[str] = set()
+        for g in self._initial_groups:
+            if g and g not in seen:
+                self.group_edit.addItem(g)
+                seen.add(g)
+        if "自定义底图" not in seen:
+            self.group_edit.addItem("自定义底图")
+            seen.add("自定义底图")
+        self.group_edit.setCurrentText("自定义底图")
         _form_row(form, "分组", self.group_edit)
 
         self.type_combo = QComboBox()
@@ -326,7 +352,7 @@ class CustomBasemapDialog(BaseDialog):
         """按当前控件状态组装 :class:`OnlineBasemapDef`（确定后由调用方持久化）。"""
         svc = self.type_combo.currentData() or "xyz"
         data: dict[str, str] = {
-            "group": self.group_edit.text().strip() or "自定义底图",
+            "group": self.group_edit.currentText().strip() or "自定义底图",
             "name": self.name_edit.text().strip(),
             "type": svc,
             "url": self.url_edit.text().strip(),

@@ -58,6 +58,29 @@ class LayerDialogsMixin:
             layer.triggerRepaint()
             self.canvas.refresh()
 
+    def _show_render_tab(self, layer) -> None:
+        """头部「打开图层渲染设置」：弹自建 :class:`LayerPropertiesDialog` 并跳到「渲染」tab。
+
+        与 :meth:`_show_style_editor` 的区别：
+
+        - 前者用 QGIS 原生 :class:`QgsRendererPropertiesDialog`（chrome 不随本应用主题）；
+        - 本方法用项目自建的 :class:`LayerPropertiesDialog`（跟随 :class:`ThemeManager`
+          与无边框标题栏），且**入口默认跳到「渲染」页**——避免用户在多个 tab 间再翻。
+
+        tab 跳转按 tab 文本"渲染"匹配（:class:`LayerPropertiesDialog._TAB_SPECS` 表里
+        第 5 个就是「渲染」→ :class:`RenderTab`）。点「确定 / 应用」后由 dialog 内部
+        :meth:`_apply_all` 触发 ``triggerRepaint`` + ``canvas.refresh``，本方法不重复触发
+        （避免在信号栈内重入画布，参见 :meth:`_show_label_settings` 的同型注释）。
+        """
+        from app.ui.dialogs.layer_properties.dialog import LayerPropertiesDialog
+
+        dlg = LayerPropertiesDialog(layer, canvas=self.canvas, parent=self)
+        for i in range(dlg.tabs.count()):
+            if dlg.tabs.tabText(i) == "渲染":
+                dlg.tabs.setCurrentIndex(i)
+                break
+        dlg.exec()
+
     def _show_label_settings(self, layer) -> None:
         """打开标注设置。
 

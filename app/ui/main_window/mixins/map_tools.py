@@ -49,6 +49,8 @@ class MapToolsMixin:
             return "zoom_in"
         if tool is self._zoom_out_tool:
             return "zoom_out"
+        if tool is self._side_zoom_tool:
+            return "side_zoom"
         return {
             "PointSelectTool": "select_point",
             "RectSelectTool": "select_box",
@@ -452,6 +454,17 @@ class MapToolsMixin:
     def _on_zoom_out(self) -> None:
         self.canvas.setMapTool(self._zoom_out_tool)
         self.tool_bar_builder.set_active("zoom_out")
+
+    def _on_side_zoom(self) -> None:
+        """侧栏「缩放」：单击地图放大、按住 Shift 单击缩小（区别于顶部「放大」）。
+
+        顶部「放大 / 缩小」仍是各自独立的 :class:`QgsMapToolZoom`；本入口用
+        :class:`~app.ui.tools.pan_zoom.ZoomClickTool`，独立 ``side_zoom`` key
+        只高亮侧栏按钮，不联动顶部「放大」。
+        """
+        self.canvas.setMapTool(self._side_zoom_tool)
+        self.tool_bar_builder.set_active("side_zoom")
+        self.side_toolbar.set_active("side_zoom")
 
     def _measure_tool(self, kind: str):
         """懒建并缓存测量工具。

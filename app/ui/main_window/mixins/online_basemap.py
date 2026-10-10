@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from qgis.core import Qgis
 from qgis.PyQt.QtWidgets import (
     QDialog,
@@ -21,9 +23,14 @@ from app.core.domain.basemap import (
     install_referer_preprocessor,
 )
 from app.env.config import (
+    add_online_basemap_group_to_yaml,
     append_online_basemap_to_yaml,
+    load_online_basemap_groups,
     load_online_basemaps,
+    reassign_online_basemap_group_in_basemaps,
     remove_online_basemap_from_yaml,
+    remove_online_basemap_group_from_yaml,
+    reorder_online_basemap_groups_in_yaml,
     set_map_keys,
     update_online_basemap_in_yaml,
 )
@@ -52,10 +59,15 @@ class OnlineBasemapMixin:
                 on_manage_keys=self._manage_basemap_keys,
                 on_edit=self._edit_online_basemap,
                 on_delete=self._delete_online_basemap,
+                on_add_group=self._add_online_basemap_group,
+                on_rename_group=self._rename_online_basemap_group,
+                on_delete_group=self._delete_online_basemap_group,
+                on_move_to_group=self._move_online_basemap_to_group,
+                on_reorder_groups=self._reorder_online_basemap_groups,
             )
             self._online_basemap_dock = dock
             self.place_right_dock(dock)
-        dock.set_layers(self._online_basemap_defs())
+        dock.set_layers(self._online_basemap_defs(), self._online_basemap_groups())
         dock.show()
         dock.raise_()
 
@@ -74,6 +86,18 @@ class OnlineBasemapMixin:
             return load_online_basemaps(self._online_basemaps_config_path())
         except Exception as exc:  # noqa: BLE001
             logger.warning("读取在线底图清单失败：%s", exc, exc_info=True)
+            return []
+
+    def _online_basemap_groups(self) -> list[str]:
+        """读取独立清单文件里的分组列表（文件缺失 / 读取失败返回空列表）。
+
+        与 :meth:`_online_basemap_defs` 同步供 :meth:`_on_online_basemap` 一次性刷新
+        Dock 树：v2 dict schema 的 ``groups:`` 段是 Dock 显示顺序的权威。
+        """
+        try:
+            return load_online_basemap_groups(self._online_basemaps_config_path())
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("读取在线底图分组失败：%s", exc, exc_info=True)
             return []
 
     @staticmethod
@@ -134,16 +158,19 @@ class OnlineBasemapMixin:
             )
             return False
 
-    def _add_custom_basemap(self) -> bool:
-        """Dock 右键「添加自定义底图」：弹窗配置后走模板同一条持久化路径。
+    def _add_custom_basemap(self, groups: list[str]) -> bool:
+        """Dock 右键「添加在线底图 ▸ 自定义底图...」：弹窗配置后走模板同一条持久化路径。
 
-        弹窗组装好 :class:`OnlineBasemapDef`（type=xyz/arcgis/arcgisfeature/wms/wmts），
-        委托 :meth:`_add_online_basemap_template` 写回 ``online_basemap_config.yaml`` 并
-        刷新 Dock 树（去重 / messageBar / 异常处理全复用）。取消返回 False。
-        按已定决策**不**加载画布——自定义底图先进树，双击再出图。
+        ``groups`` 为 Dock 当前 ``_groups_order`` 拷贝，作为 dialog 「分组」字段
+        的可编辑下拉预设项（已存在分组一键选 / 键入新名 = "先建组后加条目"连贯
+        动作）。弹窗组装好 :class:`OnlineBasemapDef`（type=xyz/arcgis/arcgisfeature/
+        wms/wmts），委托 :meth:`_add_online_basemap_template` 写回
+        ``online_basemap_config.yaml`` 并刷新 Dock 树（去重 / messageBar / 异常
+        处理全复用）。取消返回 ``False``。按已定决策**不**加载画布——自定义底图
+        先进树，双击再出图。
         """
 
-        dlg = CustomBasemapDialog(self)
+        dlg = CustomBasemapDialog(self, groups=groups)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return False
         return self._add_online_basemap_template(dlg.basemap_def())
@@ -326,6 +353,277 @@ class OnlineBasemapMixin:
             )
             return False
 
+    def _add_online_basemap_group(self, name: str) -> bool:
+        """Dock 右键「新建分组」：在 ``groups:`` 段追加 ``- name`` 并刷新树。
+
+        校验交给 config 原语（非空 / 长度限制 / 拒绝 YAML 保留字符、重名检测）；
+        错误原样弹到 messageBar（不闷拑）。返回是否成功。
+        """
+        if not name:
+            self.messageBar.pushMessage(
+                "分组名不能为空",
+                level=Qgis.MessageLevel.Warning,
+                duration=3,
+            )
+            return False
+        try:
+            path = self._online_basemaps_config_path()
+            add_online_basemap_group_to_yaml(path, name)
+            dock = getattr(self, "_online_basemap_dock", None)
+            if dock is not None:
+                dock.set_layers(self._online_basemap_defs(), self._online_basemap_groups())
+            self.messageBar.pushMessage(
+                f"已新建分组：{name}",
+                level=Qgis.MessageLevel.Info,
+                duration=2,
+            )
+            logger.info("新建在线底图分组：%s", name)
+            return True
+        except ValueError as exc:
+            self.messageBar.pushMessage(
+                f"新建分组失败：{exc}",
+                level=Qgis.MessageLevel.Warning,
+                duration=3,
+            )
+            return False
+        except Exception as exc:  # noqa: BLE001
+            logger.error("新建分组失败 %s：%s", name, exc, exc_info=True)
+            self.messageBar.pushMessage(
+                f"新建分组失败：{exc}",
+                level=Qgis.MessageLevel.Critical,
+                duration=5,
+            )
+            return False
+
+    def _rename_online_basemap_group(self, old: str, new: str) -> bool:
+        """Dock 分组右键「重命名分组」：重命名分两步——先重名（新增 new）、重分配
+        所有 ``group: old`` 条目为 ``new``、最后从 ``groups:`` 段删除 ``- old``。
+
+        两步中间出了异常会留下不一致状态——但 config 原语都是文本原子写、调用
+        异常多在磁盘层（权限 / 空间），该场景下保持失败比提供一个「事务包装」更
+        可观察可调试。原样报 messageBar。重名与重名原名（old==new）也在此拦截。
+        """
+        if not new or new == old:
+            self.messageBar.pushMessage(
+                "分组名未变更",
+                level=Qgis.MessageLevel.Info,
+                duration=2,
+            )
+            return False
+        try:
+            path = self._online_basemaps_config_path()
+            # 1) 新名补进 groups 段（不重才让走）
+            add_online_basemap_group_to_yaml(path, new)
+            # 2) 把 basemaps: 段所有 group: old 改为 group: new
+            reassign_online_basemap_group_in_basemaps(path, old, new)
+            # 3) 从 groups: 段删 - old
+            remove_online_basemap_group_from_yaml(path, old, cascade=True)
+            dock = getattr(self, "_online_basemap_dock", None)
+            if dock is not None:
+                dock.set_layers(self._online_basemap_defs(), self._online_basemap_groups())
+            self.messageBar.pushMessage(
+                f"已重命名分组：「{old}」→「{new}」",
+                level=Qgis.MessageLevel.Info,
+                duration=3,
+            )
+            logger.info("重命名在线底图分组：%s → %s", old, new)
+            return True
+        except ValueError as exc:
+            # 包括「分组已存在」/「分组名非法」
+            self.messageBar.pushMessage(
+                f"重命名分组失败：{exc}",
+                level=Qgis.MessageLevel.Warning,
+                duration=3,
+            )
+            return False
+        except Exception as exc:  # noqa: BLE001
+            logger.error("重命名分组失败 %s→%s：%s", old, new, exc, exc_info=True)
+            self.messageBar.pushMessage(
+                f"重命名分组失败：{exc}",
+                level=Qgis.MessageLevel.Critical,
+                duration=5,
+            )
+            return False
+
+    def _delete_online_basemap_group(self, name: str) -> bool:
+        """Dock 分组右键「删除分组」：空分组直接删，非空则弹选择 dialog。
+
+        选顶：
+
+        - 选目标分组重分配 → 走 :func:`reassign_online_basemap_group_in_basemaps`
+          + :func:`remove_online_basemap_group_from_yaml`（cascade=False 隐含 “已无引用”）；
+        - 一并删除该分组下所有底图 → cascade=True 一次性踢出；
+        - 取消 → 不动。
+
+        返回是否成功。 messageBar 提示与 日志都走。
+        """
+        try:
+            path = self._online_basemaps_config_path()
+            defs = load_online_basemaps(path)
+            current = load_online_basemap_groups(path)
+            # 是否还有引用
+            referenced = [d for d in defs if (d.group or "在线底图") == name]
+            if not referenced:
+                # 空分组：直接删（cascade=True 以防老版本遗留了引用未及时清理）
+                remove_online_basemap_group_from_yaml(path, name, cascade=True)
+                dock = getattr(self, "_online_basemap_dock", None)
+                if dock is not None:
+                    dock.set_layers(self._online_basemap_defs(), self._online_basemap_groups())
+                self.messageBar.pushMessage(
+                    f"已删除空分组：{name}",
+                    level=Qgis.MessageLevel.Info,
+                    duration=2,
+                )
+                logger.info("删除在线底图分组（空）：%s", name)
+                return True
+
+            # 非空：弹选择 dialog
+            other_groups = [g for g in current if g != name]
+            dlg = _DeleteGroupDialog(self, name=name, other_groups=other_groups, count=len(referenced))
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return False
+            choice, target = dlg.result()
+            if choice == "reassign":
+                if not target:
+                    return False
+                reassign_online_basemap_group_in_basemaps(path, name, target)
+                remove_online_basemap_group_from_yaml(path, name, cascade=True)
+                self.messageBar.pushMessage(
+                    f"已将「{name}」下 {len(referenced)} 条底图移到「{target}」，并删除「{name}」",
+                    level=Qgis.MessageLevel.Info,
+                    duration=3,
+                )
+                logger.info("重分配+删除分组：%s → %s，count=%d", name, target, len(referenced))
+            elif choice == "cascade":
+                # 二次确认：破坏性
+                ret = QMessageBox.question(
+                    self,
+                    "删除分组与底图",
+                    f"将同时删除「{name}」下 {len(referenced)} 条在线底图配置。\n"
+                    "已加载到工程的图层不受影响，但下次无法再从列表添加。\n\n"
+                    "确定继续吗？",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if ret != QMessageBox.StandardButton.Yes:
+                    return False
+                remove_online_basemap_group_from_yaml(path, name, cascade=True)
+                self.messageBar.pushMessage(
+                    f"已连同「{name}」分组及其 {len(referenced)} 条底图一并删除",
+                    level=Qgis.MessageLevel.Info,
+                    duration=3,
+                )
+                logger.info("级联删除分组：%s，count=%d", name, len(referenced))
+            else:
+                return False
+            dock = getattr(self, "_online_basemap_dock", None)
+            if dock is not None:
+                dock.set_layers(self._online_basemap_defs(), self._online_basemap_groups())
+            return True
+        except ValueError as exc:
+            self.messageBar.pushMessage(
+                f"删除分组失败：{exc}",
+                level=Qgis.MessageLevel.Warning,
+                duration=3,
+            )
+            return False
+        except Exception as exc:  # noqa: BLE001
+            logger.error("删除分组失败 %s：%s", name, exc, exc_info=True)
+            self.messageBar.pushMessage(
+                f"删除分组失败：{exc}",
+                level=Qgis.MessageLevel.Critical,
+                duration=5,
+            )
+            return False
+
+    def _move_online_basemap_to_group(self, d, new_group: str) -> bool:
+        """Dock 叶子右键「移动到分组」：把该条目 ``group`` 改写为 ``new_group``
+        并文本写回（注释/其他条目保留）。
+
+        “不需重名校验”（Dock 侧 _append_move_to_group_submenu 已排除了本组名）；
+        “与理是否实际改了” 在这里拦截（选了本组 = noop，直接返成功不落盘）。
+        改完同刷 Dock 树。
+        """
+        if not new_group or (d.group or "在线底图") == new_group:
+            return True
+        try:
+            path = self._online_basemaps_config_path()
+            current = load_online_basemaps(path)
+            if d not in current:
+                self.messageBar.pushMessage(
+                    "在线底图清单已变化（找不到该连接），请刷新后重试",
+                    level=Qgis.MessageLevel.Warning,
+                    duration=3,
+                )
+                return False
+            new_def = replace(d, group=new_group)
+            update_online_basemap_in_yaml(path, d, new_def)
+            # 顺便同步 groups 段（目标 group 不存在则补进）
+            try:
+                add_online_basemap_group_to_yaml(path, new_group)
+            except ValueError:
+                pass  # 已存在 → 忽略
+            dock = getattr(self, "_online_basemap_dock", None)
+            if dock is not None:
+                dock.set_layers(self._online_basemap_defs(), self._online_basemap_groups())
+            self.messageBar.pushMessage(
+                f"已将「{d.name}」移到分组「{new_group}」",
+                level=Qgis.MessageLevel.Info,
+                duration=2,
+            )
+            logger.info("移动在线底图到分组：%s → %s", d.name, new_group)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            logger.error("移动在线底图到分组失败 %s→%s：%s", d.name, new_group, exc, exc_info=True)
+            self.messageBar.pushMessage(
+                f"移动到分组失败：{exc}",
+                level=Qgis.MessageLevel.Critical,
+                duration=5,
+            )
+            return False
+
+    def _reorder_online_basemap_groups(self, new_order: list[str]) -> bool:
+        """Dock 分组拖拽排序后调本方法：把 ``groups:`` 段按新顺序重写 + 刷新树。
+
+        ``new_order`` 为 Dock 拖拽完成后给的新顺序（与当前 :attr:`_groups_order`
+        不同才被回调）。底层调 :func:`reorder_online_basemap_groups_in_yaml`
+        写 groups 段，**不动** basemaps 段（basemaps 段是条目列表、顺序不在拖动
+        语义范围；Dock 显示顺序由 :meth:`_on_online_basemap` 下次 set_layers
+        以新 groups 重传保证）。
+
+        失败 → 弹 messageBar Critical，**不**改 :attr:`_groups_order` 内存状态
+        （Dock 内部已变更，下次 set_layers 以磁盘为准重同步）。
+        """
+        path = self._online_basemaps_config_path()
+        if path is None:
+            self.messageBar.pushMessage(
+                "重排分组失败：找不到独立清单文件路径",
+                level=Qgis.MessageLevel.Critical,
+                duration=5,
+            )
+            return False
+        try:
+            new_groups = reorder_online_basemap_groups_in_yaml(path, list(new_order))
+        except (ValueError, OSError) as exc:
+            logger.error("重排分组失败 %s：%s", new_order, exc, exc_info=True)
+            self.messageBar.pushMessage(
+                f"重排分组失败：{exc}",
+                level=Qgis.MessageLevel.Critical,
+                duration=5,
+            )
+            return False
+        # 刷新树 / memory；新 groups 已透传 dock
+        if self._online_basemap_dock is not None:
+            self._online_basemap_dock.set_layers(
+                self._online_basemap_defs(), new_groups
+            )
+        self.messageBar.pushMessage(
+            f"已重排分组（{len(new_groups)} 个）",
+            level=Qgis.MessageLevel.Info,
+            duration=2,
+        )
+        return True
+
     def _add_online_basemap(self, tile) -> bool:
         """把一条在线底图配置加进工程「参考图层」分组顶部。
 
@@ -387,3 +685,65 @@ class OnlineBasemapMixin:
             return False
         finally:
             self._end_layer_loading()
+
+
+class _DeleteGroupDialog(QDialog):
+    """删除非空分组的选择 dialog：移到其他分组 / 一并删除条目 / 取消。
+
+    不引导到外层 messageBar。Dock 调 :meth:`OnlineBasemapMixin._delete_online_basemap_group`
+    调本类；用户取消或关窗 → ``exec()`` 返回 ``Rejected``，不落盘。
+
+    UI：QRadioButton 互斥“移到其他分组”/“一并删除条目”；后者的目标分组下拉框
+    (QComboBox) 装可用分组选项。返回 ``(choice, target)``：
+
+    - ``choice == "reassign"`` + ``target != None`` → 走 reassign+remove 路径；
+    - ``choice == "cascade"`` + ``target == None`` → 一并删除；
+    - ``choice == "reassign"`` 且 ``target == None``（无其他分组可选）→
+      禁止 Submit（只有 cascade 能选）；组合框 “无可选目标”。
+    """
+
+    def __init__(self, parent, name: str, other_groups: list[str], count: int) -> None:
+        super().__init__(parent)
+        self.setWindowTitle(f"删除分组「{name}」")
+        from qgis.PyQt.QtWidgets import (
+            QComboBox,
+            QDialogButtonBox,
+            QLabel,
+            QRadioButton,
+            QVBoxLayout,
+        )
+        layout = QVBoxLayout(self)
+        layout.addWidget(
+            QLabel(
+                f"分组「{name}」下还有 {count} 条底图，请选择："
+            )
+        )
+        self._reassign_radio = QRadioButton("移到其他分组：")
+        self._cascade_radio = QRadioButton("连同底图一并删除")
+        if other_groups:
+            self._reassign_radio.setChecked(True)
+        else:
+            # 没其他分组可分配 → cascade 唯一选项
+            self._reassign_radio.setEnabled(False)
+            self._cascade_radio.setChecked(True)
+        self._target_combo = QComboBox()
+        self._target_combo.addItems(other_groups)
+        if not other_groups:
+            self._target_combo.setEnabled(False)
+            self._target_combo.addItem("（无可选目标分组）")
+        layout.addWidget(self._reassign_radio)
+        layout.addWidget(self._target_combo)
+        layout.addWidget(self._cascade_radio)
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def result(self) -> tuple[str, str | None]:
+        """返回 ``(choice, target)``——``choice`` 是 ``"reassign"`` / ``"cascade"``。"""
+        if self._cascade_radio.isChecked():
+            return "cascade", None
+        target = self._target_combo.currentText() if self._target_combo.isEnabled() else None
+        return "reassign", target

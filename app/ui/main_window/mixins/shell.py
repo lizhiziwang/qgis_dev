@@ -142,7 +142,7 @@ class WindowShellMixin:
                 "select_point": self._on_select_point,
                 "select_box": self._on_select_box,
                 "pan": self._on_pan,
-                "zoom_in": self._on_zoom_in,
+                "side_zoom": self._on_side_zoom,
                 "zoom_full": self._on_zoom_full,
                 "identify": self._on_identify,
                 "clear_selection": self._on_clear_selection,
@@ -313,8 +313,8 @@ class WindowShellMixin:
         self.layer_dock.layer_clicked.connect(self._on_layer_clicked_in_dock)
         # 行尾「标注」开关（圆点 + 标注二字）：开关该图层标注（独立开关，不互斥）
         self.layer_dock.label_toggle_requested.connect(self._on_layer_label_toggle)
-        # 头部工具条：样式面板 / 添加图层组 / 删除 / 全部展开 / 全部折叠 / 上移 / 下移
-        self.layer_dock.style_panel_requested.connect(self._on_header_style_panel)
+        # 头部工具条：渲染设置（自建对话框 → 渲染 tab）/ 添加图层组 / 删除 / 全部展开 / 全部折叠 / 上移 / 下移
+        self.layer_dock.render_tab_requested.connect(self._on_header_render_tab)
         self.layer_dock.add_group_requested.connect(self._on_add_layer_group)
         self.layer_dock.remove_requested.connect(self._on_header_remove)
         self.layer_dock.expand_all_requested.connect(self._on_header_expand_all)
