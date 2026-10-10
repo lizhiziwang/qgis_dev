@@ -85,6 +85,20 @@ def _field_kind(field: "QgsField") -> str | None:
     return None
 
 
+#: 由**数据源自动赋值**的标识字段（保存时自己会填 / 重算，用户不该手改）。
+#: 与 :data:`_UID_TOKENS` 分开：那些是"新要素必须重新生成 uuid"的列，分割 / 分解时
+#: 要赋新值；objectid 这类是自增 / 自维护的，赋 uuid 反而是错的。
+_AUTO_ID_TOKENS = ("objectid", "object_id", "ogc_fid", "fid", "gid", "rowid")
+
+
+def auto_id_field_index(fields: "QgsFields") -> int | None:
+    """数据源自动赋值的标识字段下标（objectid / ogc_fid / fid…）；无则 ``None``。"""
+    for idx, field in enumerate(fields):
+        if field.name().strip().lower() in _AUTO_ID_TOKENS:
+            return idx
+    return None
+
+
 def uid_field_index(fields: "QgsFields") -> int | None:
     """全局唯一标识字段（FGUID / GUID / GlobalID）的下标；无则 ``None``。"""
     for idx, field in enumerate(fields):
@@ -316,6 +330,7 @@ def _label_from_display(layer: "QgsVectorLayer", feature) -> str:
 
 
 __all__ = [
+    "auto_id_field_index",
     "feature_label",
     "field_alias",
     "new_feature_attributes",

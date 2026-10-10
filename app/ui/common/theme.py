@@ -785,6 +785,19 @@ def app_qss(t: Theme) -> str:
         color: {t.text_secondary};
     }}
     QComboBox::drop-down {{ border: none; width: 22px; background-color: transparent; }}
+    /* 日期 / 时间输入框的日历按钮：**必须显式给 ::drop-down 宽度和箭头图**。
+       Qt 的规矩是——只要给控件套了边框/背景（上面的共用规则就套了），原生下拉
+       按钮就不再画；不给 ::drop-down，日历弹窗**根本点不开**（用户报的"日期字段
+       没法快速赋值日期"）。画法与组合框保持一致。 */
+    QDateEdit::drop-down, QDateTimeEdit::drop-down, QTimeEdit::drop-down {{
+        border: none; width: 22px; background-color: transparent;
+    }}
+    QDateEdit::down-arrow, QDateTimeEdit::down-arrow, QTimeEdit::down-arrow {{
+        image: url({_arrow_url(t.menu_text)});
+        width: 10px;
+        height: 8px;
+        margin-right: 4px;
+    }}
     QComboBox::down-arrow {{
         /* 用生成的下三角 PNG（见 _arrow_url）；border 三角会渲染成实心块。
            宽度/高度/边距放基础规则里；弹出（:on 状态）时只用 :on 规则换图，

@@ -1,13 +1,17 @@
-"""单要素属性录入 Dock（右侧面板）。
+"""单要素属性录入弹窗。
 
 「属性录入」工具（见 :mod:`app.ui.tools.attribute_entry`）点击要素后，由
-本 Dock 展示该要素的**全部属性字段**并提供就地编辑；点「确认修改」把改动
-一次性写回图层的编辑缓冲（一个可整体撤销的编辑命令）。
+:class:`AttributeEntryDialog` 展示该要素的**全部属性字段**并提供就地编辑；
+点「确认修改」把改动一次性写回图层的编辑缓冲（一个可整体撤销的编辑命令）。
+
+原先是右侧的 ``QDockWidget``：字段多时要把右侧挤得很宽，而点要素录入时更需要
+"就地把这一条改完"，所以改成**非模态弹窗**（与「节点列表」同一套做法：单实例
+复用、``show()/raise_()``）。
 
 编辑约束：
 
 - 属性录入**不需要**用户先「开始编辑」：工具条激活该工具时会让目标图层
-  自动进入编辑态；本 Dock 载入 / 确认时仍校验 ``layer.isEditable()``，
+  自动进入编辑态；本弹窗载入 / 确认时仍校验 ``layer.isEditable()``，
   以防激活后图层被外部停止编辑（此时只提示、不动数据）；
 - 写回走 QGIS 编辑缓冲 ``changeAttributeValue``（同一 fid 原地改属性，
   不新建要素），``beginEditCommand`` 把一次确认内的多个字段改动包成
@@ -20,8 +24,9 @@
 - 文本（String 等）→ ``QLineEdit``（空文本 = 空值 NULL）；
 - 整型 / 浮点 → ``QLineEdit`` + 数值校验（空文本 = NULL；解析失败拒绝保存）；
 - 布尔 → 三态 ``QCheckBox``（半选 = NULL，避免把 NULL 悄悄改成 False）；
-- 日期 / 时间 / 日期时间 → ``QDateEdit`` / ``QTimeEdit`` / ``QDateTimeEdit``
-  （值为最小值 1900-01-01 表示 NULL，显示"（空）"占位文字）；
+- 日期 / 时间 / 日期时间 → :class:`app.ui.common.date_field.DatePickerField`
+  （文本框内嵌 × + ▼ 弹选择器；**空文本 = NULL**）。不用 ``QDateEdit`` 一族：
+  它们在本应用主题下日历点不开，还带着上下微调箭头；
 - 字段编辑器配置为 Hidden 的字段跳过不显示。
 """
 
@@ -29,42 +34,54 @@ from __future__ import annotations
 
 from typing import Callable, Optional
 
+from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QDate, QDateTime, QTime, Qt, QVariant
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
-    QDateEdit,
-    QDateTimeEdit,
-    QDockWidget,
+    QFrame,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
     QScrollArea,
-    QTimeEdit,
     QVBoxLayout,
     QWidget,
 )
 
 from qgis.core import QgsField, QgsVectorLayer
 
-from app.ui.tools.feature_attrs import field_alias, uid_field_index
+from app.infra.logging import get_logger
+from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.date_field import make_date_field
+from app.ui.common.theme import ThemeManager
+from app.ui.tools.feature_attrs import (
+    auto_id_field_index,
+    field_alias,
+    uid_field_index,
+)
 
-#: 表示"空值"的日期下限（早于该值按 NULL 处理 / 显示"（空）"）
-NULL_DATE = QDate(1900, 1, 1)
-NULL_TIME = QTime(0, 0)
-NULL_DATETIME = QDateTime(NULL_DATE, NULL_TIME)
+logger = get_logger(__name__)
 
 
-class AttributeEntryDock(QDockWidget):
-    """右侧 Dock：展示 + 编辑单个要素的全部属性，确认后写回编辑缓冲。"""
+class AttributeEntryDialog(BaseDialog):
+    """属性录入**弹窗**：展示 + 编辑单个要素的全部属性，确认后写回编辑缓冲。
 
-    def __init__(self, main_window) -> None:
-        super().__init__("属性录入", main_window)
-        self.setObjectName("AttributeEntryDock")
-        self.setAllowedAreas(
-            Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea
-        )
-        self.setMinimumWidth(280)
+    原先是右侧的 ``QDockWidget``。改成弹窗是因为它天生与画布争地方：字段多时
+    要把右侧挤得很宽，而用户点要素时更需要的是"就地把这一条改完"。与「节点列表」
+    同一套做法：非模态、单实例复用、``show()/raise_()``。
+    """
+
+    def __init__(self, main_window, parent=None) -> None:
+        super().__init__(parent or main_window, title="属性录入")
+        self.setMinimumSize(420, 420)
+        self.resize(460, 560)
+        self.setModal(False)
+
+        #: 画布（最小化小条要浮在它底部；测试桩可能没有 canvas）
+        self._canvas = getattr(main_window, "canvas", None)
+        #: 最小化小条（懒建）与最小化前的几何
+        self._mini_bar = None
+        self._restore_geo = None
 
         #: 正在编辑的目标图层（非 owner；可能随时被停止编辑）
         self._layer: QgsVectorLayer | None = None
@@ -78,9 +95,19 @@ class AttributeEntryDock(QDockWidget):
         #: 确认后用于重新快照的读值回调
         self._readers: list[tuple[int, Callable[[], object]]] = []
 
-        central = QWidget()
-        root = QVBoxLayout(central)
-        root.setContentsMargins(6, 6, 6, 6)
+        # 最小化按钮改成"缩成画布底部小条"，不是系统的 showMinimized
+        # （无边框弹窗最小化后只剩任务栏一个条目，等于消失了）。FramelessMixin
+        # 在 enable_frameless 里把它接到了 showMinimized，这里改接。
+        try:
+            self.title_bar.minimize_requested.disconnect()
+        except TypeError:
+            pass
+        self.title_bar.minimize_requested.connect(self._minimize_to_bar)
+
+        # 裸构造的 QVBoxLayout 再 setLayout —— BaseDialog 的约定（见其 docstring），
+        # 用 QVBoxLayout(self) 内容会静默不显示
+        root = QVBoxLayout()
+        root.setContentsMargins(12, 10, 12, 10)
 
         self._head = QLabel("激活「属性录入」工具后，点击地图上的要素以载入其属性。")
         self._head.setWordWrap(True)
@@ -102,13 +129,20 @@ class AttributeEntryDock(QDockWidget):
         self._status.setWordWrap(True)
         root.addWidget(self._status)
 
-        #: 确认按钮（载入要素成功后启用）
+        # 按钮行：右下角、按文字宽度（不加进布局拉伸，就不会铺满整行）
         self._apply_btn = QPushButton("确认修改")
         self._apply_btn.setEnabled(False)
         self._apply_btn.clicked.connect(self.apply_edits)
-        root.addWidget(self._apply_btn)
+        self._cancel_btn = QPushButton("取消")
+        self._cancel_btn.setToolTip("关闭窗口，不保存本次修改")
+        self._cancel_btn.clicked.connect(self.reject)
+        btns = QHBoxLayout()
+        btns.addStretch(1)
+        btns.addWidget(self._cancel_btn)
+        btns.addWidget(self._apply_btn)
+        root.addLayout(btns)
 
-        self.setWidget(central)
+        self.setLayout(root)
 
     # ========================================================== 外部 API
 
@@ -139,6 +173,8 @@ class AttributeEntryDock(QDockWidget):
         # 手工改这个值会破坏"一要素一标识"的约定，分割 / 分解 / 绘制的赋新值逻辑
         # 也会被绕过。这里仍展示（用户要看得见），但输入框只读。
         uid_idx = uid_field_index(fields)
+        # objectid / ogc_fid 这类由数据源自动赋值的列同样不给手改（保存时自己会填）
+        auto_id_idx = auto_id_field_index(fields)
         added = 0
         for i in range(fields.count()):
             fld = fields[i]
@@ -149,13 +185,18 @@ class AttributeEntryDock(QDockWidget):
             except Exception:  # noqa: BLE001
                 pass
             value = attrs.get(i)
-            readonly = i == uid_idx
+            readonly = i in (uid_idx, auto_id_idx)
             row_widget, editor, read = self._make_editor(fld, value, readonly=readonly)
             if row_widget is None:
                 continue
-            name_label = QLabel(fld.name())
-            name_label.setToolTip(field_alias(fld) or fld.name())
-            name_label.setMinimumWidth(96)
+            # 显示**字段别名**（成果数据的别名才是中文可读的那个），没有别名才退回
+            # 字段名；真实字段名放 tooltip 里备查。与属性表 / 属性查询同一口径。
+            alias = field_alias(fld)
+            name_label = QLabel(alias or fld.name())
+            name_label.setToolTip(fld.name() if alias else "")
+            # 标签别占太宽：太宽会把输入框挤出去、出现横向滚动条；但太窄又会把
+            # 中文别名折成两三行
+            name_label.setMinimumWidth(100)
             name_label.setMaximumWidth(140)
             name_label.setWordWrap(True)
             hb = QHBoxLayout()
@@ -263,56 +304,38 @@ class AttributeEntryDock(QDockWidget):
             return box, cb, read_bool
 
         if ftype == QVariant.Date:
-            de = QDateEdit()
-            de.setCalendarPopup(True)
-            de.setDisplayFormat("yyyy-MM-dd")
-            de.setSpecialValueText("（空）")
-            de.setMinimumDate(NULL_DATE)
-            de.setDate(NULL_DATE if value is None else self._to_qdate(value))
+            # 日期用自定义的「文本框（内嵌 ×）+ ▼ 弹日历」：QDateEdit 在本应用里
+            # 日历点不开（主题样式接管了它的绘制），见 app.ui.common.date_field
+            field, read_date = make_date_field(value, self._to_qdate, "date")
             if readonly:
-                de.setReadOnly(True)
-                de.setToolTip(tip)
+                field.setEnabled(False)
+                field.setToolTip(tip)
             box = QWidget()
-
-            def read_date(de=de) -> object:
-                return None if de.date() <= NULL_DATE else de.date()
-
-            return box, de, read_date
+            return box, field, read_date
 
         if ftype == QVariant.Time:
-            te = QTimeEdit()
-            te.setDisplayFormat("HH:mm:ss")
-            te.setSpecialValueText("（空）")
-            te.setMinimumTime(NULL_TIME)
-            te.setTime(NULL_TIME if value is None else self._to_qtime(value))
+            # 时间 / 日期时间都换成自定义控件（见 make_date_field）：QTimeEdit /
+            # QDateTimeEdit 带着上下微调箭头，而且日历点不开（用户实报「修改时间」
+            # 那一行还是老样子）
+            field, read_time = make_date_field(value, self._to_qtime, "time")
             if readonly:
-                te.setReadOnly(True)
-                te.setToolTip(tip)
+                field.setEnabled(False)
+                field.setToolTip(tip)
             box = QWidget()
-
-            def read_time(te=te) -> object:
-                return None if te.time() <= NULL_TIME else te.time()
-
-            return box, te, read_time
+            return box, field, read_time
 
         if ftype == QVariant.DateTime:
-            dte = QDateTimeEdit()
-            dte.setDisplayFormat("yyyy-MM-dd HH:mm:ss")
-            dte.setSpecialValueText("（空）")
-            dte.setMinimumDateTime(NULL_DATETIME)
-            dte.setDateTime(NULL_DATETIME if value is None else self._to_qdatetime(value))
+            field, read_datetime = make_date_field(value, self._to_qdatetime, "datetime")
             if readonly:
-                dte.setReadOnly(True)
-                dte.setToolTip(tip)
+                field.setEnabled(False)
+                field.setToolTip(tip)
             box = QWidget()
-
-            def read_datetime(dte=dte) -> object:
-                return None if dte.dateTime() <= NULL_DATETIME else dte.dateTime()
-
-            return box, dte, read_datetime
+            return box, field, read_datetime
 
         # 数值 / 文本：QLineEdit，空文本 = NULL
         line = QLineEdit()
+        # 有内容时右端出现 × 一键清空（QLineEdit 自带，与 QGIS 的输入框一致）
+        line.setClearButtonEnabled(True)
         if value is None:
             line.setText("")
         else:
@@ -394,6 +417,88 @@ class AttributeEntryDock(QDockWidget):
     def _set_status(self, text: str) -> None:
         self._status.setText(text)
 
+    # ============================================== 关闭 / 最小化
+
+    def done(self, result: int) -> None:  # noqa: N802 —— Qt 命名
+        """关闭（× / 取消 / Esc / 程序化）：收起小条，并清掉要素的选中高亮。
+
+        QDialog 的所有关闭路径最终都汇到 ``done``，是唯一的收口点（与
+        「节点列表」同一做法）。
+        """
+        self._hide_mini_bar()
+        self._clear_selection()
+        super().done(result)
+
+    def showEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        # 从最小化小条恢复、或点要素重新载入时，小条要让位
+        self._hide_mini_bar()
+        super().showEvent(event)
+
+    def _clear_selection(self) -> None:
+        """清掉本要素的选中高亮（#8）。
+
+        **只清"正好是这一个"的选中集**：载入时工具把选中集替换成了该要素
+        （见 :meth:`AttributeEntryTool._select_only`），确认无误才动；用户若在
+        别处改了选中集就不碰。
+        """
+        layer = self._layer
+        fid = self._fid
+        if layer is None or fid is None or sip.isdeleted(layer):
+            return
+        try:
+            if list(layer.selectedFeatureIds()) != [fid]:
+                return
+            layer.removeSelection()
+        except (RuntimeError, AttributeError):
+            logger.debug("清除属性录入选中高亮失败（不影响关闭）", exc_info=True)
+
+    def _minimize_to_bar(self) -> None:
+        """最小化：藏起弹窗，在画布底部浮出一条小条（#9）。"""
+        if self._canvas is None:  # 测试桩 / 无画布：退回系统最小化
+            self.showMinimized()
+            return
+        self._restore_geo = self.geometry()
+        self.hide()
+        bar = self._ensure_mini_bar()
+        bar.set_summary(self._summary_text())
+        bar.show()
+        bar.raise_()
+        bar.reposition()
+
+    def _restore_from_bar(self) -> None:
+        self._hide_mini_bar()
+        if self._restore_geo is not None:
+            self.setGeometry(self._restore_geo)
+        self.show()
+        self.raise_()
+
+    def _summary_text(self) -> str:
+        """小条上那行字：图层 + 要素（拿不到就退回弹窗标题）。"""
+        layer = self._layer
+        if layer is None or self._fid is None:
+            return self.windowTitle()
+        try:
+            name = layer.name()
+            feature = layer.getFeature(self._fid)
+            for idx in (auto_id_field_index(layer.fields()), uid_field_index(layer.fields())):
+                if idx is not None and feature.isValid():
+                    value = feature.attribute(idx)
+                    if value not in (None, ""):
+                        return f"{name} · {value}"
+        except (RuntimeError, AttributeError):
+            pass
+        return f"{name} · FID {self._fid}"
+
+    def _ensure_mini_bar(self):
+        if self._mini_bar is None or sip.isdeleted(self._mini_bar):
+            self._mini_bar = _MinimizedBar(self._canvas, on_restore=self._restore_from_bar)
+        return self._mini_bar
+
+    def _hide_mini_bar(self) -> None:
+        bar = self._mini_bar
+        if bar is not None and not sip.isdeleted(bar):
+            bar.hide()
+
     # -------------------------------------------------- 类型换算
 
     @staticmethod
@@ -410,7 +515,7 @@ class AttributeEntryDock(QDockWidget):
 
     @staticmethod
     def _to_qdate(value) -> QDate:
-        """QDate / python date → QDate（QDateEdit 可显示）。"""
+        """QDate / python date → QDate。"""
         if isinstance(value, QDate):
             return value
         try:
@@ -442,4 +547,72 @@ class AttributeEntryDock(QDockWidget):
         return QDateTime(dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second)
 
 
-__all__ = ["AttributeEntryDock"]
+class _MinimizedBar(QFrame):
+    """弹窗最小化后浮在**画布底部**的细条：一行摘要 + 「恢复」。
+
+    作为画布的子控件（仓库既定覆盖层模式，见
+    :class:`app.ui.tools.measure.MeasureReadout`）：不占布局、不挤地图，画布
+    尺寸变化靠 ``mapCanvasRefreshed`` 回调重新贴底。
+
+    与测量读数条的唯一区别：**这里不能透明穿透鼠标**——「恢复」按钮要能点。
+    """
+
+    def __init__(self, canvas, on_restore) -> None:
+        super().__init__(canvas)
+        self._canvas = canvas
+        self._on_restore = on_restore
+        self.setObjectName("AttrEntryMinBar")
+        self.setCursor(Qt.CursorShape.ArrowCursor)
+        self.hide()
+
+        row = QHBoxLayout(self)
+        row.setContentsMargins(10, 4, 10, 4)
+        row.setSpacing(8)
+        self._label = QLabel("")
+        row.addWidget(self._label, 1)
+        restore = QPushButton("恢复")
+        restore.setObjectName("AttrEntryMinRestore")
+        restore.setCursor(Qt.CursorShape.ArrowCursor)
+        restore.clicked.connect(self._restore)
+        row.addWidget(restore)
+
+        self._apply_style()
+        ThemeManager.instance().theme_changed.connect(self._on_theme_changed)
+        canvas.mapCanvasRefreshed.connect(self.reposition)
+
+    def set_summary(self, text: str) -> None:
+        self._label.setText(text)
+        self._label.setToolTip(text)
+
+    def _restore(self) -> None:
+        self._on_restore()
+
+    def _on_theme_changed(self, _theme=None) -> None:
+        self._apply_style()
+        self.reposition()
+
+    def _apply_style(self) -> None:
+        t = ThemeManager.instance().current()
+        self.setStyleSheet(
+            f"""
+            QFrame#AttrEntryMinBar {{
+                background-color: {t.input_bg};
+                border: 1px solid {t.input_border};
+                border-radius: 4px;
+            }}
+            QFrame#AttrEntryMinBar QLabel {{ color: {t.menu_text}; font-weight: 600; }}
+            QPushButton#AttrEntryMinRestore {{ padding: 2px 12px; }}
+            """
+        )
+
+    def reposition(self) -> None:
+        """贴画布底边、横跨整个宽度（画布 resize 后由 ``mapCanvasRefreshed`` 校正）。"""
+        try:
+            self.setGeometry(0, max(self._canvas.height() - self.sizeHint().height(), 0),
+                             self._canvas.width(), self.sizeHint().height())
+        except RuntimeError:  # 画布 C++ 对象已销毁
+            pass
+
+
+__all__ = ["AttributeEntryDialog"]
+

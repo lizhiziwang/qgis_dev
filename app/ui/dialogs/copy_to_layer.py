@@ -45,6 +45,7 @@ from qgis.PyQt.QtWidgets import (
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.widgets import make_table
+from app.ui.common.widgets import CenteredCheckDelegate
 from app.ui.tools.copy_to_layer import (
     mappable_source_fields,
     mappable_target_fields,
@@ -203,6 +204,7 @@ class CopyToLayerDialog(BaseDialog):
         layout.addLayout(attr_row)
 
         self.table = make_table(["", "目标字段", "源字段", "校验"], parent=self)
+        self.table.setItemDelegate(CenteredCheckDelegate(self.table))
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self.table.verticalHeader().setVisible(False)
         header = self.table.horizontalHeader()

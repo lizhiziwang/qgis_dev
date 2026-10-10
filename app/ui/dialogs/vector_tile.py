@@ -27,6 +27,7 @@ from app.core.domain.tiles import TileJob, TileService
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.ui.common.algo_desc import make_description_browser
+from app.ui.common.widgets import CenteredCheckDelegate
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.widgets import open_file_dir
 
@@ -115,6 +116,7 @@ class VectorTileDialog(BaseDialog):
         row.setSpacing(8)
         row.addWidget(QLabel("输入图层"))
         self.list_widget = QListWidget()
+        self.list_widget.setItemDelegate(CenteredCheckDelegate(self.list_widget))
         self.list_widget.setFixedHeight(130)
         self.list_widget.itemClicked.connect(self._on_layer_clicked)
         self._populate_layers()

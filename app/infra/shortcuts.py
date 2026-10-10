@@ -59,6 +59,8 @@ DEFAULT_SHORTCUTS: tuple[ShortcutSpec, ...] = (
     ShortcutSpec("exit_app", "退出", "Ctrl+Q"),
     ShortcutSpec("log_dock", "日志面板", "Ctrl+L"),
     ShortcutSpec("flow_editor", "流程节点编辑器", "Ctrl+Shift+F"),
+    ShortcutSpec("snapping_toggle", "磁性捕捉开关", "S"),
+    ShortcutSpec("tracing_toggle", "追踪", "T"),
     # 鼠标修饰键：点选 / 框选时的选择行为（展示用，不可改——见 editable 的说明）
     ShortcutSpec("select_add", "点选/框选：追加选择", "Ctrl + 点击/拖框", editable=False, mouse=True),
     ShortcutSpec("select_remove", "点选/框选：移除选择", "Shift + 点击/拖框", editable=False, mouse=True),

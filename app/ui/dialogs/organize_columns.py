@@ -26,6 +26,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.widgets import CenteredCheckDelegate
 
 
 class OrganizeColumnsDialog(BaseDialog):
@@ -62,6 +63,7 @@ class OrganizeColumnsDialog(BaseDialog):
         main.addWidget(hint)
 
         self._list = QListWidget()
+        self._list.setItemDelegate(CenteredCheckDelegate(self._list))
         self._list.setObjectName("OrganizeColumnsList")
         # 行高由字体决定（约 14px），给 14px 勾选框留出上下间隔，避免相邻行勾选框相接。
         # 不能用 QSS 的 ::item padding / min-height 撑高：那只会把绘制矩形变高而布局

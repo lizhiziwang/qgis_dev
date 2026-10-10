@@ -55,6 +55,14 @@ def delete_selected_features(
         return None
     layer.endEditCommand()
 
+    # **清掉选中集**：要素已经删了，留着一堆死 fid 没有意义；更要紧的是选中集不变就
+    # 不发 ``selectionChanged``，选中高亮覆盖层（SelectionOverlay）不会重画——它的
+    # 带子上还留着**删除前那份几何**，画在所有图层之上，看着就像"没删掉"（高亮把
+    # 原图形挡住了）。清一下让覆盖层跟着空掉。
+    try:
+        layer.removeSelection()
+    except RuntimeError:
+        pass
     # 要素已删，空间索引缓存失效 → 清掉让下次命中重建
     clear_spatial_index(layer)
     return len(fids)

@@ -52,8 +52,6 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QMessageBox,
     QPushButton,
-    QStyle,
-    QStyledItemDelegate,
     QTabBar,
     QTableWidget,
     QTableWidgetItem,
@@ -65,6 +63,7 @@ from app.core.domain.editing import edit_command
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.coord_format import format_coord
+from app.ui.common.widgets import CenteredCheckDelegate
 from app.ui.tools.feature_attrs import feature_label
 
 logger = get_logger(__name__)
@@ -150,19 +149,6 @@ def _ring_label(part: int, ring: int, part_count: int) -> str:
 
 
 # ============================================================ 弹窗
-
-
-class _NoFocusDelegate(QStyledItemDelegate):
-    """去掉单元格的**焦点框**。
-
-    主题的 QSS 里没有 ``::item:focus`` 规则，Qt 就按原生样式在「当前单元格」上画一圈
-    方框 —— 点一下勾选框旁边的空白就冒出一圈黑边，很难看。这里把 State_HasFocus
-    从样式选项里摘掉，别的绘制照旧。
-    """
-
-    def initStyleOption(self, option, index) -> None:  # noqa: N802 —— Qt 命名
-        super().initStyleOption(option, index)
-        option.state &= ~QStyle.StateFlag.State_HasFocus
 
 
 class NodeListDialog(BaseDialog):
@@ -273,7 +259,7 @@ class NodeListDialog(BaseDialog):
         header.resizeSection(_COL_CHECK, _WIDTH_CHECK)
         header.resizeSection(_COL_ID, _WIDTH_ID)
         # 点一下当前单元格不该留一圈原生焦点框（见 _NoFocusDelegate）
-        self.table.setItemDelegate(_NoFocusDelegate(self.table))
+        self.table.setItemDelegate(CenteredCheckDelegate(self.table))
         self.table.currentCellChanged.connect(lambda *_a: self._sync_markers())
         self.table.itemChanged.connect(self._on_item_changed)
         layout.addWidget(self.table, 1)

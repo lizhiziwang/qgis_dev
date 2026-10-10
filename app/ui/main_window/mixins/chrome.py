@@ -217,6 +217,42 @@ class WindowChromeMixin:
 
         return Path(self._map_config_path()).with_name("shortcuts.yaml")
 
+    def _make_toggle_shortcut(self, button, *extra_buttons):
+        """给工具条开关按钮挂一个**窗口级**快捷键（S / T）。
+
+        为什么不用 ``QToolButton.setShortcut``：那条路要求按钮**可见且可用**才
+        生效，而捕捉工具条只在「编辑」页签下显示 —— 用户在别的页签按 S 毫无反应
+        （实测）。窗口级 QShortcut 不受页签影响，代价是可能抢文本框的按键，
+        所以额外按焦点开关，见 :meth:`_sync_toggle_shortcuts`。
+        """
+        if button is None:
+            return None
+        shortcut = QShortcut(self)
+        shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        buttons = (button, *extra_buttons)
+        shortcut.activated.connect(
+            lambda bs=buttons: [b.toggle() for b in bs if b is not None]
+        )
+        return shortcut
+
+    def _sync_toggle_shortcuts(self, *_args) -> None:
+        """焦点在文本输入里时禁用 S / T，免得打字被快捷键吃掉。"""
+        from qgis.PyQt.QtWidgets import (
+            QAbstractSpinBox,
+            QLineEdit,
+            QPlainTextEdit,
+            QTextEdit,
+        )
+
+        widget = QApplication.focusWidget()
+        typing = isinstance(
+            widget, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)
+        )
+        for attr in ("_snap_shortcut", "_trace_shortcut"):
+            shortcut = getattr(self, attr, None)
+            if shortcut is not None:
+                shortcut.setEnabled(not typing)
+
     def _init_shortcuts(self) -> None:
         """登记全系统快捷键并套用用户自定义值（启动时调一次）。
 
@@ -225,6 +261,16 @@ class WindowChromeMixin:
         :meth:`set_app_shortcut` 统一处理。
         """
         redo_shortcuts = list(getattr(self, "_redo_shortcuts", []))
+        snap_tb = getattr(self, "snapping_toolbar", None)
+        self._snap_shortcut = self._make_toggle_shortcut(
+            getattr(snap_tb, "_enable_btn", None)
+        )
+        self._trace_shortcut = self._make_toggle_shortcut(
+            getattr(snap_tb, "_trace_btn", None)
+        )
+        app = QApplication.instance()
+        if app is not None:
+            app.focusChanged.connect(self._sync_toggle_shortcuts)
         self._shortcut_targets: dict = {
             "undo": getattr(self, "_undo_shortcut", None),
             "redo": redo_shortcuts[0] if len(redo_shortcuts) > 0 else None,
@@ -237,6 +283,10 @@ class WindowChromeMixin:
             "exit_app": getattr(self, "_act_exit", None),
             "log_dock": getattr(self, "_act_log", None),
             "flow_editor": getattr(self, "_act_flow_editor", None),
+            # 捕捉 / 追踪走**窗口级 QShortcut**，不用 QToolButton.setShortcut
+            # （后者要求按钮可见，只在「编辑」页签下才显示 —— 别的页签按 S 没反应）
+            "snapping_toggle": self._snap_shortcut,
+            "tracing_toggle": self._trace_shortcut,
         }
         overrides = load_overrides(self._shortcuts_config_path())
         for key, sequence in effective_sequences(overrides).items():

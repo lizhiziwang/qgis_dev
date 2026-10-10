@@ -23,6 +23,7 @@ from qgis.PyQt.QtWidgets import (
 
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.widgets import CenteredCheckDelegate
 
 
 logger = get_logger(__name__)
@@ -150,6 +151,8 @@ class CheckConfigDialog(BaseDialog):
 
     def _build_field_table(self, parent_lay) -> None:
         self.table = QTableWidget()
+        self.table.setItemDelegate(CenteredCheckDelegate(self.table))
+        self.table.setItemDelegate(CenteredCheckDelegate(self.table))
         self.table.setRowCount(len(self.columns))
         self.table.setColumnCount(2)
         self.table.setHorizontalHeaderLabels(["是否应用", "质检字段"])

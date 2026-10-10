@@ -44,6 +44,12 @@ from app.ui.main_window.side_toolbar import SideToolBar
 
 logger = get_logger(__name__)
 
+#: 左右侧停靠面板的**统一最小宽度**。
+#: 这些面板原先没有显式宽度，实际宽度由内容 sizeHint 决定（实测左侧只有 256、
+#: 字段多的属性面板挤得看不清）。统一给一个稍宽的底；内容本来就更宽的（如右侧
+#: 属性表）不受影响，取两者较大值。
+DOCK_MIN_WIDTH = 340
+
 
 class WindowShellMixin:
     """WindowShellMixin：见模块 docstring。"""
@@ -321,6 +327,7 @@ class WindowShellMixin:
         self.layer_dock.collapse_all_requested.connect(self._on_header_collapse_all)
         self.layer_dock.move_up_requested.connect(lambda: self._on_move_layer_node(-1))
         self.layer_dock.move_down_requested.connect(lambda: self._on_move_layer_node(1))
+        self.layer_dock.setMinimumWidth(DOCK_MIN_WIDTH)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.layer_dock)
         self.watch_dock_layout(self.layer_dock)
 
@@ -328,6 +335,7 @@ class WindowShellMixin:
         self.browser_dock = BrowserDock(self)
         self.browser_dock.double_clicked.connect(self._on_browser_double_clicked)
         self.browser_dock.context_menu_requested.connect(self._on_browser_context_menu)
+        self.browser_dock.setMinimumWidth(DOCK_MIN_WIDTH)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.browser_dock)
         self.watch_dock_layout(self.browser_dock)
 
@@ -353,6 +361,8 @@ class WindowShellMixin:
             if other is not dock and not sip.isdeleted(other)
         ]
         self._right_docks = [*placed, dock]
+        # 右侧面板也统一给个更宽的底（见 DOCK_MIN_WIDTH）
+        dock.setMinimumWidth(max(dock.minimumWidth(), DOCK_MIN_WIDTH))
         self.addDockWidget(area, dock)
         # 拖出浮动后 Qt 会停摆、不再重排（见 heal_stalled_layout），挂上自愈
         self.watch_dock_layout(dock)

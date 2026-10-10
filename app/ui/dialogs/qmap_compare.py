@@ -25,6 +25,7 @@ from qgis.PyQt.QtWidgets import (
 from qgis.core import QgsLayerTreeGroup, QgsLayerTreeLayer, QgsProject
 
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.widgets import CenteredCheckDelegate
 from app.ui.tools.qmap_compare import (
     LENS_MAX_SIZE_RATE,
     LENS_MIN_SIZE_RATE,
@@ -68,6 +69,7 @@ class QMapCompareDialog(BaseDialog):
         left_layout.setContentsMargins(0, 0, 0, 0)
         left_layout.addWidget(QLabel("对比图层（可多选）"))
         self.layer_tree = QTreeWidget()
+        self.layer_tree.setItemDelegate(CenteredCheckDelegate(self.layer_tree))
         self.layer_tree.setHeaderHidden(True)
         self.layer_tree.itemChanged.connect(self._on_item_changed)
         left_layout.addWidget(self.layer_tree)

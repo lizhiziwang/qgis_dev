@@ -36,7 +36,7 @@ from qgis.core import QgsField, QgsVectorLayer
 
 from app.core.domain.check.space_index import clear_spatial_index
 from app.ui.common.base_dialog import BaseDialog
-from app.ui.tools.feature_attrs import uid_field_index
+from app.ui.tools.feature_attrs import auto_id_field_index, uid_field_index
 
 #: 空值占位文本：既表示"没值"，也是保存时转真 NULL 的判据
 _NULL_TEXT = "NULL"
@@ -54,7 +54,11 @@ class CustomAttrDialog(BaseDialog):
         #: 只读字段下标：全局唯一标识（MZGUID / FGUID / GlobalID…）**只给自动赋值**，
         #: 手工改会破坏"一要素一标识"的约定，也会绕过分割 / 分解 / 绘制的赋新值逻辑
         uid_idx = uid_field_index(layer.fields())
-        self._readonly_indices: set[int] = {uid_idx} if uid_idx is not None else set()
+        # objectid / ogc_fid 这类**由数据源自动赋值**的列同样不给手改（保存时自己会填）
+        auto_id_idx = auto_id_field_index(layer.fields())
+        self._readonly_indices: set[int] = {
+            i for i in (uid_idx, auto_id_idx) if i is not None
+        }
         self._init_ui()
 
     def _init_ui(self) -> None:

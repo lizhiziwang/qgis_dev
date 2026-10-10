@@ -85,6 +85,13 @@ class PolygonDrawTool(BaseDrawTool):
                 if self.draw_manager is not None:
                     self.draw_manager.clear_draw_tool()
 
+    def clear_helper_line(self) -> None:
+        """辅助虚线 = ``line_rubber_band``（实线是 ``rubber_band``）。"""
+        try:
+            self.line_rubber_band.reset(QgsWkbTypes.LineGeometry)
+        except RuntimeError:
+            pass
+
     def _update_rubber_band(self) -> None:
         if not self.temp_points:
             return

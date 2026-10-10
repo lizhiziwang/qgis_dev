@@ -20,7 +20,7 @@ from __future__ import annotations
 import hashlib
 import time
 
-from qgis.PyQt.QtCore import QPoint, QRect, QSize, Qt, pyqtSignal
+from qgis.PyQt.QtCore import QEvent, QPoint, QRect, QSize, Qt, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QFont, QIcon, QPainter, QPen, QPixmap
 from qgis.PyQt.QtWidgets import (
     QButtonGroup,
@@ -277,7 +277,16 @@ class _ModeSwitch(QWidget):
 
 
 class _TitleButton(QToolButton):
-    """窗口控制按钮：hover 时切换图标（关闭按钮 hover 变白、背景变红）。"""
+    """窗口控制按钮：hover 时切换图标（关闭按钮 hover 变白、背景变红）。
+
+    **图标切换必须与 ``:hover`` 背景同源**：背景由样式表的 ``:hover`` 伪状态画，
+    Qt 只在 ``HoverEnter`` / ``HoverLeave`` 上维护它。原先用 ``enterEvent`` /
+    ``leaveEvent`` 换图标 —— 两者事件源不同：窗口**恰好出现在光标下方**时（弹窗
+    在「属性录入」按钮附近弹出），Qt 只补发 ``Enter`` 而不会有 ``HoverEnter``，
+    于是图标已经变白、红底还没画上，白 × 落在浅色标题栏上（用户实报「第一次打开
+    时右上角的 × 看不清，鼠标移过去才正常」）。改挂 hover 事件后，白图标与红底
+    永远同时出现。
+    """
 
     def __init__(self, icon: QIcon, hover_icon: QIcon = None, parent: QWidget = None) -> None:
         super().__init__(parent)
@@ -288,6 +297,9 @@ class _TitleButton(QToolButton):
         self.setCursor(Qt.CursorShape.ArrowCursor)
         self.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         self.setAutoRaise(True)
+        # 显式开 hover 跟踪：QSS 里有 :hover 规则时 Qt 一般会自己开，但这里
+        # 图标切换也依赖 hover 事件，别把它交给样式表隐式决定
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
 
     def set_icons(self, normal: QIcon, hover: QIcon = None) -> None:
         self._normal_icon = normal
@@ -296,13 +308,27 @@ class _TitleButton(QToolButton):
         if not self.underMouse():
             self.setIcon(self._normal_icon)
 
-    def enterEvent(self, event) -> None:
-        self.setIcon(self._hover_icon)
-        super().enterEvent(event)
+    def event(self, event) -> bool:
+        # 与 QSS :hover 用同一套事件，保证"图标变白"和"底变红"不会错开
+        if event.type() == QEvent.Type.HoverEnter:
+            self.setIcon(self._hover_icon)
+        elif event.type() == QEvent.Type.HoverLeave:
+            self.setIcon(self._normal_icon)
+        return super().event(event)
 
-    def leaveEvent(self, event) -> None:
+    def showEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        # 每次显示都从"未 hover"起步：见 hideEvent 的说明
         self.setIcon(self._normal_icon)
-        super().leaveEvent(event)
+        super().showEvent(event)
+
+    def hideEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        """复位图标。**必须做**：窗口被关掉时鼠标往往正压在按钮上（用户就是
+        点它关的），Qt 不保证给隐藏中的控件补发 ``HoverLeave`` —— 图标就停在
+        白色；下次窗口打开、光标已不在按钮上，白色图标配浅色标题栏，就成了用户
+        报的"第一次正常、第二次打开变白"。
+        """
+        self.setIcon(self._normal_icon)
+        super().hideEvent(event)
 
 
 class TitleBar(QWidget):

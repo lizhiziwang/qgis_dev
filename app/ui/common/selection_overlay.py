@@ -23,12 +23,15 @@ from __future__ import annotations
 
 from qgis.core import QgsCoordinateTransform, QgsGeometry, QgsProject, QgsVectorLayer, QgsWkbTypes
 from qgis.gui import QgsRubberBand
-from qgis.PyQt.QtCore import QObject
+from qgis.PyQt.QtCore import QObject, QTimer
 from qgis.PyQt.QtGui import QColor
 
 from app.infra.logging import get_logger
 
 logger = get_logger(__name__)
+
+#: 几何变化后重画覆盖层的防抖间隔（毫秒）
+_GEOMETRY_REDRAW_DEBOUNCE_MS = 60
 
 #: 覆盖层颜色 = QGIS 默认选中黄，与自带高亮一致（重叠时看不出双重描边）
 _OVERLAY_COLOR = QColor(255, 255, 0, 255)
@@ -43,6 +46,12 @@ class SelectionOverlay(QObject):
         self._band: QgsRubberBand | None = None
         self._project = None
         self._hooked: set[str] = set()
+        # 几何变化的重画防抖：一次批量移动（移动要素 / 补缝…）会逐要素发
+        # geometryChanged，逐个重建覆盖层太浪费
+        self._redraw_timer = QTimer(self)
+        self._redraw_timer.setSingleShot(True)
+        self._redraw_timer.setInterval(_GEOMETRY_REDRAW_DEBOUNCE_MS)
+        self._redraw_timer.timeout.connect(self.sync)
 
     # ------------------------------------------------------------ 生命周期
 
@@ -164,17 +173,45 @@ class SelectionOverlay(QObject):
             return []
 
     def _hook(self, layer: QgsVectorLayer) -> None:
+        """挂选中信号 + **几何变化 / 要素删除**信号。
+
+        只挂 ``selectionChanged`` 是不够的，两种常见操作都不发它：
+
+        - **移动要素**（以及节点编辑、补缝）改的是几何、选中集没变；
+        - **删除要素**：``deleteFeatures`` 会把被删的 fid 直接从选中集里摘掉，而且
+          摘的时候**不发** ``selectionChanged`` —— 于是覆盖层不重画，带子上还留着
+          **删除前那份几何**画在所有图层之上，用户看着就像"没删掉"（高亮把原图形
+          挡得严严实实）。
+
+        这两种都得靠各自的信号补上。
+        """
         try:
             layer.selectionChanged.connect(self.sync)
+            layer.geometryChanged.connect(self._schedule_redraw)
+            try:
+                layer.featuresDeleted.connect(self._schedule_redraw)
+            except AttributeError:  # 该构建没有这个信号：退回只靠几何 / 选中信号
+                logger.debug("选择高亮层：本构建没有 featuresDeleted 信号")
             self._hooked.add(layer.id())
         except Exception:  # noqa: BLE001
-            logger.warning("选择高亮层：连接 %s 的选中信号失败", layer.name(), exc_info=True)
+            logger.warning("选择高亮层：连接 %s 的信号失败", layer.name(), exc_info=True)
 
     def _unhook(self, layer: QgsVectorLayer) -> None:
-        try:
-            layer.selectionChanged.disconnect(self.sync)
-        except Exception:  # noqa: BLE001 —— 图层销毁等收尾场景属正常
-            pass
+        pairs = [
+            (layer.selectionChanged, self.sync),
+            (layer.geometryChanged, self._schedule_redraw),
+        ]
+        if hasattr(layer, "featuresDeleted"):
+            pairs.append((layer.featuresDeleted, self._schedule_redraw))
+        for signal, slot in pairs:
+            try:
+                signal.disconnect(slot)
+            except Exception:  # noqa: BLE001 —— 图层销毁等收尾场景属正常
+                pass
+
+    def _schedule_redraw(self, *_args) -> None:
+        """几何变了：推迟一拍重画（合并同一次批量操作里的多次信号）。"""
+        self._redraw_timer.start()
 
     def _ensure_band(self) -> QgsRubberBand | None:
         if self._canvas is None:

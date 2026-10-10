@@ -44,6 +44,7 @@ from qgis.PyQt.QtWidgets import (
 from app.infra.logging import get_logger
 from app.ui.dialogs.layer_properties.add_field_dialog import AddFieldDialog
 from app.ui.dialogs.layer_properties.base import LayerPropertyTab
+from app.ui.common.widgets import CenteredCheckDelegate
 from app.ui.tools.feature_attrs import field_alias
 
 logger = get_logger(__name__)
@@ -178,6 +179,7 @@ class FieldsTab(LayerPropertyTab):
 
         # 中部：字段表
         self.table = QTableWidget(0, len(_HEADERS))
+        self.table.setItemDelegate(CenteredCheckDelegate(self.table))
         self.table.setHorizontalHeaderLabels(_HEADERS)
         self.table.verticalHeader().setVisible(False)
         self.table.setSelectionBehavior(

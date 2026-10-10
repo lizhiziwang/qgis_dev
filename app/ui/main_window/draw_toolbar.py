@@ -15,9 +15,9 @@
   **其它图层**上）。各工具的语义：
   「节点编辑」点击要素编辑其几何，见
   :class:`app.ui.tools.feature_edit.FeatureEditTool`；「属性录入」**不需**
-  先开编辑——激活时若目标图层未编辑会自动进入编辑态（点击要素 → 右侧
-  Dock 编辑属性后确认，见
-  :class:`app.ui.docks.attribute_entry_dock.AttributeEntryDock`）；
+  先开编辑——激活时若目标图层未编辑会自动进入编辑态（点击要素 → 弹窗
+  编辑属性后确认，见
+  :class:`app.ui.dialogs.attribute_entry.AttributeEntryDialog`）；
   「合并」另要求选中 **≥ 2 个**（先在画布上多选，再点按钮，弹窗里选定
   「要并入哪个图斑」后确认，见
   :func:`app.ui.tools.merge_geometry.merge_features_interactive`——一次性动作，
@@ -97,7 +97,7 @@ from app.ui.common.theme import ThemeManager
 from app.ui.dialogs.copy_to_layer import CopyToLayerDialog
 from app.ui.dialogs.custom_attr import CustomAttrDialog
 from app.ui.dialogs.node_list import NodeListDialog
-from app.ui.docks.attribute_entry_dock import AttributeEntryDock
+from app.ui.dialogs.attribute_entry import AttributeEntryDialog
 from app.ui.tools.attribute_entry import AttributeEntryTool
 from app.ui.tools.boundary_edit import BoundaryEditTool
 from app.ui.tools.copy_to_layer import copy_features_to as run_copy_to
@@ -200,9 +200,9 @@ class DigitizingToolbar(QObject):
         self.fill_hole_tool = None
         self.boundary_edit_tool = None
         self.move_features_tool = None
-        #: 属性录入工具实例（防 GC）与右侧 Dock（懒建单实例）
+        #: 属性录入工具实例（防 GC）与弹窗（懒建单实例，关掉后复用）
         self.attribute_entry_tool = None
-        self._attribute_entry_dock = None
+        self._attribute_entry_dialog = None
         #: 节点列表工具实例（防 GC）与弹窗（懒建单实例，关掉后复用）
         self.node_list_tool = None
         self._node_list_dialog = None
@@ -274,7 +274,7 @@ class DigitizingToolbar(QObject):
         self.feature_edit_action = QAction("节点编辑", self.digitizing_toolbar)
         self.feature_edit_action.setCheckable(True)
         self.feature_edit_action.setToolTip(
-            "先用点选/框选选中要素并进入编辑，再点此：点击要素编辑其节点（顶点）"
+            "先进入编辑并点此，再点击当前编辑图层上的图形：点击要素编辑其节点（顶点）"
         )
         self.feature_edit_action.triggered.connect(
             lambda checked=False: self.enable_feature_edit(checked)
@@ -292,7 +292,7 @@ class DigitizingToolbar(QObject):
         )
 
         # ---- 属性录入（恒可用：无需编辑态，激活时自动开始编辑）----
-        #     点击要素 → 右侧 Dock 改属性
+        #     点击要素 → 弹窗改属性
         self.attribute_entry_action = QAction("属性录入", self.digitizing_toolbar)
         self.attribute_entry_action.setCheckable(True)
         self.attribute_entry_action.triggered.connect(
@@ -604,8 +604,11 @@ class DigitizingToolbar(QObject):
             # 若 chooser 本身已同步过（getter 已指向选中层）则跳过，幂等安全。
             if self._current_layer() is not layer:
                 applier = getattr(self.main_window, "_apply_edit_target", None)
-                if callable(applier):
-                    applier(layer)
+                # 旧编辑图层有未提交改动时 applier 会弹「保存/放弃/取消」；
+                # 用户选了取消 → 整个换层中止，别再往下进编辑态
+                if callable(applier) and not applier(layer):
+                    self._refresh_button_states()
+                    return
         if layer is None or layer.type() != layer.VectorLayer:
             return
         if not self._ensure_editing(layer):
@@ -1229,9 +1232,8 @@ class DigitizingToolbar(QObject):
             QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
             return
         if not layer.selectedFeatureIds():
-            QMessageBox.warning(
-                self.main_window, "警告", "请先用点选 / 框选选中要删除的要素"
-            )
+            # 走浮动提示条：删除这条链上不该再弹模态框打断操作
+            self._toast("请先用点选 / 框选选中要删除的要素", level="info")
             return
 
         deleted = run_delete(
@@ -1241,11 +1243,9 @@ class DigitizingToolbar(QObject):
         if deleted is None:
             return  # 失败原因已由下游落地
         if deleted == 0:
-            QMessageBox.information(self.main_window, "提示", "没有可删除的选中要素")
+            self._toast("没有可删除的选中要素", level="info")
             return
-        QMessageBox.information(
-            self.main_window, "提示", f"已删除 {deleted} 个要素（可 Ctrl+Z 撤销）"
-        )
+        self._toast(f"已删除 {deleted} 个要素（可 Ctrl+Z 撤销）")
         # 事件栈内不直接 refresh（仓库约束），推迟出栈后再刷新
         QTimer.singleShot(0, self._safe_refresh)
 
@@ -1506,19 +1506,51 @@ class DigitizingToolbar(QObject):
         except RuntimeError:
             pass
 
-    def _load_attribute_entry_feature(self, layer: QgsVectorLayer, fid: int) -> None:
-        """「属性录入」点中要素：把属性载入右侧面板。
+    def _ensure_attribute_entry_dialog(self):
+        """懒建属性录入弹窗（单实例；关掉了就复用同一个，保留窗口位置）。"""
+        dialog = self._attribute_entry_dialog
+        if dialog is None or sip.isdeleted(dialog):
+            dialog = AttributeEntryDialog(self.main_window)
+            # 弹窗被关掉后要让工具忘掉"已载入哪个要素"，否则再点同一个要素会被
+            # 当成重复点击忽略（工具看起来失灵）
+            dialog.finished.connect(self._on_attribute_entry_dialog_closed)
+            self._attribute_entry_dialog = dialog
+        return dialog
 
-        面板若已被用户手动关掉（标题栏 ×），这里**先重新显示**再载入——不然点了
+    def _on_attribute_entry_dialog_closed(self, _result: int = 0) -> None:
+        tool = self.attribute_entry_tool
+        if tool is not None:
+            tool.reset_loaded()
+
+    def _close_attribute_entry_dialog(self) -> None:
+        """关掉属性录入弹窗（幂等）。工具退出时统一走这里收口。
+
+        弹窗可能处于**最小化**（画布底部小条）状态——``reject()`` 会走它的
+        ``done()``，一并把小条收掉、清掉选中高亮。不关的话，Esc 退出工具后
+        屏幕上会留一条无主的小条 / 一个还能改属性的弹窗。
+        """
+        dialog = self._attribute_entry_dialog
+        if dialog is None or sip.isdeleted(dialog):
+            return
+        try:
+            # 用 reject 而不是 close：**最小化时弹窗是隐藏的，close() 对隐藏窗口
+            # 是空操作**，收尾（收小条 / 清高亮）就不会跑。reject() 无条件走
+            # QDialog.done()，弹窗的 done() 重写才是真正的收口点。
+            dialog.reject()
+        except Exception:  # noqa: BLE001 —— 收尾失败不该影响工具清理
+            logger.exception("关闭属性录入弹窗失败")
+
+    def _load_attribute_entry_feature(self, layer: QgsVectorLayer, fid: int) -> None:
+        """「属性录入」点中要素：把属性载入弹窗。
+
+        弹窗若已被用户手动关掉（标题栏 ×），这里**先重新显示**再载入——不然点了
         要素什么都没发生，看起来像工具失灵。
         """
-        dock = self._attribute_entry_dock
-        if dock is None:
-            return
-        if dock.isHidden():
-            dock.show()
-            dock.raise_()
-        dock.load_feature(layer, fid)
+        dialog = self._ensure_attribute_entry_dialog()
+        if dialog.isHidden():
+            dialog.show()
+        dialog.raise_()
+        dialog.load_feature(layer, fid)
 
     def _tool_hint(self, text: str) -> None:
         """工具运行期提示：推到浮动消息条，**不自动关闭**。
@@ -1539,7 +1571,7 @@ class DigitizingToolbar(QObject):
         send(level=level, message=message, duration=0)
 
     def enable_attribute_entry(self, checked: bool = True) -> None:
-        """激活「属性录入」工具：点击要素 → 右侧 Dock 编辑其属性。
+        """激活「属性录入」工具：点击要素 → 弹窗编辑其属性。
 
         不需要预先「开始编辑」：目标图层若尚未进入编辑态，这里自动开启
         （与「开始编辑」同一条状态机：``startEditing`` + 按钮组同步 + 发
@@ -1562,8 +1594,11 @@ class DigitizingToolbar(QObject):
             # 落地为编辑目标：edit_layer / 停旧层 / 工具条 / 捕捉联动
             if self._current_layer() is not layer:
                 applier = getattr(self.main_window, "_apply_edit_target", None)
-                if callable(applier):
-                    applier(layer)
+                # 旧编辑图层有未提交改动时 applier 会弹「保存/放弃/取消」；
+                # 用户选了取消 → 整个换层中止，别再往下进编辑态
+                if callable(applier) and not applier(layer):
+                    self._refresh_button_states()
+                    return
         if layer is None or layer.type() != layer.VectorLayer:
             self._refresh_button_states()
             QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
@@ -1576,17 +1611,9 @@ class DigitizingToolbar(QObject):
         self.clear_draw_tool()
 
 
-        # 懒建右侧 Dock（单实例；关闭后再次激活时重新显示）
-        dock = self._attribute_entry_dock
-        if dock is None:
-            dock = AttributeEntryDock(self.main_window)
-            # 走 place_right_dock：右侧已有面板时叠放（覆盖），不堆在它下面
-            placer = getattr(self.main_window, "place_right_dock", None)
-            if callable(placer):
-                placer(dock)
-            else:  # 测试桩 / 旧窗口
-                self.main_window.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
-            self._attribute_entry_dock = dock
+        # 属性录入改成**弹窗**了（原先是右侧 Dock）：懒建单实例，点要素时载入。
+        # 不再走 place_right_dock —— 它不是 Dock，不参与右侧叠放。
+        self._ensure_attribute_entry_dialog()
 
         self.attribute_entry_tool = AttributeEntryTool(
             self.canvas,
@@ -1596,15 +1623,10 @@ class DigitizingToolbar(QObject):
         )
         self._activate_map_tool(self.attribute_entry_tool)
         self._mark_active("attr_entry")
-        dock.show()
-        dock.raise_()
-        # QMessageBox.information(
-        #     self.main_window,
-        #     "提示",
-        #     "已激活「属性录入」工具：点击图层上的要素，在右侧面板修改其属性；确认后保存，Esc 退出",
-        # )
+        # 弹窗**不在这里显示**：与「节点列表」一致，点中要素时才 pop 出来
+        # （见 :meth:`_load_attribute_entry_feature`）。激活时靠下面这条 toast 指路。
         self._toast(
-            "已激活「属性录入」工具：点击图层上的要素，在右侧面板修改其属性；确认后保存，Esc 退出",
+            "已激活「属性录入」工具：点击图层上的要素，在弹窗中修改其属性；确认后保存，Esc 退出",
             level="info",
         )
 
@@ -1777,6 +1799,8 @@ class DigitizingToolbar(QObject):
         # 节点列表弹窗跟着工具走：Esc 退出 / 再点按钮取消 / 切别的工具 / 停止编辑，
         # 四条路都经过本方法，所以这里是唯一的收口点
         self._close_node_list_dialog()
+        # 属性录入弹窗同理（含最小化小条）
+        self._close_attribute_entry_dialog()
         # 按钮统一刷新（勾选全弹起）
         self._refresh_button_states()
         logger.info(

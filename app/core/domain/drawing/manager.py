@@ -22,6 +22,7 @@ if TYPE_CHECKING:
 from qgis.core import QgsWkbTypes
 from qgis.gui import QgsRubberBand
 from qgis.PyQt.QtCore import QObject, Qt, pyqtSignal
+from qgis.PyQt.QtGui import QColor
 
 from app.infra.logging import get_logger
 
@@ -29,6 +30,12 @@ from .service import ActiveDraw, DrawingService
 from .tools import get_tool_class
 
 logger = get_logger(__name__)
+
+#: 绘制预览（橡皮筋）的颜色：红色描边 + **半透明**填充。
+#: 填充不透明会把底图与已有图斑全盖住，画的时候看不出新面压在哪 —— 与各绘制工具
+#: 自己那条带子（polygon / circle / rectangle 的 ``QColor(255, 0, 0, 50)``）同一透明度。
+_PREVIEW_COLOR = Qt.GlobalColor.red
+_PREVIEW_FILL_COLOR = QColor(255, 0, 0, 50)
 
 
 class DrawManager(QObject):
@@ -146,7 +153,10 @@ class DrawManager(QObject):
         """工具类访问共享 rubber_band（多边形/矩形/圆用）。"""
         if self._shared_rubber_band is None:
             self._shared_rubber_band = QgsRubberBand(self.canvas, QgsWkbTypes.PolygonGeometry)
-            self._shared_rubber_band.setColor(Qt.GlobalColor.red)
+            self._shared_rubber_band.setColor(_PREVIEW_COLOR)
             self._shared_rubber_band.setWidth(2)
-            self._shared_rubber_band.setFillColor(Qt.GlobalColor.red)
+            # **半透明**填充：不透明的红会把底图与已有图形全盖住，画的时候根本看不出
+            # 新面压在哪些图斑上。与各绘制工具自己的带子（polygon/circle/rectangle
+            # 的 ``QColor(255, 0, 0, 50)``）保持同一个透明度。
+            self._shared_rubber_band.setFillColor(_PREVIEW_FILL_COLOR)
         return self._shared_rubber_band

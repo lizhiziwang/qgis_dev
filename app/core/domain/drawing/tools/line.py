@@ -77,6 +77,17 @@ class LineDrawTool(BaseDrawTool):
         except Exception:  # noqa: BLE001
             pass
 
+    def clear_helper_line(self) -> None:
+        """辅助虚线 = ``line_rubber_band2``。
+
+        **别碰 ``line_rubber_band``**：那是已落点的实线，本工具的命名与面工具
+        相反（面工具的同名属性才是辅助虚线）。
+        """
+        try:
+            self.line_rubber_band2.reset(QgsWkbTypes.LineGeometry)
+        except RuntimeError:
+            pass
+
     def _update_rubber_band(self) -> None:
         if len(self.temp_points) < 2:
             return

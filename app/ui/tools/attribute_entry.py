@@ -1,12 +1,12 @@
 """属性录入交互工具。
 
 编辑工具条「属性录入」按钮激活的交互工具：**点击矢量要素 → 在右侧 Dock
-（:class:`app.ui.docks.attribute_entry_dock.AttributeEntryDock`）中编辑该
+（:class:`app.ui.dialogs.attribute_entry.AttributeEntryDialog`）中编辑该
 要素的属性**，点「确认修改」把改动写回图层编辑缓冲：
 
 - **左键单击要素** → 命中后**把图层选中集换成该要素**（QGIS 自身的选中高亮，
   一眼看出正在录入的是哪一块），再回调 ``on_feature(layer, fid)``（由工具条接
-  入 Dock 的 :meth:`AttributeEntryDock.load_feature`）；
+  入弹窗的 :meth:`AttributeEntryDialog.load_feature`）；
 - **点击空白** → 提示未命中；
 - **Esc** → 退出工具。
 
@@ -71,6 +71,15 @@ class AttributeEntryTool(QgsMapTool):
         # 工具退出：下次激活时可重新点同一要素载入最新属性
         self._loaded = None
         super().deactivate()
+
+    def reset_loaded(self) -> None:
+        """忘掉"已载入哪个要素"（弹窗关闭后由工具条调用）。
+
+        弹窗可以被用户关掉（× / 取消 / Esc），但 ``_loaded`` 还记着上一个要素；
+        不重置的话，关了弹窗再点**同一个**要素会被当成重复点击直接忽略，
+        看起来像工具失灵。
+        """
+        self._loaded = None
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
         if event.key() == Qt.Key.Key_Escape:

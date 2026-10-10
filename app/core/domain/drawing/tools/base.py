@@ -80,6 +80,10 @@ class BaseDrawTool(QgsMapTool):
         self._last_snap_match = None
         #: 上一个已落顶点是否吸到已有要素（追踪起点资格）
         self._prev_vertex_snapped = False
+        #: 绘制中 Ctrl+Z 收回的落点（供 Ctrl+Y 放回）；落在新点上就作废
+        self._redo_points: List[QgsPointXY] = []
+        #: 最近一次回退后的顶点数，用来判断"撤销之后有没有又落新点"
+        self._points_at_undo: int | None = None
 
         # 磁吸预览（指示器按画布共享，见 _snap_indicator_for；无实例字段）
 
@@ -192,6 +196,99 @@ class BaseDrawTool(QgsMapTool):
             logger.debug("追踪预览失败（退化为直段）", exc_info=True)
             ext = []
         return [prev, *ext, point]
+
+    # -------------------------------------------------- 绘制中回退落点（Ctrl+Z / Ctrl+Y）
+
+    def undo_last_point(self) -> bool:
+        """把最后一个落点收回（ArcMap 那种画到一半往回退）。
+
+        :returns: 是否真的收了一个点（没点可退返回 False，调用方好决定要不要
+            继续往下走别的撤销逻辑）。
+        """
+        if not self.temp_points:
+            return False
+        removed = self.temp_points.pop()
+        self._redo_points.append(removed)
+        self._points_at_undo = len(self.temp_points)
+        self.refresh_preview()
+        return True
+
+    def redo_last_point(self) -> bool:
+        """把刚收回的落点放回去。
+
+        **撤销之后又落了新点则作废**：靠"顶点数是否与撤销时一致"判断 —— 不判的话
+        会把一个早就作废的点插进几何里（画出来的形状与用户看到的不符）。
+        """
+        if not self._redo_points:
+            return False
+        if (self._points_at_undo is not None
+                and len(self.temp_points) != self._points_at_undo):
+            self._redo_points.clear()
+            return False
+        self.temp_points.append(self._redo_points.pop())
+        # **重做之后基准也要跟上**：不更新的话下一次重做会拿旧基准去比，
+        # 误判成"撤销后又落了新点"而把重做栈清掉（表现就是只能重做一次）
+        self._points_at_undo = len(self.temp_points)
+        self.refresh_preview()
+        return True
+
+    def refresh_preview(self) -> None:
+        """回退落点后刷新预览：已落点的实线重画，**辅助虚线直接清掉**。
+
+        那条虚线是「光标 → 上一顶点」的实时预览，光标位置还停在旧地方 —— 重画
+        出来的是一条指向旧位置的**死线**。清掉它，等用户下一次移动鼠标自然会画出
+        新的（这也是用户要的手感：退了点之后辅助线先消失，动一下才回来）。
+
+        点全退光了就整笔清空（见 :meth:`clear_preview`）。
+        """
+        if not self.temp_points:
+            self.clear_preview()
+            return
+        self.clear_helper_line()
+        updater = getattr(self, "_update_rubber_band", None)
+        if callable(updater):
+            try:
+                updater()
+            except Exception:  # noqa: BLE001 —— 预览画不出来不该影响回退本身
+                logger.debug("回退后重画预览失败", exc_info=True)
+
+    def clear_helper_line(self) -> None:
+        """清掉「光标 → 上一顶点」那条**辅助虚线**。
+
+        **不能按属性名猜**：带子的名字各工具不一样，而且同名不同物 —— 面工具的
+        ``line_rubber_band`` 是辅助虚线，线工具的 ``line_rubber_band`` 却是**已落点
+        的实线**（它的辅助虚线叫 ``line_rubber_band2``）。按名字清会清错对象。
+        所以由各工具自己实现；基类默认什么都不做。
+        """
+
+    def clear_preview(self) -> None:
+        """整笔清空：实线轮廓 + 辅助虚线 + 磁吸标记。
+
+        起点也退掉之后画布上不该再留任何这一笔的痕迹（否则一条孤零零的辅助线
+        留在图上，看着像还有一半没画完）。
+        """
+        # 扫自己身上的全部橡皮筋（名字各工具不同，逐个点名容易漏），全清全隐
+        for value in list(vars(self).values()):
+            if not isinstance(value, QgsRubberBand):
+                continue
+            try:
+                value.reset()
+                value.hide()
+            except RuntimeError:
+                pass
+        self.hide_snap_indicator()
+
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        """绘制中的键盘：Ctrl+Z 回退一个落点、Ctrl+Y 放回（与 ArcMap 一致）。"""
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            if event.key() == Qt.Key.Key_Z and self.undo_last_point():
+                event.accept()
+                return
+            if event.key() == Qt.Key.Key_Y and self.redo_last_point():
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
     def commit_geometry(self, geometry) -> None:
         """一笔绘制完成：先收起磁吸标记，再按是否挂 draw_manager 派发。

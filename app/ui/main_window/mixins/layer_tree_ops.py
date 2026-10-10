@@ -96,18 +96,28 @@ class LayerTreeOpsMixin:
         dlg.exec()
         return picked
 
-    def _apply_edit_target(self, layer: "Optional[QgsVectorLayer]") -> None:
+    def _apply_edit_target(self, layer: "Optional[QgsVectorLayer]") -> bool:
         """把 ``layer`` 设为编辑目标图层并联动工具条 / 磁性捕捉。
 
         仅指定目标（记录 ``self.edit_layer`` + 刷新按钮），不进入编辑态；真正的
         ``layer.startEditing()`` 由工具条的「开始编辑」执行。若之前有别的图层在
         编辑，先停掉（避免遗留脏 buffer）。
+
+        **旧图层有未提交修改时会先问「保存 / 放弃 / 取消」**（见
+        :meth:`_confirm_switch_with_changes`）—— 直接 ``stop(save=False)`` 会把用户
+        刚改的东西静悄悄丢掉，那是数据损失，不能默默做。
+
+        :returns: 是否已切到 ``layer``。用户在提示里选了「取消」→ ``False``，
+            调用方**不要**接着进编辑态（否则等于绕过了用户的选择）。
         """
         if layer is None or not isinstance(layer, QgsVectorLayer):
-            return
+            return False
         # 如果之前有别的图层在编辑，先停掉（避免遗留脏 buffer）
         prev = self.edit_layer
         if prev is not None and prev is not layer and prev.isEditable():
+            if prev.isModified():
+                if not self._confirm_switch_with_changes(prev):
+                    return False
             self.editing_service.stop(prev, save=False)
 
         self.edit_layer = layer
@@ -121,6 +131,32 @@ class LayerTreeOpsMixin:
             level=Qgis.MessageLevel.Info,
             duration=3,
         )
+        return True
+
+    def _confirm_switch_with_changes(self, layer: "QgsVectorLayer") -> bool:
+        """旧编辑图层有未提交改动 → 问「保存 / 放弃 / 取消」。
+
+        :returns: ``True`` = 可以继续切换（已保存，或用户选择放弃）；
+            ``False`` = 用户取消，流程要中止。
+        """
+        box = QMessageBox(self)
+        box.setWindowTitle("切换编辑图层")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(f"图层「{layer.name()}」有未保存的修改。")
+        box.setInformativeText("切换到其它图层前，请先处理这些修改：")
+        save_btn = box.addButton("保存", QMessageBox.ButtonRole.AcceptRole)
+        drop_btn = box.addButton("放弃", QMessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(save_btn)
+        box.setEscapeButton(cancel_btn)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is save_btn:
+            return self.editing_service.stop(layer, save=True)
+        if clicked is drop_btn:
+            self.editing_service.stop(layer, save=False)
+            return True
+        return False
 
     def _on_layer_clicked_in_dock(self, index) -> None:
         """用户在图层树点击一层：仅记录为 ``_selected_layer``。
