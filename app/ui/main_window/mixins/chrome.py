@@ -527,6 +527,10 @@ class WindowChromeMixin:
         if canvas is not None:
             canvas.setCanvasColor(QColor(theme.canvas_bg))
             canvas.refresh()
+        # 浮动消息条的外观 QSS 里含主题色，切主题要重贴
+        refresh_bar = getattr(self, "_apply_message_bar_appearance", None)
+        if callable(refresh_bar):
+            refresh_bar()
 
     def _on_theme_changed(self, theme) -> None:
         self._apply_theme_qss()

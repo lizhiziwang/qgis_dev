@@ -95,27 +95,7 @@ class WindowShellMixin:
         self.messageBar = FloatingMessageBar(self.canvas)
         self.messageBar.setObjectName("FloatingMessageBar")
         self.messageBar.setSizePolicy(QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Fixed)
-        # 悬浮 toast 外观：消息条自带浅底圆角卡片，文字盖在地图上也可读
-        # （该应用不引入 QGIS 桌面 qss，消息条/条目本身无样式，需自备）。
-        # 走 set_appearance 而不是 setStyleSheet：QgsMessageBar 每次 push 都会把
-        # 自带样式表盖回来，得由消息条在每次 push 后重新贴一遍。
-        self.messageBar.set_appearance(
-            "#FloatingMessageBar {"
-            "  background-color: rgba(255, 255, 255, 240);"
-            "  border: 1px solid rgba(120, 120, 120, 120);"
-            "  border-radius: 6px;"
-            "}"
-            "#FloatingMessageBar QLabel { color: #202020; }"
-            # 条目内的文字框是 QTextBrowser（QTextEdit 的子类），会被全局「输入框」
-            # 规则套上 1px 边框 —— 浮动提示里看着就是个带框的输入框。在消息条作用域
-            # 内去掉边框与底色，只留文字。
-            "#FloatingMessageBar QTextBrowser, #FloatingMessageBar QTextEdit {"
-            "  border: none; background: transparent;"
-            "}"
-            "#FloatingMessageBar QToolButton {"
-            "  border: none; background: transparent; color: #606060;"
-            "}"
-        )
+        self._apply_message_bar_appearance()
         # 把 messageBar 放到全局属性（兼容旧 sendMessageToTopParent）
         qgis_app = QgsApplication.instance()
         if qgis_app is not None:
@@ -172,6 +152,40 @@ class WindowShellMixin:
         self.project.setCrs(crs)
         self.canvas.setDestinationCrs(crs)
         self.canvas.setProject(self.project)
+
+    def _apply_message_bar_appearance(self) -> None:
+        """把浮动消息条的外观刷成当前主题色。
+
+        **不能用写死的颜色**：原先这张卡片是固定浅底 + 深字，深色主题下就成了
+        "浅色浮条 + 浅色文字"（用户报的"浮动条背景没适配"）。颜色全部取自当前主题，
+        并由 :meth:`_apply_theme_qss` 在切主题时重新调一次。
+
+        走 ``set_appearance`` 而不是 ``setStyleSheet``：``QgsMessageBar`` 每次 push
+        都会把它自带的样式表盖回来，得由消息条在每次 push 后重新贴一遍（见
+        :class:`~app.infra.messagebar.floating_bar.FloatingMessageBar`）。
+        """
+        bar = getattr(self, "messageBar", None)
+        if bar is None:
+            return
+        t = ThemeManager.instance().current()
+        bar.set_appearance(
+            # 卡片浮在地图上：用比窗体底色略亮的浮层色 + 主题边框，深浅主题都可读
+            f"#FloatingMessageBar {{"
+            f"  background-color: {t.panel_bg};"
+            f"  border: 1px solid {t.border};"
+            f"  border-radius: 6px;"
+            f"}}"
+            f"#FloatingMessageBar QLabel {{ color: {t.menu_text}; }}"
+            # 条目内的文字框是 QTextBrowser（QTextEdit 的子类），会被全局「输入框」
+            # 规则套上 1px 边框 —— 浮动提示里看着就是个带框的输入框。在消息条作用域
+            # 内去掉边框与底色，只留文字。
+            f"#FloatingMessageBar QTextBrowser, #FloatingMessageBar QTextEdit {{"
+            f"  border: none; background: transparent; color: {t.menu_text};"
+            f"}}"
+            f"#FloatingMessageBar QToolButton {{"
+            f"  border: none; background: transparent; color: {t.text_secondary};"
+            f"}}"
+        )
 
     # ===================================================== 画布左上角悬浮工具条
 

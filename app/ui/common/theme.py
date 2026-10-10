@@ -692,6 +692,13 @@ def app_qss(t: Theme) -> str:
         font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
         font-size: 12px;
     }}
+    /* 滚动区：**viewport 必须显式透明**。QScrollArea 的 viewport 是个 QWidget，
+       默认按调色板的 Base/Window 色（浅色）自绘 —— 深色主题下就在弹窗里留下一大块
+       浅灰，而里面的字段标签用主题文字色（浅色）画上去，直接看不见了（用户报
+       "属性录入 / 编辑面要素属性弹窗背景没适配"）。透明后透出 QDialog 的主题底色。 */
+    QScrollArea {{ background: transparent; border: none; }}
+    QScrollArea > QWidget#qt_scrollarea_viewport {{ background-color: transparent; }}
+    QScrollArea > QWidget > QWidget {{ background-color: transparent; }}
     QLabel {{ color: {t.menu_text}; }}
     QLabel#loginSubtitle {{ color: {t.text_secondary}; }}
     QLabel#loginError {{ color: {t.text_error}; font-weight: bold; }}

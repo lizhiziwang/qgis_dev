@@ -19,6 +19,7 @@ from qgis.core import (
     Qgis,
     QgsCoordinateReferenceSystem,
     QgsLayerTreeGroup,
+    QgsVectorLayer,
 )
 from qgis.PyQt.QtWidgets import QMessageBox
 
@@ -203,6 +204,47 @@ class ProjectOpsMixin:
         if path:
             return self._save_project_to(path)
         return self._on_save_project_as()
+
+    def _confirm_editing_layers_on_close(self) -> bool:
+        """关闭前逐个询问：处于编辑态且**有未提交改动**的图层是否保存。
+
+        **必须排在"是否保存工程"之前**：保存工程只写 ``.qgs``，**不会**提交图层
+        编辑缓冲里的改动 —— 先过这一轮，用户选保存才真的落盘。
+
+        - 「保存」→ 提交该图层（``commitChanges(stopEditing=True)``）；
+        - 「放弃」→ 回滚并停止编辑（丢弃缓冲里的改动）；
+        - 「取消」→ 返回 ``False``，调用方应 ``event.ignore()`` 中止关闭；
+        - 提交失败也返回 ``False``：宁可让用户看到错误，也不能静悄悄关掉丢数据。
+
+        与 :meth:`_confirm_save_project_on_close` 共用 ``prompt_save_on_close``
+        开关（无头 / 测试场景置 ``False``，避免模态弹窗阻塞）。
+        """
+        if not getattr(self, "prompt_save_on_close", True):
+            return True
+        dirty = [
+            lyr
+            for lyr in self.project.mapLayers().values()
+            if isinstance(lyr, QgsVectorLayer) and lyr.isEditable() and lyr.isModified()
+        ]
+        for layer in dirty:
+            ret = QMessageBox.question(
+                self,
+                "关闭应用",
+                f"图层「{layer.name()}」有未保存的修改，是否保存？",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save,
+            )
+            if ret == QMessageBox.StandardButton.Cancel:
+                return False
+            if ret == QMessageBox.StandardButton.Save:
+                if not self.editing_service.stop(layer, save=True):
+                    logger.error("关闭前保存图层「%s」失败，中止关闭", layer.name())
+                    return False
+            else:  # 放弃：回滚 + 停止编辑
+                self.editing_service.stop(layer, save=False)
+        return True
 
     def _confirm_save_project_on_close(self) -> bool:
         """关闭应用前询问是否保存工程；返回 ``True`` 表示可以关闭。

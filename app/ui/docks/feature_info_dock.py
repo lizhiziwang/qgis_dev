@@ -108,6 +108,10 @@ class FeatureInfoDock(QDockWidget):
         # 等处抛 RuntimeError: wrapped C/C++ object ... has been deleted。
         QgsProject.instance().layersWillBeRemoved.connect(self._on_layers_will_be_removed)
         self._init_ui()
+        # 正文/标题都是**打开时把主题色写进 HTML** 的，切主题必须重画一遍 ——
+        # 不接这个信号的话，已经开着的面板要等下次点要素才换色（用户报的
+        # "切换深色主题时没有动态更新，关掉再打开才变"）。
+        ThemeManager.instance().theme_changed.connect(self._on_theme_changed)
 
     def _init_ui(self) -> None:
         widget = QWidget()
@@ -144,24 +148,42 @@ class FeatureInfoDock(QDockWidget):
         if self._highlight is not None:
             self._highlight.hide()
         self._highlight = highlight
+        self._render()
+        self.show()
+        self.raise_()
+
+    def _on_theme_changed(self, *_args) -> None:
+        """切主题：把当前正在展示的内容按新主题色重画一遍。"""
+        self._render()
+
+    def _render(self) -> None:
+        """按当前数据 + **当前主题**重建标题与正文。
+
+        ``show_feature`` 与主题切换都走这里，两条路径共用同一套渲染，不会出现
+        "打开时一个色、切主题后另一个色"。
+        """
+        result = self.result
+        if result is None:
+            return
         t = ThemeManager.instance().current()
         show_attrs = bool(result.attributes)
+        try:
+            layer_name = self.layer.name()
+        except RuntimeError:  # 图层已销毁（清空信号可能还没到）
+            return
         if result.is_raster and not show_attrs:
             self.title_label.setText(
-                f"<h3 style='margin:0'>{self.layer.name()}</h3>"
+                f"<h3 style='margin:0'>{layer_name}</h3>"
                 f"<p style='margin:0; color:{t.text_secondary}'>栅格像元识别</p>"
             )
             self._load_raster_info()
         else:
             # ArcGIS MapServer 栅格的富化结果带属性，和矢量要素同款展示
-            id_text = self._display_fid()
             self.title_label.setText(
-                f"<h3 style='margin:0'>{self.layer.name()}</h3>"
-                f"<p style='margin:0; color:{t.text_secondary}'>要素 ID: {id_text}</p>"
+                f"<h3 style='margin:0'>{layer_name}</h3>"
+                f"<p style='margin:0; color:{t.text_secondary}'>要素 ID: {self._display_fid()}</p>"
             )
             self._load_info()
-        self.show()
-        self.raise_()
 
     def clear(self) -> None:
         """清空已显示的数据并断开对图层的引用（图层被移除时调用）。"""

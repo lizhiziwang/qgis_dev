@@ -207,6 +207,11 @@ class MainWindow(
     prompt_save_on_close: bool = True
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        # 先问正在编辑的图层有没有未提交改动（保存工程不会提交它们），
+        # 用户确定后再问是否保存工程；任一环节选“取消”都放弃关闭
+        if not self._confirm_editing_layers_on_close():
+            event.ignore()
+            return
         # 关闭前询问是否保存工程；用户选“取消”/保存失败则放弃关闭
         if not self._confirm_save_project_on_close():
             event.ignore()

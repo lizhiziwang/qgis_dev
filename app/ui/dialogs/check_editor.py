@@ -152,7 +152,6 @@ class CheckConfigDialog(BaseDialog):
     def _build_field_table(self, parent_lay) -> None:
         self.table = QTableWidget()
         self.table.setItemDelegate(CenteredCheckDelegate(self.table))
-        self.table.setItemDelegate(CenteredCheckDelegate(self.table))
         self.table.setRowCount(len(self.columns))
         self.table.setColumnCount(2)
         self.table.setHorizontalHeaderLabels(["是否应用", "质检字段"])
