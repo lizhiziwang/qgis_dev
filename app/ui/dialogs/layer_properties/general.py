@@ -349,11 +349,25 @@ class GeneralTab(LayerPropertyTab):
             QMessageBox.warning(self, "图层属性", f"选择数据源失败：{exc}")
 
     def _on_recalc_extent(self) -> None:
-        """重算数据范围。只刷新缓存的 extent，不改持久状态，故立刻生效。"""
+        """重算数据范围。只刷新缓存的 extent，不改持久状态，故立刻生效。
+
+        ``updateExtents()`` 只在**矢量图层**上有 —— 栅格图层调它会
+        ``AttributeError: 'QgsRasterLayer' object has no attribute 'updateExtents'``
+        （用户点 tif 的属性 → 重新计算数据范围时报过）。栅格的范围来自文件本身的
+        地理变换、没有缓存可重算，所以那边改成让数据源重读一遍元数据再显示。
+        """
         if self._layer is None:
             return
         try:
-            self._layer.updateExtents()
+            from qgis.core import QgsVectorLayer
+
+            if isinstance(self._layer, QgsVectorLayer):
+                self._layer.updateExtents()
+            else:
+                provider = self._layer.dataProvider()
+                reload_meta = getattr(provider, "reload", None)
+                if callable(reload_meta):
+                    reload_meta()
             self._show_extent(self._layer)
         except Exception as exc:  # noqa: BLE001
             logger.error("重新计算数据范围失败: %s", exc, exc_info=True)

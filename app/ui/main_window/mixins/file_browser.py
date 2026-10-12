@@ -31,56 +31,172 @@ _NEW_VECTOR_FORMATS = (
     ("CSV 表格", "csv", "CSV"),
 )
 
+#: 「添加数据文件」认的栅格扩展名（按扩展名走 GDAL 栅格 provider）
+_RASTER_EXTS = frozenset({
+    ".tif", ".tiff", ".img", ".jpg", ".jpeg", ".png", ".bmp", ".gif",
+    ".dem", ".asc", ".vrt", ".jp2", ".ecw", ".hdf", ".nc", ".mrf",
+})
+
+#: 已知的矢量扩展名。**不在这里、也不在栅格表里的**扩展名（比如 .txt/.dat）：
+#: 先试矢量、再试栅格，都不成才报错
+_VECTOR_HINT_EXTS = frozenset({
+    ".shp", ".geojson", ".json", ".gpkg", ".gml", ".kml", ".sqlite",
+    ".csv", ".tab", ".mif", ".fgb", ".gpx", ".dxf",
+})
+
+#: 文件对话框的过滤器（矢量 + 栅格）
+_DATA_FILE_FILTER = (
+    "矢量 / 栅格数据 (*.shp *.geojson *.json *.gpkg *.gml *.kml *.sqlite *.csv *.tab *.mif *.fgb *.gpx"
+    " *.tif *.tiff *.img *.jpg *.jpeg *.png *.bmp *.dem *.asc *.vrt *.jp2);;"
+    "矢量文件 (*.shp *.geojson *.json *.gpkg *.gml *.kml *.sqlite *.csv *.tab *.mif *.fgb *.gpx);;"
+    "栅格文件 (*.tif *.tiff *.img *.jpg *.jpeg *.png *.bmp *.dem *.asc *.vrt *.jp2);;"
+    "所有文件 (*)"
+)
+
 
 class FileBrowserMixin:
     """FileBrowserMixin：见模块 docstring。"""
 
-    def _on_open_file(self) -> None:
+    def _on_add_layer(self) -> None:
+        """图层面板「添加图层」按钮：弹出「文件 / GDB」两个入口。
 
+        **为什么要分两个入口**：Qt 的文件对话框**强制模式** —— 文件模式选不中目录
+        （``.gdb`` 是目录），目录模式又选不中文件；实测两种模式的 ``accept()`` 都
+        "只认自己那一类"（选错类型直接 Rejected），一个对话框兼收做不到。
+        """
+        from qgis.PyQt.QtGui import QCursor
+        from qgis.PyQt.QtWidgets import QMenu
+
+        menu = QMenu(self)
+        act_file = menu.addAction("添加数据文件…（矢量 / 栅格）")
+        act_file.triggered.connect(self._on_open_file)
+        act_gdb = menu.addAction("添加 GDB 数据库…（.gdb 文件夹）")
+        act_gdb.triggered.connect(self._on_open_gdb)
+        menu.exec(QCursor.pos())
+
+    def _on_open_file(self) -> None:
         path = open_file_dir(
             self,
             is_dir=False,
-            title="选择矢量文件",
-            filter_="矢量文件 (*.shp *.geojson *.gpkg *.gdb);;所有文件 (*)",
+            title="选择数据文件",
+            filter_=_DATA_FILE_FILTER,
+        )
+        if path:
+            self.load_file(path)
+
+    def _on_open_gdb(self) -> None:
+        """选一个 File Geodatabase 文件夹（``.gdb`` 是目录，只能用目录选择器）。"""
+        path = open_file_dir(
+            self,
+            is_dir=True,
+            title="选择 File Geodatabase（选到 .gdb 文件夹本身）",
         )
         if path:
             self.load_file(path)
 
     def load_file(self, file_path: str) -> None:
-        """加载文件到项目（支持 shp / gdb / geojson / gpkg）。"""
-        from osgeo import ogr
-        from qgis.core import QgsVectorLayer
+        """加载到项目：矢量（shp/gpkg/geojson/…）、栅格（tif/img/…）、或 GDB 目录。"""
 
         ext = os.path.splitext(file_path)[1].lower()
         self._begin_layer_loading(f"正在加载图层：{os.path.basename(file_path)}")
         try:
-            if ext == ".gdb":
-                ogr.RegisterAll()
-                ds = ogr.Open(file_path)
-                if not ds:
-                    QMessageBox.warning(self, "失败", f"无法打开 GDB: {file_path}")
-                    return
-                for i in range(ds.GetLayerCount()):
-                    fc = ds.GetLayerByIndex(i)
-                    name = fc.GetName()
-                    source = f"{file_path}|layername={name}"
-                    layer = QgsVectorLayer(source, name, "ogr")
-                    layer.path_c = file_path
-                    if layer.isValid():
-                        self._add_layer_to_project(layer)
-                        self.canvas.setExtent(layer.extent())
-                ds.Destroy()
+            if os.path.isdir(file_path):
+                # 目录 → 按 GDB 处理（.gdb 是数据集目录）
+                self._load_gdb(file_path)
+            elif ext in _RASTER_EXTS:
+                self._load_raster(file_path)
             else:
-                name = os.path.basename(file_path)
-                layer = QgsVectorLayer(file_path, name, "ogr")
-                layer.path_c = file_path
-                self._add_layer_to_project(layer)
-                self.canvas.setExtent(layer.extent())
+                # 其余按矢量；扩展名不认识时就"矢量试一次、栅格试一次"
+                if self._load_vector(file_path) is None and ext not in _VECTOR_HINT_EXTS:
+                    self._load_raster(file_path)
             self.canvas.refreshAllLayers()
         except Exception as e:  # noqa: BLE001
             QMessageBox.critical(self, "加载错误", f"文件加载失败：{e}")
         finally:
             self._end_layer_loading()
+
+    # ------------------------------------------------------- 各类型加载
+
+    def _load_vector(self, file_path: str):
+        """按矢量加载，成功返回图层，失败返回 ``None``。
+
+        **不自动缩放地图**：加完就跳视图会把用户正在看的地方甩掉（多个图层时
+        更是随便挑一个的范围就跳）。要定位自己右键 → 「缩放至图层」。
+        """
+
+        from qgis.core import QgsVectorLayer
+
+        name = os.path.basename(file_path)
+        layer = QgsVectorLayer(file_path, name, "ogr")
+        if not layer.isValid():
+            return None
+        layer.path_c = file_path
+        self._add_layer_to_project(layer)
+        return layer
+
+    def _load_raster(self, file_path: str):
+        """按栅格加载（GDAL provider），成功返回图层，失败返回 ``None``（同样不缩放）。"""
+
+        from qgis.core import QgsRasterLayer
+
+        name = os.path.basename(file_path)
+        # 不写死 provider：QgsRasterLayer 默认按 GDAL 打开，多波段 tif / img / dem 都走它
+        layer = QgsRasterLayer(file_path, name)
+        if not layer.isValid():
+            QMessageBox.warning(self, "加载失败", f"无法识别为栅格数据：{name}")
+            return None
+        layer.path_c = file_path
+        self._add_layer_to_project(layer)
+        return layer
+
+    def _load_gdb(self, gdb_path: str) -> None:
+        """加载 File Geodatabase 目录里的全部图层。"""
+
+        from osgeo import gdal, ogr
+        from qgis.core import QgsVectorLayer
+
+        ogr.RegisterAll()
+        # 用 gdal 的错误栈拿到**具体原因**：GDB 打不开最常见的原因是这种库只有
+        # ESRI 的 FileGDB 驱动能读（GDAL 自带的只读 OpenFileGDB 读不了），
+        # 报原文比一句"无法打开 GDB"有用得多
+        gdal.ErrorReset()
+        ds = ogr.Open(gdb_path)
+        error = gdal.GetLastErrorMsg() or ""
+        if ds is None:
+            name = os.path.basename(gdb_path.rstrip("/\\"))
+            hint = ""
+            if "FileGDB" in error:
+                hint = (
+                    "\n\n这个库需要 ESRI 的 FileGDB 驱动，当前 GDAL 里没有它"
+                    "（只装了只读的 OpenFileGDB，打不开这类库）。\n"
+                    "处理办法：用 ArcGIS 把该库导出成 GeoPackage / Shapefile，"
+                    "或给 GDAL 装上 gdal-filegdb 插件后再试。"
+                )
+            elif not error:
+                hint = "\n\n（该目录不是有效的 File Geodatabase：里面没有 .gdbtable 文件？）"
+            QMessageBox.warning(self, "无法打开 GDB", f"{name}\n{error}{hint}")
+            return
+
+        added = 0
+        try:
+            for i in range(ds.GetLayerCount()):
+                fc = ds.GetLayerByIndex(i)
+                name = fc.GetName()
+                layer = QgsVectorLayer(f"{gdb_path}|layername={name}", name, "ogr")
+                if not layer.isValid():
+                    logger.warning("GDB 里的图层打不开，跳过：%s", name)
+                    continue
+                layer.path_c = gdb_path
+                self._add_layer_to_project(layer)
+                added += 1
+            if added == 0:
+                QMessageBox.warning(
+                    self, "无法打开 GDB",
+                    f"{os.path.basename(gdb_path)} 里没有可加载的图层。",
+                )
+        finally:
+            ds.Destroy()
+        logger.info("GDB 加载完成：%s（%d 个图层）", gdb_path, added)
 
     # ===================================================== 浏览器事件
 

@@ -333,6 +333,19 @@ class WindowShellMixin:
         if side is not None:
             side.set_session_active("coord_locate", False)
 
+    def _raise_left_dock_once(self) -> None:
+        """窗口**显示之后**把左侧默认页签停在「图层列表」上（只做一次）。
+
+        左侧「图层列表」和「数据浏览器」是叠放的，哪个在上要看最后一次 raise；
+        ``__init__`` 里 raise 会被随后显示的浏览器压过去，所以推迟到 showEvent。
+        """
+        if getattr(self, "_left_dock_activated", False):
+            return
+        self._left_dock_activated = True
+        dock = getattr(self, "layer_dock", None)
+        if dock is not None:
+            dock.raise_()
+
     def _build_docks(self) -> None:
         # 1. 图层树
         self.layer_dock = LayerDock(self)
@@ -344,6 +357,7 @@ class WindowShellMixin:
         self.layer_dock.label_toggle_requested.connect(self._on_layer_label_toggle)
         # 头部工具条：渲染设置（自建对话框 → 渲染 tab）/ 添加图层组 / 删除 / 全部展开 / 全部折叠 / 上移 / 下移
         self.layer_dock.render_tab_requested.connect(self._on_header_render_tab)
+        self.layer_dock.add_layer_requested.connect(self._on_add_layer)
         self.layer_dock.add_group_requested.connect(self._on_add_layer_group)
         self.layer_dock.remove_requested.connect(self._on_header_remove)
         self.layer_dock.expand_all_requested.connect(self._on_header_expand_all)
@@ -360,6 +374,15 @@ class WindowShellMixin:
         self.browser_dock.context_menu_requested.connect(self._on_browser_context_menu)
         self.browser_dock.setMinimumWidth(DOCK_MIN_WIDTH)
         self.addDockWidget(Qt.DockWidgetArea.LeftDockWidgetArea, self.browser_dock)
+        # 与图层列表**叠放**（同一时刻只显示一个、占满整条左侧），默认显示图层列表。
+        # Qt 的 addDockWidget 在同一区域默认是**上下堆叠**：两个各占一半高（实测
+        # 图层列表只有 406px、浏览器 372px），图层一多就得滚半天。tabify 之后
+        # 图层列表独占整条高度，数据浏览器点它的标签页切过去。
+        self.tabifyDockWidget(self.browser_dock, self.layer_dock)
+        # 默认停在「图层列表」的那次 raise **要等窗口显示之后**再做：在 __init__ 里
+        # 直接 raise 会被随后显示的浏览器抢过去（实测标签停在了数据浏览器上）。
+        # 真正的 raise 放在 MainWindow.showEvent 里，见 _raise_left_dock_once。
+        self._left_dock_activated = False
         self.watch_dock_layout(self.browser_dock)
 
         # 3. 日志（默认隐藏，由菜单唤起）

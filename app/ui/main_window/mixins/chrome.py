@@ -66,6 +66,8 @@ class WindowChromeMixin:
             "offline_download": self._on_offline_download,
             "zoom_full": self._on_zoom_full,
             "refresh": self._on_refresh,
+            # 「测试」按钮已按用户要求从工具条移除（_TOOL_GROUPS 里不再有它），
+            # 回调留着，需要时把那行加回去即可恢复按钮
             "test": self._on_test,
         }
         self.tool_bar_builder = ToolBar(self)

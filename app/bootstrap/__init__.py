@@ -416,8 +416,35 @@ def _make_base_tile_callback(cfg: AppConfig):
             logger.warning("未加载配置底图（未启用或图层无效）")
         else:
             logger.info("已加载配置底图：%s", layer.name())
+            _zoom_to_base_tile(window, layer)
 
     return _cb
+
+
+def _zoom_to_base_tile(window, layer) -> None:
+    """把画布范围定到启动底图上。
+
+    **为什么需要显式补这一次**：以前「进程序自动显示全球底图」是
+    ``QgsLayerTreeMapCanvasBridge`` 的「自动缩放到第一个图层」顺带做的；那个开关
+    已按用户要求关掉（否则往工程里加数据时视图会被甩到图层范围上），于是启动时
+    画布范围一直是 Null、进程序一片空白（用户报「明明加载了天地图影像，却没有
+    自动缩放到当前范围」）。
+
+    推迟一拍：图层树桥接是**异步**把图层同步进画布的，当场 setExtent 会被随后的
+    同步覆盖。
+    """
+    from qgis.PyQt.QtCore import QTimer
+
+    def _apply() -> None:
+        zoom = getattr(window, "_zoom_to_layer", None)
+        if not callable(zoom):
+            return
+        try:
+            zoom(layer)   # 带 CRS 变换 + 退化范围兜底（见 LayerActionsMixin）
+        except Exception:  # noqa: BLE001 —— 启动期画布 / 图层可能已销毁
+            logger.debug("启动定位底图失败", exc_info=True)
+
+    QTimer.singleShot(0, _apply)
 
 
 def _make_open_project_callback():

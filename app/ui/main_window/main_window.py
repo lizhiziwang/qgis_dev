@@ -42,7 +42,7 @@ from qgis.core import (
     QgsVectorLayer,
 )
 from qgis.gui import QgsLayerTreeMapCanvasBridge
-from qgis.PyQt.QtGui import QCloseEvent
+from qgis.PyQt.QtGui import QCloseEvent, QShowEvent
 from qgis.PyQt.QtWidgets import QMainWindow
 
 from app.core.auth import AuthResult
@@ -134,7 +134,10 @@ class MainWindow(
         # ---- 地图画布 ----
         self.canvas = self._build_canvas()
         self.bridge = QgsLayerTreeMapCanvasBridge(self.tree_root, self.canvas)
-        self.bridge.setAutoSetupOnFirstLayer(True)
+        # **不自动缩放到第一个图层**：加了数据就把视图甩到图层范围上，用户正在看的
+        # 地方就丢了（用户报「添加完数据后视图被切到错误位置」）。关掉之后图层照样
+        # 上屏（实测 canvas.layers() 有它），要定位自己右键 → 「缩放至图层」。
+        self.bridge.setAutoSetupOnFirstLayer(False)
         # 读工程后必须显式把图层树同步进画布：QgsProject.read() 读入的图层不会
         # 驱动 bridge 更新（实测 read 完成后 canvas.layers() 仍为 0），画布空渲染
         # ⇒ 打开工程白屏，且不触发任何渲染；直到用户手动切换任一图层可见性，
@@ -205,6 +208,12 @@ class MainWindow(
     #: 关闭窗口时是否弹窗询问“是否保存工程”。默认开启；无头 / 测试场景可置
     #: ``False`` 以避免模态弹窗阻塞（见 ``tests/ui/conftest.py`` 的 autouse fixture）。
     prompt_save_on_close: bool = True
+
+    def showEvent(self, event: QShowEvent) -> None:
+        super().showEvent(event)
+        # 窗口显示之后再把左侧页签停在「图层列表」（__init__ 里 raise 会被
+        # 随后显示的浏览器抢过去，实测）。只做一次，之后由用户自己切页签。
+        self._raise_left_dock_once()
 
     def closeEvent(self, event: QCloseEvent) -> None:
         # 先问正在编辑的图层有没有未提交改动（保存工程不会提交它们），

@@ -21,6 +21,7 @@ from qgis.core import (
     QgsLayerTreeGroup,
     QgsVectorLayer,
 )
+from qgis.PyQt.QtCore import QTimer
 from qgis.PyQt.QtWidgets import QMessageBox
 
 from app.core.domain.basemap import add_base_tile_layer
@@ -126,19 +127,52 @@ class ProjectOpsMixin:
 
         用 ``insertLayer(0, ...)`` 把新图层插到分组最顶层——QGIS 面板顶部即渲染
         最上层，后加的图层直接盖在最上面。
+
+        **空工程的第一层顺手定位一下**：一个图层都没有时画布停在默认范围、看不出
+        到底加没加上。已经有图层了就**绝不动视图**——用户正看着哪就是哪，要定位
+        自己右键 →「缩放至图层」。
         """
+        first_layer = not self.project.mapLayers()
         self.project.addMapLayer(layer, False)
         group = getattr(self, "_data_group", None) or self.project.layerTreeRoot()
         group.insertLayer(0, layer)
         # 所有用户导入（打开文件 / 浏览器双击 / 拖拽）都走这里，统一记日志
         src = getattr(layer, "path_c", None) or layer.source()
         logger.info("导入图层：%s（来源=%s）", layer.name(), src)
+        if first_layer:
+            # **推迟一拍**：图层树桥接是把新图层**异步**同步进画布的，当场 setExtent
+            # 会被随后的同步覆盖。singleShot 也顺带满足仓库约束（不在 Qt 事件栈内
+            # 直接动画布，见 swipe.py 的约定）。
+            QTimer.singleShot(0, lambda lyr=layer: self._zoom_to_first_layer(lyr))
+
+    def _zoom_to_first_layer(self, layer) -> None:
+        """空工程加第一个图层 / 新建工程加载默认底图时，把视图定位到它。
+
+        **走 :meth:`_zoom_to_layer`**（带 CRS 变换）：默认底图是 EPSG:3857 的 XYZ
+        瓦片、画布是 EPSG:4490，直接拿它的原始范围 ``setExtent`` 会把视图甩到
+        几十万米外。图层已销毁 / 无效则安静跳过。
+        """
+        try:
+            if layer is None or not layer.isValid() or layer.extent().isEmpty():
+                return
+            self._zoom_to_layer(layer)
+        except RuntimeError:  # 图层或画布已销毁（收尾流程）
+            pass
 
     def _load_config_base_tile_into_ref_group(self) -> None:
-        """加载配置底图并移入"参考图层"分组（底图已平铺挂根，需移动）。"""
+        """加载配置底图并移入"参考图层"分组（底图已平铺挂根，需移动）。
+
+        **顺手定位到它**：新建工程的第一步是 ``project.clear()``，画布范围会被清成
+        空；以前这一步靠 ``QgsLayerTreeMapCanvasBridge`` 的"自动缩放到第一个图层"
+        兜住，那个开关已按用户要求关掉（否则加数据时视图会乱跳），所以这里显式补
+        一次 —— 不然新建完工程是一片空白画布。
+        """
         layer = self._load_config_base_tile()
         if layer is not None and getattr(self, "_ref_group", None) is not None:
             self._move_layer_to_group(layer, self._ref_group)
+        if layer is not None:
+            # 推迟一拍：图层树桥接是异步把图层同步进画布的
+            QTimer.singleShot(0, lambda lyr=layer: self._zoom_to_first_layer(lyr))
 
     # ------------------------------------------------------------ 保存为工程
 

@@ -60,6 +60,7 @@ from app.ui.common.theme import ThemeManager
 
 # QGIS 主题图标名（3.40 / 4.2 两个运行时均已实测可用）
 _THEME_ICONS = {
+    "add_layer": "mActionAddLayer.svg",
     "style": "mActionOptions.svg",
     "group": "mActionAddGroup.svg",
     "remove": "mActionRemoveLayer.svg",
@@ -71,7 +72,9 @@ _THEME_ICONS = {
 
 # (按钮属性名, 图标键, 信号名, 悬停提示)
 # 顺序按 QGIS 桌面图层面板：样式 → 添加组 → 删除 → 展开/折叠所有 → 上移/下移
+# 「添加图层」按用户要求放在样式（图层渲染设置）左边
 _HEADER_SPECS = (
+    ("btn_add_layer", "add_layer", "add_layer_requested", "添加图层（矢量 / 栅格 / GDB）"),
     ("btn_render_tab", "style", "render_tab_requested", "打开图层渲染设置"),
     ("btn_add_group", "group", "add_group_requested", "添加图层组"),
     ("btn_remove", "remove", "remove_requested", "删除图层/组"),
@@ -374,6 +377,7 @@ class LayerDock(QDockWidget):
     layer_clicked = pyqtSignal(object)
     label_toggle_requested = pyqtSignal(object, bool)  # (QgsVectorLayer, 期望的标注开关)
     render_tab_requested = pyqtSignal()
+    add_layer_requested = pyqtSignal()
     add_group_requested = pyqtSignal()
     remove_requested = pyqtSignal()
     expand_all_requested = pyqtSignal()
