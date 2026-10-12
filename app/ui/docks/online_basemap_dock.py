@@ -164,7 +164,10 @@ class OnlineBasemapDock(QDockWidget):
         self.tree.setDropIndicatorShown(True)
         self.tree.setDragDropMode(QAbstractItemView.DragDropMode.InternalMove)
         self.tree.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self.tree.setMovement(QAbstractItemView.Movement.Snap)
+        # 拖拽行为说明：Movement 走 QTreeView 默认的 Free（Snap 主要给网格类
+        # 视图用，文本行场景视觉无差）。PyQt5 / QGIS 打包的 sip binding 偶尔
+        # 不把 QAbstractItemView.setMovement 暴露在 QTreeWidget 实例上，
+        # 索性不在这里显式 setMovement——不依赖该 setter 也能完成分组重排。
         self.tree.model().rowsMoved.connect(self._on_tree_rows_moved)
         layout.addWidget(self.tree, 1)
 

@@ -15,11 +15,16 @@ from qgis.core import (
     Qgis,
     QgsRasterLayer,
 )
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QDialog,
     QMessageBox,
 )
 
+from app.core.domain.import_layer import (
+    ImportLayerError,
+    import_vector_layer_to_db,
+)
 from app.core.util.local_db_util import _CATEGORY_LABEL
 from app.core.util.local_layer_loader import (
     LocalLayerError,
@@ -30,6 +35,7 @@ from app.server.cli import main as server_main
 from app.ui.dialogs.add_connection import AddConnectionDialog
 from app.ui.dialogs.check_viewer import CheckViewerDialog
 from app.ui.dialogs.create_data_dialog import CreateDataDialog
+from app.ui.dialogs.import_layer_dialog import ImportLayerDialog
 from app.ui.dialogs.offline_download import OfflineDownloadDialog
 from app.ui.dialogs.qmap_compare import QMapCompareDialog
 from app.ui.dialogs.query_builder import QueryBuilderDialog
@@ -130,7 +136,9 @@ class AppActionsMixin:
                 self,
                 on_add_connection=self._on_dm_add_connection,
                 on_add_layer=self._on_dm_add_layer,
-                on_create_data=self._on_create_data
+                on_create_data=self._on_create_data,
+                on_import=self._on_import,
+                on_refresh=self._on_refresh,
             )
             self._data_manage_dock = dock
             self.place_bottom_dock(dock)
@@ -171,6 +179,147 @@ class AppActionsMixin:
             f"已创建数据「{layer.name()}」并加入工程：{layer.source()}",
             level=Qgis.MessageLevel.Success,
             duration=4,
+        )
+
+    def _on_import(self) -> None:
+        """数据管理「导入」按钮：弹 :class:`ImportLayerDialog` 收集图层/库/CRS
+        → :func:`import_vector_layer_to_db` 落表 + 注册 ``user_relation``。
+
+        工程中无矢量图层 / 已有连接里无 local + server 库 → 早期拒绝（弹警告），
+        不弹空 dialog。服务器库目前未实现，dialog 中仍展示但确认后由 helper
+        抛 :class:`ImportLayerError` → 弹 Critical 给用户。
+        """
+        from qgis.core import QgsVectorLayer
+
+        vector_layers = [
+            lyr for lyr in self.project.mapLayers().values()
+            if isinstance(lyr, QgsVectorLayer)
+        ]
+        dock = getattr(self, "_data_manage_dock", None)
+        databases: list[dict] = []
+        if dock is not None:
+            databases.extend(getattr(dock, "_databases", []))
+            databases.extend(getattr(dock, "_server_connections", []))
+
+        if not vector_layers:
+            self.messageBar.pushMessage(
+                "导入失败：当前工程中没有矢量图层",
+                level=Qgis.MessageLevel.Warning,
+                duration=3,
+            )
+            return
+        if not databases:
+            self.messageBar.pushMessage(
+                "导入失败：请先在「数据管理」Dock 添加本地或服务器数据库",
+                level=Qgis.MessageLevel.Warning,
+                duration=3,
+            )
+            return
+
+        dlg = ImportLayerDialog(self, vector_layers=vector_layers, databases=databases)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        layer, db, target_crs = dlg.result_payload()
+        # 进度反馈：弹个可取消的无模态 QProgressDialog，用 QGIS 标准
+        # QGIS 3.x / 4.x 都支持的 :class:`QgsFeedback` 联动。用户点取消
+        # 调 ``feedback.cancel()`` → service 内部 ``isCanceled()`` 赶在
+        # 下一次主循环迭代里跳出、回滚已建表。
+        from qgis.core import QgsFeedback
+        from qgis.PyQt.QtWidgets import QApplication, QProgressDialog
+
+        from app.core.domain.import_layer import _phase_text
+
+        feedback = QgsFeedback()
+        progress = QProgressDialog(
+            "准备导入…",
+            "取消",
+            0,
+            100,
+            self,
+        )
+        progress.setWindowTitle("导入图层到数据库")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(0)  # 弹窗立即出现
+        progress.setValue(0)
+        # 取消按钮 → feedback.cancel()；service 会尽快跳出 + 回滚
+        progress.canceled.connect(feedback.cancel)
+        # progressChanged 只报数字，文字阶段名由 _phase_text 按进度区间映射
+        # （QgsFeedback 没有 progressTextChanged 这个信号，避免踩坑）。
+        # QGIS 4.x 的 setProgress 参数实际是 double（emit 出来是 float），
+        # QProgressDialog.setValue 强类型 int 必须显式转。
+        def _on_progress_changed(value) -> None:
+            progress.setValue(int(value))
+            progress.setLabelText(
+                f"正在导入图层「{layer.name()}」\n{_phase_text(int(value))}"
+            )
+
+        feedback.progressChanged.connect(_on_progress_changed)
+
+        try:
+            result = import_vector_layer_to_db(
+                layer, db, target_crs, feedback=feedback
+            )
+        except ImportLayerError as exc:
+            get_logger(__name__).error("导入图层失败：%s", exc, exc_info=True)
+            self.messageBar.pushMessage(
+                f"导入失败：{exc}",
+                level=Qgis.MessageLevel.Critical,
+                duration=5,
+            )
+            return
+        finally:
+            progress.close()
+            # 关闭 QProgressDialog 后偶发关键事件未处理（PyQt5 / PyQt6 都需
+            # 主动 pump），不调会留下「窗口隐藏但 C++ 对象未释放」的中间态
+            # 导致下一个 dialog.exec() 阻塞。直接 processEvents 一下。
+            QApplication.processEvents()
+        self.messageBar.pushMessage(
+            f"已导入图层「{layer.name()}」→ 表 {result.table_name}（{result.inserted} 条）",
+            level=Qgis.MessageLevel.Success,
+            duration=4,
+        )
+        # 落库后刷新右树：让新建表进入"本地数据库 → 该库 → 分类"列表
+        if dock is not None and db.get("kind") == "local":
+            dock.refresh_database(db)
+
+    def _on_refresh(self) -> None:
+        """数据管理「刷新」按钮：刷新所有已添加的本地库 + 服务器连接。
+
+        - 本地库（:attr:`_databases`）：重新从 sqlite 端查表清单 / 分类 / 行数；
+        - 服务器连接（:attr:`_server_connections`）：重画标题 + 摘要展示
+          （不发起网络请求；服务器库表目录浏览待后续版本接入）。
+
+        无连接 → 提示「无可刷新」，不发"已刷新 0 个"误导信息。失败回
+        滚到刷新前的状态（数据读取失败时维持原表，不动 UI）。
+        """
+        dock = getattr(self, "_data_manage_dock", None)
+        if dock is None:
+            return
+        n_local = len(getattr(dock, "_databases", []))
+        n_server = len(getattr(dock, "_server_connections", []))
+        total = n_local + n_server
+        if total == 0:
+            self.messageBar.pushMessage(
+                "无可刷新的数据库连接——请先添加本地库或服务器连接",
+                level=Qgis.MessageLevel.Warning,
+                duration=3,
+            )
+            return
+        try:
+            refreshed = dock.refresh_all()
+        except Exception as exc:  # noqa: BLE001
+            get_logger(__name__).error("刷新数据库失败：%s", exc, exc_info=True)
+            self.messageBar.pushMessage(
+                f"刷新失败：{exc}",
+                level=Qgis.MessageLevel.Critical,
+                duration=5,
+            )
+            return
+        get_logger(__name__).info("刷新 %d 个数据库连接", refreshed)
+        self.messageBar.pushMessage(
+            f"已刷新 {refreshed} 个数据库连接（{n_local} 本地 + {n_server} 服务器）",
+            level=Qgis.MessageLevel.Success,
+            duration=3,
         )
 
     def _on_dm_add_layer(self, db: dict, category: str, name: str) -> None:

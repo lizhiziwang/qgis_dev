@@ -303,6 +303,40 @@ class DataManageDock(QDockWidget):
         self._select_node(root, item)
         self._show_database(conn)
 
+    def refresh_database(self, db: dict) -> None:
+        """库内容变更后重扫该库的右表（导入 / 删除后用）。
+
+        ``db`` 必须在 :attr:`_databases`（local）或 :attr:`_server_connections`
+        （server）里——路径不识别则 no-op。``kind=local`` 时调 :meth:`_show_database`
+        重扫分类 + 行数；``kind=server`` 调 :meth:`_show_server_connection` 重画
+        摘要（服务器库表目录不缓存，刷新不发起网络请求）。
+        """
+        kind = db.get("kind", "")
+        if kind == "local" and db in self._databases:
+            self._show_database(db)
+        elif kind == "server" and db in self._server_connections:
+            self._show_server_connection(db)
+
+    def refresh_all(self) -> int:
+        """刷新所有已注册的本地库 + 服务器连接——点「刷新」按钮触发。
+
+        - 本地库（``_databases``）：调 :meth:`refresh_database` 重扫右表
+          （分类 / 行数 / 元信息从 sqlite 端重新查）；
+        - 服务器连接（``_server_connections``）：同上调
+          :meth:`refresh_database`（仅重画标题 + 摘要，不发起网络请求）。
+
+        Returns:
+            实际刷新的连接数（local + server 之和）。无连接时返回 0。
+        """
+        n = 0
+        for db in list(self._databases):
+            self.refresh_database(db)
+            n += 1
+        for conn in list(self._server_connections):
+            self.refresh_database(conn)
+            n += 1
+        return n
+
     # ------------------------------------------------------------ 工程持久化
 
     def export_state(self) -> dict:
