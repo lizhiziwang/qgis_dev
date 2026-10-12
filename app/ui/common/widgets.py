@@ -127,17 +127,20 @@ class CenteredCheckDelegate(QStyledItemDelegate):
         has_check = bool(
             opt.features & QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
         )
+        if not (has_check and not opt.text):
+            # **有文字**（或本来就没有勾选框）的格子：交回基类 —— 勾选框与文字都按
+            # 默认画（勾选框在文字左边）。
+            # 早先的实现无论有没有文字都把 HasCheckIndicator 剥掉，却只在"无文字"
+            # 时补画居中那个 —— 于是「文字 + 勾选框」的格子勾选框整个不见了
+            # （用户报「组织列打开后没看到勾选框」，那正是文字+勾选框的列表）。
+            super().paint(painter, option, index)
+            return
+        # 无文字的勾选格：基类会把勾选框画在内容区最左边，这里改成居中自绘
         widget = option.widget
         style = widget.style() if widget is not None else QApplication.style()
-
-        # 让基类别画勾选框（清掉特性后**必须**自己 drawControl：调 super().paint 会
-        # 重新按 index 推导选项，把勾选框又加回来）
         opt.features &= ~QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
-
-        if has_check and not opt.text:
-            # 只有「没文字的勾选格」才居中重画；有文字的保持基类的默认左对齐
-            self._draw_check(painter, opt.rect, index)
+        self._draw_check(painter, opt.rect, index)
 
     def _draw_check(self, painter, rect, index) -> None:
         """自绘勾选框（在 ``rect`` 里居中）。"""

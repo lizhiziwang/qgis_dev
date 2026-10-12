@@ -39,6 +39,8 @@ from app.infra.logging import get_logger
 from app.ui.common import tool_icons
 from app.ui.common.icons import Icons
 from app.ui.common.theme import ThemeManager
+from app.ui.common.value_format import format_value
+from app.ui.common.widgets import save_file
 from app.ui.dialogs.organize_columns import OrganizeColumnsDialog
 from app.ui.dialogs.query_builder import QueryBuilderDialog
 from app.ui.tools.feature_attrs import field_alias
@@ -659,6 +661,13 @@ class PagedAttributeTableWidget(QWidget):
         self.funcs_btn.setIcon(Icons.edit())
         self.funcs_btn.setToolTip("自定义函数")
         self.funcs_btn.setFixedSize(26, 26)
+        self.export_btn = QPushButton()
+        self.export_btn.setObjectName("exportCsvBtn")
+        self.export_btn.setIcon(
+            tool_icons.icon("export_csv", ThemeManager.instance().current().toolbar_text)
+        )
+        self.export_btn.setToolTip("导出 CSV（导出表格当前内容：含筛选、不含隐藏列）")
+        self.export_btn.setFixedSize(26, 26)
         self.start_btn.clicked.connect(self._start_edit)
         self.save_btn.clicked.connect(self._save_edit)
         self.stop_btn.clicked.connect(self._stop_edit)
@@ -666,7 +675,9 @@ class PagedAttributeTableWidget(QWidget):
         self.calc_btn.clicked.connect(self._field_calc)
         self.columns_btn.clicked.connect(self._organize_columns)
         self.funcs_btn.clicked.connect(self._edit_functions)
-        for b in (self.start_btn, self.save_btn, self.stop_btn, self.filter_btn, self.calc_btn, self.columns_btn, self.funcs_btn):
+        self.export_btn.clicked.connect(self._export_csv)
+        for b in (self.start_btn, self.save_btn, self.stop_btn, self.filter_btn, self.calc_btn,
+                  self.columns_btn, self.funcs_btn, self.export_btn):
             tb.addWidget(b)
         tb.addStretch(0)
         main_layout.addLayout(tb)
@@ -800,6 +811,83 @@ class PagedAttributeTableWidget(QWidget):
         dlg = QueryBuilderDialog(self.layer, parent=self)
         dlg.sqlConfirmed.connect(self._apply_filter)
         dlg.exec()
+
+    def _export_csv(self) -> None:
+        """把表格**当前呈现的内容**导成 CSV。
+
+        - 行：模型里已加载的行（已经带上了当前筛选 / 限定 fid 子集）；
+        - 列：ID 列 + 未被「组织列」隐藏的字段列，表头用字段别名；
+        - 编码 **utf-8-sig**（带 BOM）：Excel 双击打开中文才不乱码。
+        """
+        import csv  # 仅此处用到，避免模块级多一个 import
+
+        model = self.model
+        if model is None or self.layer is None:
+            return
+        rows = model.rowCount()
+        if rows == 0:
+            self._notify("表格里没有可导出的行", warn=True)
+            return
+        path = save_file(
+            self,
+            "导出 CSV",
+            f"{self.layer.name()}.csv",
+            "CSV 文件 (*.csv);;所有文件 (*)",
+        )
+        if not path:
+            return
+
+        columns = [
+            (i, name, alias)
+            for i, (name, alias) in enumerate(zip(model.field_names, model.header_names))
+            if name not in self._hidden_field_names
+        ]
+        written = 0
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as handle:
+                writer = csv.writer(handle)
+                writer.writerow(["ID", *(alias for _, _, alias in columns)])
+                for row in range(rows):
+                    feature = model.feature_at(row)
+                    if feature is None:      # 要素已被删 / 取不到，跳过这一行
+                        continue
+                    attrs = feature.attributes()
+                    writer.writerow([
+                        feature.id(),
+                        *(format_value(attrs[i]) if i < len(attrs) else "" for i, _, _ in columns),
+                    ])
+                    written += 1
+        except OSError as exc:
+            logger.exception("导出 CSV 失败: %s", path)
+            self._notify(f"导出失败：{exc}", warn=True)
+            return
+        except Exception:  # noqa: BLE001 —— 取值异常不该把文件留成半截还不给说法
+            logger.exception("导出 CSV 时读取出错: %s", path)
+            self._notify("导出失败：读取属性时出错（详情见日志）", warn=True)
+            return
+
+        if model.has_more:
+            # 大图层是流式加载的，表里只有已加载的部分 —— 说清楚，别让用户以为导全了
+            self._notify(
+                f"已导出 {written} 行到 {path}（表格仍在加载 / 已截断，导出的是当前已显示的内容）",
+                warn=True,
+            )
+        else:
+            self._notify(f"已导出 {written} 行到 {path}")
+
+    def _notify(self, text: str, *, warn: bool = False) -> None:
+        """给用户一句反馈：优先走主窗口的浮动消息条，拿不到再退回消息框。"""
+        bar = getattr(self.window(), "messageBar", None)
+        if bar is not None:
+            from qgis.core import Qgis
+
+            level = Qgis.MessageLevel.Warning if warn else Qgis.MessageLevel.Success
+            try:
+                bar.pushMessage(text, level=level)
+                return
+            except RuntimeError:  # 窗口关闭流程里 C++ 对象已销毁
+                pass
+        (QMessageBox.warning if warn else QMessageBox.information)(self, "导出 CSV", text)
 
     def _apply_filter(self, cond: str) -> None:
         """筛选确认后更新模型筛选并刷新（重新统计，回到首屏首批）。"""

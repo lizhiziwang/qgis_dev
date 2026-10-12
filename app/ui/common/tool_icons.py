@@ -86,6 +86,7 @@ _GLYPHS: dict[str, str] = {
     "plus_circle": "\uf055",  # plus-circle 新建连接
     # ---- 属性表 Dock 工具条（app/ui/docks/attribute_dock.py）----
     "organize_columns": "\uf0db",  # columns 组织列（字段列显示设置）
+    "export_csv": "",        # file-export 导出为 CSV 文件
 }
 
 _CACHE: dict[tuple[str, str, int], QIcon] = {}
