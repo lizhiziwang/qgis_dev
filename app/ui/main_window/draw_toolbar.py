@@ -402,10 +402,10 @@ class DigitizingToolbar(QObject):
         )
         self.copy_to_action.triggered.connect(self.copy_to_layer)
 
-        # ---- 快捷键（工具条最末尾；点击弹出面板列出全系统快捷键，可改可恢复默认）----
-        self.shortcuts_action = QAction("快捷键", self.digitizing_toolbar)
-        self.shortcuts_action.setToolTip("查看 / 修改系统全局快捷键（改完保存即生效，可恢复默认）")
-        self.shortcuts_action.triggered.connect(self.show_shortcuts_panel)
+        # ---- 编辑设置（工具条最末尾；点击弹出面板，其「快捷键」页列编辑工具的快捷键）----
+        self.shortcuts_action = QAction("编辑设置", self.digitizing_toolbar)
+        self.shortcuts_action.setToolTip("编辑设置：查看 / 修改编辑工具栏下各工具的快捷键（改完保存即生效，可恢复默认）")
+        self.shortcuts_action.triggered.connect(self.show_edit_settings_panel)
 
         # ---- 初始态：编辑动作全禁用（「开始编辑」例外——恒可用，点击弹窗选层）
         #     最后统一由 _refresh_button_states 推导，这里只组装不动状态
@@ -1488,15 +1488,15 @@ class DigitizingToolbar(QObject):
         detail = f"【{'】【'.join(result.fields)}】" if result.fields else ""
         QMessageBox.warning(self.main_window, "复制到失败", f"{result.reason}{detail}")
 
-    def show_shortcuts_panel(self) -> None:
-        """「快捷键」一次性动作：弹面板列出 / 编辑全系统快捷键（保存即生效）。
+    def show_edit_settings_panel(self) -> None:
+        """「编辑设置」一次性动作：弹面板编辑编辑工具的快捷键（保存即生效）。
 
-        面板与落盘都在 :class:`MainWindow`（:meth:`apply_shortcut_panel`）——快捷键
+        面板与落盘都在 :class:`MainWindow`（:meth:`apply_edit_settings_panel`）——快捷键
         真正挂在那些 QAction / QShortcut 上，只有主窗口拿得到它们。
         """
-        fn = getattr(self.main_window, "apply_shortcut_panel", None)
+        fn = getattr(self.main_window, "apply_edit_settings_panel", None)
         if not callable(fn):
-            QMessageBox.information(self.main_window, "提示", "当前窗口不支持快捷键设置")
+            QMessageBox.information(self.main_window, "提示", "当前窗口不支持编辑设置")
             return
         fn()
 

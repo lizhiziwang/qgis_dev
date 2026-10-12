@@ -75,6 +75,79 @@ def make_ellipsoid_measure(crs):
     return measure
 
 
+#: 高斯-克吕格分带宽度（中国 1:10000 及更大比例尺常用 3° 带）
+GAUSS_KRUGER_ZONE_DEGREES = 3
+#: 高斯-克吕格横轴墨卡托：中央经线上尺度比 = 1（我国 3° 带不加尺度改正）
+GAUSS_KRUGER_SCALE = 1.0
+#: 东偏 500km（我国约定；对面/长度量算无影响，只为与成果坐标一致）
+GAUSS_KRUGER_FALSE_EASTING = 500000.0
+#: CGCS2000 用的就是 GRS80 椭球（a=6378137, 1/f=298.257222101）
+GAUSS_KRUGER_ELLIPSOID = "GRS80"
+
+
+def center_longitude(crs, geometry) -> float | None:
+    """几何中心的**经度**（度）；算不出来返回 ``None``。
+
+    几何可能落在投影坐标系上（此时 ``centroid().x()`` 是米不是度），所以先判
+    坐标系类型，必要时把中心点反算回经纬度。
+    """
+    if crs is None or not crs.isValid() or geometry is None or geometry.isEmpty():
+        return None
+    try:
+        point = geometry.centroid().asPoint()
+    except Exception:  # noqa: BLE001
+        return None
+    if crs.isGeographic():
+        return point.x()
+    from qgis.core import (  # 延迟 import
+        QgsCoordinateReferenceSystem,
+        QgsCoordinateTransform,
+        QgsProject,
+    )
+
+    geographic = QgsCoordinateReferenceSystem("EPSG:4490")
+    try:
+        transform = QgsCoordinateTransform(crs, geographic, QgsProject.instance().transformContext())
+        return transform.transform(point).x()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def gauss_kruger_crs(longitude: float):
+    """按 ``longitude`` 所在 **3° 带**构造 CGCS2000 高斯-克吕格 CRS。
+
+    中央经线取离该经度最近的 3° 倍数（如 115.0°E → 114°E 带）。用 PROJ 串直接建，
+    不去猜 EPSG 编号（CM 系列的 EPSG 是连续编号，靠算容易出错）。
+    """
+    from qgis.core import QgsCoordinateReferenceSystem  # 延迟 import
+
+    central = GAUSS_KRUGER_ZONE_DEGREES * round(longitude / GAUSS_KRUGER_ZONE_DEGREES)
+    proj = (
+        f"+proj=tmerc +lat_0=0 +lon_0={central} +k={GAUSS_KRUGER_SCALE} "
+        f"+x_0={GAUSS_KRUGER_FALSE_EASTING:.0f} +y_0=0 "
+        f"+ellps={GAUSS_KRUGER_ELLIPSOID} +units=m +no_defs"
+    )
+    crs = QgsCoordinateReferenceSystem.fromProj(proj)
+    return crs if crs.isValid() else None
+
+
+def make_gauss_kruger_transform(crs, geometry):
+    """``crs`` → 该几何所在 3° 带的高斯-克吕格 的坐标转换；不可用返回 ``None``。
+
+    **按几何自己所在经度选带**：离中央经线越远横轴墨卡托的尺度变形越大，
+    选近了才准（这也是高斯投影的正确用法）。
+    """
+    longitude = center_longitude(crs, geometry)
+    if longitude is None:
+        return None
+    target = gauss_kruger_crs(longitude)
+    if target is None:
+        return None
+    from qgis.core import QgsCoordinateTransform, QgsProject  # 延迟 import
+
+    return QgsCoordinateTransform(crs, target, QgsProject.instance().transformContext())
+
+
 def project_geometry(geom: QgsGeometry, transform) -> QgsGeometry | None:
     """把几何转到目标投影；``transform`` 为 ``None`` 或转换失败时返回 ``None``。"""
     if transform is None:
@@ -104,9 +177,16 @@ def measure_area_perimeter(geom: QgsGeometry, transform, measure) -> tuple[float
 
 
 __all__ = [
+    "GAUSS_KRUGER_ELLIPSOID",
+    "GAUSS_KRUGER_FALSE_EASTING",
+    "GAUSS_KRUGER_SCALE",
+    "GAUSS_KRUGER_ZONE_DEGREES",
     "JIANGXI_ALBERS_WKT",
+    "center_longitude",
+    "gauss_kruger_crs",
     "jiangxi_albers_crs",
     "make_ellipsoid_measure",
+    "make_gauss_kruger_transform",
     "make_transform",
     "measure_area_perimeter",
     "measuring_geometry",

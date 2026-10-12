@@ -32,6 +32,13 @@ except Exception:  # noqa: BLE001
     QgsWkbTypes = None  # type: ignore[assignment]
     QVariant = None  # type: ignore[assignment]
 
+from app.infra.edit_settings import (
+    BACKEND_ELLIPSOID,
+    BACKEND_GAUSS,
+    MU_IN_SQUARE_METERS,
+    EditSettingsManager,
+)
+
 #: 面积类字段名关键字（小写子串匹配，含别名）。成果数据里面积字段既有中文
 #: （``面积``）也有拼音缩写（``mj`` / ``txmj`` / ``xbmj`` / ``tb_mj``）与全拼
 #: （``bh_mian_ji``），三种写法都要能命中
@@ -110,42 +117,86 @@ def uid_field_index(fields: "QgsFields") -> int | None:
 def _geometry_value(
     layer: "QgsVectorLayer", geometry: "QgsGeometry", kind: str
 ) -> float | None:
-    """按图层几何类型算面积 ("area") / 周长长度 ("length") 值。
+    """按图层几何类型算面积 ("area") / 周长长度 ("length") 值（**写进字段的那个值**）。
 
-    **地理坐标系（EPSG:4490 这类经纬度）必须走椭球量算**：直接
-    ``geometry.area()`` 拿到的是**平方度**——实测一块正常图斑只有 ``1.28e-08``，
-    完全是另一个量级；长度同理是"度"。这里用 :class:`QgsDistanceArea` 按椭球算，
-    面积给**平方米**、长度给**米**，也是 QGIS 自己「计算几何 / 字段计算器」的口径。
+    分两种口径，由「编辑设置 → 应用于系统长度与面积字段值的自动计算」决定：
 
-    投影坐标系保持 ``geometry.area()``（本来就是 CRS 单位，常规投影即平方米）——
-    不去动它的好处是投影数据的面积口径不会因为这次修复而变化。
+    - **勾选** → 按「默认长度 / 面积计算方法」算，并按「默认长度 / 面积单位」写入
+      （所以面积字段可能存的是**亩 / 公顷**而不是平方米 —— 这是用户在编辑设置里
+      明确选的单位）；
+    - **不勾选** → 保持系统原来的方式：地理坐标系（EPSG:4490 这类）必须走椭球
+      量算（直接 ``geometry.area()`` 拿到的是**平方度**，实测一块正常图斑只有
+      ``1.28e-08``），投影坐标系用它自己 CRS 的平面量算；单位固定平方米 / 米。
+
+    两种口径都是**照算不误**，差别只在"用哪套方法、写什么单位"。
     """
     if geometry is None or geometry.isNull() or geometry.isEmpty():
         return None
+    is_area = kind == "area" and layer.geometryType() == QgsWkbTypes.PolygonGeometry
+    settings = EditSettingsManager.instance().current()
     try:
-        if layer.geometryType() == QgsWkbTypes.PolygonGeometry:
-            if kind == "area":
-                return (
-                    _ellipsoidal_measure(layer, geometry, area=True)
-                    if _needs_ellipsoidal(layer)
-                    else geometry.area()
-                )
-            return (
-                _ellipsoidal_measure(layer, geometry, area=False)
-                if _needs_ellipsoidal(layer)
-                else geometry.length()
-            )
+        if settings.auto_calc:
+            backend = settings.area_backend if is_area else settings.length_backend
+            meters = _measure_with(layer, geometry, is_area, backend)
+            return None if meters is None else _to_unit(kind, meters, settings)
         return (
-            _ellipsoidal_measure(layer, geometry, area=False)
+            _ellipsoidal_measure(layer, geometry, area=is_area)
             if _needs_ellipsoidal(layer)
-            else geometry.length()
+            else (geometry.area() if is_area else geometry.length())
         )
     except Exception:  # noqa: BLE001 —— 几何运算失败不阻断编辑
         return None
 
 
+def _measure_with(layer, geometry, is_area: bool, backend: str) -> float | None:
+    """按指定后端量出（米² / 米）：椭球 / 高斯-克吕格 / 等积，逐级兜底。"""
+    if backend == BACKEND_ELLIPSOID:
+        value = _ellipsoidal_measure(layer, geometry, area=is_area)
+        if value is not None:
+            return value
+    else:
+        projected = _projected_measure(layer, geometry, backend)
+        if projected is not None:
+            return projected.area() if is_area else projected.length()
+    return geometry.area() if is_area else geometry.length()
+
+
+def _projected_measure(layer, geometry, backend: str):
+    """把几何投到对应投影（高斯-克吕格 / 江西 Albers）平面；不可用返回 ``None``。"""
+    from app.core.domain.check.builtin.measure import (
+        make_gauss_kruger_transform,
+        make_transform,
+        project_geometry,
+    )
+
+    try:
+        transform = (
+            make_gauss_kruger_transform(layer.crs(), geometry)
+            if backend == BACKEND_GAUSS
+            else make_transform(layer.crs())
+        )
+    except Exception:  # noqa: BLE001 —— 建不出转换就落回下一级兜底
+        return None
+    return project_geometry(geometry, transform)
+
+
+def _to_unit(kind: str, meters: float, settings) -> float:
+    """米² / 米 → 「编辑设置」里选的单位。"""
+    if kind == "area":
+        if settings.area_unit == "公顷":
+            return meters / 10_000.0
+        if settings.area_unit == "平方千米":
+            return meters / 1_000_000.0
+        return meters / MU_IN_SQUARE_METERS          # 亩（QGIS 枚举里没有，手工换）
+    if settings.len_unit == "千米":
+        return meters / 1000.0
+    if settings.len_unit == "厘米":
+        return meters * 100.0
+    return meters
+
+
 def _needs_ellipsoidal(layer: "QgsVectorLayer") -> bool:
-    """该图层是否需要椭球量算（地理坐标系才需要）。"""
+    """该图层是否需要椭球量算（地理坐标系才需要）——系统原来的判定。"""
     try:
         return bool(layer.crs().isGeographic())
     except Exception:  # noqa: BLE001
@@ -164,7 +215,14 @@ def _ellipsoidal_measure(
         ellipsoid = layer.crs().ellipsoidAcronym()
         if ellipsoid:
             d.setEllipsoid(ellipsoid)
-        return d.measureArea(geometry) if area else d.measureLength(geometry)
+        if area:
+            return d.measureArea(geometry)
+        # **面必须用 measurePerimeter**：实测 QGIS 4.2 下 ``measureLength`` 对多边形
+        # 几何直接返回 0 —— 周长字段会被写成 0（安静地把数据改坏）。测量工具那边
+        # 记着同一个坑（见 app/ui/tools/measure.py 的 _perimeter_meters）。
+        if layer.geometryType() == QgsWkbTypes.PolygonGeometry:
+            return d.measurePerimeter(geometry)
+        return d.measureLength(geometry)
     except Exception:  # noqa: BLE001
         return None
 
@@ -195,6 +253,9 @@ def refresh_area_fields(
 
     原要素几何被改小（面分割留下剩余部分 / 分解留下首个部件）后调本函数，
     把过期的面积 / 周长值更新为当前几何的值；找不到面积类字段时为无操作。
+
+    **"自动计算"那个勾选框不控制算不算**——不勾只是换成系统原来的算法与单位
+    （见 :func:`_geometry_value`），几何变了照样重算，否则成果字段会悄悄变陈旧。
     """
     for idx, field in enumerate(layer.fields()):
         kind = _field_kind(field)

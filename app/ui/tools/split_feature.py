@@ -62,6 +62,7 @@ from qgis.PyQt.QtGui import QColor
 
 from app.core.domain.check.space_index import clear_spatial_index
 from app.infra.logging import get_logger
+from app.ui.tools.feature_attrs import refresh_area_fields
 
 logger = get_logger(__name__)
 
@@ -313,19 +314,33 @@ class SplitFeatureTool(QgsMapTool):
         # 重载并抛 TypeError，曲线重载两版本签名一致且不废弃。
         cut_line = QgsLineString(cleaned)
         layer.beginEditCommand("线分割")
+        # QGIS 的 splitFeatures 只动几何、**不碰属性** —— 不补这一步，面积 / 周长类
+        # 字段会留着切割前的旧值（用户报过「线分割后面积没变化」）。它给新块发的
+        # featureAdded 在下面接住，好把新块也一起重算。
+        added_fids: list[int] = []
         try:
-            # 核心 API 只切图层**当前选中**的要素——正是上面读到的 fids，
-            # 不需要临时改选中（改完还得还原，那一步出错会把编辑命令悬着不关）
-            code, _split_pts = layer.splitFeatures(cut_line, False, False)
+            layer.featureAdded.connect(added_fids.append)
+            try:
+                # 核心 API 只切图层**当前选中**的要素——正是上面读到的 fids，
+                # 不需要临时改选中（改完还得还原，那一步出错会把编辑命令悬着不关）
+                code, _split_pts = layer.splitFeatures(cut_line, False, False)
+            finally:
+                try:
+                    layer.featureAdded.disconnect(added_fids.append)
+                except TypeError:  # 没连上（或已被断开）
+                    pass
+            if code != Qgis.GeometryOperationResult.Success:
+                layer.destroyEditCommand()
+                self._hint("没有要素被切开：切割线需完整穿过选中要素的边界")
+                self._clear_line()
+                return
+            # 重算**必须在编辑命令内**：命令关掉之后再改属性会另起一个撤销步骤，
+            # 用户按一次 Ctrl+Z 只会撤掉面积修正、切开的图形留在那儿
+            self._refresh_cut_fields(layer, [*fids, *added_fids])
         except Exception:  # noqa: BLE001 —— 收宽：任何异常都必须关掉编辑命令
             layer.destroyEditCommand()
             logger.exception("线分割失败: layer=%s", layer.name())
             self._hint("分割失败：图层编辑 API 异常")
-            self._clear_line()
-            return
-        if code != Qgis.GeometryOperationResult.Success:
-            layer.destroyEditCommand()
-            self._hint("没有要素被切开：切割线需完整穿过选中要素的边界")
             self._clear_line()
             return
         layer.endEditCommand()
@@ -338,6 +353,27 @@ class SplitFeatureTool(QgsMapTool):
         )
         # 编辑命令栈外刷新画布（仓库约束：事件栈内不直接 refresh）
         QTimer.singleShot(0, self._safe_refresh)
+
+    @staticmethod
+    def _refresh_cut_fields(layer: QgsVectorLayer, fids: list[int]) -> None:
+        """把 ``fids`` 里每个要素的面积 / 周长类字段按**当前几何**重算并写回。
+
+        ``splitFeatures`` 只改几何，属性得由调用方补；找不到面积类字段时无操作。
+        只为真正变了的字段写回（与其它几何编辑工具同一套口径）。
+        """
+        for fid in fids:
+            feature = layer.getFeature(fid)
+            if not feature.isValid():
+                continue
+            geometry = feature.geometry()
+            if geometry is None or geometry.isEmpty():
+                continue
+            attrs = list(feature.attributes())
+            before = list(attrs)
+            refreshed = refresh_area_fields(layer, attrs, geometry)
+            for idx, value in enumerate(refreshed):
+                if before[idx] != value:
+                    layer.changeAttributeValue(fid, idx, value)
 
     def _layer_line_points(self) -> list[QgsPoint]:
         """切割线顶点换算到图层 CRS 并去重（分割 API 要求与几何同 CRS）。"""

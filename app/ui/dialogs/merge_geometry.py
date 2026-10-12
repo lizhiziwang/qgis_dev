@@ -40,6 +40,7 @@ from qgis.PyQt.QtWidgets import (
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.feature_highlight import FeatureHighlighter
 from app.ui.common.widgets import make_table
+from app.ui.common.value_format import format_value
 
 #: 视为「无值」的文本：真 NULL 之外，数据里常把空值写成字面量字符串
 _NULL_TOKENS = {"", "null", "none", "nil", "<null>", "undefined"}
@@ -216,7 +217,7 @@ class MergeGeometryDialog(BaseDialog):
                 self.attr_table.setItem(row, 0, name_item)
                 value = attrs[row] if row < len(attrs) else None
                 self.attr_table.setItem(
-                    row, 1, QTableWidgetItem("NULL" if value is None else str(value))
+                    row, 1, QTableWidgetItem("NULL" if value is None else format_value(value))
                 )
         except Exception:  # noqa: BLE001 —— 属性展示失败不该阻断合并流程
             self.attr_table.setRowCount(0)

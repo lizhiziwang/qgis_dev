@@ -14,6 +14,7 @@ from typing import Optional
 
 from qgis.core import (
     Qgis,
+    QgsRasterLayer,
     QgsVectorDataProvider,
     QgsVectorLayer,
 )
@@ -157,6 +158,23 @@ class LayerTreeOpsMixin:
             self.editing_service.stop(layer, save=False)
             return True
         return False
+
+    def _toggle_first_imagery(self) -> None:
+        """显隐**第一个**影像（栅格）图层 —— 「编辑设置」里那条快捷键的动作。
+
+        只切可见性复选框，不动图层顺序 / 选中状态；项目里一个栅格都没有时静默返回
+        （快捷键按下去没反应总比弹个错误框好）。
+        """
+        root = self.project.layerTreeRoot()
+        if root is None:
+            return
+        for layer in self.project.mapLayers().values():
+            if not isinstance(layer, QgsRasterLayer):
+                continue
+            node = root.findLayer(layer.id())
+            if node is not None:
+                node.setItemVisibilityChecked(not node.isVisible())
+            return
 
     def _on_layer_clicked_in_dock(self, index) -> None:
         """用户在图层树点击一层：仅记录为 ``_selected_layer``。

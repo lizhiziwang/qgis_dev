@@ -34,6 +34,7 @@ from qgis.PyQt.QtWidgets import (
 
 from app.infra.logging import get_logger
 from app.infra.messagebar import FloatingMessageBar
+from app.ui.common.canvas_wheel import CanvasWheelDirectionFilter
 from app.ui.common.map_canvas import AppMapCanvas
 from app.ui.common.selection_overlay import SelectionOverlay
 from app.ui.common.theme import ThemeManager
@@ -76,7 +77,12 @@ class WindowShellMixin:
         self._undo_shortcut = QShortcut(QKeySequence("Ctrl+Z"), canvas)
         self._undo_shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         self._undo_shortcut.activated.connect(self._undo_edit)
-        self._redo_shortcuts = [QShortcut(QKeySequence(seq), canvas) for seq in ("Ctrl+Shift+Z", "Ctrl+Y")]
+        # 重做只绑一个键（Ctrl+Y，可在「编辑设置 → 快捷键」里改）。早先还额外绑了
+        # Ctrl+Shift+Z，但面板里只能显示一个键位 —— 多出来那条既没法展示、又会让
+        # "面板显示的就是真实绑定"这句话不成立，索性去掉。
+        self._redo_shortcuts = [
+            QShortcut(QKeySequence("Ctrl+Y"), canvas)
+        ]
         for redo_sc in self._redo_shortcuts:
             redo_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             redo_sc.activated.connect(self._redo_edit)
@@ -111,6 +117,9 @@ class WindowShellMixin:
         self._msg_active = False
         self.messageBar.set_on_state(self._on_floating_message_state)
         self.messageBar.hide()
+
+        # 画布滚轮方向跟随「编辑设置 → 滚轮向前滚动」
+        self._wheel_filter = CanvasWheelDirectionFilter(self.canvas)
 
         # ---- 选中要素置顶覆盖层 ----
         # QGIS 自带的选中高亮画在**各图层自己的渲染流程里**，下层被选中的图形会

@@ -47,6 +47,7 @@ from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import QGraphicsDropShadowEffect, QLabel
 
 from app.core.domain.drawing.tools.snap import snapped_map_point
+from app.infra.edit_settings import BACKEND_ELLIPSOID, BACKEND_GAUSS, EditSettingsManager
 from app.infra.logging import get_logger
 from app.ui.common.theme import ThemeManager
 
@@ -63,14 +64,19 @@ _READOUT_BOTTOM_GAP = 56
 
 
 def _format_length(meters: float) -> str:
-    """米 → 「米 / 千米」档位（>=1km 用千米）。"""
+    """米 → 「米 / 千米」档位（>=1km 用千米）。
+
+    **测量读数不跟随「编辑设置 → 默认长度单位」**：那个单位是给**写进图层字段**用的
+    （见 :func:`app.ui.tools.feature_attrs._geometry_value`），测量读数保持原来
+    按量级自动选档的显示方式。
+    """
     if meters >= 1000.0:
         return f"{meters / 1000.0:.3f} 千米"
     return f"{meters:.2f} 米"
 
 
 def _format_area(square_meters: float) -> str:
-    """平方米 → 「平方米 / 公顷 / 平方千米」档位。"""
+    """平方米 → 「平方米 / 公顷 / 平方千米」档位（同样不跟随编辑设置的单位）。"""
     if square_meters >= 1_000_000.0:
         return f"{square_meters / 1_000_000.0:.4f} 平方千米"
     if square_meters >= 10_000.0:
@@ -371,8 +377,43 @@ class MeasureToolBase(QgsMapTool):
         """按量算器当前长度单位换算成米。"""
         return value * QgsUnitTypes.fromUnitToUnitFactor(measure.lengthUnits(), Qgis.DistanceUnit.Meters)
 
+    def _projected_measure(self, geometry: QgsGeometry, backend: str) -> QgsGeometry | None:
+        """按指定投影口径把几何投到平面上（量算入口的投影分支）。
+
+        - ``gauss`` → 该几何所在 3° 带的 CGCS2000 高斯-克吕格（横轴墨卡托，等角）；
+        - 其余（等积）→ 江西 Albers 等积投影，与质检模块同一口径
+          （见 :mod:`app.core.domain.check.builtin.measure`）。
+
+        CRS 无效 / 转换失败返回 ``None``，调用方落回椭球量算。
+        """
+        try:
+            from app.core.domain.check.builtin.measure import (
+                make_gauss_kruger_transform,
+                make_transform,
+                project_geometry,
+            )
+
+            crs = self.canvas.mapSettings().destinationCrs()
+            transform = (
+                make_gauss_kruger_transform(crs, geometry)
+                if backend == BACKEND_GAUSS
+                else make_transform(crs)
+            )
+            return project_geometry(geometry, transform)
+        except Exception:  # noqa: BLE001 —— 投影不可用就落回椭球
+            logger.debug("投影量算准备失败，落回椭球量算", exc_info=True)
+            return None
+
     def _length_meters(self, geometry: QgsGeometry) -> float | None:
-        """折线长度（米）；无法椭球量算时返回 None。"""
+        """折线长度（米）；量不出来返回 None（调用方降级为平面显示）。
+
+        方法取「编辑设置 → 默认长度计算方法」（高斯投影 / 等积投影 / 测地线）。
+        """
+        backend = EditSettingsManager.instance().current().length_backend
+        if backend != BACKEND_ELLIPSOID:
+            projected = self._projected_measure(geometry, backend)
+            if projected is not None:
+                return projected.length()
         measure = self._ellipsoid_measure()
         if measure is None:
             return None
@@ -383,11 +424,16 @@ class MeasureToolBase(QgsMapTool):
             return None
 
     def _perimeter_meters(self, geometry: QgsGeometry) -> float | None:
-        """多边形周长（米）；无法椭球量算时返回 None。
+        """多边形周长（米）；量不出来返回 None。
 
         注意面必须用 ``measurePerimeter``：实测 QGIS 4.2 下 ``measureLength``
         对多边形几何直接返回 0（周长会显示成 0.00 米）。
         """
+        backend = EditSettingsManager.instance().current().length_backend
+        if backend != BACKEND_ELLIPSOID:
+            projected = self._projected_measure(geometry, backend)
+            if projected is not None:
+                return projected.length()
         measure = self._ellipsoid_measure()
         if measure is None:
             return None
@@ -398,7 +444,12 @@ class MeasureToolBase(QgsMapTool):
             return None
 
     def _area_square_meters(self, geometry: QgsGeometry) -> float | None:
-        """多边形面积（平方米）；无法椭球量算时返回 None。"""
+        """多边形面积（平方米）；量不出来返回 None。"""
+        backend = EditSettingsManager.instance().current().area_backend
+        if backend != BACKEND_ELLIPSOID:
+            projected = self._projected_measure(geometry, backend)
+            if projected is not None:
+                return projected.area()
         measure = self._ellipsoid_measure()
         if measure is None:
             return None

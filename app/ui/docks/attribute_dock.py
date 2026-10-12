@@ -293,7 +293,24 @@ class PagedAttributeTableModel(QAbstractTableModel):
         self.truncated = False
         self.where = self._build_where()
         self._refresh_totals()
+        # 图层缓冲里的值变了（编辑工具改属性 / 挖洞等几何编辑后重算面积）→ 丢掉
+        # 要素缓存并让视图重画。不接这个信号的话，**已经打开**的属性表还显示旧值，
+        # 要手动重新点一下才刷新（用户报过）。
+        layer.attributeValueChanged.connect(self._on_layer_values_changed)
+        layer.geometryChanged.connect(self._on_layer_values_changed)
         self._start_stream()
+
+    def _on_layer_values_changed(self, *_args) -> None:
+        """编辑缓冲改了值：清要素缓存 + 让整张表重画。
+
+        ``dataChanged`` 覆盖全部已加载行只是给视图一个重画提示，Qt 只重绘可视区域，
+        大图层也不慢；这里**不做 modelReset**——那会把流式加载的 fid 列表清空、
+        整表重新扫描，代价大得多。
+        """
+        self._feature_cache.clear()
+        rows, cols = self.rowCount(), self.columnCount()
+        if rows > 0 and cols > 0:
+            self.dataChanged.emit(self.index(0, 0), self.index(rows - 1, cols - 1))
 
     def _build_where(self) -> str:
         """筛选表达式（show_ids 走 setFilterFids，不拼进表达式）。"""

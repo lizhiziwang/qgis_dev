@@ -10,8 +10,10 @@ from __future__ import annotations
 
 from qgis.core import Qgis, QgsCoordinateTransform
 from qgis.PyQt import sip
+from qgis.PyQt.QtCore import QPoint
 from qgis.PyQt.QtWidgets import QMessageBox
 
+from app.infra.edit_settings import EditSettingsManager
 from app.infra.logging import get_logger
 
 logger = get_logger(__name__)
@@ -24,6 +26,10 @@ from app.ui.tools.select_feature import (
     PointSelectTool,
     RectSelectTool,
 )
+
+
+#: 「选择集」弹窗与画布边缘的间距（像素）
+_SELECT_SET_GAP = 12
 
 
 #: 「操作指引」类提示的展示时长（秒）。这类提示是让用户**看完再动手**（"按住左键拉框"
@@ -98,10 +104,17 @@ class MapToolsMixin:
         已开着的就刷新 + 置前，不另开一个（面板是常驻观察窗，见
         :class:`~app.ui.dialogs.selection_set.SelectionSetDialog`）。
 
+        **是否弹、弹在哪**由「编辑设置 → 选择集筛选框」决定：关掉时框选只改选中集、
+        不弹窗（用户嫌它挡地图时就不用每次点掉）。
+
         **不调 ``activateWindow()``**：面板的承诺是「可继续用选择工具增减」，抢焦点会让
         用户没法接着拖下一个框、也没法直接按 Delete 删选中——这一点与
         ``_on_offline_download`` 的做法有意不同。
         """
+        settings = EditSettingsManager.instance().current()
+        if not settings.sel_filter_on:
+            logger.debug("编辑设置里关掉了「选择集筛选框」：框选后不弹「选择集」")
+            return
         dlg = getattr(self, "_selection_set_dialog", None)
         if dlg is None or sip.isdeleted(dlg):
             dlg = SelectionSetDialog(self.canvas, parent=self)
@@ -111,7 +124,26 @@ class MapToolsMixin:
             dlg.showNormal()
         else:
             dlg.show()
+        self._place_selection_set_dialog(dlg, settings.sel_filter_pos)
         dlg.raise_()
+
+    def _place_selection_set_dialog(self, dlg, pos: str) -> None:
+        """按「编辑设置 → 选择集筛选框 → 显示位置」把弹窗摆到画布顶部 / 底部居中。
+
+        弹窗是无边框顶层窗口，所以按画布的**全局**矩形算位置；尺寸取当前尺寸
+        （内容刷新后可能变高，用 ``height()`` 而不是初始值）。
+        """
+        try:
+            origin = self.canvas.mapToGlobal(QPoint(0, 0))
+            w, h = self.canvas.width(), self.canvas.height()
+        except RuntimeError:  # 画布已销毁
+            return
+        x = origin.x() + max((w - dlg.width()) // 2, 0)
+        if pos == "底部居中":
+            y = origin.y() + max(h - dlg.height() - _SELECT_SET_GAP, 0)
+        else:
+            y = origin.y() + _SELECT_SET_GAP
+        dlg.move(x, y)
 
     def _on_clear_selection(self) -> None:
         """清除：清空**所有图层**的选中集，并抹掉临时绘制的辅助图形。

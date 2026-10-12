@@ -151,7 +151,8 @@ class CopyToLayerDialog(BaseDialog):
         feature_count: int,
         parent: Optional[QWidget] = None,
     ) -> None:
-        super().__init__(parent, title="复制到")
+        # 弹窗不需要最小化（BaseDialog 的约定：构造时传 False，别事后 hide 按钮）
+        super().__init__(parent, title="复制到", show_min_button=False)
         self.setMinimumSize(0, 0)
         self.resize(680, 560)
         self.setModal(True)

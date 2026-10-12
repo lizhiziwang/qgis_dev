@@ -35,6 +35,7 @@ from qgis.PyQt.QtWidgets import (
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.feature_highlight import FeatureHighlighter
 from app.ui.common.widgets import make_table
+from app.ui.common.value_format import format_value
 
 #: 下拉首项：不处理该缝隙（``currentData()`` 为 None）
 _SKIP_TEXT = "不补（跳过）"
@@ -197,7 +198,7 @@ class GapRepairDialog(BaseDialog):
                 self.attr_table.setItem(row, 0, name_item)
                 value = attrs[row] if row < len(attrs) else None
                 self.attr_table.setItem(
-                    row, 1, QTableWidgetItem("NULL" if value is None else str(value))
+                    row, 1, QTableWidgetItem("NULL" if value is None else format_value(value))
                 )
         except Exception:  # noqa: BLE001 —— 属性展示失败不该阻断补缝流程
             self.attr_table.setRowCount(0)

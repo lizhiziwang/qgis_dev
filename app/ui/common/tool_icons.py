@@ -73,7 +73,7 @@ _GLYPHS: dict[str, str] = {
     "measure_line": "\uf547",       # ruler-horizontal 线测量
     "measure_area": "\uf546",       # ruler-combined 面测量
     "extent_clip": "\uf125",        # crop 范围裁剪
-    "shortcut": "",           # keyboard 快捷键（编辑工具条末尾）
+    "shortcut": "",           # keyboard 编辑设置（编辑工具条末尾，其「快捷键」页列编辑工具的键位）
     # ---- 数据管理 Dock 左栏连接树（app/ui/docks/data_manage_dock.py）----
     "db_local": "\uf1c0",     # database 「本地数据库」根
     "db_server": "\uf233",    # server 「服务器数据库」根

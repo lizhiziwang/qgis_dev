@@ -248,7 +248,7 @@ class WindowChromeMixin:
         typing = isinstance(
             widget, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)
         )
-        for attr in ("_snap_shortcut", "_trace_shortcut"):
+        for attr in ("_snap_shortcut", "_trace_shortcut", "_imagery_shortcut"):
             shortcut = getattr(self, attr, None)
             if shortcut is not None:
                 shortcut.setEnabled(not typing)
@@ -268,13 +268,16 @@ class WindowChromeMixin:
         self._trace_shortcut = self._make_toggle_shortcut(
             getattr(snap_tb, "_trace_btn", None)
         )
+        # 显隐首个影像图层：没有工具条按钮，纯键位（默认不绑定，用户在面板里录）
+        self._imagery_shortcut = QShortcut(self)
+        self._imagery_shortcut.setContext(Qt.ShortcutContext.WindowShortcut)
+        self._imagery_shortcut.activated.connect(self._toggle_first_imagery)
         app = QApplication.instance()
         if app is not None:
             app.focusChanged.connect(self._sync_toggle_shortcuts)
         self._shortcut_targets: dict = {
             "undo": getattr(self, "_undo_shortcut", None),
             "redo": redo_shortcuts[0] if len(redo_shortcuts) > 0 else None,
-            "redo_alt": redo_shortcuts[1] if len(redo_shortcuts) > 1 else None,
             "new_project": getattr(self, "_act_new_project", None),
             "save_project": getattr(self, "_act_save_project", None),
             "save_project_as": getattr(self, "_act_save_project_as", None),
@@ -287,10 +290,17 @@ class WindowChromeMixin:
             # （后者要求按钮可见，只在「编辑」页签下才显示 —— 别的页签按 S 没反应）
             "snapping_toggle": self._snap_shortcut,
             "tracing_toggle": self._trace_shortcut,
+            "toggle_first_imagery": self._imagery_shortcut,
         }
         overrides = load_overrides(self._shortcuts_config_path())
         for key, sequence in effective_sequences(overrides).items():
             self.set_app_shortcut(key, sequence)
+        # 编辑设置项（常规页 / 系统设置组）：读进单例，各处按需取用
+        from app.infra.edit_settings import EditSettingsManager, load_settings
+
+        EditSettingsManager.instance().apply(
+            load_settings(self._edit_settings_config_path())
+        )
 
     def set_app_shortcut(self, key: str, sequence: str) -> None:
         """把 ``key`` 对应控件的快捷键设为 ``sequence``（空串 = 不绑定）。
@@ -307,21 +317,49 @@ class WindowChromeMixin:
             return
         target.setShortcut(QKeySequence(sequence) if sequence else QKeySequence())
 
-    def apply_shortcut_panel(self) -> None:
-        """「快捷键」按钮：弹面板编辑，保存后立即生效并落盘。"""
+    def _edit_settings_config_path(self):
+        """编辑设置文件与快捷键文件同目录（都在 map config 旁边）。"""
+        from pathlib import Path
+
+        return Path(self._map_config_path()).with_name("edit_settings.yaml")
+
+    def apply_edit_settings_panel(self) -> None:
+        """「编辑设置」按钮：弹面板（常规 / 快捷键两页）编辑，保存后立即生效并落盘。
+
+        快捷键页只展示**编辑工具栏下的工具快捷键**（见 ``EDIT_TOOL_SHORTCUTS``），但
+        这里传进去的是**全量**当前值、收尾也按全量落盘 —— 否则一次保存就会把
+        工程 / 退出 / 日志等项的覆盖值从配置文件里抹掉。
+        """
+        from app.infra.edit_settings import (
+            EditSettingsManager,
+            load_settings,
+            save_settings,
+        )
         from app.infra.shortcuts import diff_from_defaults, save_overrides
-        from app.ui.dialogs.shortcuts import ShortcutsDialog
+        from app.ui.dialogs.edit_settings import EditSettingsDialog
 
         current = {
             spec.key: self._current_shortcut_text(spec.key, spec.default)
             for spec in DEFAULT_SHORTCUTS
         }
-        dlg = ShortcutsDialog(current, parent=self)
+        manager = EditSettingsManager.instance()
+        dlg = EditSettingsDialog(current, manager.current(), parent=self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         sequences = dlg.sequences()
         for key, sequence in sequences.items():
             self.set_app_shortcut(key, sequence)
+        # 编辑设置项：立即生效（各处按需读单例），再落盘
+        new_settings = dlg.settings()
+        manager.apply(new_settings)
+        try:
+            save_settings(self._edit_settings_config_path(), new_settings)
+        except Exception:  # noqa: BLE001 —— 写盘失败不该回滚已生效的设置
+            logger.exception("保存编辑设置失败")
+            self.messageBar.pushMessage(
+                "编辑设置已生效，但写入配置文件失败（下次启动会回到上次保存的值）",
+                level=Qgis.MessageLevel.Warning,
+            )
         try:
             save_overrides(self._shortcuts_config_path(), diff_from_defaults(sequences))
         except Exception:  # noqa: BLE001 —— 写盘失败不该回滚已生效的快捷键
@@ -331,7 +369,7 @@ class WindowChromeMixin:
                 level=Qgis.MessageLevel.Warning,
             )
             return
-        self.messageBar.pushMessage("快捷键已保存并生效")
+        self.messageBar.pushMessage("编辑设置已保存并生效")
 
     def _current_shortcut_text(self, key: str, default: str) -> str:
         """当前生效的键序列文本（读控件本身，保证面板显示的就是真实值）。"""

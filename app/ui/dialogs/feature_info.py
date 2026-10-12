@@ -20,6 +20,7 @@ from app.core.domain.identify import IdentifyResult
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.icons import Icons
 from app.ui.common.theme import ThemeManager
+from app.ui.common.value_format import format_value
 
 
 class FeatureInfoDialog(BaseDialog):
@@ -111,7 +112,7 @@ class FeatureInfoDialog(BaseDialog):
         """
         for i, (name, value) in enumerate(items):
             bg = t.panel_bg if i % 2 == 0 else t.input_bg
-            val = str(value) if value is not None else f"<span style='color:{t.text_secondary}'>无</span>"
+            val = format_value(value) if value is not None else f"<span style='color:{t.text_secondary}'>无</span>"
             info += (
                 f"<tr style='background-color:{bg}'>"
                 f"<td style='padding:8px; border-bottom:1px solid {t.panel_border};'>{name}</td>"
@@ -147,7 +148,7 @@ class FeatureInfoDialog(BaseDialog):
             rows = [("（无数据）", "")]
         for i, (name, value) in enumerate(rows):
             bg = t.panel_bg if i % 2 == 0 else t.input_bg
-            val = str(value) if value not in (None, "") else f"<span style='color:{t.text_secondary}'>无数据</span>"
+            val = format_value(value) if value not in (None, "") else f"<span style='color:{t.text_secondary}'>无数据</span>"
             info += (
                 f"<tr style='background-color:{bg}'>"
                 f"<td style='padding:8px; border-bottom:1px solid {t.panel_border};'>{name}</td>"

@@ -1,7 +1,12 @@
 """应用级快捷键登记表与用户自定义的持久化。
 
 系统里所有**全局**快捷键在这里登记一次（:data:`DEFAULT_SHORTCUTS`），
-「快捷键」面板按它列出、编辑、恢复默认。
+「编辑设置 → 快捷键」页按它列出、编辑、恢复默认。
+
+:data:`DEFAULT_SHORTCUTS` 覆盖**全系统**（含工程 / 退出 / 日志等应用级快捷键），
+但「编辑设置」页只展示 :data:`EDIT_TOOL_SHORTCUTS`（编辑工具栏下的工具快捷键）——
+分组靠 :attr:`ShortcutSpec.group`。列表筛选只影响**展示**：读写配置始终按全量
+:data:`EDITABLE_SHORTCUTS`，页面里看不见的项照样生效、也照样保留用户的覆盖值。
 
 用户改过的项以**覆盖值**的形式写在 ``config/shortcuts.yaml``（只存与默认不同的
 项）。这样以后代码里新增快捷键时，老配置文件不会把它锁死在旧默认上；删掉该文件
@@ -28,6 +33,11 @@ from app.infra.logging import get_logger
 
 logger = get_logger(__name__)
 
+#: 分组：编辑工具栏下的工具快捷键（进「编辑设置 → 快捷键」页）
+GROUP_EDIT = "edit"
+#: 分组：工程 / 退出 / 日志等应用级快捷键（仍生效，但不在该页展示）
+GROUP_APP = "app"
+
 
 @dataclass(frozen=True)
 class ShortcutSpec:
@@ -44,13 +54,28 @@ class ShortcutSpec:
     editable: bool = True
     #: 是否为“鼠标 + 修饰键”条目（面板里标注一下，免得跟键盘快捷键混淆）
     mouse: bool = False
+    #: 归属分组（:data:`GROUP_EDIT` / :data:`GROUP_APP`），决定是否进「编辑设置」页
+    group: str = GROUP_APP
+    #: 非空时在该行的功能名后面挂一个「ⓘ」提示按钮，鼠标悬停显示这段话
+    info: str = ""
 
 
 #: 全系统快捷键清单。顺序即面板里的展示顺序。
 DEFAULT_SHORTCUTS: tuple[ShortcutSpec, ...] = (
-    ShortcutSpec("undo", "撤销", "Ctrl+Z"),
-    ShortcutSpec("redo", "重做", "Ctrl+Shift+Z"),
-    ShortcutSpec("redo_alt", "重做（备用键）", "Ctrl+Y"),
+    ShortcutSpec(
+        "undo",
+        "撤销",
+        "Ctrl+Z",
+        group=GROUP_EDIT,
+        info="包括绘制时的节点撤销和重做：画到一半按 Ctrl+Z 是回退上一个落点。",
+    ),
+    ShortcutSpec(
+        "redo",
+        "重做",
+        "Ctrl+Y",
+        group=GROUP_EDIT,
+        info="包括绘制时的节点撤销和重做：画到一半按 Ctrl+Y 是放回刚回退的落点。",
+    ),
     ShortcutSpec("new_project", "新建工程", "Ctrl+N"),
     ShortcutSpec("save_project", "保存工程", "Ctrl+S"),
     ShortcutSpec("save_project_as", "另存为工程", "Ctrl+Shift+S"),
@@ -59,11 +84,18 @@ DEFAULT_SHORTCUTS: tuple[ShortcutSpec, ...] = (
     ShortcutSpec("exit_app", "退出", "Ctrl+Q"),
     ShortcutSpec("log_dock", "日志面板", "Ctrl+L"),
     ShortcutSpec("flow_editor", "流程节点编辑器", "Ctrl+Shift+F"),
-    ShortcutSpec("snapping_toggle", "磁性捕捉开关", "S"),
-    ShortcutSpec("tracing_toggle", "追踪", "T"),
+    ShortcutSpec("snapping_toggle", "捕捉", "S", group=GROUP_EDIT),
+    ShortcutSpec("tracing_toggle", "追踪", "T", group=GROUP_EDIT),
+    ShortcutSpec("toggle_first_imagery", "显隐首个影像图层", "Space", group=GROUP_EDIT),
     # 鼠标修饰键：点选 / 框选时的选择行为（展示用，不可改——见 editable 的说明）
-    ShortcutSpec("select_add", "点选/框选：追加选择", "Ctrl + 点击/拖框", editable=False, mouse=True),
-    ShortcutSpec("select_remove", "点选/框选：移除选择", "Shift + 点击/拖框", editable=False, mouse=True),
+    ShortcutSpec("select_add", "点选/框选：追加选择", "Ctrl + 点击/拖框", editable=False, mouse=True, group=GROUP_EDIT),
+    ShortcutSpec("select_remove", "点选/框选：移除选择", "Shift + 点击/拖框", editable=False, mouse=True, group=GROUP_EDIT),
+)
+
+#: 「编辑设置 → 快捷键」页展示的条目（编辑工具栏下的工具快捷键）。
+#: **只影响展示**：工程 / 退出 / 日志等仍按 :data:`DEFAULT_SHORTCUTS` 生效。
+EDIT_TOOL_SHORTCUTS: tuple[ShortcutSpec, ...] = tuple(
+    spec for spec in DEFAULT_SHORTCUTS if spec.group == GROUP_EDIT
 )
 
 #: 可编辑的条目（面板里给录制框的）
@@ -166,6 +198,9 @@ def find_conflicts(sequences: dict[str, str]) -> list[tuple[str, str, str]]:
 __all__ = [
     "DEFAULT_SHORTCUTS",
     "EDITABLE_SHORTCUTS",
+    "EDIT_TOOL_SHORTCUTS",
+    "GROUP_APP",
+    "GROUP_EDIT",
     "ShortcutSpec",
     "default_map",
     "diff_from_defaults",

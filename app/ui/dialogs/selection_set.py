@@ -54,6 +54,7 @@ from qgis.PyQt.QtWidgets import (
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.feature_highlight import FeatureHighlighter
+from app.ui.common.value_format import format_value
 from app.ui.tools.feature_attrs import field_alias
 
 logger = get_logger(__name__)
@@ -226,7 +227,7 @@ class _SelectionPageModel(QAbstractTableModel):
             return None
         value = attributes[field_idx]
         # 与属性表同口径：NULL 显示成空单元格（不是字面量 "NULL"）
-        return "" if value is None else str(value)
+        return "" if value is None else format_value(value)
 
     def flags(self, index):
         return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
