@@ -17,7 +17,7 @@
 没走那条路，runner 无效 → 保存会写到 ``<当前盘符>:\\<名>.py`` 且不注册。所以
 本模块同时对外提供 :func:`expressions_dir` / :func:`list_function_files` /
 :func:`save_function_file` / :func:`delete_function_file`，供自建的
-``FunctionEditorDialog`` 使用，绕开原生函数编辑器。
+``FunctionEditorWidget`` 使用，绕开原生函数编辑器。
 
 加载方式与 QGIS 一致：逐个执行 ``expressions/*.py``，靠文件里的
 ``@qgsfunction`` 自注册。文件名相同的函数会互相覆盖（QGIS 也如此，后加载的
