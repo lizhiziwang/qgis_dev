@@ -1,0 +1,20 @@
+# 选中要素高亮样式（「图层属性 → 选择」页按几何类型配置；删掉本文件即全部回到默认）
+selection_style:
+  point:
+    stroke_enabled: true
+    stroke_color: '#ffff00'
+    stroke_width: 2.0
+    fill_enabled: true
+    fill_color: '#ffff00'
+  line:
+    stroke_enabled: true
+    stroke_color: '#ffff00'
+    stroke_width: 2.0
+    fill_enabled: false
+    fill_color: '#ffff00'
+  polygon:
+    stroke_enabled: true
+    stroke_color: '#ffff00'
+    stroke_width: 2.0
+    fill_enabled: true
+    fill_color: '#ffff00'

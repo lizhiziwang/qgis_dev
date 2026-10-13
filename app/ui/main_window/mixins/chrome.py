@@ -303,6 +303,11 @@ class WindowChromeMixin:
         EditSettingsManager.instance().apply(
             load_settings(self._edit_settings_config_path())
         )
+        # 选中高亮样式（「图层属性 → 选择」页配置）：读进单例并广播一次 ——
+        # 覆盖层可能已用默认色建好，不广播它不会知道自己该换色（load 内部发 changed）
+        from app.ui.common.selection_style import SelectionStyleManager
+
+        SelectionStyleManager.instance().load(self._selection_style_config_path())
 
     def set_app_shortcut(self, key: str, sequence: str) -> None:
         """把 ``key`` 对应控件的快捷键设为 ``sequence``（空串 = 不绑定）。
@@ -324,6 +329,12 @@ class WindowChromeMixin:
         from pathlib import Path
 
         return Path(self._map_config_path()).with_name("edit_settings.yaml")
+
+    def _selection_style_config_path(self):
+        """选中高亮样式文件，与编辑设置同目录（都在 map config 旁边）。"""
+        from pathlib import Path
+
+        return Path(self._map_config_path()).with_name("selection_style.yaml")
 
     def apply_edit_settings_panel(self) -> None:
         """「编辑设置」按钮：弹面板（常规 / 快捷键两页）编辑，保存后立即生效并落盘。

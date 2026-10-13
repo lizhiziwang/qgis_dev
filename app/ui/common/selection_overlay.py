@@ -8,8 +8,11 @@ QGIS 自带的选中高亮是在**该图层自己的绘制流程里**画的：�
 天然盖在最上层。本类把各可见矢量图层的选中几何收集到这样一个橡皮筋上，保证
 "选中就看得见"。
 
-自带的选中高亮**不关掉**：它画在图层内、我们画在最上，颜色一致，重叠看不出来；
-关掉它反而会让"本层没被遮住的选中"失去高亮。
+高亮颜色**按几何类型分**（点 / 线 / 面各一条带子），取自
+:class:`~app.ui.common.selection_style.SelectionStyleManager`，由「图层属性 → 选择」页
+配置。因此这里**把自带高亮关掉**（``canvas.setSelectionColor(透明)``）：自带的那套只有
+**一个全局色**，三类颜色不同时它会与我们的带子双重描边（面的半透明填充叠在自带底色上
+看着发浑）。关掉后本覆盖层是唯一来源，颜色所见即所得。
 
 用法::
 
@@ -27,14 +30,32 @@ from qgis.PyQt.QtCore import QObject, QTimer
 from qgis.PyQt.QtGui import QColor
 
 from app.infra.logging import get_logger
+from app.ui.common.selection_style import KINDS, SelectionStyleManager, kind_of_geometry_type, style_band
 
 logger = get_logger(__name__)
 
 #: 几何变化后重画覆盖层的防抖间隔（毫秒）
 _GEOMETRY_REDRAW_DEBOUNCE_MS = 60
 
-#: 覆盖层颜色 = QGIS 默认选中黄，与自带高亮一致（重叠时看不出双重描边）
-_OVERLAY_COLOR = QColor(255, 255, 0, 255)
+#: kind → 橡皮筋几何类型
+_BAND_TYPES = {
+    "point": QgsWkbTypes.GeometryType.PointGeometry,
+    "line": QgsWkbTypes.GeometryType.LineGeometry,
+    "polygon": QgsWkbTypes.GeometryType.PolygonGeometry,
+}
+
+#: 点的标记大小见 selection_style.POINT_BAND_ICON_SIZE（各高亮件共用同一套上色规则）
+
+
+#: 点带子的标记尺寸已挪进 selection_style（各高亮件共用同一套上色规则）
+def _kind_of_geometry(geom: QgsGeometry) -> str | None:
+    """几何 → 高亮种类名（``point`` / ``line`` / ``polygon``）；认不出返回 ``None``。"""
+    if geom is None:
+        return None
+    try:
+        return kind_of_geometry_type(QgsWkbTypes.geometryType(geom.wkbType()))
+    except (RuntimeError, AttributeError):
+        return None
 
 
 class SelectionOverlay(QObject):
@@ -43,7 +64,8 @@ class SelectionOverlay(QObject):
     def __init__(self, canvas, parent: QObject | None = None) -> None:
         super().__init__(parent)
         self._canvas = canvas
-        self._band: QgsRubberBand | None = None
+        #: kind → 橡皮筋带子
+        self._bands: dict[str, QgsRubberBand] = {}
         self._project = None
         self._hooked: set[str] = set()
         # 几何变化的重画防抖：一次批量移动（移动要素 / 补缝…）会逐要素发
@@ -53,16 +75,36 @@ class SelectionOverlay(QObject):
         self._redraw_timer.setInterval(_GEOMETRY_REDRAW_DEBOUNCE_MS)
         self._redraw_timer.timeout.connect(self.sync)
 
+    @property
+    def _band(self) -> QgsRubberBand | None:
+        """兼容旧调用点：老脚本按"一条面带子"取 ``overlay._band``。
+
+        改造后是三条带子（点 / 线 / 面），这里返回**面**那条——历来用它测的都是
+        面图层（``verify_selection_overlay.py`` / ``verify_move_highlight.py`` /
+        ``verify_round3.py`` / ``verify_round9.py``），语义不变。
+        """
+        return self._bands.get("polygon")
+
+
     # ------------------------------------------------------------ 生命周期
 
     def attach(self, project=None) -> None:
-        """接管工程里所有矢量图层的 ``selectionChanged``，并跟随图层增删。"""
+        """接管工程里所有矢量图层的 ``selectionChanged``，并跟随图层增删。
+
+        同时**关掉画布自带的选中高亮**（设成全透明）并订阅高亮样式的变化 —— 见模块
+        docstring：三类颜色不同时，自带的单一全局色会与我们双重描边。
+        """
         self._project = project or QgsProject.instance()
         try:
             self._project.layersAdded.connect(self.sync)
             self._project.layersRemoved.connect(self.sync)
         except Exception:  # noqa: BLE001
             logger.exception("选择高亮层：连接工程图层增删信号失败")
+        self._suppress_builtin_highlight(True)
+        try:
+            SelectionStyleManager.instance().changed.connect(self._on_style_changed)
+        except Exception:  # noqa: BLE001
+            logger.exception("选择高亮层：订阅高亮样式变化失败")
         self.sync()
 
     def detach(self) -> None:
@@ -75,10 +117,27 @@ class SelectionOverlay(QObject):
                     signal.disconnect(self.sync)
                 except Exception:  # noqa: BLE001 —— 收尾场景属正常
                     pass
+        try:
+            SelectionStyleManager.instance().changed.disconnect(self._on_style_changed)
+        except Exception:  # noqa: BLE001
+            pass
+        self._suppress_builtin_highlight(False)
         for layer in self._layers():
             self._unhook(layer)
         self._hooked.clear()
         self._clear_band()
+
+    def _suppress_builtin_highlight(self, suppress: bool) -> None:
+        """开关画布自带的选中高亮（透明 = 关）。"""
+        if self._canvas is None:
+            return
+        try:
+            # 原色 = QGIS 默认选中黄（``QgsMapCanvas`` 的默认值）
+            self._canvas.setSelectionColor(
+                QColor(0, 0, 0, 0) if suppress else QColor(255, 255, 0, 255)
+            )
+        except RuntimeError:
+            pass  # 画布已销毁
 
     # ------------------------------------------------------------ 刷新
 
@@ -100,16 +159,10 @@ class SelectionOverlay(QObject):
             if layer.id() not in self._hooked:
                 self._hook(layer)
 
-        band = self._ensure_band()
-        if band is None:
-            return
-        try:
-            band.reset(QgsWkbTypes.PolygonGeometry)
-        except RuntimeError:
-            return
         canvas_crs = self._canvas.mapSettings().destinationCrs()
         project = self._canvas.project() or QgsProject.instance()
-        geoms: list[QgsGeometry] = []
+        # 按几何类型分桶：一次遍历、每类一次 setToGeometry（见下方性能注释）
+        by_kind: dict[str, list[QgsGeometry]] = {kind: [] for kind in KINDS}
         for layer in self._layers():
             fids = layer.selectedFeatureIds()
             if not fids:
@@ -122,16 +175,28 @@ class SelectionOverlay(QObject):
                     geom = feature.geometry()
                     if geom is None or geom.isNull() or geom.isEmpty():
                         continue
-                    if QgsWkbTypes.geometryType(geom.wkbType()) != QgsWkbTypes.PolygonGeometry:
-                        continue  # 本覆盖层是面类型的带子，点 / 线画不了
+                    kind = _kind_of_geometry(geom)
+                    if kind is None:
+                        continue  # 无几何 / 认不出的类型，画不了
                     if xform is not None:
                         geom = QgsGeometry(geom)
                         geom.transform(xform)
-                    geoms.append(geom)
+                    by_kind[kind].append(geom)
             except RuntimeError:
                 continue  # 图层 / 画布已销毁
-        try:
-            if geoms:
+
+        # 先按 z-order 建齐（polygon → line → point），后续逐个填几何
+        self._ensure_bands()
+        for kind in KINDS:
+            band = self._ensure_band(kind)
+            if band is None:
+                continue
+            geoms = by_kind[kind]
+            try:
+                if not geoms:
+                    band.hide()
+                    band.reset(_BAND_TYPES[kind])
+                    continue
                 # **一次设入**，不要逐个 ``addGeometry``：后者是**超线性**的——内存
                 # 实测 5 千个选中要素 1.9 秒、2 万个 33 秒（QTBUG 级别的大坑），
                 # 框选一大片时会把界面活活冻住几十秒，连事件循环都进不去。
@@ -140,10 +205,8 @@ class SelectionOverlay(QObject):
                 combined.convertToMultiType()
                 band.setToGeometry(combined, None)
                 band.show()
-            else:
-                band.hide()
-        except RuntimeError:
-            pass
+            except RuntimeError:
+                pass
 
     # ------------------------------------------------------------ 内部
 
@@ -213,27 +276,46 @@ class SelectionOverlay(QObject):
         """几何变了：推迟一拍重画（合并同一次批量操作里的多次信号）。"""
         self._redraw_timer.start()
 
-    def _ensure_band(self) -> QgsRubberBand | None:
+    def _ensure_band(self, kind: str) -> QgsRubberBand | None:
+        """取 / 建某一类的带子。
+
+        建的时候按 **polygon → line → point** 的顺序（见 :meth:`_ensure_bands`），
+        让点的带子最后建、盖在线 / 面之上，免得面的半透明填充糊住点。
+        """
         if self._canvas is None:
             return None
-        if self._band is None:
+        band = self._bands.get(kind)
+        if band is None:
             try:
-                band = QgsRubberBand(self._canvas, QgsWkbTypes.PolygonGeometry)
-                band.setColor(_OVERLAY_COLOR)
-                band.setWidth(2)
-                band.setFillColor(QColor(255, 255, 0, 60))
-                self._band = band
-            except RuntimeError:
+                band = QgsRubberBand(self._canvas, _BAND_TYPES[kind])
+            except (RuntimeError, KeyError):
                 return None
-        return self._band
+            self._bands[kind] = band
+            self._style_band(kind, band)
+        return band
+
+    def _ensure_bands(self) -> None:
+        """按 z-order 建齐三条带子（后建的画在上面）。"""
+        for kind in ("polygon", "line", "point"):
+            self._ensure_band(kind)
+
+    def _style_band(self, kind: str, band: QgsRubberBand) -> None:
+        """按该类的样式给带子上色（规则见 :func:`selection_style.style_band`）。"""
+        style_band(band, kind, SelectionStyleManager.instance().style(kind))
+
+    def _on_style_changed(self) -> None:
+        """高亮样式改了：三条带子换色重画。"""
+        for kind, band in self._bands.items():
+            self._style_band(kind, band)
+        self.sync()
 
     def _clear_band(self) -> None:
-        if self._band is not None:
+        for kind, band in self._bands.items():
             try:
-                self._band.reset(QgsWkbTypes.PolygonGeometry)
+                band.reset(_BAND_TYPES[kind])
             except RuntimeError:
                 pass
-            self._band = None
+        self._bands.clear()
 
 
 __all__ = ["SelectionOverlay"]

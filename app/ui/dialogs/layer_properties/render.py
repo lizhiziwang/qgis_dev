@@ -393,6 +393,10 @@ class RenderTab(LayerPropertyTab):
         self._source_symbol = None
         #: 当前选中的类别下标；-1 = 无（单一符号模式恒为 -1）
         self._selected = -1
+        #: 用户是否在本页动过东西。外壳点「确定 / 应用」会把**每一页**都 apply 一遍，
+        #: 本页在"当前符号不是简单符号"时会弹「是否替换为单一符号」——用户只是改了别的
+        #: 页也会被这条提示拦住，答"否"还会让整个对话框关不掉。所以没改动就什么都不做。
+        self._dirty = False
         self._build()
         if layer is not None:
             self.load(layer)
@@ -600,6 +604,8 @@ class RenderTab(LayerPropertyTab):
         self._cats = []
         self._source_symbol = None
         self._selected = -1
+        # 刚读进来 = 用户还没动过；回填过程本身不算"改动"
+        self._dirty = False
         if self._geom is None:
             # 非矢量 / 没有几何类型：没有符号可配，只给提示
             self.preview_label.clear()
@@ -861,6 +867,7 @@ class RenderTab(LayerPropertyTab):
         """
         if self._loading or self._geom is None:
             return
+        self._dirty = True  # 用户改了样式控件
         try:
             cat = self._cats[self._selected] if self._has_target() else None
             if cat is not None:
@@ -921,6 +928,7 @@ class RenderTab(LayerPropertyTab):
         """「渲染方式」切换。**不**重建 ``_cats``（只有「分类」按钮重建）。"""
         if self._loading or self._geom is None:
             return
+        self._dirty = True  # 用户切了渲染方式
         self._mode = self.renderer_combo.currentData() or "single"
         if self._mode == "categorized" and self._cats:
             if not self._has_target():
@@ -1002,6 +1010,7 @@ class RenderTab(LayerPropertyTab):
             cats.append(_Category(value=value, label=str(value), symbol=symbol))
 
         self._cats = cats
+        self._dirty = True  # 用户点了「分类」，类别是按本页控件新建的
         self._source_symbol = template.clone() if template is not None else None
         self._mode = "categorized"
         self._set_combo_mode("categorized")
@@ -1209,6 +1218,11 @@ class RenderTab(LayerPropertyTab):
         """把控件值写回图层。两条路见模块 docstring。"""
         kind = _geom_kind(layer)
         if kind is None:
+            return True
+        # **用户没碰过本页就别动图层**：外壳「确定 / 应用」会把每一页都 apply 一遍，
+        # 本页在"当前符号不是简单符号"时会弹「是否替换为单一符号」，用户只是改了「选择」
+        # 之类的别的页也会被这条提示拦住（答"否"还会让对话框关不掉）。没改动即无操作。
+        if not self._dirty:
             return True
         if (self.renderer_combo.currentData() or "single") == "categorized":
             return self._apply_categorized(layer, kind)

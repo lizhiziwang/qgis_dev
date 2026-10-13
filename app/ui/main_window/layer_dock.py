@@ -487,11 +487,11 @@ class LayerDock(QDockWidget):
         """底部「图层信息」块：当前图层名 + 要素数量，双击打开属性表。"""
         panel = _InfoPanel(self)
         panel.setObjectName("LayerDockInfo")
-        panel.setCursor(Qt.CursorShape.PointingHandCursor)
         box = QVBoxLayout(panel)
         box.setContentsMargins(8, 6, 8, 6)
         box.setSpacing(2)
-        title = QLabel("图层信息")
+        # 标题初始为空：没选中图层时连「图层信息」四个字都不显示（见 set_current_layer）
+        title = QLabel("")
         title.setObjectName("LayerDockInfoTitle")
         self._info_title = title
         box.addWidget(title)
