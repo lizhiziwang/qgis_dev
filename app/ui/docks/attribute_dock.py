@@ -39,7 +39,6 @@ from app.infra.logging import get_logger
 from app.ui.common import tool_icons
 from app.ui.common.feature_highlight import FeatureHighlighter
 from app.ui.common.icons import Icons
-from app.ui.common.selection_style import SelectionStyleManager, kind_of_geometry_type
 from app.ui.common.theme import ThemeManager
 from app.ui.common.value_format import format_value
 from app.ui.common.widgets import save_file
@@ -607,10 +606,10 @@ class PagedAttributeTableWidget(QWidget):
 
     zoom_to_map = pyqtSignal(str, object)
 
-    #: 行被单击 / 双击 → 请上层在画布上高亮该要素：``(fid, 是否闪烁)``。
-    #: 单击 = 高亮（用系统配置的选中高亮样式，见「图层属性 → 选择」页）；
-    #: 双击 = 高亮 + 闪烁（在同一个高亮带上闪几下，帮你在密集数据里找到它）。
-    feature_highlight_requested = pyqtSignal(int, bool)
+    #: 行被单击 / 双击 → 请上层**选中**该要素：``(fid, 是否闪烁)``。
+    #: 单击 = 选中它（选中集一变，画布上的选中高亮——「图层属性 → 选择」页配的那套样式
+    #: ——立刻把这块画出来）；双击 = 选中 + 在它上面闪几下，方便在密集数据里找到。
+    feature_selected = pyqtSignal(int, bool)
 
     def __init__(self, layer, page_size: int = 50, parent=None, filter_str: str = "1=1", show_ids: Optional[list] = None) -> None:
         super().__init__(parent)
@@ -777,15 +776,15 @@ class PagedAttributeTableWidget(QWidget):
     # ------------------------------------------------------------ 行单击 / 双击
 
     def _on_row_clicked(self, index) -> None:
-        """单击行：请求高亮该行要素（不闪烁）。"""
-        self._request_highlight(index, flash=False)
+        """单击行：选中该行要素（不闪烁）。"""
+        self._request_select(index, flash=False)
 
     def _on_row_double_clicked(self, index) -> None:
-        """双击行：请求高亮该行要素并闪烁几下。"""
-        self._request_highlight(index, flash=True)
+        """双击行：选中该行要素并闪烁几下。"""
+        self._request_select(index, flash=True)
 
-    def _request_highlight(self, index, flash: bool) -> None:
-        """行索引 → fid → 发信号请上层画到画布上。
+    def _request_select(self, index, flash: bool) -> None:
+        """行索引 → fid → 发信号请上层选中它。
 
         槽里未捕获的异常在本环境是原生崩溃（无 traceback），必须自己兜住。
         """
@@ -797,9 +796,9 @@ class PagedAttributeTableWidget(QWidget):
             fids = model.fids
             if not 0 <= row < len(fids):
                 return
-            self.feature_highlight_requested.emit(int(fids[row]), bool(flash))
+            self.feature_selected.emit(int(fids[row]), bool(flash))
         except Exception:  # noqa: BLE001
-            logger.debug("属性表高亮要素失败", exc_info=True)
+            logger.debug("属性表选中要素失败", exc_info=True)
 
     def _on_scroll(self, value: int) -> None:
         """滚动到接近底部时追加加载下一批。"""
@@ -1030,8 +1029,8 @@ class AttributeDock(QDockWidget):
         self.content_widget = PagedAttributeTableWidget(layer, page_size, self, filter_str=filter_str, show_ids=show_ids)
         self.setWidget(self.content_widget)
         self.content_widget.zoom_to_map.connect(self.zoom_to_map)
-        self.content_widget.feature_highlight_requested.connect(self._highlight_feature)
-        #: 属性表里单击 / 双击行时，在画布上高亮那一个要素（懒建，见 _ensure_highlighter）
+        self.content_widget.feature_selected.connect(self._select_feature)
+        #: 双击行时在选中要素上闪几下的件（懒建，见 _ensure_flasher）
         self._highlighter = None
         self.setMinimumSize(200, 100)
 
@@ -1043,8 +1042,8 @@ class AttributeDock(QDockWidget):
         self.show_ids = list(show_ids) if show_ids else []
         self.content_widget = PagedAttributeTableWidget(layer, page_size, self, filter_str=filter_str, show_ids=show_ids)
         self.setWidget(self.content_widget)
-        self.content_widget.feature_highlight_requested.connect(self._highlight_feature)
-        # 高亮件绑定的是**旧图层**，换了图层必须丢掉重建
+        self.content_widget.feature_selected.connect(self._select_feature)
+        # 闪烁件绑定的是**旧图层**，换了图层必须丢掉重建
         self._discard_highlighter()
         self.setWindowTitle(title)
 
@@ -1101,13 +1100,18 @@ class AttributeDock(QDockWidget):
         if canvas is not None:
             canvas.refresh()
 
-    # ------------------------------------------------------------ 行高亮
+    # ------------------------------------------------------------ 行选中
 
-    def _highlight_feature(self, fid: int, flash: bool) -> None:
-        """属性表单击 / 双击行 → 在画布上高亮该要素（``flash`` 为真时再闪几下）。
+    def _select_feature(self, fid: int, flash: bool) -> None:
+        """属性表单击 / 双击行 → **选中**该要素（``flash`` 为真时再闪几下）。
 
-        样式取系统里该几何类型的**选中高亮样式**（「图层属性 → 选择」页配的那套），
-        所以这里的高亮和你在地图上选中看到的是同一套观感。
+        走的是真正的选中集（``selectByIds``，替换式），不是另画一条带子：这样
+        "属性表里选中的数据" 与 "地图上选中的数据" 是同一份，用选择工具、属性表、
+        各种按选中集工作的功能都一致。画布上的高亮由选中高亮覆盖层按「图层属性 →
+        选择」页配的样式画出来。
+
+        双击额外交给 :class:`FeatureHighlighter` 闪几下——它是**洋红**的，和选中高亮
+        区分得开，不然在自己已经高亮的要素上闪烁根本看不出来。
         """
         if self.topParent is None or self.layer is None:
             return
@@ -1115,36 +1119,23 @@ class AttributeDock(QDockWidget):
         if canvas is None:
             return
         try:
-            highlighter = self._ensure_highlighter(canvas)
-            if highlighter is None:
-                return
+            self.layer.selectByIds([int(fid)])
+            self._refresh_canvas()   # selectByIds 不会自动重绘画布
             if flash:
-                highlighter.flash(fid)
-            else:
-                highlighter.show(fid)
+                flasher = self._ensure_flasher(canvas)
+                if flasher is not None:
+                    flasher.flash(fid)
         except Exception:  # noqa: BLE001 —— 槽里未捕获异常是原生崩溃
-            logger.warning("高亮属性表行失败: fid=%s", fid, exc_info=True)
+            logger.warning("属性表选中要素失败: fid=%s", fid, exc_info=True)
 
-    def _ensure_highlighter(self, canvas):
-        """懒建高亮件（绑定当前图层，所以换图层时要丢掉重建）。"""
+    def _ensure_flasher(self, canvas):
+        """懒建闪烁件（绑定当前图层，所以换图层时要丢掉重建）。"""
         if self._highlighter is None:
-            kind = None
-            try:
-                kind = (kind_of_geometry_type(self.layer.geometryType())
-                        if isinstance(self.layer, QgsVectorLayer) else None)
-            except RuntimeError:
-                kind = None  # 悬空图层：退回默认闪烁色
-            provider = None
-            if kind is not None:
-                # 每次画之前现取当前样式：样式是系统级配置，用户随时可能在「选择」页改
-                provider = lambda: SelectionStyleManager.instance().style(kind)
-            self._highlighter = FeatureHighlighter(
-                canvas, self.layer, parent=self, style_provider=provider
-            )
+            self._highlighter = FeatureHighlighter(canvas, self.layer, parent=self)
         return self._highlighter
 
     def _discard_highlighter(self) -> None:
-        """丢掉高亮件（换图层 / 关 Dock 时调），顺手把画布上的残留清掉。"""
+        """丢掉闪烁件（换图层 / 关 Dock 时调），顺手把画布上的残留清掉。"""
         highlighter, self._highlighter = self._highlighter, None
         if highlighter is not None:
             try:

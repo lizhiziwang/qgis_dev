@@ -20,7 +20,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Optional
 
 from qgis.core import QgsVectorLayer
@@ -28,14 +27,12 @@ from qgis.gui import QgsRubberBand
 from qgis.PyQt.QtCore import QObject, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QColor
 
-from app.ui.common.selection_style import (HighlightStyle, kind_of_geometry_type,
-                                           style_band)
-
 #: 闪烁间隔（毫秒）与总切换次数（偶数次 → 结束时高亮带可见）
 _FLASH_INTERVAL_MS = 160
 _FLASH_TOGGLES = 6
 
-#: 默认高亮带颜色（洋红，与选中集的黄色区分开）。传了 ``style`` 时改用那套样式。
+#: 高亮带颜色（洋红，与选中集的黄色区分开 —— 它要叠在选中高亮**之上**闪，
+#: 同色的话在自己已经高亮的要素上闪根本看不出来）
 _FLASH_COLOR = (255, 0, 220)
 
 
@@ -46,17 +43,10 @@ class FeatureHighlighter(QObject):
     #: 例如「选择集」面板只要闪一下说明「是哪一个」，不需要它一直亮着对照。
     finished = pyqtSignal()
 
-    def __init__(self, canvas, layer: QgsVectorLayer, parent: Optional[QObject] = None,
-                 style_provider: Optional[Callable[[], HighlightStyle]] = None) -> None:
-        """
-        :param style_provider: 不给 = 用洋红闪烁色（默认，与选中黄区分、够醒目）；
-            给了 = 每次画之前**问它要当前样式**（属性表单击行就是这种用法：样式是系统级
-            配置，用户随时可能在「选择」页改，快照一份会过期）。
-        """
+    def __init__(self, canvas, layer: QgsVectorLayer, parent: Optional[QObject] = None) -> None:
         super().__init__(parent)
         self._canvas = canvas
         self._layer = layer
-        self._style_provider = style_provider
         self._band: Optional[QgsRubberBand] = None
         self._timer: Optional[QTimer] = None
         self._left = 0
@@ -72,11 +62,6 @@ class FeatureHighlighter(QObject):
             self._timer = QTimer(self)
             self._timer.timeout.connect(self._on_tick)
         self._timer.start(_FLASH_INTERVAL_MS)
-
-    def show(self, fid: int) -> None:
-        """把 ``fid`` 画到高亮带上并**保持可见**（不闪烁）。"""
-        self._stop_flash()
-        self._draw(fid)
 
     def clear(self) -> None:
         """停掉闪烁并隐藏高亮带（实例保留，可继续用）。"""
@@ -141,13 +126,6 @@ class FeatureHighlighter(QObject):
         return self._band
 
     def _style_band(self, band: QgsRubberBand) -> None:
-        """上色：有 ``style_provider`` 就按它给的选中高亮样式，否则用洋红闪烁色。"""
-        kind = kind_of_geometry_type(self._layer.geometryType()) if self._style_provider else None
-        if kind is not None:
-            style = self._style_provider()
-            if style is not None:
-                style_band(band, kind, style)
-                return
         band.setColor(QColor(*_FLASH_COLOR))
         band.setWidth(3)
         band.setFillColor(QColor(*_FLASH_COLOR, 70))
