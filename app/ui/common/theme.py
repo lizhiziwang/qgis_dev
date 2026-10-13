@@ -277,6 +277,11 @@ class ThemeManager(QObject):
 # QSS 渲染：各组件用当前主题渲染自己的样式表
 # ---------------------------------------------------------------------------
 
+#: 停靠面板里「选中行」底色的不透明度（0-255）。QSS 与图层树自绘的「标注」胶囊
+#: **共用这一个值** —— 两边各写一个迟早漂移（之前就是因为改了 QSS 没改自绘，
+#: 选中行上露出一块颜色不同的补丁）。
+DOCK_SELECTION_ALPHA = 55
+
 
 def title_bar_qss(t: Theme) -> str:
     """标题栏 QSS。含标题栏空白区、窗口按钮、用户按钮及其弹出菜单。"""
@@ -455,6 +460,13 @@ def window_qss(t: Theme) -> str:
         border-bottom: 1px solid {t.border};
     }}
     QDockWidget > QWidget {{ background-color: {t.window_bg}; }}
+    /* 图层面板底部的「图层信息」块：浅一档的底 + 上边框，与树区分开 */
+    QWidget#LayerDockInfo {{
+        background-color: {t.input_bg};
+        border-top: 1px solid {t.border};
+    }}
+    QLabel#LayerDockInfoTitle {{ color: {t.menu_text}; font-weight: 600; }}
+    QLabel#LayerDockInfoLine {{ color: {t.text_secondary}; }}
     QDockWidget QTreeView, QDockWidget QListView, QDockWidget QTableView,
     QDockWidget QTextBrowser {{
         background-color: {t.window_bg};
@@ -464,9 +476,21 @@ def window_qss(t: Theme) -> str:
     QDockWidget QTreeView::item:hover, QDockWidget QListView::item:hover {{
         background-color: {t.menu_hover};
     }}
-    QDockWidget QTreeView::item:selected, QDockWidget QListView::item:selected {{
-        background-color: {t.toolbar_hover};
+    /* 选中行（图层树 / 属性表 / dock 里的各种列表）：
+       - **不要焦点框**：Qt 会给"当前项"额外描一圈方框，看着就是"选中行有边框线"；
+       - 底色用强调色而非灰：原先 selections 与 hover 同为灰系（toolbar_hover vs
+         menu_hover 几乎一个色），根本看不出哪行是选中的（用户报"背景显示不明显"）；
+       - ``show-decoration-selected: 1``：让选中底色**铺满整行**（包括左侧缩进 / 分支
+         区），否则左边会空出一条竖杠（用户报"选中行左侧多一个竖条"）。 */
+    QDockWidget QTreeView, QDockWidget QListView {{
+        show-decoration-selected: 1;
+    }}
+    QDockWidget QTreeView::item:selected, QDockWidget QListView::item:selected,
+    QDockWidget QTableView::item:selected, QDockWidget QTreeWidget::item:selected,
+    QDockWidget QListWidget::item:selected, QDockWidget QTableWidget::item:selected {{
+        background-color: {_with_alpha(t.input_focus, DOCK_SELECTION_ALPHA)};
         color: {t.menu_text};
+        outline: none;
     }}
     QHeaderView::section {{
         background-color: {t.menu_bg};

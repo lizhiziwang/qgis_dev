@@ -13,18 +13,19 @@
 # 天地图 URL 里的 tk 用 {tk} 占位符，真实 key 见 app.yaml 的 map.keys（换 key 只改那里）。
 
 groups:
+  # 顺序即 Dock 树里的显示顺序（「我的收藏」按用户要求排在最顶部）
+  - 我的收藏
+
   - 天地图
   - 高德地图
   - 自定义底图
-
-  - 我的收藏
 
 basemaps:
   - group: 天地图
     name: 天地图·影像
     type: xyz
-    url: "https://t0.tianditu.gov.cn/img_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=img&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILECOL={x}&TILEROW={y}&TILEMATRIX={z}&tk={tk}"
-    referer: "https://www.tianditu.gov.cn/"
+    url: https://t0.tianditu.gov.cn/img_w/wmts?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=img&STYLE=default&TILEMATRIXSET=w&FORMAT=tiles&TILECOL={x}&TILEROW={y}&TILEMATRIX={z}&tk={tk}
+    referer: https://www.tianditu.gov.cn/
     zmin: 0
     zmax: 18
 

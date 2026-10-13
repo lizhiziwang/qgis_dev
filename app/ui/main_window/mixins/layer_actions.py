@@ -29,6 +29,85 @@ from qgis.PyQt.QtWidgets import (
 from app.infra.logging import get_logger
 from app.ui.common.icons import Icons
 
+
+def _snapshot_tree_node(node):
+    """图层树节点 → 可反复粘贴的快照；不支持的节点返回 ``None``。
+
+    **不在这里 ``clone()``**：实测 clone 会给图层**新建一个 provider 并读元数据**
+    （1 个要素的 shp 就要 35ms，图层越重越慢），用户在 QGIS 里觉得复制粘贴很快，
+    正是因为复制那步只记**数据源引用**、粘贴时才建图层。这里照做：
+
+    - 普通图层 → ``("layer", 数据源, 名字, provider, 样式 xml)``（都是轻量值）；
+    - **内存图层**例外 → 直接存 ``clone()``：内存图层的数据活在 provider 实例里，
+      按数据源重建会**丢掉全部要素**；
+    - 组 → ``("group", 组名, [子快照…])``，递归。
+    """
+    from qgis.core import QgsLayerTreeGroup, QgsLayerTreeLayer
+
+    if isinstance(node, QgsLayerTreeLayer):
+        layer = node.layer()
+        if layer is None:
+            return None
+        if layer.providerType() == "memory":
+            return ("clone", layer.clone())
+        style_xml = None
+        try:
+            sm = layer.styleManager()
+            style_xml = sm.style(sm.currentStyle()).xmlData()
+        except Exception:  # noqa: BLE001 —— 取不到样式就只记数据源
+            logger.debug("复制图层时读取样式失败：%s", layer.name(), exc_info=True)
+        return ("layer", layer.source(), layer.name(), layer.providerType(), style_xml)
+    if isinstance(node, QgsLayerTreeGroup):
+        children = [
+            snap for snap in (_snapshot_tree_node(c) for c in node.children())
+            if snap is not None
+        ]
+        return ("group", node.name(), children)
+    return None
+
+
+def _restore_tree_snapshot(win, snapshot, parent_group, at: int) -> int:
+    """把一份快照还原到 ``parent_group`` 的 ``at`` 位，返回新建的**图层**数。
+
+    ``at`` 由调用方**逐项递增**传入：全都插到 0 会把顺序倒过来（用户报「粘贴后
+    里面的图层顺序反掉了」）。
+    """
+    from qgis.core import QgsLayerTreeGroup, QgsRasterLayer, QgsVectorLayer
+
+    kind = snapshot[0]
+    if kind == "clone":
+        layer = snapshot[1].clone()   # 内存图层：再克隆一份，剪贴板可反复粘贴
+        win.project.addMapLayer(layer, False)
+        parent_group.insertLayer(at, layer)
+        return 1
+    if kind == "layer":
+        _, source, name, provider, style_xml = snapshot
+        layer = QgsVectorLayer(source, name, provider)
+        if not layer.isValid():
+            layer = QgsRasterLayer(source, name, provider)
+        if not layer.isValid():
+            win.messageBar.pushMessage(
+                f"粘贴失败：{name}", level=Qgis.MessageLevel.Warning, duration=3
+            )
+            return 0
+        if style_xml:
+            try:
+                layer.importNamedStyle(QgsMapLayerStyle(style_xml))
+            except Exception:  # noqa: BLE001 —— 样式没套上不影响图层可用
+                logger.debug("粘贴图层时套用样式失败：%s", name, exc_info=True)
+        win.project.addMapLayer(layer, False)
+        parent_group.insertLayer(at, layer)
+        return 1
+    if kind == "group":
+        _, name, children = snapshot
+        sub = QgsLayerTreeGroup(name)
+        parent_group.insertChildNode(at, sub)
+        # 新组是空组，子节点从 0 开始按原顺序逐个追加
+        return sum(
+            _restore_tree_snapshot(win, c, sub, i) for i, c in enumerate(children)
+        )
+    return 0
+
 logger = get_logger(__name__)
 
 
@@ -36,6 +115,160 @@ class LayerActionsMixin:
     """LayerActionsMixin：见模块 docstring。"""
 
     # ===================================================== 图层右键菜单
+
+    def _on_layer_tree_blank_context_menu(self, global_pos: QPoint) -> None:
+        """图层树**空白处**右键：添加组 / 全部展开 / 全部折叠 / 粘贴图层或组。
+
+        这几项都不针对某个节点（粘贴默认落到工程根），所以单独一套菜单。
+        """
+        menu = QMenu(self)
+        act_add = menu.addAction("添加组")
+        act_add.triggered.connect(self._on_add_layer_group)
+        menu.addSeparator()
+        act_expand = menu.addAction("全部展开")
+        act_expand.triggered.connect(self._on_header_expand_all)
+        act_collapse = menu.addAction("全部折叠")
+        act_collapse.triggered.connect(self._on_header_collapse_all)
+        menu.addSeparator()
+        act_paste = menu.addAction("粘贴图层 / 组")
+        act_paste.setEnabled(bool(getattr(self, "_layer_clipboard", None)))
+        act_paste.triggered.connect(lambda: self._paste_tree_nodes(self.project.layerTreeRoot()))
+        menu.exec(global_pos)
+
+    def _on_layer_group_context_menu(self, group, global_pos: QPoint) -> None:
+        """图层组右键菜单。
+
+        图层面板的组节点在走"图层菜单"时被 ``layer is None`` 挡掉了，于是右键组
+        什么也没有（用户报过）。这里给组一套自己的菜单：缩放到组 / 复制组 /
+        粘贴图层或组 / 重命名组 / 添加组 / 移除组。
+
+        各动作直接**闭包捕获**右键的那个组，不依赖"当前选中节点"——右键的未必是
+        已选中的那个（与图层菜单同样的取舍）。
+        """
+        from qgis.core import QgsLayerTreeGroup
+
+        if not isinstance(group, QgsLayerTreeGroup):
+            return
+        menu = QMenu(self)
+        act_zoom = menu.addAction("缩放到组")
+        act_zoom.triggered.connect(lambda: self._zoom_to_layer_group(group))
+        menu.addSeparator()
+        act_copy = menu.addAction("复制组")
+        act_copy.triggered.connect(lambda: self._copy_tree_nodes([group]))
+        act_paste = menu.addAction("粘贴图层 / 组")
+        act_paste.setEnabled(bool(getattr(self, "_layer_clipboard", None)))
+        act_paste.triggered.connect(lambda: self._paste_tree_nodes(group))
+        menu.addSeparator()
+        act_rename = menu.addAction("重命名组")
+        act_rename.triggered.connect(lambda: self._rename_layer_group(group))
+        act_add = menu.addAction("添加组")
+        act_add.triggered.connect(lambda: self._add_layer_group_under(group))
+        menu.addSeparator()
+        act_remove = menu.addAction("移除组")
+        act_remove.triggered.connect(lambda: self._remove_layer_group(group))
+        menu.exec(global_pos)
+
+    # ---------------------------------------------------------- 组菜单动作
+
+    def _zoom_to_layer_group(self, group) -> None:
+        """缩放到组：合并组内**全部子图层**（含嵌套子组）的范围。
+
+        与「全图」同一套口径：每个图层的 extent 先换算到画布 CRS 再合并，否则
+        经纬度（度）与投影（米）混在一起会偏。
+        """
+        from qgis.core import QgsLayerTreeGroup
+
+        if not isinstance(group, QgsLayerTreeGroup):
+            return
+        dest_crs = self.canvas.mapSettings().destinationCrs()
+        combined = None
+        for node in group.findLayers():
+            layer = node.layer()
+            if layer is None or not layer.isValid():
+                continue
+            extent = layer.extent()
+            if extent.isNull():
+                continue
+            if layer.crs() != dest_crs:
+                try:
+                    transform = QgsCoordinateTransform(layer.crs(), dest_crs, self.project)
+                    extent = transform.transformBoundingBox(extent)
+                except Exception:  # noqa: BLE001 —— 脏数据的越界范围，跳过该图层
+                    logger.warning("缩放到组：图层 %s 范围转换失败，已跳过", layer.name(), exc_info=True)
+                    continue
+            if combined is None:
+                combined = QgsRectangle(extent)
+            else:
+                combined.combineExtentWith(extent)
+        if combined is None or combined.isNull():
+            self.messageBar.pushMessage(
+                "该图层组里没有可定位的图层", level=Qgis.MessageLevel.Info, duration=3
+            )
+            return
+        # 组里全是点（或共线）时范围是**零尺寸**的：注意 ``isEmpty()`` 对零尺寸范围
+        # 返回 True，所以这里**不能**拿它当"空的"判据（会把点图层组误判成没内容），
+        # 只按宽高是否 > 0 补一圈 —— 与「放大至选中要素」同一套做法。
+        if combined.width() <= 0 or combined.height() <= 0:
+            center = combined.center()
+            half = 0.001
+            combined = QgsRectangle(
+                center.x() - half, center.y() - half, center.x() + half, center.y() + half
+            )
+        self.canvas.setExtent(combined)
+        self.canvas.refresh()
+
+    def _rename_layer_group(self, group) -> None:
+        """重命名图层组（空名 / 取消则不改）。"""
+        from qgis.PyQt.QtWidgets import QInputDialog
+
+        if group is None:
+            return
+        name, ok = QInputDialog.getText(self, "重命名图层组", "组名：", text=group.name())
+        name = (name or "").strip()
+        if not ok or not name or name == group.name():
+            return
+        group.setName(name)
+        self.messageBar.pushMessage(f"已重命名为：{name}", level=Qgis.MessageLevel.Info, duration=2)
+
+    def _copy_tree_nodes(self, nodes) -> None:
+        """把图层 / 组快照进剪贴板（组连同子节点一起，可反复粘贴）。"""
+        snapshots = [
+            snap for snap in (_snapshot_tree_node(n) for n in nodes if n is not None)
+            if snap is not None
+        ]
+        if not snapshots:
+            return
+        self._layer_clipboard = snapshots
+        self.messageBar.pushMessage(
+            f"已复制 {len(snapshots)} 项（右键图层组可粘贴）",
+            level=Qgis.MessageLevel.Info,
+            duration=3,
+        )
+
+    def _paste_tree_nodes(self, target_group) -> None:
+        """把剪贴板里的图层 / 组粘到 ``target_group`` **末尾**（每次粘贴都是新的克隆）。
+
+        粘到末尾而不是 0：图层树里 **0 = 最上层**，粘在最前面会盖住原有图层，
+        用户还要手动往下挪（用户报「空白处粘贴后跑到最顶部了」）。顺序由调用方
+        逐项递增的 ``at`` 保证，不再倒序。
+        """
+        from qgis.core import QgsLayerTreeGroup
+
+        items = getattr(self, "_layer_clipboard", None) or []
+        if not items:
+            return
+        if not isinstance(target_group, QgsLayerTreeGroup):
+            target_group = self.project.layerTreeRoot()
+        at = len(target_group.children())
+        added = 0
+        for snap in items:
+            added += _restore_tree_snapshot(self, snap, target_group, at)
+            at += 1
+        # **不调 refreshAllLayers**：那是"整幅重画"，图层多 / 有栅格时很贵；
+        # 图层树桥接本来就会把新图层同步进画布并触发重绘（实测粘贴后图层正常上屏）。
+        self.messageBar.pushMessage(
+            f"已粘贴 {added} 个图层", level=Qgis.MessageLevel.Info, duration=3
+        )
 
     def _on_layer_context_menu(self, layer, global_pos: QPoint) -> None:
         """图层树 / 工程管理 Dock 右键 → 同一套 QGIS 式图层菜单。

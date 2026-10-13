@@ -19,13 +19,13 @@
 工具清单（自上而下，与设计稿一致）::
 
     选择 / 框选 / 漫游 / 缩放 / 全图 / 清除
-    属性 / 条件查询 / 选择屏蔽 / 取消屏蔽 / 分屏 / 坐标定位
+    属性 / 条件查询 / 选择屏蔽 / 取消屏蔽 / 分屏 / 定位
     线测量 / 面测量 / 范围裁剪
 
 行为约定：
 
 - 项目**已实现**的工具直接接主窗口既有回调（与顶部工具条同一入口）：
-  选择 / 框选 / 漫游 / 缩放 / 全图 / 清除 / 条件查询 / 分屏 / 坐标定位 /
+  选择 / 框选 / 漫游 / 缩放 / 全图 / 清除 / 条件查询 / 分屏 / 定位 /
   线测量 / 面测量 / 选择屏蔽 / 取消屏蔽 / 范围裁剪；
 - 「属性」就是顶部「通用」tab 里的那个识别工具（``identify`` →
   :class:`~app.ui.tools.find_feature.FindFeatureTool`，点要素在右侧 Dock 显示其
@@ -38,7 +38,7 @@
 - 「分屏」复用 :mod:`app.ui.tools.qmap_compare` 的「地图对比」入口
   （``MainWindow._on_qmap_compare``：镜像分屏 / 垂直分割 / 水平分割 /
   放大镜），与顶部工具条「地图对比」同一实现，不再用旧的卷帘覆盖层；
-- 「坐标定位」点击后弹出 :class:`~app.ui.main_window.coord_locate_overlay.CoordLocateOverlay`
+- 「定位」点击后弹出 :class:`~app.ui.main_window.coord_locate_overlay.CoordLocateOverlay`
   气泡（浮在地图**右上角**），由主窗口
   :meth:`~app.ui.main_window.mixins.shell.WindowShellMixin._on_coord_locate`
   接管：再点同按钮或点气泡上的 ``×`` 都能关闭，按钮随气泡显隐独立常亮
@@ -85,7 +85,7 @@ _TOOL_KEYS = frozenset({
 #: 但图标复用 ``zoom_in`` 的那张，外观不变。
 _ICON_ALIAS = {"side_zoom": "zoom_in"}
 #: 会话型工具 key（独立常亮，不受地图工具切换影响；与顶部工具条同 key）。
-#: 「坐标定位」也归这里：点开气泡 → 按钮保持高亮表示"气泡在显示"，
+#: 「定位」也归这里：点开气泡 → 按钮保持高亮表示"气泡在显示"，
 #: 关闭气泡（再点同按钮或气泡上的 ×）→ 按钮弹起，与分屏会话同一套高亮逻辑。
 #: 「范围裁剪」同理：裁剪生效期间按钮保持高亮，再点一次即取消并弹起。
 _SESSION_KEYS = frozenset({"qmap_compare", "coord_locate", "extent_clip"})
@@ -132,13 +132,15 @@ class SideToolBar:
             ("漫游", "pan", False),
             ("缩放", "side_zoom", False),
             ("全图", "zoom_full", False),
+            ("前视图", "view_prev", False),
+            ("后视图", "view_next", False),
             ("清除", "clear_selection", True),
             ("属性", "identify", False),
             ("条件查询", "condition_query", False),
             ("选择屏蔽", "select_mask", False),
             ("取消屏蔽", "unmask", False),
             ("分屏", "qmap_compare", False),
-            ("坐标定位", "coord_locate", True),
+            ("定位", "coord_locate", True),
             ("线测量", "measure_line", False),
             ("面测量", "measure_area", False),
             ("范围裁剪", "extent_clip", False),

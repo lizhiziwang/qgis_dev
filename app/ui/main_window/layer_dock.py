@@ -45,9 +45,11 @@ from qgis.PyQt.QtGui import (
     QPen,
 )
 from qgis.PyQt.QtWidgets import (
+    QAbstractItemView,
     QDockWidget,
     QHBoxLayout,
     QHeaderView,
+    QLabel,
     QStyle,
     QStyledItemDelegate,
     QToolButton,
@@ -56,7 +58,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from app.ui.common.theme import ThemeManager
+from app.ui.common.theme import DOCK_SELECTION_ALPHA, ThemeManager
 
 # QGIS 主题图标名（3.40 / 4.2 两个运行时均已实测可用）
 _THEME_ICONS = {
@@ -108,6 +110,19 @@ _PILL_FADE = 12.0  # 胶囊左缘「透明 → 行底色」的渐变宽度（长
 _ROW_MIN_HEIGHT = 22
 
 
+def _blend_over(fg: QColor, alpha: int, bg: QColor) -> QColor:
+    """把 ``fg`` 以 ``alpha``（0-255）不透明度叠在 ``bg`` 上，返回**不透明**的结果色。
+
+    用来把 QSS 里的 ``rgba(...)`` 背景换算成委托自绘时用得上的实色。
+    """
+    a = max(0, min(255, alpha)) / 255.0
+    return QColor(
+        round(fg.red() * a + bg.red() * (1.0 - a)),
+        round(fg.green() * a + bg.green() * (1.0 - a)),
+        round(fg.blue() * a + bg.blue() * (1.0 - a)),
+    )
+
+
 class _LabelRadioDelegate(QStyledItemDelegate):
     """矢量图层行末尾的「标注」开关：一个 Radio + 紧跟的「标注」二字。
 
@@ -145,6 +160,17 @@ class _LabelRadioDelegate(QStyledItemDelegate):
         self._measure_caption()
 
     # ------------------------------------------------------------- 内部
+
+    def initStyleOption(self, option, index) -> None:  # noqa: N802 —— Qt 命名
+        """选中行**不要焦点框**。
+
+        Qt 会给"当前项"额外描一圈方框（看着就是"选中行有黑色边框"）。QSS 里给
+        ``::item:selected`` 写 ``outline: none`` 在本构建上**不生效**（实测），
+        只能在委托里把 ``State_HasFocus`` 摘掉 —— 与
+        :class:`app.ui.common.widgets.CenteredCheckDelegate` 同一套做法。
+        """
+        super().initStyleOption(option, index)
+        option.state &= ~QStyle.StateFlag.State_HasFocus
 
     def _measure_caption(self) -> None:
         """按当前视图字体重量「标注」二字宽度（绘制与命中判定共用）。"""
@@ -219,11 +245,17 @@ class _LabelRadioDelegate(QStyledItemDelegate):
     def _row_background(self, theme, option) -> QColor:
         """行当前底色（与 theme.py 里 ``QDockWidget QTreeView`` 的 QSS 对齐）。
 
-        QSS 的 ``:selected`` 规则排在 ``:hover`` 之后，同时命中时选中胜出，
-        这里保持同样的优先级。
+        - **选中**：QSS 用的是 ``rgba(input_focus, 90)``（半透明），画在视图底色上
+          实际看到的是**两者混合后的颜色**。这里必须把混合结果算成不透明色，胶囊
+          才会和整行底色严丝合缝 —— 否则选中行上会露出一块颜色不同的补丁
+          （用户报「标注下的背景色和图层名下的不一致，看着不连续」）。
+        - QSS 的 ``:selected`` 规则排在 ``:hover`` 之后，同时命中时选中胜出，
+          这里保持同样的优先级。
         """
         if option.state & QStyle.StateFlag.State_Selected:
-            return QColor(theme.toolbar_hover)
+            return _blend_over(
+                QColor(theme.input_focus), DOCK_SELECTION_ALPHA, QColor(theme.window_bg)
+            )
         if option.state & QStyle.StateFlag.State_MouseOver:
             return QColor(theme.menu_hover)
         return QColor(theme.window_bg)
@@ -370,10 +402,26 @@ class _LabelRadioDelegate(QStyledItemDelegate):
         return super().editorEvent(event, model, option, index)
 
 
+class _InfoPanel(QWidget):
+    """图层面板底部的「图层信息」块（双击 → 打开属性表）。"""
+
+    double_clicked = pyqtSignal()
+
+    def mouseDoubleClickEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        self.double_clicked.emit()
+        super().mouseDoubleClickEvent(event)
+
+
 class LayerDock(QDockWidget):
     """独立的图层树面板。"""
 
     context_menu_requested = pyqtSignal(object, object)  # (QgsMapLayer, QPoint 全局坐标)
+    #: 右键落在**图层组**节点上（组没有 layer()）：(QgsLayerTreeGroup, QPoint 全局坐标)
+    group_context_menu_requested = pyqtSignal(object, object)
+    #: 右键落在**树的空白处**（没有节点）：(QPoint 全局坐标)
+    blank_context_menu_requested = pyqtSignal(object)
+    #: 双击底部「图层信息」块 → 打开该图层的属性表（只对矢量图层发）
+    attribute_table_requested = pyqtSignal(object)
     layer_clicked = pyqtSignal(object)
     label_toggle_requested = pyqtSignal(object, bool)  # (QgsVectorLayer, 期望的标注开关)
     render_tab_requested = pyqtSignal()
@@ -409,6 +457,11 @@ class LayerDock(QDockWidget):
         self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.view.setTextElideMode(Qt.TextElideMode.ElideRight)
         self.view.clicked.connect(self.layer_clicked.emit)
+        # 另接一个槽刷新底部「图层信息」（不动 layer_clicked 的载荷：那边收的是 index）
+        self.view.clicked.connect(self._on_view_clicked)
+        # 双击图层项 → 打开属性表；就地重命名改用编辑键（F2），别一次双击干两件事
+        self.view.setEditTriggers(QAbstractItemView.EditTrigger.EditKeyPressed)
+        self.view.doubleClicked.connect(self._on_view_double_clicked)
         self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.view.customContextMenuRequested.connect(self._on_view_context_menu)
         # 行尾「标注」开关：只画、只发信号（读写标注由主窗口实现）
@@ -425,7 +478,88 @@ class LayerDock(QDockWidget):
         body_layout.setSpacing(0)
         body_layout.addWidget(self.header_bar)
         body_layout.addWidget(self.view, 1)
+        body_layout.addWidget(self._build_info_panel())
         self.setWidget(body)
+
+    # ------------------------------------------------------------- 图层信息块
+
+    def _build_info_panel(self) -> QWidget:
+        """底部「图层信息」块：当前图层名 + 要素数量，双击打开属性表。"""
+        panel = _InfoPanel(self)
+        panel.setObjectName("LayerDockInfo")
+        panel.setCursor(Qt.CursorShape.PointingHandCursor)
+        box = QVBoxLayout(panel)
+        box.setContentsMargins(8, 6, 8, 6)
+        box.setSpacing(2)
+        title = QLabel("图层信息")
+        title.setObjectName("LayerDockInfoTitle")
+        self._info_title = title
+        box.addWidget(title)
+        self._info_layer = QLabel("")
+        self._info_layer.setObjectName("LayerDockInfoLine")
+        box.addWidget(self._info_layer)
+        self._info_count = QLabel("")
+        self._info_count.setObjectName("LayerDockInfoLine")
+        box.addWidget(self._info_count)
+        # 当前展示的图层（供别处查询；双击打开属性表走**图层树项**，见 view.doubleClicked）
+        self._info_layer_obj = None
+        return panel
+
+    def _on_view_double_clicked(self, index) -> None:
+        """双击**图层项** → 打开它的属性表（栅格没有属性表，不发）。
+
+        注意：双击不再用于就地重命名（那条改成 F2 / 编辑键，见 ``view`` 的
+        ``EditKeyPressed``），否则一次双击既开属性表又开改名框。
+        """
+        from qgis.core import QgsVectorLayer
+
+        try:
+            node = self.view.index2node(index)
+            getter = getattr(node, "layer", None)
+            layer = getter() if callable(getter) else None
+        except Exception:  # noqa: BLE001 —— 野索引不该把双击拖垮
+            return
+        if isinstance(layer, QgsVectorLayer):
+            self.attribute_table_requested.emit(layer)
+
+    def set_current_layer(self, layer) -> None:
+        """刷新「图层信息」；**没选中图层就把整块清空**（不留占位文字）。
+
+        数量取 ``featureCount()``：数据源给不出（返回 -1）时显示「未知」而不是 -1。
+        """
+        self._info_layer_obj = None
+        try:
+            name = layer.name() if layer is not None else ""
+            count = int(layer.featureCount()) if layer is not None else -1
+        except RuntimeError:  # 已是悬空对象：当作没选中
+            name, count = "", -1
+        except Exception:  # noqa: BLE001 —— 数据源不认 featureCount 就当未知
+            name, count = (layer.name() if layer is not None else ""), -1
+        if not name:
+            # 没选中（点到组 / 空白）：三行全清，不显示"当前图层：—"这类占位
+            self._info_title.setText("")
+            self._info_layer.setText("")
+            self._info_count.setText("")
+            return
+        self._info_layer_obj = layer
+        self._info_title.setText("图层信息")
+        self._info_layer.setText(f"当前图层：{name}")
+        text = "未知" if count < 0 else f"{count:,}"
+        self._info_count.setText(f"要素数量：{text} · 双击图层项打开属性表")
+
+    def _on_info_double_clicked(self) -> None:
+        """（保留）信息块自身不再触发打开属性表 —— 改由双击**图层项**实现。"""
+
+    def _on_view_clicked(self, index) -> None:
+        """点中节点：刷新底部「图层信息」（点到组 / 空白显示占位）。"""
+        layer = None
+        try:
+            node = self.view.index2node(index)
+            getter = getattr(node, "layer", None)
+            layer = getter() if callable(getter) else None
+        except Exception:  # noqa: BLE001 —— 野索引不该把点击拖垮
+            pass
+        self.set_current_layer(layer)
 
     # ------------------------------------------------------------- 事件
 
@@ -444,6 +578,9 @@ class LayerDock(QDockWidget):
         """
         index = self.view.indexAt(pos)
         if not index.isValid():
+            # **空白处右键**：树本身不弹菜单，发信号给宿主（添加组 / 展开折叠 /
+            # 粘贴…）。以前这里直接返回，空白处右键什么都不出来。
+            self.blank_context_menu_requested.emit(self.view.viewport().mapToGlobal(pos))
             return
         # index2node 对越界/野索引会抛异常；槽内异常未捕获会崩（0xC0000409）
         try:
@@ -453,6 +590,14 @@ class LayerDock(QDockWidget):
         layer_getter = getattr(node, "layer", None)
         layer = layer_getter() if callable(layer_getter) else None
         if layer is None:
+            # 组节点没有 layer()：走另一条信号，交给组右键菜单（重命名 / 移除 /
+            # 复制粘贴…）。以前这里直接 return，于是"右键图层组没有任何内容"。
+            from qgis.core import QgsLayerTreeGroup
+
+            if isinstance(node, QgsLayerTreeGroup):
+                self.group_context_menu_requested.emit(
+                    node, self.view.viewport().mapToGlobal(pos)
+                )
             return
         self.context_menu_requested.emit(layer, self.view.viewport().mapToGlobal(pos))
 
