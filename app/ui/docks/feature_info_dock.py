@@ -37,7 +37,10 @@ class _FieldInfoTextEdit(QTextEdit):
 
     富文本自带的 ``QTextCharFormat.setToolTip`` 要等 Qt 默认的 ~700ms 唤醒延时
     才弹，而且只覆盖文字本身（别名很短时很难停准），所以不用它；这里开鼠标跟踪，
-    划过哪一行就立刻 :meth:`QToolTip.showText` 弹出该行提示，命中区域覆盖整格。
+    划过哪一行就立刻 :meth:`QToolTip.showText` 弹出提示，命中区域覆盖整格。
+
+    同一行两列提示不同：字段名列 -> 字段详情（别名/真实名/类型/长度），
+    值列 -> 该行的值（长值被表格截断时可悬浮看全）。
     """
 
     def __init__(self, parent=None) -> None:
@@ -45,14 +48,26 @@ class _FieldInfoTextEdit(QTextEdit):
         self.setReadOnly(True)
         self.setFont(QFont("Segoe UI", 10))
         self.setMouseTracking(True)
-        #: 行号 → 提示文本（空 = 该行无提示），由 :meth:`set_row_tips` 设置
-        self._row_tips: list[str] = []
+        #: 行号 → ``(字段名提示, 值提示)``（空 = 不弹），由 :meth:`set_row_tips` 设置
+        self._row_tips: list[tuple[str, str]] = []
         #: 当前已弹出提示，避免同一行反复 showText 造成闪烁
         self._shown_tip: Optional[str] = None
 
     def set_row_tips(self, tips) -> None:
-        """设置每行的悬浮提示（按表格行号；空文本表示该行不弹）。"""
-        self._row_tips = [t or "" for t in tips] if tips else []
+        """设置每行的悬浮提示（按表格行号）。
+
+        每项为 ``(字段名提示, 值提示)`` 二元组；也接受纯字符串（值提示留空）。
+        空文本表示该格不弹。
+        """
+        normalized: list[tuple[str, str]] = []
+        for t in tips or []:
+            if isinstance(t, (tuple, list)):
+                name_tip = t[0] if t and t[0] else ""
+                value_tip = t[1] if len(t) > 1 and t[1] else ""
+            else:
+                name_tip, value_tip = (t or ""), ""
+            normalized.append((name_tip, value_tip))
+        self._row_tips = normalized
         self._shown_tip = None
         QToolTip.hideText()
 
@@ -72,16 +87,21 @@ class _FieldInfoTextEdit(QTextEdit):
         super().leaveEvent(event)
 
     def _tip_at(self, pos) -> Optional[str]:
-        """取 ``pos``（视口坐标）所在表格行的提示；不在表格内返回 ``None``。"""
+        """取 ``pos``（视口坐标）所在表格格的提示；不在表格内返回 ``None``。
+
+        第 0 列（字段名）取字段详情，其余列（值）取值提示。
+        """
         if not self._row_tips:
             return None
         cursor = self.cursorForPosition(pos)
         table = cursor.currentTable()
         if table is None:
             return None
-        row = table.cellAt(cursor).row()
+        cell = table.cellAt(cursor)
+        row, col = cell.row(), cell.column()
         if 0 <= row < len(self._row_tips):
-            return self._row_tips[row] or None
+            name_tip, value_tip = self._row_tips[row]
+            return (value_tip if col > 0 else name_tip) or None
         return None
 
 
@@ -280,10 +300,13 @@ class FeatureInfoDock(QDockWidget):
         <table style='width:100%; border-collapse:collapse; table-layout:auto;'>
             <colgroup><col style='width: 35%;' /><col style='width: 65%;' /></colgroup>
         """
+        row_tips: list[tuple[str, str]] = []
         for i, (name, value) in enumerate(items):
             bg = t.panel_bg if i % 2 == 0 else t.input_bg
             val = format_value(value) if value is not None else f"<span style='color:{t.text_secondary}'>无</span>"
-            display, _tip = self._display_and_tip(name, info_map)
+            display, name_tip = self._display_and_tip(name, info_map)
+            value_tip = format_value(value) if value is not None else "无"
+            row_tips.append((name_tip, value_tip))
             info += (
                 f"<tr style='background-color:{bg}'>"
                 f"<td style='padding:8px; border-bottom:1px solid {t.panel_border};'>{html_escape(display)}</td>"
@@ -294,9 +317,7 @@ class FeatureInfoDock(QDockWidget):
         self.info_text.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
         self.info_text.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.info_text.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
-        self.info_text.set_row_tips(
-            self._display_and_tip(name, info_map)[1] for name, _ in items
-        )
+        self.info_text.set_row_tips(row_tips)
 
     def _field_info_map(self) -> dict:
         """字段名 → ``(别名, 类型名, 字段长度)``；别名无则为空串、长度无则 0。
