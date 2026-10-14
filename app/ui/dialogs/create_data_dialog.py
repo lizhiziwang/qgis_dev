@@ -12,7 +12,9 @@
 5. **几何类型** —— 下拉：点 / 线 / 面 / 多点 / 多线 / 多面，取值是 QGIS 的
    几何类型名（``Point`` / ``LineString`` / ``Polygon`` / ``Multi*``），
    建图层时可直接拼 ``"<几何类型>?crs=..."``；
-6. **坐标系** —— **可搜索下拉框**：输入 ``4490`` / ``EPSG:4490`` /
+6. **坐标系** —— **可搜索下拉框**：默认取配置的 ``app.crs``（``config/app.yaml``，
+   默认 ``EPSG:4490`` / CGCS2000；由调用方经 ``default_crs`` 注入，见
+   :data:`_CRS_FALLBACK`），输入 ``4490`` / ``EPSG:4490`` /
    ``cgcs2000`` 即时过滤候选。候选来自 QGIS 自带的 ``srs.db``
    （:func:`QgsApplication.srsDatabaseFilePath`，EPSG 非废弃项约 7200 条），
    读不到时退回 :data:`_FALLBACK_CRS`，裁剪过的分发包（无 srs.db）也能用。
@@ -91,6 +93,11 @@ _CRS_SEP = " — "
 
 #: ``authid`` 形态校验（``EPSG:4490`` / ``ESRI:102100`` …）
 _AUTHID_RE = re.compile(r"[A-Za-z]+:\d+")
+
+#: 调用方没注入默认坐标系时的兜底值（CGCS2000 / 中国 2000）。正常路径下默认值
+#: 来自配置：``config/app.yaml`` 的 ``app.crs``，由 :class:`MainWindow` 注入 ——
+#: 本对话框不自己读配置文件（UI 不写 IO，见模块头「职责边界」）。
+_CRS_FALLBACK = "EPSG:4490"
 
 #: srs.db 读不到时的兜底候选（全球通用 + 国内常用，描述与 srs.db 保持一致）
 _FALLBACK_CRS: tuple[tuple[str, str], ...] = (
@@ -218,10 +225,19 @@ class CrsComboBox(QComboBox):
 class CreateDataDialog(BaseDialog):
     """创建数据 Dialog（收集参数 + 校验 + 触发创建，入工程交给调用方）。"""
 
-    def __init__(self, parent: QWidget | None = None, title: str = "创建数据") -> None:
+    def __init__(
+        self,
+        parent: QWidget | None = None,
+        title: str = "创建数据",
+        *,
+        default_crs: str = "",
+    ) -> None:
         super().__init__(parent, title)
         #: 「确定」成功建出来的图层（未加入工程），见 :meth:`created_layer`
         self._created_layer: QgsVectorLayer | None = None
+        #: 坐标系下拉的默认值。调用方（MainWindow）按 ``config/app.yaml`` 的
+        #: ``app.crs`` 注入；未注入时兜底 :data:`_CRS_FALLBACK`
+        self._default_crs = default_crs or _CRS_FALLBACK
         # BaseDialog 默认 800x600 对 6 行表单偏大，收敛到内容尺寸（同 CrsSelectDialog）
         self.setMinimumSize(560, 0)
         self.resize(660, 340)
@@ -333,11 +349,10 @@ class CreateDataDialog(BaseDialog):
         form.addRow("几何类型", self.geometry_combo)
 
     def _add_crs_row(self, form: QFormLayout) -> None:
-        """6. 坐标系：可搜索下拉框，默认取工程坐标系（无有效值时给 WGS 84）。"""
+        """6. 坐标系：可搜索下拉框，默认 :attr:`_default_crs`（配置的 ``app.crs``）。"""
         self.crs_combo = CrsComboBox()
         self.crs_combo.editTextChanged.connect(self._refresh_hint)
-        project_crs = QgsProject.instance().crs()
-        self.crs_combo.set_crs(project_crs.authid() if project_crs.isValid() else "EPSG:4326")
+        self.crs_combo.set_crs(self._default_crs)
         form.addRow("坐标系", self.crs_combo)
 
     def _build_footer(self) -> QHBoxLayout:

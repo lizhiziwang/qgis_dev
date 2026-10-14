@@ -37,6 +37,9 @@ logger = get_logger(__name__)
 #: 工程文件的保存 / 打开过滤器
 _PROJECT_FILTER = "工程文件 (*.pgs);;所有文件 (*)"
 
+#: 默认坐标系兜底（配置读不到时用）：CGCS2000 / 中国 2000，见 :meth:`ProjectOpsMixin._default_crs_authid`
+_DEFAULT_CRS_AUTHID = "EPSG:4490"
+
 #: 应用私有数据在工程文件里的存放位置（QgsProject.writeEntry 的 scope/key）
 _DM_SCOPE = "qgis_dev"
 _DM_KEY = "data_manage"
@@ -105,10 +108,14 @@ class ProjectOpsMixin:
         self._data_group = root.addGroup("数据图层")
         self._ref_group = root.addGroup("参考图层")
 
-        # 工程名 + 坐标系（project.clear() 会把 CRS 重置回默认）
+        # 工程名 + 坐标系（project.clear() 会把 CRS 重置回默认）。
+        # **画布一起设**：工程 CRS 与画布 destinationCrs 是两份状态，只改前者
+        # 会让画布继续按旧 CRS 出图（用户在状态栏切过 CRS 再新建工程就会撞上）。
         self.project.setTitle(name)
         self.setWindowTitle(f"{self._app_name} - {name}")
-        self.project.setCrs(QgsCoordinateReferenceSystem("EPSG:4490"))
+        project_crs = QgsCoordinateReferenceSystem(self._default_crs_authid())
+        self.project.setCrs(project_crs)
+        self.canvas.setDestinationCrs(project_crs)
 
         # 新建工程 ⇒ 尚未关联工程文件，关闭/保存时需另存
         self._project_path = None
@@ -503,6 +510,18 @@ class ProjectOpsMixin:
         except Exception as exc:  # noqa: BLE001
             logger.warning("读取配置文件失败：%s", exc, exc_info=True)
             return None
+
+    def _default_crs_authid(self) -> str:
+        """工程 / 新建数据的默认坐标系 authid：``config/app.yaml`` 的 ``app.crs``。
+
+        单一来源就是那份 yaml（:data:`_DEFAULT_CRS_AUTHID` 只是它读不到时的兜底），
+        启动建画布、新建工程、创建数据对话框三处都走这里 —— 以前三处各写各的
+        字面量，改一处忘一处就会出现「工程是 4490、创建数据默认给 4326」这种
+        不一致（用户报过默认值跑偏）。
+        """
+        cfg = self._load_map_config()
+        authid = getattr(cfg, "crs", "") if cfg is not None else ""
+        return authid or _DEFAULT_CRS_AUTHID
 
     def _load_config_base_tile(self):
         """读取配置并加载默认底图（新建工程时恢复天地图底图）。返回图层或 ``None``。"""

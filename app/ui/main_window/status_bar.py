@@ -60,7 +60,7 @@ class StatusBar:
         # 才能显示正确的 CRS；否则控件永久停留在"无效投影"状态。
         # 同时把 ProjectCrs 选项隐藏（占用空间大、不需要），并绑定 crsChanged 信号
         # 在工程 CRS 变更时同步。
-        from qgis.core import QgsProject
+        from qgis.core import Qgis, QgsProject
 
         proj_selector = QgsProjectionSelectionWidget(self.main_window)
         # 限制下拉最大宽度，避免占用过多状态栏空间
@@ -86,6 +86,31 @@ class StatusBar:
                 pass
 
         project.crsChanged.connect(_sync_proj_selector)
+
+        # 反过来：在状态栏选一个新 CRS = 真的切工程坐标系。
+        # **以前只做了「工程 → 控件」单向同步**，用户点选只改了控件自己显示的那
+        # 一行字，``project`` 和画布纹丝不动 —— 用户报的"切换工程坐标系没效果"
+        # 就是这个：控件显示 3857、工程其实还是 4490，两边从此对不上。
+        # 控件在 _sync_proj_selector 里被程序化 setCrs 时也会发 crsChanged，
+        # 与当前工程 CRS 相同就直接返回，避免自激循环。
+        def _on_proj_selector_changed(crs) -> None:
+            try:
+                if crs is None or not crs.isValid() or crs == project.crs():
+                    return
+                project.setCrs(crs)
+                # 画布 destinationCrs 是另一份状态，不跟着改就还是按旧 CRS 出图
+                canvas = getattr(self.main_window, "canvas", None)
+                if canvas is not None:
+                    canvas.setDestinationCrs(crs)
+                self.main_window.messageBar.pushMessage(
+                    f"工程坐标系已切换为 {crs.authid()}（{crs.description()}）",
+                    level=Qgis.MessageLevel.Info,
+                    duration=3,
+                )
+            except RuntimeError:
+                pass  # 控件 / 窗口销毁流程中
+
+        proj_selector.crsChanged.connect(_on_proj_selector_changed)
         self.status_bar.addPermanentWidget(proj_selector)
 
         # 图层加载指示：转圈 + 文本，平时隐藏（show_loading 时亮起）。

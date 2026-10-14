@@ -177,7 +177,7 @@ class AppActionsMixin:
         :class:`~app.core.domain.create_data.CreateDataService` 的事（对话框在
         ``accept()`` 里调），这里只管把建出来的图层放进工程。
         """
-        dlg = CreateDataDialog(self)
+        dlg = CreateDataDialog(self, default_crs=self._default_crs_authid())
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
         layer = dlg.created_layer()

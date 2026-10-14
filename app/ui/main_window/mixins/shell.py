@@ -182,7 +182,10 @@ class WindowShellMixin:
         # 定位气泡悬浮在地图画布右上角；侧栏「定位」按钮点亮时弹出
         self._attach_coord_locate_overlay()
 
-        crs = QgsCoordinateReferenceSystem("EPSG:4490")
+        # 工程 / 画布坐标系都取配置的 ``app.crs``（``config/app.yaml``，默认 4490）。
+        # 以前这里写死 4490、对话框那边写死 4326，配置改了也对不上号；现在统一
+        # 走 :meth:`ProjectOpsMixin._default_crs_authid`（配置读不到才兜底 4490）。
+        crs = QgsCoordinateReferenceSystem(self._default_crs_authid())
         self.project.setCrs(crs)
         self.canvas.setDestinationCrs(crs)
         self.canvas.setProject(self.project)
