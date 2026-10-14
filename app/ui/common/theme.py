@@ -543,6 +543,16 @@ def window_qss(t: Theme) -> str:
         border-right: 1px solid {t.border};
         padding: 4px;
     }}
+    /* 表头排序三角：**必须自绘** —— 给表头设了 QSS 之后 Qt 就不画它自带的排序指示器了
+       （与 ::branch 那类坑同源）。箭头复用 _arrow_url 生成的 PNG（升 = ▲，降 = ▼）。 */
+    QDockWidget QHeaderView::up-arrow, QDockWidget QHeaderView::down-arrow {{
+        width: 9px;
+        height: 9px;
+        subcontrol-position: center right;
+        right: 3px;
+    }}
+    QDockWidget QHeaderView::up-arrow {{ image: url({_arrow_url(t.menu_text, True)}); }}
+    QDockWidget QHeaderView::down-arrow {{ image: url({_arrow_url(t.menu_text, False)}); }}
 
     /* 图层树 Dock 头部工具条：背景用 toolbar_bg 与工具条一致、底边 1px 分隔线
        与树视图分隔；按钮 hover/pressed 用 toolbar 系列色，避免 app_qss 默认的

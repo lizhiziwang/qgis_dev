@@ -44,6 +44,11 @@ _BAND_TYPES = {
     "polygon": QgsWkbTypes.GeometryType.PolygonGeometry,
 }
 
+#: 选中要素超过这个数就**不再自己画**覆盖层（改成让画布自带高亮去画）。
+#: 自己画要把选中要素的几何一个个读出来，实测 14.8 万的多边形 GDB 图层要 ~10 秒，
+#: 界面直接卡死；自带高亮在图层渲染里顺带画，代价只与可视范围有关。
+MAX_OVERLAY_GEOMETRIES = 20000
+
 #: 点的标记大小见 selection_style.POINT_BAND_ICON_SIZE（各高亮件共用同一套上色规则）
 
 
@@ -66,6 +71,8 @@ class SelectionOverlay(QObject):
         self._canvas = canvas
         #: kind → 橡皮筋带子
         self._bands: dict[str, QgsRubberBand] = {}
+        #: 当前设给画布自带高亮的颜色（None = 还没设过）；用于"值没变就别动"
+        self._builtin_color: QColor | None = None
         self._project = None
         self._hooked: set[str] = set()
         # 几何变化的重画防抖：一次批量移动（移动要素 / 补缝…）会逐要素发
@@ -105,6 +112,13 @@ class SelectionOverlay(QObject):
             SelectionStyleManager.instance().changed.connect(self._on_style_changed)
         except Exception:  # noqa: BLE001
             logger.exception("选择高亮层：订阅高亮样式变化失败")
+        # **可见图层集合一变就重算**：图层隐藏期间改了选中集，等它再勾选显示出来时
+        # 没人重算过覆盖层，而自带高亮又被我们按成透明——于是"选中集覆盖整层"的图层
+        # 会整层看不见（用户报过：属性表里 Ctrl+A 后把隐藏图层勾回来，地图上空的）。
+        try:
+            self._canvas.layersChanged.connect(self.sync)
+        except Exception:  # noqa: BLE001
+            logger.exception("选择高亮层：订阅画布可见图层变化失败")
         self.sync()
 
     def detach(self) -> None:
@@ -121,6 +135,10 @@ class SelectionOverlay(QObject):
             SelectionStyleManager.instance().changed.disconnect(self._on_style_changed)
         except Exception:  # noqa: BLE001
             pass
+        try:
+            self._canvas.layersChanged.disconnect(self.sync)
+        except Exception:  # noqa: BLE001 —— 画布已销毁 / 本就未连
+            pass
         self._suppress_builtin_highlight(False)
         for layer in self._layers():
             self._unhook(layer)
@@ -129,15 +147,63 @@ class SelectionOverlay(QObject):
 
     def _suppress_builtin_highlight(self, suppress: bool) -> None:
         """开关画布自带的选中高亮（透明 = 关）。"""
+        self._apply_builtin_highlight(not suppress, None)
+
+    def _apply_builtin_highlight(self, on: bool, color=None) -> None:
+        """设画布自带高亮的开关与颜色；**值没变就不动**（免得每次 sync 都触发重绘）。"""
         if self._canvas is None:
             return
+        if on:
+            target = QColor(color) if color is not None else QColor(255, 255, 0, 255)
+        else:
+            target = QColor(0, 0, 0, 0)
+        if self._builtin_color is not None and target == self._builtin_color:
+            return
         try:
-            # 原色 = QGIS 默认选中黄（``QgsMapCanvas`` 的默认值）
-            self._canvas.setSelectionColor(
-                QColor(0, 0, 0, 0) if suppress else QColor(255, 255, 0, 255)
-            )
+            self._canvas.setSelectionColor(target)
+            self._builtin_color = target
         except RuntimeError:
             pass  # 画布已销毁
+
+    def _too_many_selected(self) -> bool:
+        """选中的要素是不是多到不值得自己画（只数个数，不取几何）。"""
+        total = 0
+        for layer in self._layers():
+            try:
+                if kind_of_geometry_type(layer.geometryType()) is None:
+                    continue
+                total += len(layer.selectedFeatureIds())
+            except RuntimeError:
+                continue
+            if total > MAX_OVERLAY_GEOMETRIES:
+                return True
+        return False
+
+    def _use_builtin_highlight(self) -> None:
+        """选中太多：藏掉自己的带子，改用画布自带高亮画。
+
+        自带高亮只有一个全局色，取不到"按几何类型分开"，所以用**选中最多的那一类**
+        的描边色顶上——视觉上仍是你配的颜色。
+        """
+        for band in self._bands.values():
+            try:
+                band.hide()
+            except RuntimeError:
+                pass
+        color = None
+        try:
+            counts: dict[str, int] = {}
+            for layer in self._layers():
+                kind = kind_of_geometry_type(layer.geometryType())
+                if kind is None:
+                    continue
+                counts[kind] = counts.get(kind, 0) + len(layer.selectedFeatureIds())
+            if counts:
+                dominant = max(counts, key=counts.get)
+                color = SelectionStyleManager.instance().style(dominant).stroke_qcolor()
+        except RuntimeError:
+            color = None
+        self._apply_builtin_highlight(True, color)
 
     # ------------------------------------------------------------ 刷新
 
@@ -161,6 +227,15 @@ class SelectionOverlay(QObject):
 
         canvas_crs = self._canvas.mapSettings().destinationCrs()
         project = self._canvas.project() or QgsProject.instance()
+
+        # 先只**数**一遍（便宜）：选中元素太多时不在 Python 里逐个取几何 —— 取几何要
+        # 把选中要素全读出来，实测 14.8 万的多边形 GDB 图层要 ~10 秒，界面直接卡住。
+        # 这种情况交回 QGIS 自带高亮：它随图层渲染顺带画，代价只与可视范围有关。
+        if self._too_many_selected():
+            self._use_builtin_highlight()
+            return
+        self._suppress_builtin_highlight(True)
+
         # 按几何类型分桶：一次遍历、每类一次 setToGeometry（见下方性能注释）
         by_kind: dict[str, list[QgsGeometry]] = {kind: [] for kind in KINDS}
         for layer in self._layers():

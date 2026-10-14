@@ -49,7 +49,6 @@ LENGTH_METHODS: tuple[str, ...] = ("高斯投影长度", "测地线长度")
 #: - **等积投影面积** —— Albers 等积投影平面面积，与真实面积一致（国土/林业口径）；
 #: - **椭球面积** —— 椭球面上的真实面积。
 AREA_METHODS: tuple[str, ...] = ("高斯投影面积", "等积投影面积", "椭球面积")
-
 #: 方法名 → 量算后端
 BACKEND_GAUSS = "gauss"          # 高斯-克吕格平面
 BACKEND_ALBERS = "albers"        # 等积（Albers）平面

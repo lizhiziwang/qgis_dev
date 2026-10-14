@@ -13,6 +13,7 @@ import threading
 
 from qgis.core import (
     Qgis,
+    QgsProject,
     QgsRasterLayer,
 )
 from qgis.PyQt.QtCore import Qt
@@ -489,17 +490,48 @@ class AppActionsMixin:
             if hasattr(self, "messageBar"):
                 self.messageBar.pushWarning("流程编辑器", f"打开失败：{exc}")
 
+    def _attribute_docks(self) -> dict:
+        """图层 id → 该图层的属性表面板（同一图层复用同一个，不同图层各开一个）。"""
+        docks = getattr(self, "_attr_docks", None)
+        if docks is None:
+            docks = self._attr_docks = {}
+            # 图层删了就把登记清掉（面板自己会在图层删除时关闭，这里只是别留悬空条目）
+            QgsProject.instance().layersRemoved.connect(
+                lambda _ids: self._prune_attribute_docks()
+            )
+        return docks
+
+    def _prune_attribute_docks(self) -> None:
+        """清掉指向已删图层的登记条目。"""
+        docks = getattr(self, "_attr_docks", None)
+        if not docks:
+            return
+        for lid in [k for k in docks if QgsProject.instance().mapLayer(k) is None]:
+            docks.pop(lid, None)
+
     def _show_attribute_dock(self, layer, filter_str: str = "1=1", show_ids: list = None) -> None:
-        if not hasattr(self, "current_attribute_dock") or self.current_attribute_dock is None:
-            self.current_attribute_dock = AttributeDock(
+        """打开某图层的属性表。
+
+        **每个图层一个面板**，都停靠到底部、彼此**叠成标签页**（:meth:`place_bottom_dock`），
+        所以可以像 QGIS 那样同时开着好几个图层的属性表。同一图层再次打开就复用原面板
+        （位置记忆、标签页顺序都留着），只是把内容换成新的筛选 / 子集。
+        """
+        if layer is None:
+            return
+        docks = self._attribute_docks()
+        self._prune_attribute_docks()       # 顺手清掉已删图层留下的条目
+        dock = docks.get(layer.id())
+        if dock is None:
+            dock = AttributeDock(
                 layer, page_size=50, parent=self, filter_str=filter_str, show_ids=show_ids
             )
-            self.place_bottom_dock(self.current_attribute_dock)
-            self.current_attribute_dock.show()
-            self.current_attribute_dock.raise_()
+            docks[layer.id()] = dock
+            self.place_bottom_dock(dock)     # 底部已有别的面板时自动叠成标签页
+            dock.show()
         else:
-            self.current_attribute_dock.add_new_layer(layer, self, filter_str, show_ids, 50, f"属性表 - {layer.name()}")
-            # 复用同一个 Dock 实例（位置记忆留着），关过的就再显示出来。
-            # 早先这里靠 "关掉时把引用置空 → 下次重建" 来重新显示，代价是位置全丢。
-            self.current_attribute_dock.show()
-            self.current_attribute_dock.raise_()
+            # 复用同一个 Dock 实例（位置记忆留着），关过的就再显示出来
+            dock.add_new_layer(layer, self, filter_str, show_ids, 50, f"属性表 - {layer.name()}")
+            dock.show()
+        dock.raise_()                        # 抬到当前标签页
+        # 仍维护 current_attribute_dock：空间查询等入口拿到"刚打开的这个"
+        self.current_attribute_dock = dock
