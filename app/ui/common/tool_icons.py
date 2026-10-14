@@ -65,6 +65,12 @@ _GLYPHS: dict[str, str] = {
     "save": "",           # save 保存
     "archive": "",        # archive 另存为
     "expand": "",         # expand-arrows-alt 适应窗口
+    # ---- 属性表底部「转到特定记录」的翻页箭头（app/ui/docks/attribute_dock.py）----
+    # 纯导航箭头用实心三角更符合直觉（同媒体播放器），就近用字形，不另画 SVG
+    "row_first": "",      # step-backward ⏮ 移到表开始处
+    "row_prev": "",       # caret-left ◀ 前一条记录
+    "row_next": "",       # caret-right ▶ 下一条记录
+    "row_last": "",       # step-forward ⏭ 移到表结束处
     # ---- 画布左侧竖排工具条（app/ui/main_window/side_toolbar）----
     # （PUA 码位用转义书写：Font Awesome 5 Free Solid）
     "one_key_query": "\uf0e7",      # bolt 一键查询
