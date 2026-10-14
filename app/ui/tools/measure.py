@@ -122,7 +122,7 @@ class MeasureReadout(QLabel):
             }}
             """
         )
-        # 柔和投影：让读数条浮在地图上（与 CanvasZoomTool / 坐标定位气泡同款）
+        # 柔和投影：让读数条浮在地图上（与 CanvasZoomTool / 定位气泡同款）
         if self.graphicsEffect() is None:
             shadow = QGraphicsDropShadowEffect(self)
             shadow.setBlurRadius(12)

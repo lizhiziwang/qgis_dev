@@ -277,6 +277,29 @@ class ThemeManager(QObject):
 # QSS 渲染：各组件用当前主题渲染自己的样式表
 # ---------------------------------------------------------------------------
 
+#: 停靠面板里「选中行」底色的不透明度（0-255）。QSS 与图层树自绘的「标注」胶囊
+#: **共用这一个值** —— 两边各写一个迟早漂移（之前就是因为改了 QSS 没改自绘，
+#: 选中行上露出一块颜色不同的补丁）。
+DOCK_SELECTION_ALPHA = 55
+
+
+def dock_selection_color(t: "Theme") -> str:
+    """选中行的**实色**（把强调色按 :data:`DOCK_SELECTION_ALPHA` 叠到窗体底色上）。
+
+    QSS 里**不用** ``rgba(...)``：Qt 对 ``selection-background-color`` 这类调色板
+    角色会丢 alpha / 按自己的规则合成，于是"分支区一种深浅、item 区另一种"
+    （实测分支区 #98bee9、item 区 #cbdbed）。这里给一个算好的实色，两边必然同色。
+    图层树自绘的「标注」胶囊也用同一套算法（见 ``layer_dock._blend_over``）。
+    """
+    fg = QColor(t.input_focus)
+    bg = QColor(t.window_bg)
+    a = max(0, min(255, DOCK_SELECTION_ALPHA)) / 255.0
+    return QColor(
+        round(fg.red() * a + bg.red() * (1.0 - a)),
+        round(fg.green() * a + bg.green() * (1.0 - a)),
+        round(fg.blue() * a + bg.blue() * (1.0 - a)),
+    ).name()
+
 
 def title_bar_qss(t: Theme) -> str:
     """标题栏 QSS。含标题栏空白区、窗口按钮、用户按钮及其弹出菜单。"""
@@ -455,6 +478,13 @@ def window_qss(t: Theme) -> str:
         border-bottom: 1px solid {t.border};
     }}
     QDockWidget > QWidget {{ background-color: {t.window_bg}; }}
+    /* 图层面板底部的「图层信息」块：浅一档的底 + 上边框，与树区分开 */
+    QWidget#LayerDockInfo {{
+        background-color: {t.input_bg};
+        border-top: 1px solid {t.border};
+    }}
+    QLabel#LayerDockInfoTitle {{ color: {t.menu_text}; font-weight: 600; }}
+    QLabel#LayerDockInfoLine {{ color: {t.text_secondary}; }}
     QDockWidget QTreeView, QDockWidget QListView, QDockWidget QTableView,
     QDockWidget QTextBrowser {{
         background-color: {t.window_bg};
@@ -464,9 +494,47 @@ def window_qss(t: Theme) -> str:
     QDockWidget QTreeView::item:hover, QDockWidget QListView::item:hover {{
         background-color: {t.menu_hover};
     }}
-    QDockWidget QTreeView::item:selected, QDockWidget QListView::item:selected {{
-        background-color: {t.toolbar_hover};
+    /* 选中行（图层树 / 属性表 / dock 里的各种列表）：
+       - **不要焦点框**：Qt 会给"当前项"额外描一圈方框，看着就是"选中行有边框线"；
+       - 底色用强调色而非灰：原先 selections 与 hover 同为灰系（toolbar_hover vs
+         menu_hover 几乎一个色），根本看不出哪行是选中的（用户报"背景显示不明显"）；
+       - ``show-decoration-selected: 1``：让选中底色**铺满整行**（包括左侧缩进 / 分支
+         区），否则左边会空出一条竖杠（用户报"选中行左侧多一个竖条"）。 */
+    QDockWidget QTreeView, QDockWidget QListView {{
+        show-decoration-selected: 1;
+        /* **视图级选中色也跟 ::item:selected 统一**：分支 / 缩进区不吃 ::item 规则，
+           用的是这里的 selection-background-color —— 不统一的话，选中行左边会空出
+           一条另一种颜色的竖条（app_qss 给视图默认设的是 toolbar_hover 灰）。
+           这里刻意用**实色**（见 dock_selection_color）而不是 rgba：Qt 对
+           selection-background-color 这类调色板角色会丢 alpha 自己合成，实测分支区
+           渲染成 #98bee9、item 区 #cbdbed，左边照样一条深色竖条。 */
+        selection-background-color: {dock_selection_color(t)};
+        selection-color: {t.menu_text};
+    }}
+    /* 分支区：**故意不写 ``QDockWidget QTreeView::branch {{ ... }}`` 基规则**，
+       只给"有子节点"两态（展开 / 折叠）贴三角箭头图（见 _branch_url）。
+       实测（windows11 原生样式，真实平台，选中一个二级行）：
+         - 只要存在基规则（无论 ``image: none`` 还是给张透明图），选中行左侧的每个
+           缩进列都会冒出一条青色竖线（原生样式借 ``show-decoration-selected`` 画的
+           父→子连接线，用户报的"两个竖条"；属性表是 QTableView、无分支列，故不出现）；
+         - 删掉基规则、只留下面两条带 ``image`` 的箭头规则 → 竖条消失，三角箭头与
+           选中底色都还在。
+       所以这里**不要**补基规则。*/
+    QDockWidget QTreeView::branch:has-children:!has-siblings:closed,
+    QDockWidget QTreeView::branch:closed:has-children:has-siblings {{
+        image: url({_branch_url(t.menu_text, False)});
+    }}
+    QDockWidget QTreeView::branch:open:has-children:!has-siblings,
+    QDockWidget QTreeView::branch:open:has-children:has-siblings {{
+        image: url({_branch_url(t.menu_text, True)});
+    }}
+    QDockWidget QTreeView::item:selected, QDockWidget QListView::item:selected,
+    QDockWidget QTableView::item:selected, QDockWidget QTreeWidget::item:selected,
+    QDockWidget QListWidget::item:selected, QDockWidget QTableWidget::item:selected {{
+        /* 与上面的 selection-background-color 用同一个实色，保证缩进区 / 条目区同色 */
+        background-color: {dock_selection_color(t)};
         color: {t.menu_text};
+        outline: none;
     }}
     QHeaderView::section {{
         background-color: {t.menu_bg};
@@ -546,6 +614,50 @@ def window_qss(t: Theme) -> str:
 
 
 _ARROW_CACHE: dict[tuple[str, bool], str] = {}
+
+
+#: 树的展开 / 折叠三角 PNG 缓存（键 = (颜色, 是否展开)）
+_BRANCH_CACHE: dict[tuple[str, bool], str] = {}
+
+
+def _branch_url(color: str, opened: bool) -> str:
+    """树的展开 / 折叠三角 PNG：展开 = 下三角 ▼，折叠 = 右三角 ▶。
+
+    原生样式除了三角还会画一条「父节点 → 子节点」的**竖向连接线**，在选中行上看着
+    就是"左侧多了一条竖条"（用户报的）。所以这里把箭头换成自绘 PNG，三角才好认。
+
+    但**光换箭头不够**：连接线是原生样式在"存在 ``QTreeView::branch`` 基规则"时画的，
+    必须**连基规则一起不写**才压得掉 —— 见 ``window_qss`` 里分支区那段注释与
+    ``_branch_url`` 的调用处。
+    """
+    key = (color, opened)
+    if key in _BRANCH_CACHE:
+        return _BRANCH_CACHE[key]
+
+    from qgis.PyQt.QtCore import QPoint, Qt
+    from qgis.PyQt.QtGui import QColor, QPainter, QPolygon, QPixmap
+
+    size = 9
+    pm = QPixmap(size, size)
+    pm.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pm)
+    painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+    c = QColor(color)
+    painter.setPen(c)
+    painter.setBrush(c)
+    if opened:  # ▼
+        painter.drawPolygon(QPoint(1, 3), QPoint(7, 3), QPoint(4, 6))
+    else:       # ▶
+        painter.drawPolygon(QPoint(3, 1), QPoint(3, 7), QPoint(6, 4))
+    painter.end()
+
+    stem = "open" if opened else "closed"
+    path = Path(tempfile.gettempdir()) / f"qgis_dev_branch_{stem}_{color.lstrip('#').upper()}.png"
+    if not pm.save(str(path), "PNG"):
+        raise RuntimeError(f"无法写入树分支三角 PNG: {path}")
+    url = path.as_posix()
+    _BRANCH_CACHE[key] = url
+    return url
 
 
 def _arrow_url(color: str, up: bool = False) -> str:

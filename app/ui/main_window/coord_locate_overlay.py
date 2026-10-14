@@ -1,6 +1,6 @@
-"""坐标定位气泡：悬浮在地图画布右上角的「输入坐标 + 定位」面板。
+"""定位气泡：悬浮在地图画布右上角的「输入坐标 + 定位」面板。
 
-由 :class:`app.ui.main_window.side_toolbar.SideToolBar` 的「坐标定位」按钮
+由 :class:`app.ui.main_window.side_toolbar.SideToolBar` 的「定位」按钮
 点击唤起；同侧按钮再点一次关闭；面板上的 ``×`` 也能关闭。
 
 坐标系：默认按当前画布 ``destinationCrs()`` 输入，CRS 文本标签显示在面板上
@@ -23,7 +23,9 @@ from typing import Optional
 
 from qgis.core import (
     QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
     QgsPointXY,
+    QgsProject,
     QgsRectangle,
 )
 from qgis.gui import QgsMapCanvas, QgsVertexMarker
@@ -31,6 +33,7 @@ from qgis.PyQt import sip
 from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QFont, QKeyEvent
 from qgis.PyQt.QtWidgets import (
+    QComboBox,
     QDoubleSpinBox,
     QFrame,
     QGraphicsDropShadowEffect,
@@ -38,6 +41,7 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QPushButton,
     QToolButton,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -56,13 +60,34 @@ _DECIMALS_PROJ = 3
 #: 输入单步 / 上下按钮步进（角度系 0.0001° ≈ 11 m；投影系 1 m）
 _SINGLE_STEP_GEO = 0.0001
 _SINGLE_STEP_PROJ = 1.0
-#: 定位标点颜色。红色 → 与工具条上坐标定位图标（crosshairs）同为强调色，
+#: 定位标点颜色。红色 → 与工具条上定位图标（crosshairs）同为强调色，
 #: 深底主题也足够亮。
 _PIN_COLOR = QColor(220, 40, 40)
 
+#: 视野跨度超过这些阈值就认为"大到看不出在哪"，定位时改用默认窗口（见
+#: :meth:`CoordLocateOverlay._window_half_size`）。
+_MAX_SPAN_DEG = 10.0          # 角度系：10° 已经跨好几个省
+_MAX_SPAN_METERS = 100_000.0  # 投影系：100km
+#: 收窄后用的默认窗口（度 / 米）：约 2km 见方，够看清目标点周围
+_DEFAULT_SPAN_DEG = 0.02
+_DEFAULT_SPAN_METERS = 2000.0
+
+#: 「定位」的**输入坐标系**选项：(下拉里显示的名字, EPSG 码)。
+#: 默认第一项是 CGCS2000 经纬度 —— 用户最常直接输经纬度，而这时**必须**按经纬度
+#: 解释、再转换到地图坐标系：地图坐标系若是投影系（如 3857／高斯带），把 117/28
+#: 当平面米直接塞进去就跑到几内亚湾去了（用户报的"定位到国外"）。
+#: 其余四项是国土 / 林业常用的 3° 带高斯投影（`CM_xxxE` 无带号前缀、`Zone_nn` 带）。
+_INPUT_CRS_OPTIONS: tuple[tuple[str, str], ...] = (
+    ("经纬度（CGCS2000）", "EPSG:4490"),
+    ("CGCS2000_3_Degree_GK_CM_114E", "EPSG:4547"),
+    ("CGCS2000_3_Degree_GK_CM_117E", "EPSG:4548"),
+    ("CGCS2000_3_Degree_GK_Zone_38", "EPSG:4526"),
+    ("CGCS2000_3_Degree_GK_Zone_39", "EPSG:4527"),
+)
+
 
 class CoordLocateOverlay(QFrame):
-    """坐标定位气泡（X / Y 输入 + 定位按钮 + × 关闭）。"""
+    """定位气泡（X / Y 输入 + 定位按钮 + × 关闭）。"""
 
     #: 用户主动关闭时（点 × 或外部 toggle 收掉）发出，供宿主同步按钮高亮。
     closed = pyqtSignal()
@@ -98,9 +123,12 @@ class CoordLocateOverlay(QFrame):
         的气泡里会把面板挤到 600px 以上，盖住画布右侧很大区域。简短标签视觉
         更紧凑，与设计原型"短输入 + 一次操作"的轻量风一致。
         """
-        layout = QHBoxLayout(self)
+        layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 6, 8, 6)
-        layout.setSpacing(6)
+        layout.setSpacing(4)
+
+        top = QHBoxLayout()
+        top.setSpacing(6)
 
         # ---- × 关闭按钮 ----
         # 紧贴面板左侧，作为"气泡的嘴"提醒用户这是临时面板而非画布装饰；
@@ -114,12 +142,12 @@ class CoordLocateOverlay(QFrame):
         self._close_btn.setAutoRaise(True)
         self._close_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)  # 不抢输入框焦点
         self._close_btn.clicked.connect(self._on_close_clicked)
-        layout.addWidget(self._close_btn)
+        top.addWidget(self._close_btn)
 
         # ---- 横坐标 (X) ----
         x_label = QLabel("横坐标 X:")
         x_label.setObjectName("CoordLocateLabel")
-        layout.addWidget(x_label)
+        top.addWidget(x_label)
         self._x_input = QDoubleSpinBox()
         self._x_input.setObjectName("CoordLocateX")
         self._x_input.setDecimals(_DECIMALS_GEO)
@@ -132,12 +160,12 @@ class CoordLocateOverlay(QFrame):
         self._x_input.valueChanged.connect(lambda *_: self._clear_error(self._x_input))
         # 回车触发定位
         self._x_input.lineEdit().returnPressed.connect(self._on_locate_clicked)
-        layout.addWidget(self._x_input)
+        top.addWidget(self._x_input)
 
         # ---- 纵坐标 (Y) ----
         y_label = QLabel("纵坐标 Y:")
         y_label.setObjectName("CoordLocateLabel")
-        layout.addWidget(y_label)
+        top.addWidget(y_label)
         self._y_input = QDoubleSpinBox()
         self._y_input.setObjectName("CoordLocateY")
         self._y_input.setDecimals(_DECIMALS_GEO)
@@ -147,7 +175,7 @@ class CoordLocateOverlay(QFrame):
         self._y_input.setMinimumHeight(26)
         self._y_input.valueChanged.connect(lambda *_: self._clear_error(self._y_input))
         self._y_input.lineEdit().returnPressed.connect(self._on_locate_clicked)
-        layout.addWidget(self._y_input)
+        top.addWidget(self._y_input)
 
         # ---- 定位按钮（主操作）----
         self._locate_btn = QPushButton("定位")
@@ -156,7 +184,7 @@ class CoordLocateOverlay(QFrame):
         self._locate_btn.setMinimumHeight(26)
         self._locate_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._locate_btn.clicked.connect(self._on_locate_clicked)
-        layout.addWidget(self._locate_btn)
+        top.addWidget(self._locate_btn)
 
         # ---- 坐标系提示（小灰字），放在最右边 ----
         self._crs_label = QLabel("")
@@ -164,7 +192,45 @@ class CoordLocateOverlay(QFrame):
         font = QFont()
         font.setPointSize(8)
         self._crs_label.setFont(font)
-        layout.addWidget(self._crs_label)
+        top.addWidget(self._crs_label)
+
+        layout.addLayout(top)
+
+        # ---- 第二行：输入坐标系选择 ----
+        # 输入按**这个**坐标系解释，再转换到地图坐标系（见 _on_locate_clicked）。
+        # 用户最常直接输经纬度，而地图坐标系可能是投影系，两者不是一回事。
+        crs_row = QHBoxLayout()
+        crs_row.setSpacing(6)
+        crs_title = QLabel("坐标系:")
+        crs_title.setObjectName("CoordLocateLabel")
+        crs_row.addWidget(crs_title)
+        self._crs_combo = QComboBox(self)
+        self._crs_combo.setObjectName("CoordLocateCrsCombo")
+        self._crs_combo.setMinimumHeight(26)
+        self._crs_combo.setToolTip("输入坐标所属的坐标系；定位时会自动换算到地图坐标系")
+        for label, authid in _INPUT_CRS_OPTIONS:
+            self._crs_combo.addItem(label, authid)
+        self._crs_combo.currentIndexChanged.connect(self._on_input_crs_changed)
+        crs_row.addWidget(self._crs_combo, 1)
+        layout.addLayout(crs_row)
+
+    def _input_crs(self) -> QgsCoordinateReferenceSystem:
+        """当前选中的**输入坐标系**；取不到时退回 CGCS2000 经纬度。"""
+        authid = ""
+        try:
+            authid = self._crs_combo.currentData() or ""
+        except RuntimeError:
+            pass
+        crs = QgsCoordinateReferenceSystem(authid) if authid else QgsCoordinateReferenceSystem()
+        if not crs.isValid():
+            crs = QgsCoordinateReferenceSystem("EPSG:4490")
+        return crs
+
+    def _on_input_crs_changed(self, *_args) -> None:
+        """换了输入坐标系：小数位 / 步进跟着换（经纬度 6 位、平面 3 位）。"""
+        self._sync_input_precision()
+        self._clear_error(self._x_input)
+        self._clear_error(self._y_input)
 
     # ===================================================== 显隐
 
@@ -227,10 +293,9 @@ class CoordLocateOverlay(QFrame):
         """把画布居中到 (X, Y)；输入无效仅标红、不动画布。"""
         x = float(self._x_input.value())
         y = float(self._y_input.value())
-        # 范围：经纬度一般 [-180, 180] / [-90, 90]；投影系由 spinbox 的 ±1e9 控制。
-        # 这里对角度系做强校验（防止误输错位的小数），投影系跳过
-        crs = self._canvas.mapSettings().destinationCrs()
-        if crs.isGeographic():
+        # 校验按**输入坐标系**来：角度系才卡经纬度范围，平面系不卡。
+        src_crs = self._input_crs()
+        if src_crs.isGeographic():
             ok_x = -360.0 <= x <= 360.0
             ok_y = -180.0 <= y <= 180.0
         else:
@@ -242,8 +307,21 @@ class CoordLocateOverlay(QFrame):
             self._mark_error(self._y_input)
             return
 
-        target = QgsPointXY(x, y)
         canvas = self._canvas
+        dest_crs = canvas.mapSettings().destinationCrs()
+        target = QgsPointXY(x, y)
+        # **按输入坐标系解释、再换算到地图坐标系**：地图可能是投影系（3857 / 高斯带），
+        # 直接把 117/28 当平面米塞进 3857 就落到几内亚湾了（用户报的"定位到国外"）。
+        if src_crs != dest_crs:
+            try:
+                transform = QgsCoordinateTransform(src_crs, dest_crs, QgsProject.instance())
+                target = transform.transform(target)
+            except Exception as exc:  # noqa: BLE001 —— 越界 / 无法转换
+                logger.warning("定位坐标换算失败 (%s, %s): %s", x, y, exc)
+                self._mark_error(self._x_input)
+                self._mark_error(self._y_input)
+                return
+        crs = dest_crs
         try:
             # 保留当前缩放级别（extent 大小不变），仅挪中心。
             # setExtent 必不可少：从未 setExtent 时 setCenter / zoomScale 是 no-op
@@ -254,8 +332,7 @@ class CoordLocateOverlay(QFrame):
                 # 全新工程尚未 setExtent：以画布尺寸为默认大小，居中到目标点
                 size = canvas.size()
                 cur = QgsRectangle(0, 0, max(size.width(), 100), max(size.height(), 100))
-            half_w = cur.width() / 2.0
-            half_h = cur.height() / 2.0
+            half_w, half_h = self._window_half_size(cur, crs)
             new_extent = QgsRectangle(
                 target.x() - half_w,
                 target.y() - half_h,
@@ -265,11 +342,11 @@ class CoordLocateOverlay(QFrame):
             canvas.setExtent(new_extent)
             canvas.setCenter(target)
         except Exception as exc:  # noqa: BLE001
-            logger.warning("坐标定位失败 (%s, %s): %s", x, y, exc, exc_info=True)
+            logger.warning("定位失败 (%s, %s): %s", x, y, exc, exc_info=True)
             self._mark_error(self._x_input)
             self._mark_error(self._y_input)
             return
-        # 在画布上落下标点（“图钉”效果）：红十字 + red，与工具条上坐标定位图标同调。
+        # 在画布上落下标点（“图钉”效果）：红十字 + red，与工具条上定位图标同调。
         # marker 是 :class:`QgsMapCanvasItem`，setCenter + show 后会被下一拍
         # canvas.refresh() 随地图一起画出。
         self._show_marker(target)
@@ -277,8 +354,31 @@ class CoordLocateOverlay(QFrame):
         # 同一栈里 refresh 会重入渲染，QGIS 这边偶发 native 崩溃。推到下一拍。
         QTimer.singleShot(0, canvas.refresh)
 
-    # ---- 标点管理 ----
+    @staticmethod
+    def _window_half_size(cur, crs) -> tuple[float, float]:
+        """定位窗口的半宽 / 半高：**保留当前缩放级别**，但视野大到看不出在哪时收窄。
 
+        定位的语义是"保留当前比例尺、把画面挪到目标点"（与 QGIS 的「转到坐标」一致）。
+        可刚进程序时画布是**全球范围**（默认底图的世界范围，跨度 800° 上下），照搬
+        这个跨度挪中心，屏幕上仍是一整张世界地图 —— 用户以为"定位到国外去了"
+        （实测：输入 117/28 后中心确实对，但可视范围是 -310..544 度）。
+
+        所以跨度大到没意义时，按比例收到一个能看清的默认窗口（角度系 0.02° ≈ 2km，
+        投影系 2000m），宽高比照旧。
+        """
+        width, height = cur.width(), cur.height()
+        span = max(width, height)
+        limit, default = (
+            (_MAX_SPAN_DEG, _DEFAULT_SPAN_DEG)
+            if crs is not None and crs.isGeographic()
+            else (_MAX_SPAN_METERS, _DEFAULT_SPAN_METERS)
+        )
+        if span > limit > 0:
+            scale = default / span
+            width, height = width * scale, height * scale
+        return width / 2.0, height / 2.0
+
+    # ---- 标点管理 ----
     def _ensure_marker(self) -> Optional[QgsVertexMarker]:
         """懒创建画布定位标点（QgsVertexMarker）。C++ 对象死亡时重建。
 
@@ -354,7 +454,7 @@ class CoordLocateOverlay(QFrame):
         self._refresh_crs_label()
 
     def _refresh_crs_label(self) -> None:
-        """显示当前画布目标坐标系（角度系 vs 投影系 → 不同小数位）。"""
+        """显示当前**地图**坐标系（输入坐标系由下拉选，见 _input_crs）。"""
         try:
             crs = self._canvas.mapSettings().destinationCrs()
         except Exception:  # noqa: BLE001
@@ -363,8 +463,12 @@ class CoordLocateOverlay(QFrame):
         if not crs.isValid():
             self._crs_label.setText("")
             return
-        self._crs_label.setText(f"坐标系 {crs.authid()}")
-        is_geo = crs.isGeographic()
+        self._crs_label.setText(f"地图 {crs.authid()}")
+        self._sync_input_precision()
+
+    def _sync_input_precision(self) -> None:
+        """小数位 / 步进跟随**输入坐标系**（角度系 6 位，平面系 3 位）。"""
+        is_geo = self._input_crs().isGeographic()
         self._x_input.setDecimals(_DECIMALS_GEO if is_geo else _DECIMALS_PROJ)
         self._y_input.setDecimals(_DECIMALS_GEO if is_geo else _DECIMALS_PROJ)
         self._x_input.setSingleStep(_SINGLE_STEP_GEO if is_geo else _SINGLE_STEP_PROJ)

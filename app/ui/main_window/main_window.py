@@ -168,6 +168,8 @@ class MainWindow(
         self._selected_layer: Optional[QgsVectorLayer] = None
         #: 样式剪贴板：复制样式时存 xmlData()，粘贴样式时读（QGIS 图层菜单习惯）
         self._style_clipboard: Optional[str] = None
+        #: 图层 / 组剪贴板：复制组时存节点快照（图层存 clone()），组右键「粘贴」读它
+        self._layer_clipboard: Optional[list] = None
         #: 流程节点编辑器窗口（懒建单实例，见 _open_flow_editor）
         self._flow_editor_window = None
         #: 离线下载弹窗（懒建单实例，保留用户勾选/进度状态）

@@ -39,6 +39,8 @@ _GLYPHS: dict[str, str] = {
     "quality": "",             # shield-alt 盾牌
     "analyse": "",             # chart-bar 柱状图
     "zoom_full": "",           # globe 地球（全图）
+    "view_prev": "",          # arrow-left 前视图
+    "view_next": "",          # arrow-right 后视图
     "refresh": "",             # sync 环形刷新
     "test": "",                # flask 烧瓶
     "swipe": "",              # columns 竖向分割（卷帘对比）
@@ -69,7 +71,7 @@ _GLYPHS: dict[str, str] = {
     "condition_query": "\uf0b0",    # filter 条件查询（漏斗）
     "select_mask": "\uf070",        # eye-slash 选择屏蔽
     "unmask": "\uf06e",             # eye 取消屏蔽
-    "coord_locate": "\uf05b",       # crosshairs 坐标定位
+    "coord_locate": "\uf05b",       # crosshairs 定位
     "measure_line": "\uf547",       # ruler-horizontal 线测量
     "measure_area": "\uf546",       # ruler-combined 面测量
     "extent_clip": "\uf125",        # crop 范围裁剪

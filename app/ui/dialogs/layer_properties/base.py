@@ -6,7 +6,7 @@
 - :meth:`LayerPropertyTab.apply` —— 把控件值写回图层；校验不通过返回 ``False``
   并自己弹 ``QMessageBox``（对话框外壳据此中止「确定」并保持打开）
 
-这样后续补「字段 / 选择 / 标注 / 渲染 / 条件」各页时，只要写一个新类塞进
+这样后续补「字段 / 选择 / 标注 / 渲染」各页时，只要写一个新类塞进
 :data:`~app.ui.dialogs.layer_properties.dialog.LayerPropertiesDialog._TAB_SPECS`
 即可，外壳完全不用改。
 """

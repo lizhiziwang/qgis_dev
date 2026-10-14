@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from qgis.PyQt.QtCore import QRect, Qt
+from qgis.PyQt.QtCore import QEvent, QRect, Qt
 from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import (
     QApplication,
@@ -142,6 +142,46 @@ class CenteredCheckDelegate(QStyledItemDelegate):
         style.drawControl(QStyle.ControlElement.CE_ItemViewItem, opt, painter, widget)
         self._draw_check(painter, opt.rect, index)
 
+    def editorEvent(self, event, model, option, index) -> bool:  # noqa: N802 —— Qt 命名
+        """勾选格的点击判定：**整格都算命中**。
+
+        基类用的是样式给的**左对齐**复选框矩形，而本委托把框画在了列中线 ——
+        于是"看着点在框里、实际不算"（用户报：复选框命中偏左、往右一点就点不中）。
+        这里不去复刻那个居中矩形（两处几何各算各的迟早再错位），直接把整个勾选格
+        都当命中区：这类列本来就是"整格即复选框"的语义。
+        """
+        if not index.isValid():
+            return False
+        if not (index.flags() & Qt.ItemFlag.ItemIsUserCheckable):
+            return False
+        self.initStyleOption(option, index)
+        if not (option.features & QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator):
+            return False
+        if option.text:
+            return False      # 有文字的格子不归这里管（与绘制分支一致）
+        if event.type() not in (
+            QEvent.Type.MouseButtonRelease,
+            QEvent.Type.MouseButtonDblClick,
+        ):
+            return False
+        if event.button() != Qt.MouseButton.LeftButton:
+            return False
+        if not option.rect.contains(event.pos()):
+            return False
+        checked = index.data(Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked
+        new_state = Qt.CheckState.Unchecked if checked else Qt.CheckState.Checked
+        return bool(model.setData(index, new_state, Qt.ItemDataRole.CheckStateRole))
+
+    def _check_rect(self, rect) -> QRect:
+        """自绘复选框在单元格里**居中**后占的矩形（绘制与命中判定共用一份）。"""
+        size = self.BOX
+        return QRect(
+            rect.x() + (rect.width() - size) // 2,
+            rect.y() + (rect.height() - size) // 2,
+            size,
+            size,
+        )
+
     def _draw_check(self, painter, rect, index) -> None:
         """自绘勾选框（在 ``rect`` 里居中）。"""
         from qgis.PyQt.QtGui import QBrush, QPainter, QPen, QPixmap
@@ -149,13 +189,7 @@ class CenteredCheckDelegate(QStyledItemDelegate):
         from app.ui.common.theme import ThemeManager, _check_url
 
         theme = ThemeManager.instance().current()
-        size = self.BOX
-        box = QRect(
-            rect.x() + (rect.width() - size) // 2,
-            rect.y() + (rect.height() - size) // 2,
-            size,
-            size,
-        )
+        box = self._check_rect(rect)
         checked = index.data(Qt.ItemDataRole.CheckStateRole) == Qt.CheckState.Checked
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)

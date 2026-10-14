@@ -45,6 +45,10 @@ class ColorButton(QPushButton):
         if emit:
             self.color_changed.emit(QColor(c))
 
+    def open_picker(self) -> None:
+        """打开取色框（给"点预览图也能取色"这类外部入口用，等价于点自己）。"""
+        self._pick()
+
     def _sync(self) -> None:
         # 内联样式只作用于这一颗按钮：色块背景 + 中性描边
         self.setStyleSheet(

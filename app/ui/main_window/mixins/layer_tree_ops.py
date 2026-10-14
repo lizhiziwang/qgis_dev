@@ -276,33 +276,7 @@ class LayerTreeOpsMixin:
             return
 
         if isinstance(node, QgsLayerTreeGroup):
-            parent = node.parent()
-            # findLayers 默认递归收集所有子图层（嵌套子组下的也算）
-            layers = [c.layer() for c in node.findLayers() if c.layer() is not None]
-            name = node.name()
-            text = f"确定删除「{name}」及其 {len(layers)} 个图层吗？" if layers else f"确定删除空图层组「{name}」吗？"
-            ret = QMessageBox.question(
-                self,
-                "删除图层组",
-                text,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
-            )
-            if ret != QMessageBox.StandardButton.Yes:
-                return
-            # 1) 先逐个走 _remove_layer：拿到完整清理（退出编辑态/清选中引用/
-            #    gpkg 别名/延迟刷新）。若只摘组节点，bridge 会直接 delete 里面的
-            #    图层，正在编辑的图层会留下脏 buffer 与悬空 edit_layer。
-            for layer in layers:
-                self._remove_layer(layer)
-            # 2) 再摘掉组节点本身（空组、嵌套空子组）。原实现只删子图层就返回，
-            #    空组永远删不掉、非空组删完还留个空壳——看起来就是「移除失效」。
-            #    删节点前先清视图当前项，避免 Qt 持有即将析构节点的持久索引。
-            self._clear_view_current()
-            # 组被删后 _data_group/_ref_group 会悬空，先清引用再摘节点
-            self._forget_group_refs(node)
-            parent.removeChildNode(node)
-            self.messageBar.pushMessage(f"已删除图层组：{name}", level=Qgis.MessageLevel.Info, duration=3)
+            self._remove_layer_group(node)
             return
 
         # 图例项等其它节点：当作无效选择
@@ -313,6 +287,41 @@ class LayerTreeOpsMixin:
         )
 
     # ---------------------------------------------------- 组节点删除/移动的引用维护
+
+    def _remove_layer_group(self, group) -> None:
+        """确认后递归删除组里**全部图层**，再摘掉组节点本身（含嵌套空子组）。
+
+        供头部「删除图层/组」与组右键菜单「移除组」共用。
+        """
+        if group is None or group.parent() is None:
+            return  # 树根（正常选不中，兜底别把整棵树删了）
+        parent = group.parent()
+        # findLayers 默认递归收集所有子图层（嵌套子组下的也算）
+        layers = [c.layer() for c in group.findLayers() if c.layer() is not None]
+        name = group.name()
+        text = f"确定删除「{name}」及其 {len(layers)} 个图层吗？" if layers else f"确定删除空图层组「{name}」吗？"
+        ret = QMessageBox.question(
+            self,
+            "删除图层组",
+            text,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        # 1) 先逐个走 _remove_layer：拿到完整清理（退出编辑态/清选中引用/
+        #    gpkg 别名/延迟刷新）。若只摘组节点，bridge 会直接 delete 里面的
+        #    图层，正在编辑的图层会留下脏 buffer 与悬空 edit_layer。
+        for layer in layers:
+            self._remove_layer(layer)
+        # 2) 再摘掉组节点本身（空组、嵌套空子组）。原实现只删子图层就返回，
+        #    空组永远删不掉、非空组删完还留个空壳——看起来就是「移除失效」。
+        #    删节点前先清视图当前项，避免 Qt 持有即将析构节点的持久索引。
+        self._clear_view_current()
+        # 组被删后 _data_group/_ref_group 会悬空，先清引用再摘节点
+        self._forget_group_refs(group)
+        parent.removeChildNode(group)
+        self.messageBar.pushMessage(f"已删除图层组：{name}", level=Qgis.MessageLevel.Info, duration=3)
 
     def _clear_view_current(self) -> None:
         """清掉图层树视图的当前项与选中项。
@@ -417,7 +426,16 @@ class LayerTreeOpsMixin:
             parent = node.parent()
         else:
             parent = self.project.layerTreeRoot()
+        self._add_layer_group_under(parent)
 
+    def _add_layer_group_under(self, parent) -> None:
+        """在 ``parent`` 下新建图层组（默认名去重 → 插入 → 尝试就地重命名）。
+
+        供头部「添加图层组」与组右键菜单「添加组」共用。
+        """
+        from qgis.core import QgsLayerTreeGroup
+
+        parent = parent if isinstance(parent, QgsLayerTreeGroup) else self.project.layerTreeRoot()
         # 默认名去重（父分组内查重）
         base = "新建图层组"
         name = base

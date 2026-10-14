@@ -5,12 +5,10 @@
 它靠 ``QgsPythonRunner`` 取保存目录并执行代码，runner 无效时会写到
 ``<当前盘符>:\\<名>.py`` 且不会即时注册——这正是"保存之后识别不到"的原因。
 
-所以这里自建一个函数编辑器，绕开原生 Function Editor。拆成可复用控件 + 对话框
-两层，和 QGIS 一样：
+所以这里自建一个函数编辑器，绕开原生 Function Editor：
 
 - :class:`FunctionEditorWidget`：函数编辑器本体，作为表达式构建器的
-  「函数编辑器」tab 内嵌（也可单独用）；
-- :class:`FunctionEditorDialog`：把控件包成对话框（属性表工具栏按钮用）。
+  「函数编辑器」tab 内嵌。
 
 功能：
 
@@ -27,7 +25,6 @@ import re
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
-    QDialogButtonBox,
     QHBoxLayout,
     QInputDialog,
     QLabel,
@@ -48,7 +45,6 @@ from app.env.user_expressions import (
     save_function_file,
 )
 from app.infra.logging import get_logger
-from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.code_editor import CodeEditor
 
 logger = get_logger(__name__)
@@ -263,34 +259,3 @@ class FunctionEditorWidget(QWidget):
         self.status.setStyleSheet("color: #2e7d32;")
         self.status.setText(f"已保存并注册 {name}.py（{count} 个函数）")
         return True
-
-
-class FunctionEditorDialog(BaseDialog):
-    """把 :class:`FunctionEditorWidget` 包成对话框（属性表工具栏入口用）。"""
-
-    def __init__(self, parent=None, select: str = "") -> None:
-        super().__init__(parent, "自定义函数")
-        self.resize(920, 640)
-
-        root = QVBoxLayout()
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(8)
-
-        self._widget = FunctionEditorWidget(self, select)
-        root.addWidget(self._widget, 1)
-
-        buttons = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Close,
-            Qt.Orientation.Horizontal,
-            self,
-        )
-        buttons.button(QDialogButtonBox.StandardButton.Close).setText("关闭")
-        buttons.rejected.connect(self.reject)
-        root.addWidget(buttons)
-
-        self.setLayout(root)
-
-    def reject(self) -> None:
-        # 关闭前若还有未保存改动，静默落盘，避免用户白改
-        self._widget.save_if_modified()
-        super().reject()

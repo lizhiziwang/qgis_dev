@@ -27,6 +27,7 @@ from app.ui.dialogs.layer_properties.fields import FieldsTab
 from app.ui.dialogs.layer_properties.general import GeneralTab
 from app.ui.dialogs.layer_properties.labeling import LabelingTab
 from app.ui.dialogs.layer_properties.render import RenderTab
+from app.ui.dialogs.layer_properties.selection import SelectionTab
 
 logger = get_logger(__name__)
 
@@ -35,16 +36,16 @@ _VECTOR_ONLY = frozenset({"字段", "选择", "标注", "渲染"})
 
 
 class LayerPropertiesDialog(BaseDialog):
-    """图层属性对话框（常规 / 字段 / 标注 / 渲染页已实现，其余页占位）。"""
+    """图层属性对话框（常规 / 字段 / 选择 / 标注 / 渲染页）。"""
 
-    #: (标签名, 页类)；页类为 None → 占位页
+    #: (标签名, 页类)；页类为 None → 占位页。
+    #: 「条件」页已按产品要求撤下（原先是个 "内容待补充" 的占位页），要恢复就加回一行。
     _TAB_SPECS = (
         ("常规", GeneralTab),
         ("字段", FieldsTab),
-        ("选择", None),
+        ("选择", SelectionTab),
         ("标注", LabelingTab),
         ("渲染", RenderTab),
-        ("条件", None),
     )
 
     def __init__(self, layer, canvas=None, parent=None) -> None:

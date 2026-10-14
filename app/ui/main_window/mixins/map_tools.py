@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from qgis.core import Qgis, QgsCoordinateTransform
+from qgis.core import Qgis, QgsCoordinateTransform, QgsRectangle
 from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QPoint
 from qgis.PyQt.QtWidgets import QMessageBox
@@ -30,6 +30,24 @@ from app.ui.tools.select_feature import (
 
 #: 「选择集」弹窗与画布边缘的间距（像素）
 _SELECT_SET_GAP = 12
+
+#: 视图历史最多记多少步（超出丢最早的）
+_VIEW_HISTORY_LIMIT = 50
+
+
+def _same_view(a, b, *, tol: float = 1e-9) -> bool:
+    """两个范围是否"是同一个视图"（按相对容差比，避免浮点抖动）。"""
+    try:
+        w = max(abs(a.width()), abs(b.width()), 1e-12)
+        h = max(abs(a.height()), abs(b.height()), 1e-12)
+        return (
+            abs(a.xMinimum() - b.xMinimum()) <= w * tol
+            and abs(a.xMaximum() - b.xMaximum()) <= w * tol
+            and abs(a.yMinimum() - b.yMinimum()) <= h * tol
+            and abs(a.yMaximum() - b.yMaximum()) <= h * tol
+        )
+    except Exception:  # noqa: BLE001 —— 拿不到就当作不相同
+        return False
 
 
 #: 「操作指引」类提示的展示时长（秒）。这类提示是让用户**看完再动手**（"按住左键拉框"
@@ -570,6 +588,83 @@ class MapToolsMixin:
         key = self._tool_key(self.canvas.mapTool())
         self.tool_bar_builder.set_active(key)
         self.side_toolbar.set_active(key)
+
+    def _on_view_prev(self) -> None:
+        """「前视图」：回到上一个记录下来的视图范围。"""
+        self._step_view(-1)
+
+    def _on_view_next(self) -> None:
+        """「后视图」：前进到下一个视图范围（做过新动作后这条分支会被作废）。"""
+        self._step_view(1)
+
+    def _on_canvas_extent_changed(self, *_args) -> None:
+        """画布范围变了：重启防抖计时，等视图稳定再记一步（见 shell 里的初始化）。"""
+        timer = getattr(self, "_view_record_timer", None)
+        if timer is not None:
+            timer.start()
+
+    def _record_view_extent(self) -> None:
+        """把当前视图记进历史（视图已稳定）。
+
+        与浏览器同款语义：**有新动作就作废"前进"那段历史**；范围没变则不记。
+
+        **必须把记录值归一成"画布实际范围"**：``setExtent`` 之后画布会按窗口宽高比
+        修正一次，直接存传入的矩形，下次一比对就"不相等"，每次导航都会被当成新视图
+        再记一遍。这里记的始终是 ``canvas.extent()``。
+        """
+        if getattr(self, "_view_navigating", False):
+            return
+        history = getattr(self, "_view_history", None)
+        if history is None:
+            return
+        try:
+            extent = QgsRectangle(self.canvas.extent())
+        except RuntimeError:  # 画布已销毁
+            return
+        if extent.isNull() or extent.isEmpty():
+            return
+        index = self._view_index
+        if 0 <= index < len(history) and _same_view(history[index], extent):
+            return
+        del history[index + 1:]
+        history.append(extent)
+        if len(history) > _VIEW_HISTORY_LIMIT:
+            history.pop(0)
+        self._view_index = len(history) - 1
+
+    def _step_view(self, delta: int) -> None:
+        """在自建视图历史里退 / 进一步；到头了给一句提示。
+
+        **为什么不用画布自带的 ``zoomToPreviousExtent``**：它只记交互式缩放 / 平移，
+        程序化 ``setExtent``（全图、缩放到图层、属性表定位…）不进它的历史 ——
+        实测连着 ``setExtent`` 三次再调它，范围纹丝不动。
+        """
+        history = getattr(self, "_view_history", None) or []
+        target = self._view_index + delta
+        if not (0 <= target < len(history)):
+            self._hint_view("已经是第一个视图了" if delta < 0 else "已经是最后一个视图了")
+            return
+        self._view_index = target
+        self._view_navigating = True
+        try:
+            self.canvas.setExtent(history[target])
+            self.canvas.refresh()
+            # 把宽高比修正后的真实值写回历史，免得防抖计时回来又把这一步记一遍
+            history[target] = QgsRectangle(self.canvas.extent())
+        except RuntimeError:
+            pass
+        finally:
+            self._view_navigating = False
+
+    def _hint_view(self, text: str) -> None:
+        """视图到头了的提示：走浮动消息条，不弹模态框。"""
+        bar = getattr(self, "messageBar", None)
+        if bar is None:
+            return
+        try:
+            bar.pushMessage(text, level=Qgis.MessageLevel.Info, duration=2)
+        except RuntimeError:
+            pass
 
     def _on_zoom_full(self) -> None:
         """全图：合并所有有效图层的范围。

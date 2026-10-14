@@ -37,6 +37,7 @@ from qgis.PyQt.QtWidgets import (
 from app.core.domain.editing import LayerEditService
 from app.infra.logging import get_logger
 from app.ui.common import tool_icons
+from app.ui.common.feature_highlight import FeatureHighlighter
 from app.ui.common.icons import Icons
 from app.ui.common.theme import ThemeManager
 from app.ui.common.value_format import format_value
@@ -605,6 +606,11 @@ class PagedAttributeTableWidget(QWidget):
 
     zoom_to_map = pyqtSignal(str, object)
 
+    #: 行被单击 / 双击 → 请上层**选中**该要素：``(fid, 是否闪烁)``。
+    #: 单击 = 选中它（选中集一变，画布上的选中高亮——「图层属性 → 选择」页配的那套样式
+    #: ——立刻把这块画出来）；双击 = 选中 + 在它上面闪几下，方便在密集数据里找到。
+    feature_selected = pyqtSignal(int, bool)
+
     def __init__(self, layer, page_size: int = 50, parent=None, filter_str: str = "1=1", show_ids: Optional[list] = None) -> None:
         super().__init__(parent)
         self.parent = parent
@@ -656,11 +662,6 @@ class PagedAttributeTableWidget(QWidget):
         )
         self.columns_btn.setToolTip("组织列")
         self.columns_btn.setFixedSize(26, 26)
-        self.funcs_btn = QPushButton()
-        self.funcs_btn.setObjectName("customFuncsBtn")
-        self.funcs_btn.setIcon(Icons.edit())
-        self.funcs_btn.setToolTip("自定义函数")
-        self.funcs_btn.setFixedSize(26, 26)
         self.export_btn = QPushButton()
         self.export_btn.setObjectName("exportCsvBtn")
         self.export_btn.setIcon(
@@ -674,10 +675,9 @@ class PagedAttributeTableWidget(QWidget):
         self.filter_btn.clicked.connect(self._filter)
         self.calc_btn.clicked.connect(self._field_calc)
         self.columns_btn.clicked.connect(self._organize_columns)
-        self.funcs_btn.clicked.connect(self._edit_functions)
         self.export_btn.clicked.connect(self._export_csv)
         for b in (self.start_btn, self.save_btn, self.stop_btn, self.filter_btn, self.calc_btn,
-                  self.columns_btn, self.funcs_btn, self.export_btn):
+                  self.columns_btn, self.export_btn):
             tb.addWidget(b)
         tb.addStretch(0)
         main_layout.addLayout(tb)
@@ -720,6 +720,9 @@ class PagedAttributeTableWidget(QWidget):
         self.model.modelReset.connect(self._sync_column_visibility)
         self.model.state_changed.connect(self._refresh_load_state)
         self.table_view.verticalScrollBar().valueChanged.connect(self._on_scroll)
+        # 单击行 → 高亮该要素；双击行 → 再闪几下（画布上的动作由上层 Dock 做）
+        self.table_view.clicked.connect(self._on_row_clicked)
+        self.table_view.doubleClicked.connect(self._on_row_double_clicked)
         self._refresh_load_state()
 
     def _setup_load_bar(self, main_layout) -> None:
@@ -769,6 +772,33 @@ class PagedAttributeTableWidget(QWidget):
         else:
             self.load_status_label.setText(f"共 {total} 条（已全部加载）")
         self.load_more_btn.setEnabled(self.model.has_more)
+
+    # ------------------------------------------------------------ 行单击 / 双击
+
+    def _on_row_clicked(self, index) -> None:
+        """单击行：选中该行要素（不闪烁）。"""
+        self._request_select(index, flash=False)
+
+    def _on_row_double_clicked(self, index) -> None:
+        """双击行：选中该行要素并闪烁几下。"""
+        self._request_select(index, flash=True)
+
+    def _request_select(self, index, flash: bool) -> None:
+        """行索引 → fid → 发信号请上层选中它。
+
+        槽里未捕获的异常在本环境是原生崩溃（无 traceback），必须自己兜住。
+        """
+        try:
+            model = self.model
+            if model is None or not index.isValid():
+                return
+            row = index.row()
+            fids = model.fids
+            if not 0 <= row < len(fids):
+                return
+            self.feature_selected.emit(int(fids[row]), bool(flash))
+        except Exception:  # noqa: BLE001
+            logger.debug("属性表选中要素失败", exc_info=True)
 
     def _on_scroll(self, value: int) -> None:
         """滚动到接近底部时追加加载下一批。"""
@@ -914,20 +944,6 @@ class PagedAttributeTableWidget(QWidget):
         if self.model is not None:
             self.model.reload_fields()
 
-    def _edit_functions(self) -> None:
-        """打开自建的自定义表达式函数编辑器（保存后立即注册到本进程）。
-
-        原生字段计算器里的 QGIS Function Editor 在本应用不可用（``QgsPythonRunner``
-        未初始化，保存会写到盘符根目录且不注册），改从这里管理函数。
-        """
-        try:
-            from app.ui.dialogs.function_editor import FunctionEditorDialog
-
-            FunctionEditorDialog(self).exec()
-        except Exception as exc:  # noqa: BLE001
-            logger.error("打开自定义函数编辑器失败: %s", exc, exc_info=True)
-            QMessageBox.warning(self, "自定义函数", f"打开自定义函数编辑器失败：{exc}")
-
     def _sync_edit_buttons(self) -> None:
         """按图层编辑态同步"保存编辑/停止编辑"按钮可用性。"""
         editing = bool(self.layer.isEditable())
@@ -1013,6 +1029,9 @@ class AttributeDock(QDockWidget):
         self.content_widget = PagedAttributeTableWidget(layer, page_size, self, filter_str=filter_str, show_ids=show_ids)
         self.setWidget(self.content_widget)
         self.content_widget.zoom_to_map.connect(self.zoom_to_map)
+        self.content_widget.feature_selected.connect(self._select_feature)
+        #: 双击行时在选中要素上闪几下的件（懒建，见 _ensure_flasher）
+        self._highlighter = None
         self.setMinimumSize(200, 100)
 
     def add_new_layer(self, layer, parent, filter_str: str, show_ids, page_size: int = 50, title: str = "属性表") -> None:
@@ -1023,6 +1042,9 @@ class AttributeDock(QDockWidget):
         self.show_ids = list(show_ids) if show_ids else []
         self.content_widget = PagedAttributeTableWidget(layer, page_size, self, filter_str=filter_str, show_ids=show_ids)
         self.setWidget(self.content_widget)
+        self.content_widget.feature_selected.connect(self._select_feature)
+        # 闪烁件绑定的是**旧图层**，换了图层必须丢掉重建
+        self._discard_highlighter()
         self.setWindowTitle(title)
 
     def _on_layers_will_be_removed(self, layer_ids) -> None:
@@ -1048,6 +1070,8 @@ class AttributeDock(QDockWidget):
                 self.layer.setSubsetString("")
             if self.layer.isEditable():
                 self.content_widget._stop_edit()
+            # 高亮带挂在画布上，关了 Dock 得把它收掉，否则残留一个高亮框在地图上
+            self._discard_highlighter()
             # **不清** ``topParent.current_attribute_dock``：清了下次打开就以为是
             # "没建过"，重新 new 一个 —— 新 Dock 没有位置记忆，用户把它浮动到地图上
             # 再关掉后，再打开会直接落回左上角。保留实例复用，Qt 才会记住浮动位置。
@@ -1075,3 +1099,46 @@ class AttributeDock(QDockWidget):
         canvas = getattr(self.topParent, "canvas", None)
         if canvas is not None:
             canvas.refresh()
+
+    # ------------------------------------------------------------ 行选中
+
+    def _select_feature(self, fid: int, flash: bool) -> None:
+        """属性表单击 / 双击行 → **选中**该要素（``flash`` 为真时再闪几下）。
+
+        走的是真正的选中集（``selectByIds``，替换式），不是另画一条带子：这样
+        "属性表里选中的数据" 与 "地图上选中的数据" 是同一份，用选择工具、属性表、
+        各种按选中集工作的功能都一致。画布上的高亮由选中高亮覆盖层按「图层属性 →
+        选择」页配的样式画出来。
+
+        双击额外交给 :class:`FeatureHighlighter` 闪几下——它是**洋红**的，和选中高亮
+        区分得开，不然在自己已经高亮的要素上闪烁根本看不出来。
+        """
+        if self.topParent is None or self.layer is None:
+            return
+        canvas = getattr(self.topParent, "canvas", None)
+        if canvas is None:
+            return
+        try:
+            self.layer.selectByIds([int(fid)])
+            self._refresh_canvas()   # selectByIds 不会自动重绘画布
+            if flash:
+                flasher = self._ensure_flasher(canvas)
+                if flasher is not None:
+                    flasher.flash(fid)
+        except Exception:  # noqa: BLE001 —— 槽里未捕获异常是原生崩溃
+            logger.warning("属性表选中要素失败: fid=%s", fid, exc_info=True)
+
+    def _ensure_flasher(self, canvas):
+        """懒建闪烁件（绑定当前图层，所以换图层时要丢掉重建）。"""
+        if self._highlighter is None:
+            self._highlighter = FeatureHighlighter(canvas, self.layer, parent=self)
+        return self._highlighter
+
+    def _discard_highlighter(self) -> None:
+        """丢掉闪烁件（换图层 / 关 Dock 时调），顺手把画布上的残留清掉。"""
+        highlighter, self._highlighter = self._highlighter, None
+        if highlighter is not None:
+            try:
+                highlighter.close()
+            except Exception:  # noqa: BLE001
+                pass

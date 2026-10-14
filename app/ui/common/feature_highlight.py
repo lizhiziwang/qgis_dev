@@ -31,7 +31,8 @@ from qgis.PyQt.QtGui import QColor
 _FLASH_INTERVAL_MS = 160
 _FLASH_TOGGLES = 6
 
-#: 高亮带颜色（洋红，与选中集的黄色区分开）
+#: 高亮带颜色（洋红，与选中集的黄色区分开 —— 它要叠在选中高亮**之上**闪，
+#: 同色的话在自己已经高亮的要素上闪根本看不出来）
 _FLASH_COLOR = (255, 0, 220)
 
 
@@ -54,21 +55,8 @@ class FeatureHighlighter(QObject):
 
     def flash(self, fid: int) -> None:
         """把 ``fid`` 画到高亮带上并闪烁几下，闪完保持可见。"""
-        band = self._ensure_band()
-        if band is None:
+        if not self._draw(fid):
             return
-        try:
-            feature = self._layer.getFeature(int(fid))
-            geometry = feature.geometry() if feature.isValid() else None
-            if geometry is None or geometry.isNull() or geometry.isEmpty():
-                # 几何失效 / 已删除：留着上一次的高亮会指错要素
-                self.clear()
-                return
-            band.setToGeometry(geometry, self._layer)
-            band.show()
-        except RuntimeError:
-            return  # 图层 / 画布已销毁
-
         self._left = _FLASH_TOGGLES
         if self._timer is None:
             self._timer = QTimer(self)
@@ -102,19 +90,45 @@ class FeatureHighlighter(QObject):
 
     # ------------------------------------------------------------ 内部
 
+    def _draw(self, fid: int) -> bool:
+        """把要素几何设进高亮带并显示；画上了返回 ``True``。
+
+        几何失效 / 已删除时清掉并返回 ``False`` —— 留着上一次的高亮会指错要素。
+        """
+        band = self._ensure_band()
+        if band is None:
+            return False
+        # 每次画之前重新上色：高亮样式是系统级配置，用户随时可能改（见「选择」页），
+        # 带子只在创建时上色的话，改完得等下次重建才生效
+        self._style_band(band)
+        try:
+            feature = self._layer.getFeature(int(fid))
+            geometry = feature.geometry() if feature.isValid() else None
+            if geometry is None or geometry.isNull() or geometry.isEmpty():
+                self.clear()
+                return False
+            band.setToGeometry(geometry, self._layer)
+            band.show()
+        except RuntimeError:
+            return False  # 图层 / 画布已销毁
+        return True
+
     def _ensure_band(self) -> Optional[QgsRubberBand]:
         if self._canvas is None:
             return None
         if self._band is None:
             try:
                 band = QgsRubberBand(self._canvas, self._layer.geometryType())
-                band.setColor(QColor(*_FLASH_COLOR))
-                band.setWidth(3)
-                band.setFillColor(QColor(*_FLASH_COLOR, 70))
-                self._band = band
             except RuntimeError:  # 画布已销毁
                 return None
+            self._style_band(band)
+            self._band = band
         return self._band
+
+    def _style_band(self, band: QgsRubberBand) -> None:
+        band.setColor(QColor(*_FLASH_COLOR))
+        band.setWidth(3)
+        band.setFillColor(QColor(*_FLASH_COLOR, 70))
 
     def _on_tick(self) -> None:
         self._left -= 1

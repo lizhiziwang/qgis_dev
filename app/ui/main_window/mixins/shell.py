@@ -12,6 +12,7 @@ from __future__ import annotations
 from qgis.core import (
     QgsApplication,
     QgsCoordinateReferenceSystem,
+    QgsRectangle,
 )
 from qgis.PyQt import sip
 from qgis.gui import QgsMapCanvas
@@ -19,6 +20,7 @@ from qgis.PyQt.QtCore import (
     QEvent,
     QPoint,
     Qt,
+    QTimer,
 )
 from qgis.PyQt.QtGui import (
     QColor,
@@ -50,6 +52,12 @@ logger = get_logger(__name__)
 #: 字段多的属性面板挤得看不清）。统一给一个稍宽的底；内容本来就更宽的（如右侧
 #: 属性表）不受影响，取两者较大值。
 DOCK_MIN_WIDTH = 340
+
+#: 视图稳定多久才记一步（毫秒）：拖拽 / 滚轮会连发 ``extentsChanged``，合并成一次。
+#: 计时器在这里建（本文件拥有它），记录的语义见
+#: :meth:`~app.ui.main_window.mixins.map_tools.MapToolsMixin._record_view_extent`。
+_VIEW_HISTORY_DEBOUNCE_MS = 450
+
 
 
 class WindowShellMixin:
@@ -86,6 +94,21 @@ class WindowShellMixin:
         for redo_sc in self._redo_shortcuts:
             redo_sc.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
             redo_sc.activated.connect(self._redo_edit)
+
+        # 视图历史（左侧「前视图 / 后视图」）：范围一变就起个防抖计时，等视图
+        # **稳定下来**再记一步 —— 拖拽 / 滚轮会连发事件，逐条记等于把中间过程全塞
+        # 进历史。
+        # **信号是 ``extentsChanged``（复数）**，这个构建里没有 ``extentChanged``。
+        # 也**不用**画布自带的 ``zoomToPreviousExtent``：它只记交互式缩放 / 平移，
+        # 程序化 ``setExtent``（全图、缩放到图层）根本不进它的历史（实测原地不动）。
+        self._view_history: list[QgsRectangle] = []
+        self._view_index = -1
+        self._view_navigating = False
+        self._view_record_timer = QTimer(canvas)
+        self._view_record_timer.setSingleShot(True)
+        self._view_record_timer.setInterval(_VIEW_HISTORY_DEBOUNCE_MS)
+        self._view_record_timer.timeout.connect(self._record_view_extent)
+        canvas.extentsChanged.connect(self._on_canvas_extent_changed)
         return canvas
 
     def _build_central_widget(self) -> None:
@@ -139,6 +162,8 @@ class WindowShellMixin:
                 "pan": self._on_pan,
                 "side_zoom": self._on_side_zoom,
                 "zoom_full": self._on_zoom_full,
+                "view_prev": self._on_view_prev,
+                "view_next": self._on_view_next,
                 "identify": self._on_identify,
                 "clear_selection": self._on_clear_selection,
                 "select_mask": self._on_select_mask,
@@ -154,7 +179,7 @@ class WindowShellMixin:
         layout.addWidget(self.canvas)
         # 竖排工具条悬浮在地图画布左上角（left 4px / top 3px）
         self._attach_side_toolbar_overlay()
-        # 坐标定位气泡悬浮在地图画布右上角；侧栏「坐标定位」按钮点亮时弹出
+        # 定位气泡悬浮在地图画布右上角；侧栏「定位」按钮点亮时弹出
         self._attach_coord_locate_overlay()
 
         crs = QgsCoordinateReferenceSystem("EPSG:4490")
@@ -258,14 +283,14 @@ class WindowShellMixin:
         except RuntimeError:
             pass  # 窗口关闭流程中 C++ 对象已销毁
 
-    # ===================================================== 画布右上角坐标定位气泡
+    # ===================================================== 画布右上角定位气泡
 
     def _attach_coord_locate_overlay(self) -> None:
-        """把坐标定位气泡悬浮到画布右上角（与侧栏工具条互为对角覆盖层）。
+        """把定位气泡悬浮到画布右上角（与侧栏工具条互为对角覆盖层）。
 
         装配模式与 :meth:`_attach_side_toolbar_overlay` 一致：setParent 到画布
         父容器（与画布同级）→ raise_() 永远盖在画布及其所有子覆盖层之上。
-        初始隐藏，由侧栏「坐标定位」按钮的回调 :meth:`_on_coord_locate` 唤起。
+        初始隐藏，由侧栏「定位」按钮的回调 :meth:`_on_coord_locate` 唤起。
         """
         self._coord_locate_overlay = CoordLocateOverlay(self.canvas)
         # 父容器优先：有父才能提到画布**之上**（与侧栏同款）
@@ -280,7 +305,7 @@ class WindowShellMixin:
         self.canvas.extentsChanged.connect(self._place_coord_locate_overlay)
 
     def _place_coord_locate_overlay(self) -> None:
-        """把坐标定位气泡摆到画布右上角（与侧栏左上角互为对角，互不遮挡）。"""
+        """把定位气泡摆到画布右上角（与侧栏左上角互为对角，互不遮挡）。"""
         overlay = getattr(self, "_coord_locate_overlay", None)
         canvas = getattr(self, "canvas", None)
         if overlay is None or canvas is None:
@@ -307,7 +332,7 @@ class WindowShellMixin:
         overlay.raise_()
 
     def _on_coord_locate(self) -> None:
-        """侧栏「坐标定位」按钮回调：toggle 气泡显示，按钮随显隐独立常亮。
+        """侧栏「定位」按钮回调：toggle 气泡显示，按钮随显隐独立常亮。
 
         与 :meth:`_on_qmap_compare` 一致——按钮在 :data:`SideToolBar._SESSION_KEYS`
         里，由 :meth:`SideToolBar.set_session_active` 控高亮。
@@ -350,6 +375,9 @@ class WindowShellMixin:
         # 1. 图层树
         self.layer_dock = LayerDock(self)
         self.layer_dock.context_menu_requested.connect(self._on_layer_context_menu)
+        self.layer_dock.group_context_menu_requested.connect(self._on_layer_group_context_menu)
+        self.layer_dock.blank_context_menu_requested.connect(self._on_layer_tree_blank_context_menu)
+        self.layer_dock.attribute_table_requested.connect(self._show_attribute_dock)
         # 点击图层树即自动设为编辑目标（与 QGIS 桌面一致）：
         # 用户期望点完一层就能在工具条点"开始编辑"
         self.layer_dock.layer_clicked.connect(self._on_layer_clicked_in_dock)
