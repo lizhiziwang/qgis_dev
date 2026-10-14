@@ -9,7 +9,10 @@
 
 from __future__ import annotations
 
+import os
 import threading
+from pathlib import Path
+from urllib.parse import unquote
 
 from qgis.core import (
     Qgis,
@@ -21,6 +24,10 @@ from qgis.PyQt.QtWidgets import (
     QMessageBox,
 )
 
+from app.core.domain.delete_data import (
+    DeleteDataError,
+    delete_registered_data,
+)
 from app.core.domain.import_layer import (
     ImportLayerError,
     import_vector_layer_to_db,
@@ -126,8 +133,8 @@ class AppActionsMixin:
 
         「+ 新建连接」打开选库弹窗（本地数据库 Tab，见
         :mod:`app.ui.dialogs.add_connection`），成功后把新连接追加进左树并
-        联动右侧数据表；创建数据 / 导入 / 刷新由 Dock 内部占位记日志
-        （后续版本接入真实功能）。
+        联动右侧数据表；创建数据 / 导入 / 刷新 / 树节点右键菜单（添连接 /
+        导入 / 删除 / 刷新）都接到本类的 ``_on_*`` 实现上。
         """
 
         dock = getattr(self, "_data_manage_dock", None)
@@ -136,6 +143,7 @@ class AppActionsMixin:
                 self,
                 on_add_connection=self._on_dm_add_connection,
                 on_add_layer=self._on_dm_add_layer,
+                on_delete_layer=self._on_dm_delete_layer,
                 on_create_data=self._on_create_data,
                 on_import=self._on_import,
                 on_refresh=self._on_refresh,
@@ -379,6 +387,129 @@ class AppActionsMixin:
             )
         finally:
             self._end_layer_loading()
+
+    def _on_dm_delete_layer(self, db: dict, category: str, name: str) -> None:
+        """数据管理左树右键「删除图层」：删库内数据表 + 注册信息 + 移出工程图层。
+
+        时序刻意是「先移出工程图层、再删库」：图层按 OGR / GDAL 持有库文件
+        句柄（老 ``.db`` 后缀 gpkg 库还经同 inode 的 ``.gpkg`` 硬链接别名），
+        先 :meth:`_remove_layer` 把句柄与别名放掉，``DROP TABLE`` 才不会撞上
+        sqlite 锁。
+
+        删除不可恢复 → 先弹确认框（默认 No）；库里删表 + ``user_relation``
+        注册行走 :func:`~app.core.domain.delete_data.delete_registered_data`；
+        最后让 Dock 摘掉该注册项并重画左树。
+        """
+        path = str(db.get("path") or "")
+        label = _CATEGORY_LABEL.get(category, category)
+        if db.get("kind") == "server":
+            QMessageBox.information(
+                self,
+                "删除图层",
+                "服务器库删除尚未实现，请选用本地库（SpatiaLite / GeoPackage）。",
+            )
+            return
+        if not path:
+            QMessageBox.warning(
+                self, "删除图层", f"「{name}」缺少库文件路径, 无法删除。"
+            )
+            return
+
+        ret = QMessageBox.question(
+            self,
+            "删除图层",
+            f"确定删除{label}「{name}」吗？\n\n"
+            "将删除库内数据表与注册信息，并把工程中已打开的对应图层移出地图。\n"
+            "此操作不可恢复。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+
+        # 1) 先移出工程里指向这张表的图层（释放文件句柄 / gpkg 别名）
+        removed = 0
+        for layer in self._layers_backed_by(path, name):
+            self._remove_layer(layer)
+            removed += 1
+        # 2) 删库内数据表 + user_relation 注册行
+        try:
+            delete_registered_data(db, category, name)
+        except DeleteDataError as exc:
+            get_logger(__name__).error("删除数据失败：%s", exc, exc_info=True)
+            self.messageBar.pushMessage(
+                f"删除失败：{exc}",
+                level=Qgis.MessageLevel.Critical,
+                duration=5,
+            )
+            return
+        # 3) 左树摘掉该注册项（含类别计数 / 行数），右表跟着重画
+        dock = getattr(self, "_data_manage_dock", None)
+        if dock is not None:
+            dock.remove_registered_node(db, category, name)
+        suffix = f"，并移出工程 {removed} 个图层" if removed else ""
+        get_logger(__name__).info(
+            "已删除本地库数据：%s → %s(%s)%s", path, name, category, suffix
+        )
+        self.messageBar.pushMessage(
+            f"已删除{label}「{name}」{suffix}",
+            level=Qgis.MessageLevel.Success,
+            duration=4,
+        )
+
+    def _layers_backed_by(self, db_path: str, table: str) -> list:
+        """工程里数据源指向「``db_path`` 库中的 ``table``」的图层（删除时一并移出）。
+
+        两条线索都命中才算同一份数据：
+
+        - **容器路径**：加载时挂在图层上的 ``layer.path_c``（见
+          :meth:`_on_dm_add_layer` / ``file_browser``），没有则退 OGR 数据源
+          ``路径|layername=表名`` 里 ``|`` 之前那段；
+        - **表名**：数据源 ``layername=`` 参数；栅格等非 OGR 数据源没有该参数，
+          退图层显示名（加载时就是用表名命名的）。
+
+        路径比较先按规范化字符串（大小写不敏感），再退 ``os.path.samefile``
+        —— 老 ``.db`` 后缀 gpkg 库的图层数据源指向同 inode 的 ``.gpkg`` 硬
+        链接别名，字符串对不上但其实是同一个文件。
+        """
+        out: list = []
+        for layer in self.project.mapLayers().values():
+            try:
+                source = str(layer.source() or "")
+                layer_name = layer.name()
+            except RuntimeError:  # C++ 对象已销毁（极端时序），跳过
+                continue
+            container = str(getattr(layer, "path_c", None) or source.split("|", 1)[0])
+            if not self._same_db_path(container, db_path):
+                continue
+            src_table = self._source_layername(source)
+            if (src_table if src_table is not None else layer_name) != table:
+                continue
+            out.append(layer)
+        return out
+
+    @staticmethod
+    def _same_db_path(container: str, db_path: str) -> bool:
+        """两段路径是否指向同一个库文件（字符串规范化 → ``samefile`` 兜底）。"""
+        if not container or not db_path:
+            return False
+        if container.replace("\\", "/").lower() == db_path.replace("\\", "/").lower():
+            return True
+        try:
+            return os.path.samefile(Path(container), Path(db_path))
+        except OSError:
+            return False
+
+    @staticmethod
+    def _source_layername(source: str) -> str | None:
+        """取 OGR 数据源里的 ``layername=`` 表名（没有该参数则 None）。
+
+        值可能被 QGIS 做过 URI 转义（空格 / 中文），这里还原一次再比。
+        """
+        if "layername=" not in source:
+            return None
+        raw = source.split("layername=", 1)[1].split("|", 1)[0]
+        return unquote(raw) or None
 
     def _on_swipe(self) -> None:
         """卷帘对比：分屏会话已存续则直接恢复（不弹窗）；否则弹窗选栅格激活。

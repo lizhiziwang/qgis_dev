@@ -84,6 +84,7 @@ _GLYPHS: dict[str, str] = {
     "cat_image": "\uf03e",    # image 影像数据分组
     "cat_data": "\uf15b",     # file 注册数据表叶子
     "plus_circle": "\uf055",  # plus-circle 新建连接
+    "upload": "\uf093",       # upload 导入图层（左栏树节点右键菜单）
     # ---- 属性表 Dock 工具条（app/ui/docks/attribute_dock.py）----
     "organize_columns": "\uf0db",  # columns 组织列（字段列显示设置）
     "export_csv": "",        # file-export 导出为 CSV 文件

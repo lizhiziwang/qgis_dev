@@ -33,15 +33,25 @@ gpkg 库(经同 inode 的 ``.gpkg`` 硬链接别名打开 —— GDAL 3.11 按�
 边车的打开方式); 直开失败(非 GeoPackage 内容)提示改用 .gpkg 库重落 ——
 无本地 XYZ 回落(该服务已移除), 见
 :mod:`app.core.util.local_layer_loader`。
+
+树节点另有右键菜单(见 :meth:`DataManageDock._build_context_menu`), 菜单项按
+节点层级显隐:
+
+- 「添加数据库连接」—— 只在「本地数据库」/「服务器数据库」两个根节点;
+- 「导入图层」—— 只在库连接节点(本地 / 服务器连接);
+- 「删除图层」—— 只在注册数据叶子(库内表 + ``user_relation`` 注册行由
+  MainWindow 侧一并删除, 并移出工程里已打开的对应图层);
+- 「刷新」—— 任意节点(重扫该节点所属库并重建左树)。
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
 
 from qgis.PyQt.QtCore import QEvent, QSize, Qt, QTimer
-from qgis.PyQt.QtGui import QBrush, QColor, QFont, QIcon
+from qgis.PyQt.QtGui import QAction, QBrush, QColor, QFont, QIcon
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QDialog,
@@ -49,6 +59,7 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QMenu,
     QPushButton,
     QSplitter,
     QTableWidget,
@@ -105,6 +116,7 @@ class DataManageDock(QDockWidget):
         on_import: Callable[[], None] | None = None,
         on_refresh: Callable[[], None] | None = None,
         on_add_layer: Callable[[dict, str, str], None] | None = None,
+        on_delete_layer: Callable[[dict, str, str], None] | None = None,
     ) -> None:
         super().__init__("数据管理", parent)
         #: QSS 作用域锚点(见 app.ui.common.theme.window_qss 的 #DataManageDock 规则)
@@ -116,8 +128,13 @@ class DataManageDock(QDockWidget):
         self._on_refresh = on_refresh
         #: 双击表格行回调: (连接 dict, category, 表名) → 加入地图(由 MainWindow 提供)
         self._on_add_layer = on_add_layer
+        #: 右键树「删除图层」回调: (连接 dict, category, 表名) → 删库内表 + 注册
+        #: 并移出工程图层(由 MainWindow 提供)
+        self._on_delete_layer = on_delete_layer
         #: 当前联动展示的库(双击行定位用)
         self._current_db: dict | None = None
+        #: 当前选中的类别过滤(类别分组节点点击时设; refresh_all 重画用)
+        self._current_category: str | None = None
         #: 列宽程序化调整中(防止信号重入)
         self._fitting = False
         #: 服务器连接清单(kind=server, 挂在「服务器数据库」分组下)
@@ -195,6 +212,10 @@ class DataManageDock(QDockWidget):
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.Interactive)
         self.tree.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self.tree.itemClicked.connect(self._on_tree_item_clicked)
+        # 右键菜单: 走自定义策略(QTreeWidget 默认策略不弹菜单), 菜单项按
+        # 节点层级显隐, 见 _on_tree_context_menu / _build_context_menu
+        self.tree.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.tree.customContextMenuRequested.connect(self._on_tree_context_menu)
         lay.addWidget(self.tree, 1)
 
         self.add_btn = QPushButton("新建连接")
@@ -303,16 +324,47 @@ class DataManageDock(QDockWidget):
         self._select_node(root, item)
         self._show_database(conn)
 
+    def _refresh_db_cache(self, db: dict) -> bool:
+        """从 db 文件实时重扫 → 写回 :attr:`_databases[i]["categories"/"counts"/"meta"]`。
+
+        背景：:meth:`add_connection` / :meth:`restore_state` 一次性把
+        :func:`describe_local_db` 的快照写进 db dict；后续导入 / 删除 / 外部
+        变更不会自动同步。点「刷新」按钮 / :meth:`refresh_database` 走
+        本方法拿最新快照。失败（库文件被占用、格式不是 gpkg/spatialite）→ 返回
+        False，不动 db dict。 调用方决定是否调 :meth:`_show_database`。
+        """
+        path = db.get("path")
+        if not path:
+            return False
+        try:
+            p = Path(str(path))
+            if not p.is_file():
+                return False
+            catalog = describe_local_db(str(path))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "数据管理[刷新缓存]: 重扫本地库 %s 失败: %s", path, exc
+            )
+            return False
+        db["categories"] = catalog["categories"]
+        db["counts"] = catalog["counts"]
+        db["meta"] = catalog["meta"]
+        return True
+
     def refresh_database(self, db: dict) -> None:
         """库内容变更后重扫该库的右表（导入 / 删除后用）。
 
         ``db`` 必须在 :attr:`_databases`（local）或 :attr:`_server_connections`
-        （server）里——路径不识别则 no-op。``kind=local`` 时调 :meth:`_show_database`
-        重扫分类 + 行数；``kind=server`` 调 :meth:`_show_server_connection` 重画
-        摘要（服务器库表目录不缓存，刷新不发起网络请求）。
+        （server）里——路径不识别则 no-op。``kind=local`` 时调 :meth:`_refresh_db_cache`
+        重扫 db 文件 → 拿到最新的 ``user_relation`` 注册表 → 调
+        :meth:`_show_database` 重画右表；``kind=server`` 调
+        :meth:`_show_server_connection` 重画摘要（服务器库表目录不缓存，刷新
+        不发起网络请求）。
         """
         kind = db.get("kind", "")
         if kind == "local" and db in self._databases:
+            # 失败 (文件被占用) 仍尝试重画旧缓存 → 让 UI 至少不丢
+            self._refresh_db_cache(db)
             self._show_database(db)
         elif kind == "server" and db in self._server_connections:
             self._show_server_connection(db)
@@ -320,22 +372,54 @@ class DataManageDock(QDockWidget):
     def refresh_all(self) -> int:
         """刷新所有已注册的本地库 + 服务器连接——点「刷新」按钮触发。
 
-        - 本地库（``_databases``）：调 :meth:`refresh_database` 重扫右表
-          （分类 / 行数 / 元信息从 sqlite 端重新查）；
-        - 服务器连接（``_server_connections``）：同上调
-          :meth:`refresh_database`（仅重画标题 + 摘要，不发起网络请求）。
+        本地库走 :meth:`_refresh_db_cache` 重扫 db 文件并写回缓存
+        （不动 UI）；服务器连接只计数。 最后只对 :attr:`_current_db`（如果
+        还在 :attr:`_databases` / :attr:`_server_connections` 里）调一次
+        :meth:`_show_database` / :meth:`_show_server_connection` 重画——
+        避免全部重画后 UI 跳到最后一个 db。 库文件重扫失败 → 缓存不变
+        （记 warning），不影响其他 db 刷新。
 
         Returns:
             实际刷新的连接数（local + server 之和）。无连接时返回 0。
         """
         n = 0
         for db in list(self._databases):
-            self.refresh_database(db)
+            self._refresh_db_cache(db)
             n += 1
         for conn in list(self._server_connections):
-            self.refresh_database(conn)
             n += 1
+        # 仅重画当前选中，保持选中状态不变
+        if self._current_db is not None:
+            if self._current_db in self._databases:
+                self._show_database(
+                    self._current_db, category=self._current_category
+                )
+            elif self._current_db in self._server_connections:
+                self._show_server_connection(self._current_db)
         return n
+
+    def remove_registered_node(self, db: dict, category: str, name: str) -> None:
+        """删除成功后从缓存摘掉该注册项并重建左树(尽量保持选中该库)。
+
+        走缓存改动而非重扫库文件: 删表刚由 MainWindow 在库里做完, 结果确定,
+        重开库文件只是把同一件事再读一遍。``db`` 可能是树节点 payload 里的
+        **副本**(见 :meth:`_same_db`), 先换回 :attr:`_databases` 里的原件再改;
+        换不回(服务器库 / 已被替换的连接) → no-op, 只当没这个节点。
+        """
+        target = self._cache_db(db)
+        if target is None:
+            return
+        cats = target.get("categories")
+        if isinstance(cats, dict) and isinstance(cats.get(category), list):
+            with suppress(ValueError):
+                cats[category].remove(name)
+        for key in ("counts", "meta"):
+            mapping = target.get(key)
+            if isinstance(mapping, dict):
+                mapping.pop(name, None)
+        self._rebuild_tree()
+        self._select_db_node(target)
+        self._show_database(target, category=category)
 
     # ------------------------------------------------------------ 工程持久化
 
@@ -613,8 +697,13 @@ class DataManageDock(QDockWidget):
         return out
 
     def _show_database(self, db: dict | None, *, category: str | None = None) -> None:
-        """联动右侧面板: 更新标题并重建数据表 (db=None 显示空提示)."""
+        """联动右侧面板: 更新标题并重建数据表 (db=None 显示空提示).
+
+        记下当前选中的库 + 类别，供 :meth:`refresh_all` 末尾重画时保持
+        选中状态不变（避免全部本地库重扫后 UI 跳到最后一个 db）。
+        """
         self._current_db = db
+        self._current_category = category
         if db is None:
             self.sel_name.setText("未连接本地数据库")
             self.sel_name.setToolTip("")
@@ -692,6 +781,7 @@ class DataManageDock(QDockWidget):
     def _show_server_connection(self, conn: dict) -> None:
         """选中服务器连接: 右侧标题/摘要展示(表目录浏览待后续版本接入)."""
         self._current_db = None
+        self._current_category = None
         self.table.setRowCount(0)
         self.sel_name.setText(self._server_title(conn))
         self.sel_name.setToolTip(self._server_tooltip(conn))
@@ -704,6 +794,7 @@ class DataManageDock(QDockWidget):
         if scope:
             # 根节点(本地数据库 / 服务器数据库): 只显示根名, 数据区清空
             self._current_db = None
+            self._current_category = None
             self.table.setRowCount(0)
             self.sel_name.setText(
                 "本地数据库" if scope == "local" else "服务器数据库"
@@ -731,6 +822,162 @@ class DataManageDock(QDockWidget):
                 self._show_server_connection(db)
                 return
             self._show_database(db)
+
+    # ------------------------------------------------------------ 右键菜单
+
+    def _on_tree_context_menu(self, pos) -> None:
+        """树节点右键 → 上下文菜单(项按节点层级显隐, 见 :meth:`_build_context_menu`)。
+
+        空白处(没点中节点)不弹: 菜单项都针对具体节点, 弹出来用户不知道动作
+        落在谁身上。右键同时把该节点设为当前项, 先高亮"这一行"再选动作。
+        """
+        item = self.tree.itemAt(pos)
+        if item is None:
+            return
+        payload = item.data(0, _ROLE)
+        if not isinstance(payload, dict):
+            return
+        self.tree.setCurrentItem(item)
+        menu = self._build_context_menu(payload)
+        menu.exec(self.tree.viewport().mapToGlobal(pos))
+        # 每次右键都是新菜单: exec 返回后立刻交还给事件循环销毁, 不然会以
+        # Dock 为 parent 一直攒着。
+        menu.deleteLater()
+
+    def _build_context_menu(self, payload: dict) -> QMenu:
+        """按节点层级组装右键菜单(显隐规则见模块 docstring)。
+
+        菜单外观(QMenu / QMenu::item / ::separator)由全局 QSS 统一管, 这里
+        只给文案与图标; 图标是 QPainter 画的、颜色烧在 PNG 里, 取当前主题的
+        主文字色(与左树节点图标同源), 主题切换时下次右键自然是新颜色。
+        """
+        theme = ThemeManager.instance().current()
+        kind = self._payload_kind(payload)
+        # payload 里的 db 是 QVariantMap 深拷出来的副本(见 _same_db): 动作要改
+        # 缓存时得拿原件, 先换回 _databases 里的整条; 服务器连接换不回, 留副本
+        raw_db = payload.get("db")
+        raw_db = raw_db if isinstance(raw_db, dict) else None
+        db = self._cache_db(raw_db) or raw_db
+        #: 节点专属项(显隐规则) + 通用项「刷新」拼成一份菜单
+        head: list[tuple[str, str, Callable[[], None]]] = []
+        if payload.get("scope"):
+            # 作用域根(本地 / 服务器数据库): 库里还没东西, 只有"添连接"说得通
+            head.append(
+                ("添加数据库连接", "plus_circle", self._on_add_connection_clicked)
+            )
+        elif kind == "leaf" and db is not None:
+            # 注册数据叶子: 删这张表(同步删注册信息 + 移出工程图层)
+            name = str(payload.get("name") or "")
+            cat = str(payload.get("cat") or "")
+            head.append(
+                ("删除图层", "trash", lambda: self._request_delete(db, cat, name))
+            )
+        elif db is not None and "cat" not in payload:
+            # 库连接节点(本地 / 服务器): 往这个库里导入图层
+            head.append(("导入图层", "upload", self._on_import_clicked))
+
+        menu = QMenu(self)
+        for label, icon_key, slot in head:
+            act = QAction(tool_icons.icon(icon_key, theme.menu_text), label, menu)
+            act.triggered.connect(slot)
+            menu.addAction(act)
+        if head:
+            menu.addSeparator()
+        refresh = QAction(tool_icons.icon("refresh", theme.menu_text), "刷新", menu)
+        # 根节点没有 db → 刷新全部; 其余节点刷新所属库
+        refresh.triggered.connect(lambda: self._on_tree_refresh(db))
+        menu.addAction(refresh)
+        return menu
+
+    def _request_delete(self, db: dict, category: str, name: str) -> None:
+        """菜单「删除图层」: 交回调(MainWindow 确认后删库内表 + 注册 + 工程图层)。
+
+        未接回调(单独用 Dock)只记日志 —— 删除是破坏性操作, Dock 不自己动手。
+        """
+        if not category or self._on_delete_layer is None:
+            logger.debug("数据管理[删除图层]: 未接回调, %s/%s", category, name)
+            return
+        try:
+            self._on_delete_layer(db, category, name)
+        except Exception as exc:  # 槽内异常会 native 崩溃
+            logger.error("数据管理[删除图层]回调异常: %s", exc, exc_info=True)
+
+    def _on_tree_refresh(self, db: dict | None) -> int:
+        """菜单「刷新」: 重扫目标库(``db=None`` 为全部)并**重建左树**, 保持选中。
+
+        与「刷新」按钮(:meth:`refresh_all`)的差别: 按钮只重扫缓存 + 重画右表,
+        左树的类别分组 / 行数保持旧值; 右键刷新按节点重扫后重建树, 新导入 /
+        外部新增的表也会冒出来, 选中的连接节点不跳走。
+
+        Returns:
+            本次重扫的本地库 + 服务器连接数(与 :meth:`refresh_all` 同口径)。
+        """
+        if db is None:
+            n = self.refresh_all()
+            self._rebuild_tree()
+            return n
+        if db.get("kind") == "server":
+            self._show_server_connection(db)
+            return 1
+        # 右键拿到的可能是 payload 副本 → 换回缓存里的原件再重扫(否则扫的是副本)
+        target = self._cache_db(db)
+        if target is None:
+            return 0
+        keep_category = (
+            self._current_category if self._same_db(self._current_db, target) else None
+        )
+        self._refresh_db_cache(target)
+        self._rebuild_tree()
+        self._select_db_node(target)
+        self._show_database(target, category=keep_category)
+        return 1
+
+    def _select_db_node(self, db: dict) -> None:
+        """在(刚重建的)树里定位 ``db`` 的连接节点并选中(只改高亮, 不触发点击)."""
+        item = self._find_item(lambda p: self._same_db(p.get("db"), db))
+        if item is None:
+            return
+        parent = item.parent()
+        if parent is not None:
+            self._select_node(parent, item)
+
+    @staticmethod
+    def _same_db(a: dict | None, b: dict | None) -> bool:
+        """两个连接 dict 是否指向同一个库。
+
+        树节点 payload 里的 db 是 ``QTreeWidgetItem.setData`` 存 QVariantMap
+        时**深拷**出来的副本(顶层和嵌套 list 都不是同一个对象) —— 所以这里
+        只比内容: 两边都有 ``path`` 就比 ``path``(缓存被重扫过也能对上),
+        否则退回整体相等。
+        """
+        if not isinstance(a, dict) or not isinstance(b, dict):
+            return False
+        pa, pb = a.get("path"), b.get("path")
+        if pa and pb:
+            return str(pa) == str(pb)
+        return a == b
+
+    def _cache_db(self, db: dict | None) -> dict | None:
+        """把 payload 副本换回 :attr:`_databases` 里的原件(找不到 → None)."""
+        if not isinstance(db, dict):
+            return None
+        for cand in self._databases:
+            if self._same_db(cand, db):
+                return cand
+        return None
+
+    def _find_item(self, pred: Callable[[dict], bool]) -> QTreeWidgetItem | None:
+        """深度优先找第一个 payload 满足 ``pred`` 的节点(找不到返回 None)."""
+        stack = [
+            self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())
+        ]
+        while stack:
+            item = stack.pop()
+            payload = item.data(0, _ROLE)
+            if isinstance(payload, dict) and pred(payload):
+                return item
+            stack.extend(item.child(j) for j in range(item.childCount()))
+        return None
 
     def eventFilter(self, obj, ev) -> bool:  # noqa: N802 —— Qt 命名
         """表格尺寸变化(窗口 / 分隔条拖动)后延迟横向撑满(等布局稳定)."""
