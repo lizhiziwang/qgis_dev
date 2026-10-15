@@ -66,7 +66,11 @@ from app.ui.common.value_format import format_value
 from app.ui.common.widgets import save_file
 from app.ui.dialogs.organize_columns import OrganizeColumnsDialog
 from app.ui.dialogs.query_builder import QueryBuilderDialog
-from app.ui.tools.feature_attrs import field_alias
+from app.ui.tools.feature_attrs import (
+    auto_id_field_index,
+    field_alias,
+    uid_field_index,
+)
 
 logger = get_logger(__name__)
 
@@ -341,6 +345,9 @@ class PagedAttributeTableModel(QAbstractTableModel):
         self.header_names = [
             field_alias(layer.fields().at(i)) or name for i, name in enumerate(self.field_names)
         ]
+        #: 编辑态下**禁止改值**的列（字段下标 +1，列 0 是 ID 列）：全局唯一标识
+        #: 与数据源自增/自维护的主键。与属性录入弹窗同一口径，见 feature_attrs。
+        self._readonly_cols = self._compute_readonly_cols()
         #: 结果 **fid 列表**（内存主驻留物；要素按需取，见 ``feature_at``）
         self._fids: List[int] = []
         #: fid → 行号（选中集同步要按 fid 反查行，线性找在 2M 行上不可用）
@@ -390,6 +397,18 @@ class PagedAttributeTableModel(QAbstractTableModel):
     def _build_where(self) -> str:
         """筛选表达式（show_ids 走 setFilterFids，不拼进表达式）。"""
         return self.filter_str or "1=1"
+
+    def _compute_readonly_cols(self) -> set[int]:
+        """系统自维护 / 全局唯一标识字段的**列号**（列 0 = ID 列，字段从第 1 列起）。
+
+        与属性录入弹窗同一口径（``uid_field_index`` / ``auto_id_field_index``）：
+        - 全局唯一标识（MZGUID / FGUID / GlobalID…）：只给系统自动赋值，手工改会
+          破坏"一要素一标识"；
+        - 数据源自增/自维护的主键（OBJECTID / fid / ogc_fid…）：保存时数据源自己填。
+        """
+        fields = self.layer.fields()
+        idx = {i for i in (uid_field_index(fields), auto_id_field_index(fields)) if i is not None}
+        return {i + 1 for i in idx}
 
     @property
     def has_more(self) -> bool:
@@ -566,6 +585,7 @@ class PagedAttributeTableModel(QAbstractTableModel):
         self.header_names = [
             field_alias(self.layer.fields().at(i)) or name for i, name in enumerate(self.field_names)
         ]
+        self._readonly_cols = self._compute_readonly_cols()
         self._feature_cache.clear()
         self.beginResetModel()
         self.endResetModel()
@@ -842,14 +862,14 @@ class PagedAttributeTableModel(QAbstractTableModel):
             return Qt.ItemFlag.ItemIsEnabled
         if index.column() == 0:
             return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
-        if self.layer.isEditable():
+        if self.layer.isEditable() and index.column() not in self._readonly_cols:
             return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsEditable
         return Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
 
     def setData(self, index, value, role=Qt.ItemDataRole.EditRole):
         if not index.isValid() or role != Qt.ItemDataRole.EditRole:
             return False
-        if index.column() == 0:
+        if index.column() == 0 or index.column() in self._readonly_cols:
             return False
         if index.row() >= len(self._fids):
             return False
