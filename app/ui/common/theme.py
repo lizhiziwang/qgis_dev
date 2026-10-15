@@ -1039,6 +1039,17 @@ def app_qss(t: Theme) -> str:
         padding: 0 4px;
         color: {t.menu_text};
     }}
+    /* 字段计算器的两个可勾选分组：标题里的勾选框默认会被顶到分组框上边框上、把
+       边框挡住。这里把标题放到**边框内侧**（subcontrol-origin: border），上边框线
+       在勾选框上方完整可见（与 QGIS 原生分组框观感一致）。QSS 选不中"可勾选"的
+       分组框，故用 objectName 标定。 */
+    QGroupBox#FieldCalcGroup {{ margin-top: 0px; padding-top: 24px; }}
+    QGroupBox#FieldCalcGroup::title {{
+        subcontrol-origin: border;
+        subcontrol-position: top left;
+        left: 8px;
+        top: 2px;
+    }}
 
     QTableWidget, QTableView, QTreeWidget, QTreeView, QListView, QListWidget,
     QColumnView {{
