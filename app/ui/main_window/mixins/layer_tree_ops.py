@@ -272,7 +272,7 @@ class LayerTreeOpsMixin:
         if isinstance(node, QgsLayerTreeLayer):
             layer = node.layer()
             if layer is not None:
-                self._remove_layer(layer)
+                self._remove_layer(layer, confirm=True)
             return
 
         if isinstance(node, QgsLayerTreeGroup):
@@ -299,16 +299,17 @@ class LayerTreeOpsMixin:
         # findLayers 默认递归收集所有子图层（嵌套子组下的也算）
         layers = [c.layer() for c in group.findLayers() if c.layer() is not None]
         name = group.name()
-        text = f"确定删除「{name}」及其 {len(layers)} 个图层吗？" if layers else f"确定删除空图层组「{name}」吗？"
-        ret = QMessageBox.question(
-            self,
-            "删除图层组",
-            text,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        )
-        if ret != QMessageBox.StandardButton.Yes:
-            return
+        # 空组没有数据可丢：直接删，不弹确认（用户要求）。
+        if layers:
+            ret = QMessageBox.question(
+                self,
+                "删除图层组",
+                f"确定删除「{name}」及其 {len(layers)} 个图层吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if ret != QMessageBox.StandardButton.Yes:
+                return
         # 1) 先逐个走 _remove_layer：拿到完整清理（退出编辑态/清选中引用/
         #    gpkg 别名/延迟刷新）。若只摘组节点，bridge 会直接 delete 里面的
         #    图层，正在编辑的图层会留下脏 buffer 与悬空 edit_layer。
