@@ -68,6 +68,9 @@ class DownloadManager(QObject):
     # ------------------------------------------------------------ 注册
 
     def register(self, job_id: str, task, plan: FetchPlan, request: DownloadRequest) -> None:
+        # 拆成局部变量：Cython 3.3 对 ``sorted(<a or b>)`` 会编译崩溃
+        # （EarlyReplaceBuiltinCalls），语义不变，仅为可编译性。
+        includes = request.include or ()
         rec = {
             "job_id": job_id,
             "task_id": plan.task_id,
@@ -84,7 +87,7 @@ class DownloadManager(QObject):
                 "task": request.task.to_dict(),
                 "scope": request.scope.value,
                 "scope_extent": list(request.scope_extent) if request.scope_extent else None,
-                "include": sorted(request.include or ()),
+                "include": sorted(includes),
                 "target_dir": request.target_dir,
                 "target_name": request.target_name,
                 "zoom_range": list(request.zoom_range),

@@ -10,6 +10,7 @@
     pyinstaller tools/pyinstaller.spec
 """
 
+import json
 import os
 import re
 import sys
@@ -190,6 +191,48 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
+
+# --------------------------------------------------------------------------- #
+# 原生编译保护（可选，见 tools/protect_cython.py）
+#
+# 分析阶段仍用原始 .py（保证 import 图 / 动态导入收集完整）；这里把已编译成
+# 原生扩展的模块从 PYZ 里剔除，改为把 .pyd 作为二进制收进产物目录。
+# 运行期 PyInstaller 冻结导入器在 PYZ 找不到模块时回退到磁盘 FileFinder
+# （PyInstaller/loader/pyimod02_importers.py 的 PyiFrozenFinder.find_spec），
+# 于是加载 .pyd。反编译产物时这些模块既没有 .py 也没有 .pyc，只剩机器码。
+# --------------------------------------------------------------------------- #
+_MANIFEST_CANDIDATES = [
+    os.environ.get("QGIS_PROTECT_MANIFEST", ""),
+    str(PROJECT_ROOT / "build" / "protect" / "manifest.json"),
+]
+native_entries = []
+for _cand in _MANIFEST_CANDIDATES:
+    if _cand and os.path.isfile(_cand):
+        try:
+            with open(_cand, encoding="utf-8") as _f:
+                native_entries = json.load(_f).get("native", []) or []
+            print(f"[protect] manifest: {_cand}")
+        except Exception as _exc:  # noqa: BLE001
+            print(f"[protect] 读取 manifest 失败，跳过原生保护: {_exc}")
+            native_entries = []
+        break
+
+if native_entries:
+    _native_modules = {e["module"] for e in native_entries}
+    _before = len(a.pure)
+    a.pure = [item for item in a.pure if item[0] not in _native_modules]
+    _removed = _before - len(a.pure)
+    _added = 0
+    for _e in native_entries:
+        _src, _dest = _e.get("path"), _e.get("dest")
+        if _src and _dest and os.path.isfile(_src):
+            a.binaries.append((_dest, _src, "EXTENSION"))
+            _added += 1
+    print(f"[protect] 原生编译保护：PYZ 剔除 {_removed} 个模块，收进 {_added} 个原生扩展")
+    if _added < len(native_entries):
+        print(f"[protect] 警告：manifest 有 {len(native_entries)} 项，但只有 {_added} 个产物存在")
+else:
+    print("[protect] 未启用原生编译保护（未找到 manifest）")
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
