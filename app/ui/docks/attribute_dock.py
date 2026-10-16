@@ -380,7 +380,40 @@ class PagedAttributeTableModel(QAbstractTableModel):
         # 要手动重新点一下才刷新（用户报过）。
         layer.attributeValueChanged.connect(self._on_layer_values_changed)
         layer.geometryChanged.connect(self._on_layer_values_changed)
+        # 字段定义变化（增 / 删 / 改名，含「图层属性 → 字段」里删字段）→ 重读列定义。
+        # updatedFields 在 provider 直接改与编辑缓冲改两条路都会发（实测：非编辑态
+        # deleteAttributes、编辑态 deleteAttribute/addAttribute、renameAttributes 都发），
+        # 所以一个信号就能覆盖所有入口；否则已打开的属性表还挂着被删列（取值/编辑错位）。
+        layer.updatedFields.connect(self._on_fields_updated)
+        # 字段**别名**变化只发 layerModified（实测 setFieldAlias 不发 updatedFields），
+        # 且字段名没变 → 不能走 reload_fields。这里只刷新列头文字（见 _on_layer_modified）。
+        layer.layerModified.connect(self._on_layer_modified)
         self._start_stream()
+
+    def _on_fields_updated(self) -> None:
+        """图层字段定义变了 → 字段名有变化才重读列（避免 commit 等重复触发白重载）。"""
+        if [f.name() for f in self.layer.fields()] == self.field_names:
+            return
+        self.reload_fields()
+
+    def _on_layer_modified(self, *_args) -> None:
+        """图层被改动（主要是字段别名变化）→ **只刷新列头文字**。
+
+        别名变化：字段名不变、只发 ``layerModified``。若为此走 ``reload_fields``
+        （beginResetModel/endResetModel），会把整表 reset —— 清选中、重建可见行、
+        还可能打扰滚动；对百万行只是浪费。这里只重算列头并 ``headerDataChanged``，
+        只重绘表头，**代价与行数无关**（O(列数)）。
+        """
+        fields = self.layer.fields()
+        if fields.count() != len(self.field_names):
+            return  # 数量变了：交给 _on_fields_updated / reload_fields 处理
+        headers = [
+            field_alias(fields.at(i)) or name for i, name in enumerate(self.field_names)
+        ]
+        if headers == self.header_names:
+            return
+        self.header_names = headers
+        self.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, self.columnCount() - 1)
 
     def _on_layer_values_changed(self, *_args) -> None:
         """编辑缓冲改了值：清要素缓存 + 让整张表重画。
