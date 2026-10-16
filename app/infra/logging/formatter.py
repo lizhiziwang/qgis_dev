@@ -38,13 +38,16 @@ class HtmlLogFormatter(logging.Formatter):
     MESSAGE_CLOSE: ClassVar[str] = "__LOGDOCK::MSG_CLOSE__"
 
     LOG_FORMAT: ClassVar[str] = (
-        "%(asctime)s - %(name)s - %(process)d:%(thread)d - "
+        "%(asctime)s - %(name)s.%(funcName)s:%(lineno)d - "
+        "%(process)d:%(thread)d - op=%(op_id)s - "
         "%(levelname_html)s - %(message_html)s"
     )
     DATE_FORMAT: ClassVar[str] = "%Y-%m-%d %H:%M:%S"
 
     def __init__(self) -> None:
-        super().__init__(self.LOG_FORMAT, datefmt=self.DATE_FORMAT)
+        # ``defaults``：op_id 由 handler 上的 filter 注入（见 operation.attach_filter）。
+        # 万一有 handler 漏装 filter，退化成 ``-`` 而不是让整条记录格式化失败。
+        super().__init__(self.LOG_FORMAT, datefmt=self.DATE_FORMAT, defaults={"op_id": "-"})
 
     def format(self, record: logging.LogRecord) -> str:
         # 1) 级别：套上颜色 / 加粗的 <font> 标签

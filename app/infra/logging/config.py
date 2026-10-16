@@ -41,11 +41,22 @@ class LogConfig:
     root_logger_name: str = "Application"
     all_log_filename: str = "app.log"
     error_log_filename: str = "error.log"
+    # 含 ``funcName`` / ``lineno``：定位问题的第一步是知道"哪一行"。打包后源码被
+    # 编译成 .pyd（``config/app.yaml`` 的 ``build.protect.cython``），产物里没有
+    # .py，只能靠日志里的文件名:行号去对同一 commit 的源码，所以这两项必须有。
+    # ``op_id``：当前矢量操作编号（见 :mod:`app.infra.logging.operation`），
+    # 不在操作里是 ``-``；有它才能把"用户点了什么"与"报错那几行"对上。
     log_format: str = (
-        "%(asctime)s - %(name)s - %(process)d:%(thread)d - "
-        "__%(levelname)s__ - %(message)s"
+        "%(asctime)s - %(name)s.%(funcName)s:%(lineno)d - "
+        "%(process)d:%(thread)d - op=%(op_id)s - __%(levelname)s__ - %(message)s"
     )
     date_format: str = "%Y-%m-%d %H:%M:%S"
+
+    #: 崩溃日志（``crash.log``）的大小上限与备份数。崩溃日志由
+    #: :mod:`app.infra.logging.crash` 单独管理，不跟着上面的轮转配置走——
+    #: 它可能被"事件循环里每帧抛的同一个异常"灌满，需要更小的上限。
+    crash_max_bytes: int = 5 * 1024 * 1024
+    crash_backup_count: int = 3
 
     @classmethod
     def from_env(cls) -> "LogConfig":

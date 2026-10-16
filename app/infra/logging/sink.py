@@ -13,6 +13,7 @@ from logging.handlers import RotatingFileHandler
 
 from .config import LogConfig
 from .formatter import HtmlLogFormatter
+from .operation import attach_filter
 
 
 class _RootSink:
@@ -39,6 +40,8 @@ class _RootSink:
         plain_formatter = logging.Formatter(
             config.log_format,
             datefmt=config.date_format,
+            # op=%(op_id)s 由 handler 上的 filter 注入；漏装时退化成 ``-``
+            defaults={"op_id": "-"},
         )
         # 文件：预渲染 HTML，所有样式直接由 formatter 写进文件
         html_formatter = HtmlLogFormatter()
@@ -64,9 +67,8 @@ class _RootSink:
             level=logging.ERROR,
         )
 
-        root.addHandler(console)
-        root.addHandler(all_file)
-        root.addHandler(error_file)
+        for handler in (console, all_file, error_file):
+            root.addHandler(attach_filter(handler))
 
         cls._configured = True
 

@@ -20,13 +20,16 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
+import platform
 import sys
 from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
+from app import __version__ as app_version
 from app.bootstrap.main_window import build_window
 from app.core.auth import (
     AuthClient,
@@ -41,7 +44,11 @@ from app.core.util.service_client import set_session_token
 from app.env.config import AppConfig
 from app.env.qgis_runtime import QgisRuntime
 from app.infra.fs.paths import Paths
-from app.infra.logging import get_logger, install_crash_logging
+from app.infra.logging import (
+    get_logger,
+    install_crash_logging,
+    install_qgis_log_bridge,
+)
 from app.infra.logging.config import LogConfig
 from app.infra.logging.sink import _RootSink
 
@@ -91,6 +98,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     # 创建 QApplication（不 initQgis，等登录通过再做）
     app = _ensure_qgis_application(qgis)
 
+    # QGIS / Qt 自身的日志接进 Python logging：矢量操作失败的真正原因（OGR/GDAL
+    # 报错、坐标系不匹配、图层只读、几何非法）大多只出现在 QGIS 消息日志里，不接
+    # 就全丢了。必须等 QgsApplication 建好、运行时环境就绪之后装；装不上不阻断启动。
+    install_qgis_log_bridge()
+
+    # 构建 / 环境快照：让用户传上来的日志自带版本信息，不必再回头问"你装的哪一版"
+    _log_build_info(cfg, paths)
+
     # 先弹登录窗口：此时**不**显示初始化状态页。两者都是居中浮窗，
     # 一起开就会叠在一起（登录框上面压着 splash），体验很怪；而且登录
     # 阶段本来就短（一次 POST），登录框自己就有"正在登录"反馈。
@@ -124,17 +139,23 @@ def _resolve_config_path() -> Path:
 def _ensure_portable_env() -> None:
     """打包后直接双击 ``app.exe`` 也能工作。
 
-    PyInstaller 冻结态下，可执行文件所在目录即便携包根（``qgis/`` + ``proj.db``
-    + ``etc/`` 等都在根下）。这里自动探测并设置 ``QGIS_PREFIX`` /
-    ``QGIS_DEV_*``，已由 launcher 设置过则不覆盖（``setdefault``）。
+    PyInstaller 冻结态下，可执行文件所在目录即便携包根：
+
+    - ``runtime/``：QGIS 运行时（``proj.db`` / ``etc`` / ``plugins`` / ``i18n`` ...）
+    - ``config/`` / ``resource/``：可编辑配置与资源（在根目录）
+    - ``_internal/``：Python 运行时与依赖库（PyInstaller 管理）
+
+    这里自动探测并把 ``QGIS_PREFIX`` 指向 ``runtime/``，同时设好 ``QGIS_DEV_*``；
+    已由 launcher 设置过则不覆盖（``setdefault``）。
     """
     if not getattr(sys, "frozen", False):
         return
     bundle = Path(sys.executable).resolve().parent
-    # 便携包特征校验，避免误判
-    if not (bundle / "qgis").is_dir() or not (bundle / "proj.db").is_file():
+    runtime = bundle / "runtime"
+    # 便携包特征校验，避免误判：QGIS 运行时在 runtime/ 子目录
+    if not (runtime / "proj.db").is_file():
         return
-    os.environ.setdefault("QGIS_PREFIX", str(bundle))
+    os.environ.setdefault("QGIS_PREFIX", str(runtime))
     os.environ.setdefault("QGIS_DEV_CONFIG", str(bundle / "config" / "app.yaml"))
     os.environ.setdefault("QGIS_DEV_PATHS_PROJECT_ROOT", str(bundle))
     os.environ.setdefault("QGIS_DEV_PATHS_RESOURCE", str(bundle / "resource"))
@@ -172,6 +193,79 @@ def _configure_logging(cfg: AppConfig, paths: Paths) -> None:
     _RootSink.reset()
     _RootSink.configure(log_cfg)
     logger.info("日志装配完成 dir=%s", paths.logs)
+
+
+#: 打包时可由构建脚本写在产物根的版本戳（``{"git": "abc1234"}``），有则优先用。
+_BUILD_INFO_FILE = "build_info.json"
+
+
+def _log_build_info(cfg: AppConfig, paths: Paths) -> None:
+    """记一条构建 / 环境快照。
+
+    排查第一步是确认"用户跑的是哪一版"。打包后源码被编译成 .pyd，产物里没有
+    .py，traceback 里的文件名:行号只能对同一 commit 的源码才有意义，所以这条
+    日志里的 ``git`` 必须存在。QGIS / Python / 平台版本同理——不同版本的行为差异
+    经常就是问题本身。
+
+    取不到的字段退回 ``"?"``：快照本身绝不能把启动流程带崩。
+    """
+    project_root = getattr(paths, "project_root", None)
+    logger.info(
+        "BUILD app=%s version=%s git=%s env=%s python=%s platform=%s frozen=%s qgis=%s crs=%s log_dir=%s",
+        cfg.app_name,
+        app_version,
+        _read_git_revision(project_root) if isinstance(project_root, Path) else "?",
+        cfg.env,
+        platform.python_version(),
+        platform.platform(),
+        bool(getattr(sys, "frozen", False)),
+        _qgis_version(),
+        cfg.crs,
+        getattr(paths, "logs", "?"),
+    )
+
+
+def _read_git_revision(project_root: Path) -> str:
+    """当前提交的短哈希：优先打包时写入的版本戳，否则直接读 ``.git/HEAD``。
+
+    直接读文件而不调 ``git rev-parse``：打包后的机器上没有 git，开发态也省一次
+    子进程。``.git`` 在工作区（worktree）里是个指向真实 git 目录的文本文件，
+    所以要先跟着它跳一次。
+    """
+    try:
+        stamped = json.loads(
+            (project_root / _BUILD_INFO_FILE).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        stamped = {}
+    revision = str(stamped.get("git") or "").strip() if isinstance(stamped, dict) else ""
+    if revision:
+        return revision
+
+    try:
+        git_dir = project_root / ".git"
+        if git_dir.is_file():  # worktree：内容是 "gitdir: <真实 git 目录>"
+            pointer = git_dir.read_text(encoding="utf-8").strip()
+            git_dir = (project_root / pointer.split(":", 1)[1].strip()).resolve()
+        head = (git_dir / "HEAD").read_text(encoding="utf-8").strip()
+        if not head.startswith("ref:"):
+            return head[:8]  # detached HEAD：文件里直接是哈希
+        ref_file = git_dir / head.split(":", 1)[1].strip()
+        # 引用被打包进 packed-refs 时读不到单文件，返回 "?" 即可（不猜）
+        if ref_file.is_file():
+            return ref_file.read_text(encoding="utf-8").strip()[:8]
+    except (OSError, IndexError):
+        pass
+    return "?"
+
+
+def _qgis_version() -> str:
+    """QGIS 版本串；拿不到返回 ``"?"``（日志快照不该因为取版本而失败）。"""
+    try:
+        from qgis.core import Qgis
+    except Exception:  # noqa: BLE001
+        return "?"
+    return str(getattr(Qgis, "QGIS_VERSION", "?"))
 
 
 def _build_qgis_runtime(cfg: AppConfig) -> QgisRuntime:

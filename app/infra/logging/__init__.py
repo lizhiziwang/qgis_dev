@@ -16,6 +16,8 @@
 - :mod:`app.infra.logging.sink` —— ``_RootSink`` 单例装配
 - :mod:`app.infra.logging.crash` —— 崩溃日志（``sys.excepthook`` +
   ``faulthandler``），启动早期调 :func:`install_crash_logging`
+- :mod:`app.infra.logging.qgis_bridge` —— QGIS 消息日志 / Qt 消息处理器接进
+  Python logging，``QgsApplication`` 建好后调 :func:`install_qgis_log_bridge`
 - :mod:`app.infra.logging.renderer` —— ``render_log_html``
 
 设计要点：
@@ -29,6 +31,8 @@
    用户控制的 ``message`` 字段用唯一 marker 包围，渲染器做一次正则替换做
    HTML 转义。
 5. **样式与逻辑分层**：颜色映射、表单解析、HTML 渲染、根 logger 装配各自独立。
+6. **三条采集线**：Python logging（本包）+ 崩溃 hook（crash）+ QGIS/Qt 自身
+   日志（qgis_bridge）。缺任何一条，用户传上来的日志都定位不到根因。
 """
 
 from __future__ import annotations
@@ -37,6 +41,7 @@ from .config import LogConfig
 from .crash import install as install_crash_logging
 from .formatter import HtmlLogFormatter
 from .logger import get_logger, setup_logger
+from .qgis_bridge import install as install_qgis_log_bridge
 from .renderer import log_to_html, render_log_html
 from .sink import _RootSink
 from .styles import LogStyle
@@ -48,6 +53,7 @@ __all__ = [
     "_RootSink",
     "get_logger",
     "install_crash_logging",
+    "install_qgis_log_bridge",
     "log_to_html",
     "render_log_html",
     "setup_logger",
