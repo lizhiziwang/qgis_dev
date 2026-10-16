@@ -2,7 +2,12 @@
 # 单一入口，所有路径从 config/app.yaml 读取
 #
 # 用法（在项目根目录）：
-#   pwsh tools/build_windows.ps1
+#   pwsh tools/build_windows.ps1              # 默认开启 Cython 原生编译保护
+#   pwsh tools/build_windows.ps1 -NoProtect   # 关闭保护（快速调试构建）
+
+param(
+    [switch]$NoProtect
+)
 
 $ErrorActionPreference = "Stop"
 
@@ -66,16 +71,43 @@ if (Test-Path (Join-Path $ProjectRoot "build")) {
     Remove-Item (Join-Path $ProjectRoot "build") -Recurse -Force
 }
 
-# STAGE 2: PyInstaller
-Write-Host "STAGE 2: Running PyInstaller..." -ForegroundColor Cyan
+# STAGE 2: Cython 原生编译保护（.py -> .pyd，产物里不留字节码）
+Write-Host "STAGE 2: Cython native protection..." -ForegroundColor Cyan
+$ProtectDir = Join-Path $ProjectRoot "build/protect"
+$ProtectManifest = Join-Path $ProtectDir "manifest.json"
+$env:PYTHONUTF8 = "1"   # 保护工具输出 UTF-8，避免中文日志乱码
+if ($NoProtect) {
+    Write-Host "  -NoProtect: skipped" -ForegroundColor Yellow
+    Remove-Item Env:QGIS_PROTECT_MANIFEST -ErrorAction SilentlyContinue
+} else {
+    & $PythonLauncher (Join-Path $ProjectRoot "tools/protect_cython.py") `
+        --project-root $ProjectRoot `
+        --config (Join-Path $ProjectRoot "config/app.yaml") `
+        --out $ProtectDir `
+        --manifest $ProtectManifest `
+        --clean
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Cython 原生编译保护失败"
+        exit 1
+    }
+    if (Test-Path $ProtectManifest) {
+        $env:QGIS_PROTECT_MANIFEST = $ProtectManifest
+        Write-Host "  保护清单: $ProtectManifest" -ForegroundColor Green
+    } else {
+        Write-Host "  未生成 manifest，PyInstaller 将不做原生保护" -ForegroundColor Yellow
+    }
+}
+
+# STAGE 3: PyInstaller
+Write-Host "STAGE 3: Running PyInstaller..." -ForegroundColor Cyan
 & $PythonLauncher -m PyInstaller --noconfirm $SpecFile
 if ($LASTEXITCODE -ne 0) {
     Write-Error "PyInstaller failed"
     exit 1
 }
 
-# STAGE 3: 复制 QGIS runtime
-Write-Host "STAGE 3: Copying QGIS runtime..." -ForegroundColor Cyan
+# STAGE 4: 复制 QGIS runtime
+Write-Host "STAGE 4: Copying QGIS runtime..." -ForegroundColor Cyan
 if (-not (Test-Path $DistPath)) {
     Write-Error "dist folder not created"
     exit 1
@@ -105,8 +137,8 @@ if (Test-Path (Join-Path $QGISInstall "apps/qgis/providers")) {
 # 把启动器复制进产物，和目标机器一起分发
 Copy-Item -Path (Join-Path $ProjectRoot "tools/runtime/launch_qgis.bat") -Destination (Join-Path $DistPath "launch_qgis.bat") -Force
 
-# STAGE 4: 校验关键产物，缺了直接报错退出，避免分发不完整包
-Write-Host "STAGE 4: Verifying build output..." -ForegroundColor Cyan
+# STAGE 5: 校验关键产物，缺了直接报错退出，避免分发不完整包
+Write-Host "STAGE 5: Verifying build output..." -ForegroundColor Cyan
 $missingFiles = @()
 foreach ($required in @("app.exe", "plugins/processing", "launch_qgis.bat", "qgis", "proj.db", "etc", "i18n", "qgis_analysis.dll")) {
     if (-not (Test-Path (Join-Path $DistPath $required))) {
@@ -116,6 +148,16 @@ foreach ($required in @("app.exe", "plugins/processing", "launch_qgis.bat", "qgi
 if ($missingFiles.Count -gt 0) {
     Write-Host "ERROR: 以下关键文件缺失，打包不完整：$($missingFiles -join ', ')" -ForegroundColor Red
     exit 1
+}
+
+# 原生保护生效性校验：启用保护时产物里必须存在 .pyd
+if ($env:QGIS_PROTECT_MANIFEST) {
+    $nativeCount = (Get-ChildItem -Path (Join-Path $DistPath "app") -Recurse -Filter *.pyd -ErrorAction SilentlyContinue | Measure-Object).Count
+    if ($nativeCount -lt 1) {
+        Write-Host "ERROR: 已启用原生编译保护，但产物里找不到任何 .pyd" -ForegroundColor Red
+        exit 1
+    }
+    Write-Host "OK: 原生扩展 $nativeCount 个 .pyd" -ForegroundColor Green
 }
 Write-Host "OK: 关键文件齐全" -ForegroundColor Green
 

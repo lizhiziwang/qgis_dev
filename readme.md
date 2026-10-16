@@ -57,7 +57,8 @@ qgis_dev/
 │   └── run_server.py / run_gdb2pg.py / run_check.py
 ├── tools/                      # 构建 / 打包
 │   ├── pyinstaller.spec        #   统一 PyInstaller spec（Win/Linux 共用，QGIS 路径读 config）
-│   ├── build_windows.ps1       #   Windows 打包：清理 → PyInstaller → 复制 QGIS 运行时
+│   ├── protect_cython.py       #   Cython 原生编译保护：Qt-free 模块 → .pyd/.so + manifest
+│   ├── build_windows.ps1       #   Windows 打包：清理 → 编译保护 → PyInstaller → 复制 QGIS 运行时
 │   ├── build_linux.sh          #   Linux 打包
 │   ├── runtime/                #   便携启动器
 │   │   ├── launch_qgis.bat     #     与 app.exe 同目录，设 QGIS 环境后启动（打包会复制进产物）
@@ -135,10 +136,11 @@ bash tools/build_linux.sh                                            rem Linux /
 > 在麒麟机/容器上 `bash tools/build_linux.sh` → `bash tools/kylin/build_deb.sh` 出 `.deb`。
 > 完整指南见 [`tools/kylin/README.md`](tools/kylin/README.md)。
 
-`build_windows.ps1` 自动完成三步：
+`build_windows.ps1` 自动完成四步：
 1. **清理** 旧 `dist/`、`build/`
-2. **PyInstaller**（`tools/pyinstaller.spec`）：入口 `scripts/entry.py`（包外脚本，避免直接以包内 `app/main.py` 为入口时 `app.bootstrap` 打不进包）
-3. **复制 QGIS 运行时**：`etc/`、`o4w_env.bat`、`plugins/`、`i18n/`、`providers/` → `dist/app/`，并把 `launch_qgis.bat` 一并复制进产物
+2. **编译保护**（可选）：把 Qt-free 的纯 Python 模块用 Cython 编成 `.pyd`（详见下节）
+3. **PyInstaller**（`tools/pyinstaller.spec`）：入口 `scripts/entry.py`（包外脚本，避免直接以包内 `app/main.py` 为入口时 `app.bootstrap` 打不进包）
+4. **复制 QGIS 运行时**：`etc/`、`o4w_env.bat`、`plugins/`、`i18n/`、`providers/` → `dist/app/`，并把 `launch_qgis.bat` 一并复制进产物
 
 ### 启动打包结果
 
@@ -160,6 +162,49 @@ bash tools/build_linux.sh                                            rem Linux /
 - `datas`：`qgis` python 包、`resource/`、`config/`、`srs.db`、`proj.db`。
 - `binaries`：`qgis_core.dll`、`qgis_gui.dll`、`gdal313.dll`、`geos_c.dll`、`pdalcpp.dll`、`proj_9.dll`、Qt6 核心 DLL、Qt 平台插件。
 - `hiddenimports`：qgis.core/gui/utils + qgis.PyQt + 全部 PyQt 子模块（Win=PyQt6，Linux=PyQt5，spec 按平台自动选）。
+
+### 代码保护（Cython 原生编译）
+
+**背景**：PyInstaller 只是打包器——PYZ 就是一堆 `.pyc` 字节码，用标准库 `struct/zlib/marshal` 几十行即可从中还原全部模块名与反编译，`console=False`/UPX 不构成任何保护；PyInstaller 6 更已**移除**内置加密（`--key`/`cipher`），PyArmor 试用版会拒绝大脚本。因此本项目采用 **Cython 原生编译**：把纯逻辑模块编译成机器码 `.pyd`，产物里既无 `.py` 也无 `.pyc`。
+
+**流程**（`tools/protect_cython.py` + `tools/pyinstaller.spec`）：
+
+1. `build_windows.ps1` 的 **STAGE 2** 调用 `tools/protect_cython.py`，按 `config/app.yaml` 的 `build.protect.cython` 配置把目标模块编成 `.pyd`，写出 `build/protect/manifest.json`。
+2. PyInstaller **分析阶段仍用原始 `.py`**（保证 `collect_submodules` / 动态导入收集完整）。
+3. spec 读 manifest，把这些模块的**字节码从 PYZ 剔除**，只把 `.pyd` 作为二进制收进 `dist/app/app/...`。
+4. 运行期冻结导入器在 PYZ 找不到模块时回退到磁盘 FileFinder（`PyInstaller/loader/pyimod02_importers.py` 的 `PyiFrozenFinder.find_spec`），于是加载 `.pyd`。
+
+**默认范围**：只编译 **不 import `qgis`/`PyQt` 的模块**（约 104 个），已覆盖 `app.core.auth`（密钥/授权/凭据/DPAPI）、`app.core.data`、`app.core.util`、`app.core.domain` 算法、`app.infra`、`app.env`、`app.server`。
+
+**必须遵守的三条硬约束**（都踩过坑）：
+
+| 约束 | 原因 |
+|---|---|
+| `qt_free_only: true`，Qt 模块保持字节码 | Cython 编译出的函数/类与 **PyQt signal/slot 不兼容**：`.connect(编译方法)` 会 `TypeError` 甚至硬崩溃 `0xC0000409` |
+| `annotation_typing: false` | 否则 Cython 把类型注解当 C 类型约束，会拒编“注解与实际不符”的代码，并静默改变运行语义 |
+| `skip_module_getattr: true` | 模块级 `def __getattr__`（PEP 562 惰性导出）编译后访问属性会与导入机无限递归（栈溢出） |
+
+**配置**（`config/app.yaml`）：
+
+```yaml
+build:
+  protect:
+    cython:
+      enabled: true
+      include: [app]          # 编译范围（包会递归）
+      exclude: []             # 显式跳过的模块/包
+      fail_open: true         # 单模块编译失败则回退为字节码，不中断构建
+      skip_module_getattr: true
+      qt_free_only: true      # 只编译 Qt-free 模块（强烈建议保持 true）
+      compiler_include: ""    # 留空自动探测 Python 开发文件
+      compiler_libs: ""
+```
+
+**开关 / 注意事项**：
+
+- `powershell -File tools\build_windows.ps1` 默认开启；`-NoProtect` 关闭（快速调试构建）。
+- 编译需要 Python 开发文件（`Python.h` + `python3XX.lib`）。QGIS 自带 Python 通常是精简版（无 `Include/`、`libs/`），工具会自动探测：`sysconfig` → 环境变量 `QGIS_PYTHON_INCLUDE`/`QGIS_PYTHON_LIBS` → 同类 OSGeo4W/conda 安装（要求 `python3XX.lib` **次版本匹配**）。
+- **扩大范围前务必实跑 UI**：把某个 Qt 模块加进 `include` 或关掉 `qt_free_only` 很容易让信号槽失效。若某模块出现 `TypeError: ... takes exactly 1 positional argument` 或启动即崩，把它加进 `exclude`。
 
 ---
 
