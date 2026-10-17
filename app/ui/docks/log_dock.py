@@ -35,7 +35,7 @@ from qgis.PyQt.QtWidgets import (
 
 from app.infra.fs.io import write_text
 from app.infra.logging import (
-    LogConfig,
+    active_log_config,
     build_diagnostics_package,
     get_logger,
     render_log_html,
@@ -44,9 +44,6 @@ from app.ui.common.project_report import snapshot_text
 from app.ui.common.widgets import open_file_dir
 
 logger = get_logger(__name__)
-
-_LOG_CONFIG = LogConfig.from_env()
-_ALL_LOG_PATH = str(_LOG_CONFIG.log_dir / _LOG_CONFIG.all_log_filename)
 
 _LEVEL_TAG_RE = re.compile(r">([A-Z]+)</")
 
@@ -145,12 +142,24 @@ class LogDock(QDockWidget):
 
     # ---------------------------------------------------------- 行为
 
+    def _log_path(self) -> str:
+        """当前生效的 ``app.log`` 路径。
+
+        必须**运行时**解析：本模块在 ``app.bootstrap`` 导入阶段就会被连带导入，
+        早于 ``main()`` 里的 ``_ensure_portable_env`` / ``_configure_logging``。
+        打包后那时 ``__file__`` 推出的默认目录是 ``_internal/logs``，与真正写入的
+        ``<便携包>/logs`` 不同——缓存成模块常量会让日志面板永远读那个空文件。
+        """
+        cfg = active_log_config()
+        return str(cfg.log_dir / cfg.all_log_filename)
+
     def _load_log_file(self, param: Optional[dict] = None) -> None:
         p = param or self.param
-        if not os.path.exists(_ALL_LOG_PATH):
+        path = self._log_path()
+        if not os.path.exists(path):
             self.txt.setHtml("")
             return
-        with open(_ALL_LOG_PATH, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             raw = [line.strip() for line in f.readlines() if _line_has_level(line, p["level"])]
         rendered = [render_log_html(line) for line in raw]
         if p["filter"]:
@@ -172,7 +181,7 @@ class LogDock(QDockWidget):
     def _file_mtime(self) -> float:
         """日志文件最后修改时间；文件不存在返回 0（触发一次重载兜底）。"""
         try:
-            return os.path.getmtime(_ALL_LOG_PATH)
+            return os.path.getmtime(self._log_path())
         except OSError:
             return 0.0
 
@@ -201,7 +210,7 @@ class LogDock(QDockWidget):
         mb.addButton(QMessageBox.StandardButton.Ok)
         mb.addButton(QMessageBox.StandardButton.Cancel)
         if mb.exec() == QMessageBox.StandardButton.Ok:
-            write_text(_ALL_LOG_PATH, "")
+            write_text(self._log_path(), "")
             self._on_refresh()
 
     def _on_refresh(self) -> None:
