@@ -114,6 +114,15 @@ def uid_field_index(fields: "QgsFields") -> int | None:
     return None
 
 
+def readonly_field_indices(fields: "QgsFields") -> set[int]:
+    """**只读**字段下标的集合（系统自维护主键 + 全局唯一标识）。
+
+    只读字段不允许手工改值（见属性录入弹窗），也不允许改名 / 删除（属性表列头、
+    图层属性「字段」页统一按本函数判定）。
+    """
+    return {i for i in (uid_field_index(fields), auto_id_field_index(fields)) if i is not None}
+
+
 def _geometry_value(
     layer: "QgsVectorLayer", geometry: "QgsGeometry", kind: str
 ) -> float | None:
@@ -395,6 +404,7 @@ __all__ = [
     "feature_label",
     "field_alias",
     "new_feature_attributes",
+    "readonly_field_indices",
     "refresh_area_fields",
     "uid_field_index",
     "uid_value_for",

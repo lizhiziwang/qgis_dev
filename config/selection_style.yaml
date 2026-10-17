@@ -4,17 +4,23 @@ selection_style:
     stroke_enabled: true
     stroke_color: '#ffff00'
     stroke_width: 2.0
+    stroke_opacity: 100
     fill_enabled: true
     fill_color: '#ffff00'
+    fill_opacity: 50
   line:
     stroke_enabled: true
     stroke_color: '#ffff00'
     stroke_width: 2.0
+    stroke_opacity: 100
     fill_enabled: false
     fill_color: '#ffff00'
+    fill_opacity: 100
   polygon:
     stroke_enabled: true
-    stroke_color: '#ffff00'
+    stroke_color: '#aaff00'
     stroke_width: 2.0
+    stroke_opacity: 100
     fill_enabled: true
-    fill_color: '#ffff00'
+    fill_color: '#aaff00'
+    fill_opacity: 25

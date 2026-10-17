@@ -2,6 +2,10 @@
 
 迁自 :class:`component.LogDock.LogDock`，去掉了对 :class:`MainWindow.log_dock`
 的动态属性依赖，统一由 :class:`MainWindow._docks["log"]` 管理。
+
+除查看 / 查询 / 保存之外，这里还是**导出诊断包**的入口（见
+:meth:`LogDock._on_export_diagnostics`）：用户报错之后该发什么给我们，就在这一排
+按钮里，不必再去 logs/ 目录里猜哪个文件有用。
 """
 
 from __future__ import annotations
@@ -9,15 +13,16 @@ from __future__ import annotations
 import os
 import re
 from datetime import datetime
+from pathlib import Path
 from typing import Optional
 
 from qgis.PyQt.QtCore import Qt, QTimer
 from qgis.PyQt.QtGui import QTextCursor
 from qgis.PyQt.QtWidgets import (
+    QApplication,
     QComboBox,
     QDockWidget,
     QHBoxLayout,
-    QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
@@ -29,19 +34,16 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from app.infra.fs.io import write_text
-from app.infra.fs.paths import Paths
 from app.infra.logging import (
-    LogConfig,
-    _RootSink,
+    active_log_config,
+    build_diagnostics_package,
     get_logger,
     render_log_html,
 )
+from app.ui.common.project_report import snapshot_text
 from app.ui.common.widgets import open_file_dir
 
 logger = get_logger(__name__)
-
-_LOG_CONFIG = LogConfig.from_env()
-_ALL_LOG_PATH = str(_LOG_CONFIG.log_dir / _LOG_CONFIG.all_log_filename)
 
 _LEVEL_TAG_RE = re.compile(r">([A-Z]+)</")
 
@@ -112,6 +114,13 @@ class LogDock(QDockWidget):
         save = QPushButton("保存日志")
         save.clicked.connect(self._on_save)
         h.addWidget(save)
+        export = QPushButton("导出诊断包")
+        export.setToolTip(
+            "把本次运行的日志、崩溃记录、环境 / 工程 / 配置快照打成一个 zip（凭据已打码），\n"
+            "用于反馈问题。"
+        )
+        export.clicked.connect(self._on_export_diagnostics)
+        h.addWidget(export)
         h.addSpacing(10)
         self.auto_btn = QPushButton("自动滚动")
         self.auto_btn.setCheckable(True)
@@ -133,12 +142,24 @@ class LogDock(QDockWidget):
 
     # ---------------------------------------------------------- 行为
 
+    def _log_path(self) -> str:
+        """当前生效的 ``app.log`` 路径。
+
+        必须**运行时**解析：本模块在 ``app.bootstrap`` 导入阶段就会被连带导入，
+        早于 ``main()`` 里的 ``_ensure_portable_env`` / ``_configure_logging``。
+        打包后那时 ``__file__`` 推出的默认目录是 ``_internal/logs``，与真正写入的
+        ``<便携包>/logs`` 不同——缓存成模块常量会让日志面板永远读那个空文件。
+        """
+        cfg = active_log_config()
+        return str(cfg.log_dir / cfg.all_log_filename)
+
     def _load_log_file(self, param: Optional[dict] = None) -> None:
         p = param or self.param
-        if not os.path.exists(_ALL_LOG_PATH):
+        path = self._log_path()
+        if not os.path.exists(path):
             self.txt.setHtml("")
             return
-        with open(_ALL_LOG_PATH, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             raw = [line.strip() for line in f.readlines() if _line_has_level(line, p["level"])]
         rendered = [render_log_html(line) for line in raw]
         if p["filter"]:
@@ -160,7 +181,7 @@ class LogDock(QDockWidget):
     def _file_mtime(self) -> float:
         """日志文件最后修改时间；文件不存在返回 0（触发一次重载兜底）。"""
         try:
-            return os.path.getmtime(_ALL_LOG_PATH)
+            return os.path.getmtime(self._log_path())
         except OSError:
             return 0.0
 
@@ -189,7 +210,7 @@ class LogDock(QDockWidget):
         mb.addButton(QMessageBox.StandardButton.Ok)
         mb.addButton(QMessageBox.StandardButton.Cancel)
         if mb.exec() == QMessageBox.StandardButton.Ok:
-            write_text(_ALL_LOG_PATH, "")
+            write_text(self._log_path(), "")
             self._on_refresh()
 
     def _on_refresh(self) -> None:
@@ -205,6 +226,40 @@ class LogDock(QDockWidget):
         full = os.path.join(path, file_name)
         write_text(full, self.txt.toPlainText())
         QMessageBox.information(self, "保存成功", f"日志已保存到\n{full}")
+
+    def _on_export_diagnostics(self) -> None:
+        """导出诊断包：一次运行的全部证据，打成一个 zip。
+
+        这是"出问题之后该发什么给我们"的**唯一入口**（第四步）。现场同事不需要知道
+        ``logs/`` 下哪个文件有用、哪个是上次跑剩下的，也不必担心把配置里的 key 发出去
+        ——包里已经按同一套规则打过码（:mod:`app.infra.logging.redaction`）。
+
+        同步执行：只读几 MB 文本再压缩，是一瞬间的事，为它起线程反而要处理
+        "导出中用户又把窗口关了"。失败必须弹窗（静默失败等于用户白点一次），
+        同时记一条日志——现场说"导不出来"时，我们能从日志里看出卡在哪。
+        """
+        path = open_file_dir(self, is_dir=True, title="选择诊断包保存目录")
+        if not path:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            package = build_diagnostics_package(
+                Path(path), extra={"project.json": snapshot_text()}
+            )
+        except Exception as exc:  # 导出失败要说清楚，不能静默
+            logger.exception("导出诊断包失败 dest=%s", path)
+            QMessageBox.critical(self, "导出失败", f"诊断包导出失败：\n{exc}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+        size_kb = package.size_bytes / 1024
+        QMessageBox.information(
+            self,
+            "导出完成",
+            f"诊断包已导出到\n{package.path}\n\n"
+            f"共 {len(package.entries)} 个文件、{size_kb:.0f} KB，凭据已打码。"
+            f"\n请把它发给技术支持。",
+        )
 
 
 def add_log_dock(parent) -> LogDock:

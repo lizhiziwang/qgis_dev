@@ -48,7 +48,7 @@ class QgisRuntime:
     proj: Path             # share/proj（proj.db 所在）
     bin: Path              # bin（依赖 DLL）
     plugins: Path          # apps/qgis/python/plugins
-    #: True = 便携扁平布局（QGIS 运行时打进 dist/app，前缀即 dist/app）
+    #: True = 便携布局（QGIS 运行时打进 dist/app/runtime，前缀即该目录）
     portable: bool = False
     #: True = 标准 Linux 布局（conda / apt 安装：share/qgis、lib/qgis/plugins）
     system: bool = False
@@ -82,10 +82,11 @@ class QgisRuntime:
 
     @classmethod
     def for_portable(cls, prefix: Path) -> "QgisRuntime":
-        """便携打包：QGIS 运行时按**扁平布局**打进 ``dist/app``，前缀即 ``dist/app``。
+        """便携打包：QGIS 运行时数据集中在 ``dist/app/runtime``，前缀即该目录。
 
-        ``proj.db``、``qgis`` python 包、``etc/``、``plugins/``、``i18n/``、
-        各种 DLL 都在前缀根目录下，环境变量直接指向前缀。
+        调用方传进来的 ``prefix`` 就是 ``runtime/``：``proj.db``、``etc/``、
+        ``plugins/``、``i18n/``、``platforms/`` 都在它下面。（``qgis`` python
+        包本身在 ``_internal/``，由 PyInstaller 放进 sys.path。）
         """
         prefix = Path(prefix)
         return cls(
@@ -166,8 +167,8 @@ class QgisRuntime:
             self._append_syspath(p)
 
     def _apply_portable_env(self) -> None:
-        """便携布局：proj.db / qgis / etc / plugins / i18n / DLL 都在前缀根目录。"""
-        p = self.qgis_base  # 即 dist/app
+        """便携布局：proj.db / etc / plugins / i18n / platforms 都在前缀（runtime/）下。"""
+        p = self.qgis_base  # 即 dist/app/runtime
         os.environ["QGIS_PREFIX_PATH"] = str(p)
         os.environ["PROJ_DATA"] = str(p)                     # proj.db 在根
         os.environ["PROJ_LIB"] = str(p)

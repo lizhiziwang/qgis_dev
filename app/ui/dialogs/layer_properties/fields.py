@@ -45,7 +45,7 @@ from app.infra.logging import get_logger
 from app.ui.dialogs.layer_properties.add_field_dialog import AddFieldDialog
 from app.ui.dialogs.layer_properties.base import LayerPropertyTab
 from app.ui.common.widgets import CenteredCheckDelegate
-from app.ui.tools.feature_attrs import field_alias
+from app.ui.tools.feature_attrs import field_alias, readonly_field_indices
 
 logger = get_logger(__name__)
 
@@ -121,7 +121,8 @@ class _RowActionButtons(QWidget):
     也不会点错行。
     """
 
-    def __init__(self, fields_tab: "FieldsTab", parent=None) -> None:
+    def __init__(self, fields_tab: "FieldsTab", parent=None, readonly: bool = False,
+                 editing: bool = False) -> None:
         super().__init__(parent)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(2, 1, 2, 1)
@@ -142,6 +143,18 @@ class _RowActionButtons(QWidget):
         lay.addStretch(1)
         self.update_btn.clicked.connect(lambda: fields_tab._on_row_update(self))
         self.delete_btn.clicked.connect(lambda: fields_tab._on_row_delete(self))
+        # 编辑状态优先于只读：两者都禁止「更新 / 删除」，只是原因不同
+        if editing:
+            self.update_btn.setEnabled(False)
+            self.update_btn.setToolTip("图层处于编辑状态，请先保存 / 停止编辑后再修改字段")
+            self.delete_btn.setEnabled(False)
+            self.delete_btn.setToolTip("图层处于编辑状态，请先保存 / 停止编辑后再删除字段")
+        elif readonly:
+            # 系统自维护 / 全局唯一标识字段：不允许改定义、也不允许删除
+            self.update_btn.setEnabled(False)
+            self.update_btn.setToolTip("系统自维护 / 唯一标识字段，不允许修改")
+            self.delete_btn.setEnabled(False)
+            self.delete_btn.setToolTip("系统自维护 / 唯一标识字段，不允许删除")
 
 
 class FieldsTab(LayerPropertyTab):
@@ -241,7 +254,14 @@ class FieldsTab(LayerPropertyTab):
             self.table.setRowCount(0)
             self.count_label.setText("字段个数: —")
             self.display_combo.clear()
+            self.add_btn.setEnabled(False)
             return
+        # 编辑状态下不允许改 schema（添加字段）→ 置灰「添加字段」按钮
+        editable = bool(layer.isEditable())
+        self.add_btn.setEnabled(not editable)
+        self.add_btn.setToolTip(
+            "图层处于编辑状态，请先保存 / 停止编辑后再添加字段" if editable else ""
+        )
         try:
             fields = layer.fields()
             self._populate_table(fields)
@@ -257,8 +277,12 @@ class FieldsTab(LayerPropertyTab):
         """把 ``QgsFields`` 写进 7 列表格。"""
         n = fields.size()
         self.table.setRowCount(n)
+        readonly_names = self._readonly_field_names()
+        editing = bool(self._layer is not None and self._layer.isEditable())
         for i in range(n):
             fld = fields.at(i)
+            # 只读字段 / 编辑状态下都不允许改名、改别名
+            locked = (fld.name() in readonly_names) or editing
 
             # 列 0：checkbox（默认勾上；不改 attributeTableConfig）
             cb_item = QTableWidgetItem()
@@ -270,17 +294,22 @@ class FieldsTab(LayerPropertyTab):
             cb_item.setCheckState(Qt.CheckState.Checked)
             self.table.setItem(i, 0, cb_item)
 
-            # 列 1：字段名（可编辑；UserRole 存原始名，apply 时据此判断是否要改名）
+            # 列 1：字段名（可编辑；UserRole 存原始名，apply 时据此判断是否要改名）。
+            # 只读字段（系统自维护 / 唯一标识）与编辑状态下都不可改名 → 去编辑标志。
             name_item = QTableWidgetItem(fld.name())
             name_item.setData(Qt.ItemDataRole.UserRole, fld.name())
+            if locked:
+                name_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
             self.table.setItem(i, 1, name_item)
 
-            # 列 2：字段别名（可编辑）。
+            # 列 2：字段别名（可编辑；只读字段 / 编辑状态下同样不可改）。
             # 用 ``field_alias`` 而不是裸 ``fld.alias()``：某些 GDB（实测 FileGDB 的
             # 中文别名）取回来是「UTF-8 字节被当成 Latin-1」的乱码，直接显示用户
             # 根本读不了。这里显示修好的文本，用户点「确定」时也会把修好的写进图层
             # 字段配置（``setFieldAlias`` 是**图层级**的，不落数据源）。
             alias_item = QTableWidgetItem(field_alias(fld))
+            if locked:
+                alias_item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
             self.table.setItem(i, 2, alias_item)
 
             # 列 3：类型
@@ -372,14 +401,38 @@ class FieldsTab(LayerPropertyTab):
         self.count_label.setText(f"字段个数: {self.table.rowCount()}")
         self._rebuild_action_cells()
 
+    def _readonly_field_names(self) -> set[str]:
+        """只读字段名集合（系统自维护主键 + 全局唯一标识）：不可改定义、不可删除。"""
+        if self._layer is None:
+            return set()
+        fields = self._layer.fields()
+        return {fields.at(i).name() for i in readonly_field_indices(fields)}
+
+    def _field_name_of_row(self, row: int) -> str:
+        """某行的字段名（列 1 文本）；没有该行 / 空返回 ``""``。"""
+        item = self.table.item(row, 1)
+        return (item.text() or "").strip() if item is not None else ""
+
     def _rebuild_action_cells(self) -> None:
         """给每行（重新）挂「操作」列按钮。
 
         插行 / 删行会把行号打乱，这里统整一遍；按钮回调带自身，靠
         :meth:`_row_of_actions` 反查当前行，所以行号漂移也不会点错。
+        只读字段（系统自维护 / 唯一标识）**禁用**更新与删除按钮；图层处于编辑
+        状态时，已在图层里的字段行也**禁用**更新与删除（pending 新行不受影响，
+        因为它的删除只是移出未落库的行）。
         """
+        readonly_names = self._readonly_field_names()
+        editing = bool(self._layer is not None and self._layer.isEditable())
         for row in range(self.table.rowCount()):
-            widget = _RowActionButtons(self, self.table.viewport())
+            if self._is_pending_row(row) is not None:
+                readonly, editing_row = False, False
+            else:
+                readonly = self._field_name_of_row(row) in readonly_names
+                editing_row = editing
+            widget = _RowActionButtons(
+                self, self.table.viewport(), readonly=readonly, editing=editing_row
+            )
             self.table.setCellWidget(row, _ACTION_COL, widget)
             # 单元格尺寸确定后显式激活一次布局，让按钮按行高 / 列宽落位。
             lay = widget.layout()
@@ -452,6 +505,12 @@ class FieldsTab(LayerPropertyTab):
         """
         if self._layer is None:
             return
+        if self._layer.isEditable():
+            QMessageBox.information(
+                self, "添加字段",
+                "图层处于编辑状态，请先保存 / 停止编辑后再添加字段。",
+            )
+            return
         dlg = AddFieldDialog(self)
         if dlg.exec() != AddFieldDialog.DialogCode.Accepted:
             return
@@ -484,6 +543,15 @@ class FieldsTab(LayerPropertyTab):
             return
 
         if self._layer is None:
+            return
+        if self._field_name_of_row(row) in self._readonly_field_names():
+            QMessageBox.information(self, "更新字段", "系统自维护 / 唯一标识字段，不允许修改。")
+            return
+        if self._layer.isEditable():
+            QMessageBox.information(
+                self, "更新字段",
+                "图层处于编辑状态，请先保存 / 停止编辑后再修改字段。",
+            )
             return
         name_item = self.table.item(row, 1)
         alias_item = self.table.item(row, 2)
@@ -530,6 +598,15 @@ class FieldsTab(LayerPropertyTab):
             return
 
         if self._layer is None or not name:
+            return
+        if name in self._readonly_field_names():
+            QMessageBox.information(self, "删除字段", "系统自维护 / 唯一标识字段，不允许删除。")
+            return
+        if self._layer.isEditable():
+            QMessageBox.information(
+                self, "删除字段",
+                "图层处于编辑状态，请先保存 / 停止编辑后再删除字段。",
+            )
             return
         answer = QMessageBox.question(
             self, "删除字段", f"确定从图层中删除字段「{name}」？该操作不可撤销。"
@@ -657,6 +734,8 @@ class FieldsTab(LayerPropertyTab):
                     name_item.setData(Qt.ItemDataRole.UserRole, s["name"])
 
             # 2) 写改名 + 别名：按字段名查索引（addAttributes 后 layer.fields() 已含新字段）
+            layer_fields = layer.fields()
+            readonly_names = {layer_fields.at(i).name() for i in readonly_field_indices(layer_fields)}
             for row in range(self.table.rowCount()):
                 name_item = self.table.item(row, 1)
                 if name_item is None:
@@ -667,6 +746,9 @@ class FieldsTab(LayerPropertyTab):
                 if not new_name:
                     raise RuntimeError("字段名不能为空")
                 orig = name_item.data(Qt.ItemDataRole.UserRole)
+                orig_name = orig if isinstance(orig, str) and orig else new_name
+                if orig_name in readonly_names:
+                    continue  # 只读字段：不允许改名 / 改别名
                 if isinstance(orig, str) and orig and orig != new_name:
                     if not _rename_field_in_layer(layer, orig, new_name):
                         raise RuntimeError(

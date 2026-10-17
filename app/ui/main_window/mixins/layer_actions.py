@@ -357,7 +357,7 @@ class LayerActionsMixin:
         menu.addSeparator()
         act_remove = QAction("移除", self)
         act_remove.setIcon(Icons.remove())
-        act_remove.triggered.connect(lambda: self._remove_layer(self._selected_layer))
+        act_remove.triggered.connect(lambda: self._remove_layer(self._selected_layer, confirm=True))
         menu.addAction(act_remove)
         if is_vector:
             # 导出走 QgsVectorLayerSaveAsDialog，仅矢量
@@ -537,8 +537,11 @@ class LayerActionsMixin:
                 f"已把 {layer.name()} 移到「{group.name()}」", level=Qgis.MessageLevel.Info, duration=2
             )
 
-    def _remove_layer(self, layer, *, notify: bool = True) -> None:
+    def _remove_layer(self, layer, *, confirm: bool = False, notify: bool = True) -> None:
         """移除图层：清引用 + 刷新画布。
+
+        ``confirm=True`` 时先弹「是否确定移除该图层」确认框（默认 No）。
+        组删除 / 数据管理删库这类"上游已确认"的批量调用不传，避免连环弹窗。
 
         ``project.removeMapLayer`` 只会把图层从 project 树摘掉，
         画布仍保留最后一次 render 缓存 → 必须显式 ``refresh()`` 否则看到
@@ -561,6 +564,16 @@ class LayerActionsMixin:
 
         if layer is None:
             return
+        if confirm:
+            ret = QMessageBox.question(
+                self,
+                "移除图层",
+                f"是否确定移除该图层「{layer.name()}」？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if ret != QMessageBox.StandardButton.Yes:
+                return
         layer_id = layer.id()
         layer_name = layer.name()
         # 必须在 removeMapLayer 之前读：工程对图层持有所有权，removeMapLayer

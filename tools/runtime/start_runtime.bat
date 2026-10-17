@@ -2,6 +2,12 @@
 REM Desktop launcher: keep this file in the same directory as app.exe (dist\app\).
 REM It sets the QGIS env vars and starts app.exe.
 REM app.exe also auto-detects the portable bundle; this is an explicit fallback.
+REM
+REM Layout it expects next to app.exe:
+REM   runtime\        QGIS 运行时（proj.db / etc / plugins / i18n / providers / platforms）
+REM   config\        应用配置
+REM   resource\      应用资源
+REM   _internal\     Python 运行时与依赖库
 
 setlocal
 set "DIST_DIR=%~dp0"
@@ -12,12 +18,10 @@ if not exist "%DIST_DIR%app.exe" (
     exit /b 1
 )
 
-REM Portable packaging: QGIS runtime (proj.db / qgis / etc / plugins / i18n / DLLs)
-REM are all bundled into this directory.
-set "QGIS_PREFIX=%DIST_DIR%"
+REM Portable packaging: QGIS runtime data lives under runtime\.
+set "QGIS_PREFIX=%DIST_DIR%runtime"
 
-REM In the frozen build __file__ points to _internal; config / resource live at the
-REM top level. Point them back via env vars.
+REM config / resource live at the top level; point the app at them.
 set "QGIS_DEV_CONFIG=%DIST_DIR%config\app.yaml"
 set "QGIS_DEV_PATHS_PROJECT_ROOT=%DIST_DIR%"
 set "QGIS_DEV_PATHS_RESOURCE=%DIST_DIR%resource"

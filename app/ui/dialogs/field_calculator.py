@@ -21,7 +21,13 @@
 
 from __future__ import annotations
 
-from qgis.core import QgsExpression, QgsFeatureRequest, QgsField, QgsVectorLayer
+from qgis.core import (
+    QgsExpression,
+    QgsFeatureRequest,
+    QgsField,
+    QgsFields,
+    QgsVectorLayer,
+)
 from qgis.PyQt.QtCore import QVariant, Qt
 from qgis.PyQt.QtWidgets import (
     QApplication,
@@ -59,7 +65,7 @@ _TYPE_OPTIONS = (
 class FieldCalculatorDialog(BaseDialog):
     """按表达式新建 / 更新字段（布局对齐 QGIS 字段计算器）。"""
 
-    def __init__(self, layer: QgsVectorLayer, parent=None) -> None:
+    def __init__(self, layer: QgsVectorLayer, parent=None, initial_field: str | None = None) -> None:
         super().__init__(parent, f"字段计算器 - {layer.name()}")
         self._layer = layer
         self._result_field: str | None = None
@@ -67,7 +73,10 @@ class FieldCalculatorDialog(BaseDialog):
         self.resize(820, 680)
 
         self._build()
-        self._on_new_toggled(True)
+        # 传入 initial_field（列头右键进入）→ 默认切到「更新已有字段」并选中该字段；
+        # 否则维持默认的「创建新字段」。
+        if not (initial_field and self._activate_update_field(initial_field)):
+            self._on_new_toggled(True)
 
     # ------------------------------------------------------------- 构建
 
@@ -79,6 +88,14 @@ class FieldCalculatorDialog(BaseDialog):
 
         # 只更新选中要素
         self.only_selected_check = QCheckBox("只更新选中要素", self)
+        # 图层已有选中要素 → 默认勾上并标出数量；没有选中 → 禁用（避免了点确定才
+        # 报"没有选中要素"）。清空选择后依旧可改，这里只在打开时定一次初值。
+        selected_count = self._layer.selectedFeatureCount()
+        if selected_count > 0:
+            self.only_selected_check.setChecked(True)
+            self.only_selected_check.setText(f"只更新选中要素（已选中 {selected_count} 个）")
+        else:
+            self.only_selected_check.setEnabled(False)
         root.addWidget(self.only_selected_check, 0, 0, 1, 2)
 
         # 创建新字段 / 更新已有字段（互斥的可勾选分组）
@@ -103,11 +120,18 @@ class FieldCalculatorDialog(BaseDialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons, 3, 0, 1, 2)
 
+        # 表达式无效（空 / 语法错误 / 字段不存在 / 类型不匹配）时禁用「确定」。
+        # 构建器在构造时已算过一次有效性（那时还没连上），故显式设初值。
+        self.ok_button = buttons.button(QDialogButtonBox.StandardButton.Ok)
+        self.builder.validation_changed.connect(self.ok_button.setEnabled)
+        self.ok_button.setEnabled(self.builder.is_expression_valid())
+
         root.setRowStretch(2, 1)
         self.setLayout(root)
 
     def _build_new_group(self) -> QGroupBox:
         group = QGroupBox("创建新字段", self)
+        group.setObjectName("FieldCalcGroup")
         group.setCheckable(True)
         group.setChecked(True)
         group.setFlat(True)
@@ -156,6 +180,7 @@ class FieldCalculatorDialog(BaseDialog):
 
     def _build_update_group(self) -> QGroupBox:
         group = QGroupBox("更新已有字段", self)
+        group.setObjectName("FieldCalcGroup")
         group.setCheckable(True)
         group.setChecked(False)
         group.setFlat(True)
@@ -163,7 +188,10 @@ class FieldCalculatorDialog(BaseDialog):
         layout.setContentsMargins(3, 9, 3, 0)
         self.update_combo = QComboBox(group)
         for field in self._layer.fields():
-            self.update_combo.addItem(field.name())
+            # 字段前带类型图标（对齐 QGIS 字段计算器）：QgsFields.iconForFieldType
+            # 按 QVariant 类型 / 子类型 / 类型名给出与 QGIS 同款图标。
+            icon = QgsFields.iconForFieldType(field.type(), field.subType(), field.typeName())
+            self.update_combo.addItem(icon, field.name())
         layout.addWidget(self.update_combo)
         group.toggled.connect(self._on_update_toggled)
         return group
@@ -216,6 +244,20 @@ class FieldCalculatorDialog(BaseDialog):
         for widget in group.findChildren(QWidget):
             widget.setEnabled(enabled)
 
+    def _activate_update_field(self, name: str) -> bool:
+        """打开时默认切到「更新已有字段」并选中 ``name``；字段不存在返回 ``False``。"""
+        index = self.update_combo.findText(name)
+        if index < 0:
+            return False
+        self.update_combo.setCurrentIndex(index)
+        # 用 _set_group_checked 绕开互斥回调，再手动同步两组的启用状态
+        self._set_group_checked("new", False)
+        self._set_group_checked("update", True)
+        self._set_subtree_enabled(self.new_group, False)
+        self._set_subtree_enabled(self.update_group, True)
+        self.virtual_check.setEnabled(False)
+        return True
+
     def _on_type_changed(self, index: int) -> None:
         data = self.type_combo.itemData(index)
         if not data:
@@ -234,13 +276,12 @@ class FieldCalculatorDialog(BaseDialog):
             QMessageBox.warning(self, "字段计算器", "表达式不能为空")
             return
         expr = QgsExpression(text)
-        if expr.hasParserError():
-            QMessageBox.warning(self, "字段计算器", f"表达式有语法错误：\n{expr.parserErrorString()}")
-            return
 
         layer = self._layer
         creating = self.new_group.isChecked()
         only_selected = self.only_selected_check.isChecked()
+        # 虚拟字段是全图层重算，与「只更新选中要素」无关
+        virtual = creating and self.virtual_check.isChecked()
 
         if creating:
             name = self.name_edit.text().strip()
@@ -252,9 +293,6 @@ class FieldCalculatorDialog(BaseDialog):
                 return
             qtype, type_name, _, _ = self.type_combo.currentData()
             field = QgsField(name, qtype, type_name, self.length_spin.value(), self.precision_spin.value())
-            if self.virtual_check.isChecked():
-                self._create_virtual_field(expr, field, name)
-                return
             target_name = name
         else:
             target_name = self.update_combo.currentText()
@@ -263,8 +301,25 @@ class FieldCalculatorDialog(BaseDialog):
                 return
             field = None
 
-        if only_selected and not layer.selectedFeatureIds():
+        # 目标字段（用于把表达式结果按类型校验后再写）：新建用待建字段，更新取已有字段
+        target_field = field if creating else layer.fields().field(target_name)
+
+        fids = layer.selectedFeatureIds() if (only_selected and not virtual) else None
+        if only_selected and not virtual and not fids:
             QMessageBox.warning(self, "字段计算器", "没有选中要素")
+            return
+
+        # ---- 写操作之前先校验表达式（语法 / 字段是否存在 / 类型是否匹配）----
+        # 只查 hasParserError 不够：引用不存在的字段时 prepare 会报错、但 evaluate
+        # 会把该错误清掉，于是旧代码一路"成功"。这里在开编辑 / 加字段 / 改值之前就
+        # 拦下来（与表达式构建器的预览同一套判定）。
+        error = self._validate_expression(expr, fids, target_field)
+        if error:
+            QMessageBox.warning(self, "字段计算器", f"表达式无效：\n{error}")
+            return
+
+        if virtual:
+            self._create_virtual_field(expr, field, name)
             return
 
         was_editable = layer.isEditable()
@@ -283,7 +338,6 @@ class FieldCalculatorDialog(BaseDialog):
             self._fail(was_editable, f"找不到字段：{target_name}")
             return
 
-        fids = layer.selectedFeatureIds() if only_selected else None
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         updated = 0
         error_msg: str | None = None
@@ -298,6 +352,10 @@ class FieldCalculatorDialog(BaseDialog):
                 value = expr.evaluate(ctx)
                 if expr.hasEvalError():
                     error_msg = expr.evalErrorString()
+                    break
+                type_err = self._value_type_error(target_field, value)
+                if type_err:
+                    error_msg = type_err
                     break
                 if layer.changeAttributeValue(feature.id(), index, value):
                     updated += 1
@@ -314,6 +372,65 @@ class FieldCalculatorDialog(BaseDialog):
         logger.info("字段计算完成：图层=%s，字段=%s，更新 %d 个要素", layer.name(), target_name, updated)
         QMessageBox.information(self, "字段计算器", f"已更新 {updated} 个要素（字段：{target_name}）")
         self.accept()
+
+    def _validate_expression(self, expr: QgsExpression, fids, target_field=None) -> str | None:
+        """写操作前的表达式校验；返回错误文本（``None`` = 通过）。
+
+        判定顺序（与 :class:`ExpressionBuilderWidget` 的预览一致）：
+
+        1. ``hasParserError`` —— 语法错误 / 未知函数；
+        2. ``prepare`` 后 ``hasEvalError`` —— 例如引用了**不存在的字段**。这步不能
+           省：该错误会被随后的 ``evaluate`` 清掉，只在 prepare 之后可见；
+        3. 在目标集合的**第一条要素**上试算一次 —— 提前暴露字段类型不匹配等运行期
+           错误，避免"字段已加/已改一半才报错"；
+        4. 试算结果与 ``target_field`` 的类型是否兼容（字符串表达式不能写数值字段）。
+        """
+        if expr.hasParserError():
+            return expr.parserErrorString().strip()
+        layer = self._layer
+        ctx = layer.createExpressionContext()
+        try:
+            expr.prepare(ctx)
+        except Exception as exc:  # noqa: BLE001
+            return str(exc)
+        if expr.hasEvalError():
+            return expr.evalErrorString().strip()
+        request = QgsFeatureRequest()
+        if fids is not None:
+            request.setFilterFids(fids)
+        request.setLimit(1)
+        try:
+            for feature in layer.getFeatures(request):
+                ctx.setFeature(feature)
+                value = expr.evaluate(ctx)
+                if expr.hasEvalError():
+                    return expr.evalErrorString().strip()
+                type_err = self._value_type_error(target_field, value)
+                if type_err:
+                    return type_err
+                break
+        except Exception as exc:  # noqa: BLE001
+            return str(exc)
+        return None
+
+    @staticmethod
+    def _value_type_error(field: QgsField | None, value) -> str | None:
+        """表达式结果能否写入 ``field``；不能则返回错误文本（``None`` = 可写）。
+
+        走 :meth:`QgsField.convertCompatible`（与 QGIS 同款判定）：数值字段接受
+        数字与数字串（``"12.5"`` 可转），但拒绝非数字串（``"abc"``）；文本字段接受
+        一切；``None``（NULL）恒可写。不兼容时该方法会抛异常，这里据此判定。
+        """
+        if field is None or value is None:
+            return None
+        try:
+            field.convertCompatible(value)
+        except Exception:  # noqa: BLE001 —— 不兼容即抛异常
+            return (
+                f"字段「{field.name()}」类型为 {field.typeName()}，"
+                f"表达式结果 {value!r} 无法写入该类型"
+            )
+        return None
 
     def _create_virtual_field(self, expr: QgsExpression, field: QgsField, name: str) -> None:
         """创建虚拟字段（定义存工程文件，不写数据源）。"""

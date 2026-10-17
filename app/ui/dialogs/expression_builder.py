@@ -30,7 +30,7 @@ import html
 import re
 
 from qgis.core import QgsExpression
-from qgis.PyQt.QtCore import QRegularExpression, Qt, QTimer
+from qgis.PyQt.QtCore import QRegularExpression, Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QSyntaxHighlighter, QTextCharFormat, QTextCursor
 from qgis.PyQt.QtWidgets import (
     QDialogButtonBox,
@@ -210,9 +210,14 @@ def _quote_field(name: str) -> str:
 class ExpressionBuilderWidget(QWidget):
     """表达式构建器本体（可内嵌，字段计算器的表达式区就用它）。"""
 
+    #: 表达式有效性变化（True = 当前表达式可求值）。宿主据此启用/禁用「确定」。
+    validation_changed = pyqtSignal(bool)
+
     def __init__(self, layer=None, parent=None) -> None:
         super().__init__(parent)
         self._layer = layer
+        #: 当前表达式是否有效（空 / 语法错误 / 求值错误均为 False）
+        self._valid = False
         #: 预览用的首个要素（惰性取一次）
         self._first_feature = None
         #: 编辑停顿多久后刷新预览
@@ -455,28 +460,46 @@ class ExpressionBuilderWidget(QWidget):
         text = self.expression_text()
         if not text:
             self._show_preview("", error=False)
+            self._set_valid(False)
             return
         expr = QgsExpression(text)
         if expr.hasParserError():
             self._show_preview(f"语法错误：{expr.parserErrorString()}", error=True)
+            self._set_valid(False)
             return
         ctx = self._context()
         if ctx is None:
+            # 无图层：只能判到语法层，视为可接受（预览不可用）
             self._show_preview("（无图层，无法预览）", error=False)
+            self._set_valid(True)
             return
         try:
             expr.prepare(ctx)
             if expr.hasEvalError():
                 self._show_preview(f"无法求值：{expr.evalErrorString()}", error=True)
+                self._set_valid(False)
                 return
             value = expr.evaluate(ctx)
         except Exception as exc:  # noqa: BLE001
             self._show_preview(f"无法求值：{exc}", error=True)
+            self._set_valid(False)
             return
         if expr.hasEvalError():
             self._show_preview(f"无法求值：{expr.evalErrorString()}", error=True)
+            self._set_valid(False)
             return
         self._show_preview(f"= {_fmt_value(value)}", error=False)
+        self._set_valid(True)
+
+    def _set_valid(self, valid: bool) -> None:
+        """记录有效性并广播（值没变就不发信号）。"""
+        if valid != self._valid:
+            self._valid = valid
+            self.validation_changed.emit(valid)
+
+    def is_expression_valid(self) -> bool:
+        """当前表达式是否有效（空 / 语法错误 / 求值错误均为 ``False``）。"""
+        return self._valid
 
     def _show_preview(self, text: str, error: bool) -> None:
         self.preview_label.setText(text)

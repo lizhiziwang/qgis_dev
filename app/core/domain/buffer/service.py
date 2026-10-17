@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 from app.core.domain.geom_cleanup import copy_with_widened_string_fields
-from app.infra.logging import get_logger
+from app.infra.logging import get_logger, log_operation
 
 if TYPE_CHECKING:
     from qgis.core import QgsProcessingFeedback, QgsVectorLayer
@@ -21,13 +21,13 @@ class BufferJob:
     #: 输入矢量图层。必须是图层**对象**——memory 图层（如处理结果）的
     #: ``source()`` 带 ``uid`` 参数，离开工程上下文后 ``processing`` 无法按
     #: source 字符串重新加载（实测报 ``Could not load source layer for INPUT``）。
-    layer: "QgsVectorLayer"
+    layer: QgsVectorLayer
     #: 缓冲距离（数值部分，单位见 ``distance_unit``）
     distance: float = 100.0
     #: 距离单位（:class:`QgsUnitTypes.DistanceUnit` 的整数值，如 0=米 6=度）；
     #: ``None`` 表示已按图层坐标系单位给出（默认，兼容直接传图层单位的旧调用）。
     #: 服务端会按图层 CRS 的 ``mapUnits()`` 自动换算成算法要求的单位。
-    distance_unit: Optional[int] = None
+    distance_unit: int | None = None
     #: 圆弧分段数（越大多边形越圆，代价是顶点更多）
     segments: int = 8
     #: 是否融合重叠的缓冲多边形（默认各自成多边形）
@@ -40,7 +40,7 @@ class BufferJob:
     output_name: str = "缓冲区结果"
     #: 输出文件路径（如 ``D:/xx/结果.gpkg``）。为 ``None`` 时结果写入临时 memory
     #: 图层；给定路径时写入文件（gpkg/shp 等，由扩展名决定），并返回从文件加载的图层。
-    output_path: Optional[str] = None
+    output_path: str | None = None
 
 
 def _to_layer_units(job: BufferJob) -> float:
@@ -69,34 +69,26 @@ def _to_layer_units(job: BufferJob) -> float:
 class BufferService:
     """矢量缓冲区服务门面。
 
-    **同步执行** ``native:buffer`` 并返回结果图层（调用方负责加入工程）。
-    缓冲区操作对常规图层是秒级，同步执行即可；超大图层时主线程会短暂阻塞，
-    这是有意的取舍（结果图层直接在主线程返回，无需跨线程移交）。
+    两条执行路径共用同一套参数准备：
+
+    - :meth:`run`：同步执行 ``processing.run``，供测试 / 主线程场景；
+    - :meth:`build_task`：返回后台任务（``QgsProcessingAlgRunnerTask``），dialog
+      交给 ``QgsTaskManager`` 后算法在 worker 线程跑，主线程事件循环不阻塞；
+      结果经 ``executed`` 信号回主线程后由 :meth:`finish` 装配。
 
     依赖 Processing 插件（与 :class:`~app.core.domain.tiles.task.CreateTileTask`
     一致，真实 QGIS app 已加载；离线环境需先 ``Processing.initialize()``）。
     """
 
-    def run(
-        self,
-        job: BufferJob,
-        feedback: Optional["QgsProcessingFeedback"] = None,
-    ) -> "QgsVectorLayer":
-        """执行缓冲区生成，返回结果图层（已置入工程上下文，未加入工程）。"""
-        from qgis import processing
-        from qgis.core import QgsProcessingContext, QgsProcessingFeedback, QgsProject
-
-        context = QgsProcessingContext()
-        context.setProject(QgsProject.instance())
-        fb = feedback or QgsProcessingFeedback()
-
+    def _prepare_params(self, job: BufferJob) -> dict:
+        """主线程准备算法参数（含临时图层创建）。"""
         # GDB/ArcGIS 导出图层常见「字段声明长度 < 实际数据长度」的脏数据，
         # 直接交给 memory sink 会拒绝超长字符串值（报「无法将要素写入 OUTPUT」）。
         # 先把输入拷贝为字段长度已修正的临时图层，再交给算法。
         input_layer = copy_with_widened_string_fields(job.layer)
         # DISTANCE 要求图层坐标系单位；job.distance 可能带了用户单位，先换算
         distance = _to_layer_units(job)
-        params = {
+        return {
             "INPUT": input_layer,  # 传图层对象，不要传 job.layer.source()
             "DISTANCE": distance,
             "SEGMENTS": job.segments,
@@ -105,15 +97,31 @@ class BufferService:
             "DISSOLVE": job.dissolve,
             "OUTPUT": job.output_path or f"memory:{job.output_name}",
         }
+
+    @log_operation("缓冲区生成")
+    def run(
+        self,
+        job: BufferJob,
+        feedback: QgsProcessingFeedback | None = None,
+    ) -> QgsVectorLayer:
+        """同步执行缓冲区生成，返回结果图层（已置入工程上下文，未加入工程）。"""
+        from qgis import processing
+        from qgis.core import QgsProcessingContext, QgsProcessingFeedback, QgsProject
+
+        context = QgsProcessingContext()
+        context.setProject(QgsProject.instance())
+        fb = feedback or QgsProcessingFeedback()
+
+        params = self._prepare_params(job)
         logger.info(
             "执行算法 native:buffer：输出=%s 距离=%s 融合=%s",
-            job.output_path or f"memory:{job.output_name}",
+            params["OUTPUT"],
             job.distance,
             job.dissolve,
         )
         try:
             results = processing.run("native:buffer", params, context=context, feedback=fb)
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             # 记录输入图层特征，便于定位"Could not write features to OUTPUT"这类
             # 算法级失败（sink 创建/写入失败，通常是图层类型/几何数据的问题）
             try:
@@ -132,17 +140,56 @@ class BufferService:
                     job.distance,
                     exc_info=True,
                 )
-            except Exception:  # noqa: BLE001
+            except Exception:
                 logger.error("native:buffer 执行失败 %s: %s", job.output_name, exc, exc_info=True)
             raise
 
-        if job.output_path:
-            # 文件输出时 results["OUTPUT"] 是路径字符串，从文件重新加载图层
-            from qgis.core import QgsVectorLayer
+        return self.finish(job, context, results)
 
-            layer = QgsVectorLayer(results["OUTPUT"], job.output_name, "ogr")
-        else:
-            layer = results["OUTPUT"]
+    def build_task(
+        self,
+        job: BufferJob,
+        feedback: QgsProcessingFeedback | None = None,
+    ):
+        """构造后台执行任务（**不启动**），返回 ``(task, context, feedback)``。
+
+        ``context`` / ``feedback`` 调用方必须持有到任务结束
+        （``QgsProcessingAlgRunnerTask`` 内部保存的是裸指针，被 GC 会悬垂）。
+        参数准备（临时 memory 图层）在**主线程**完成，worker 只跑算法本身。
+        """
+        from qgis.core import QgsApplication, QgsProcessingContext, QgsProject
+
+        from app.core.domain.alg_task import AlgRunnerTask
+        from app.core.domain.imagery_tiles.feedback import ProcessingLogFeedback
+
+        alg = QgsApplication.processingRegistry().algorithmById("native:buffer")
+        if alg is None:
+            raise RuntimeError("算法未注册或已被卸载：native:buffer")
+        params = self._prepare_params(job)
+        context = QgsProcessingContext()
+        context.setProject(QgsProject.instance())
+        fb = feedback or ProcessingLogFeedback()
+        logger.info(
+            "准备后台任务 native:buffer：输出=%s 距离=%s 融合=%s",
+            params["OUTPUT"],
+            job.distance,
+            job.dissolve,
+        )
+        task = AlgRunnerTask(alg, params, context, fb, keepalive=params)
+        return task, context, fb
+
+    def finish(
+        self,
+        job: BufferJob,
+        context,
+        results: dict | None,
+    ) -> QgsVectorLayer:
+        """主线程装配任务结果（同步 / 后台两条路径共用）。"""
+        from app.core.domain.alg_task import resolve_vector_output
+
+        layer = resolve_vector_output(
+            context, (results or {}).get("OUTPUT"), job.output_name
+        )
         if layer is None or not layer.isValid():
             raise RuntimeError(f"缓冲区结果图层无效：{job.output_name}")
         logger.info(

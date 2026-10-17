@@ -43,7 +43,7 @@ from qgis.core import (
 )
 
 from app.core.util.local_db_util import local_db_util
-from app.infra.logging import get_logger
+from app.infra.logging import get_logger, log_operation
 
 logger = get_logger(__name__)
 
@@ -71,6 +71,7 @@ class ImportLayerResult:
     reason: str = ""
 
 
+@log_operation("导入矢量图层到本地库")
 def import_vector_layer_to_db(
     layer: QgsVectorLayer,
     db: dict,

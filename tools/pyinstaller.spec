@@ -10,6 +10,7 @@
     pyinstaller tools/pyinstaller.spec
 """
 
+import json
 import os
 import re
 import sys
@@ -57,10 +58,11 @@ if IS_WIN:
 
     datas = [
         (str(QGIS_PYTHON / "qgis"), "qgis"),
-        (str(PROJECT_ROOT / "resource"), "resource"),
-        (str(PROJECT_ROOT / "config"), "config"),
-        (str(Path(QGIS_INSTALL) / "apps" / "qgis" / "resources" / "srs.db"), "resources"),
-        (str(Path(QGIS_INSTALL) / "share" / "proj" / "proj.db"), "."),
+        # 下面这些"可整体替换/用户可见"的东西**不**放 datas（那会落到 _internal/），
+        # 改由 build_windows.ps1 的 STAGE 4 复制，让根目录干净：
+        #   config/ resource/                     -> dist/app/（用户可改）
+        #   etc/ plugins/ i18n/ providers/         -> dist/app/runtime/
+        #   platforms/ resources/srs.db proj.db    -> dist/app/runtime/
     ]
 
     binaries = [
@@ -80,8 +82,8 @@ if IS_WIN:
         (str(QT6_BIN / "Qt6Xml.dll"), "."),
         (str(QT6_BIN / "Qt6Svg.dll"), "."),
         (str(QT6_BIN / "Qt6Concurrent.dll"), "."),
-        # Qt 平台插件（GUI 显示必需）：apps/qt6/plugins/platforms/qwindows.dll → dist/app/platforms/
-        (str(QT6_BIN.parent / "plugins" / "platforms"), "platforms"),
+        # Qt 平台插件不放这里（那会落到 _internal/platforms），由 STAGE 4 复制到
+        # dist/app/runtime/platforms/，配合 QT_QPA_PLATFORM_PLUGIN_PATH 使用。
     ]
 else:
     # ------------------------------------------------------------------ Linux
@@ -183,13 +185,56 @@ a = Analysis(
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    # 运行期钩子：隔离随包 QGIS/Qt 运行时与宿主机上的同类 DLL
+    runtime_hooks=[str(SPEC_DIR / "rthook_dll_dirs.py")] if IS_WIN else [],
     excludes=["processing"],  # 项目根的 processing/ 是 QGIS 临时目录，namespace 包会遮蔽 plugins/processing
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
     cipher=block_cipher,
     noarchive=False,
 )
+
+# --------------------------------------------------------------------------- #
+# 原生编译保护（可选，见 tools/protect_cython.py）
+#
+# 分析阶段仍用原始 .py（保证 import 图 / 动态导入收集完整）；这里把已编译成
+# 原生扩展的模块从 PYZ 里剔除，改为把 .pyd 作为二进制收进产物目录。
+# 运行期 PyInstaller 冻结导入器在 PYZ 找不到模块时回退到磁盘 FileFinder
+# （PyInstaller/loader/pyimod02_importers.py 的 PyiFrozenFinder.find_spec），
+# 于是加载 .pyd。反编译产物时这些模块既没有 .py 也没有 .pyc，只剩机器码。
+# --------------------------------------------------------------------------- #
+_MANIFEST_CANDIDATES = [
+    os.environ.get("QGIS_PROTECT_MANIFEST", ""),
+    str(PROJECT_ROOT / "build" / "protect" / "manifest.json"),
+]
+native_entries = []
+for _cand in _MANIFEST_CANDIDATES:
+    if _cand and os.path.isfile(_cand):
+        try:
+            with open(_cand, encoding="utf-8") as _f:
+                native_entries = json.load(_f).get("native", []) or []
+            print(f"[protect] manifest: {_cand}")
+        except Exception as _exc:  # noqa: BLE001
+            print(f"[protect] 读取 manifest 失败，跳过原生保护: {_exc}")
+            native_entries = []
+        break
+
+if native_entries:
+    _native_modules = {e["module"] for e in native_entries}
+    _before = len(a.pure)
+    a.pure = [item for item in a.pure if item[0] not in _native_modules]
+    _removed = _before - len(a.pure)
+    _added = 0
+    for _e in native_entries:
+        _src, _dest = _e.get("path"), _e.get("dest")
+        if _src and _dest and os.path.isfile(_src):
+            a.binaries.append((_dest, _src, "EXTENSION"))
+            _added += 1
+    print(f"[protect] 原生编译保护：PYZ 剔除 {_removed} 个模块，收进 {_added} 个原生扩展")
+    if _added < len(native_entries):
+        print(f"[protect] 警告：manifest 有 {len(native_entries)} 项，但只有 {_added} 个产物存在")
+else:
+    print("[protect] 未启用原生编译保护（未找到 manifest）")
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
@@ -198,6 +243,41 @@ pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 # （#8767 防 runpy），而 Python 包名也是 app → 包 __path__ = dist/app/app 恰好是
 # 可执行文件 → 子包（app.bootstrap 等）导入被拒 → No module named 'app.bootstrap'。
 _EXE_NAME = "app" if IS_WIN else "qgis_dev"
+
+# --------------------------------------------------------------------------- #
+# 应用文件图标（Windows）：从 resource/png/app_icon.png 生成多尺寸 .ico 嵌进 exe
+#
+# 不直接把 png 交给 PyInstaller：它会用 Pillow 盲转（尺寸档位不可控）。这里显式
+# 生成 16/24/32/48/64（Pillow 自动跳过大于源图尺寸的档位），并把 ico 放进 build/
+# （gitignore），随 png 一起更新。生成失败则回退 PyInstaller 默认图标。
+# --------------------------------------------------------------------------- #
+_APP_ICON_PNG = PROJECT_ROOT / "resource" / "png" / "app_icon.png"
+_app_icon = None
+if IS_WIN and _APP_ICON_PNG.is_file():
+    try:
+        from PIL import Image as _Image
+
+        _ico_path = PROJECT_ROOT / "build" / "app_icon.ico"
+        _ico_path.parent.mkdir(parents=True, exist_ok=True)
+        with _Image.open(_APP_ICON_PNG) as _im:
+            # bitmap_format="bmp" 很关键：Pillow 11.3+ 默认把 ICO 各档位存成 PNG
+            # 压缩条目，Windows 的 shell 图标渲染（资源管理器）对「纯 PNG、无 BMP
+            # 兜底」的 ICO 可能不显示（虽然 ExtractIconEx 能读），表现为“exe 还是
+            # 默认图标”。强制 DIB/BMP 条目兼容性最好。
+            _im.convert("RGBA").save(
+                _ico_path,
+                format="ICO",
+                bitmap_format="bmp",
+                sizes=[(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)],
+            )
+        with _Image.open(_ico_path) as _ico:
+            _sizes = sorted(_ico.info.get("sizes", []))
+        _app_icon = str(_ico_path)
+        print(f"[icon] exe 图标 {_APP_ICON_PNG.name} -> {_ico_path.name} 尺寸 {_sizes}")
+    except Exception as _iph:  # noqa: BLE001
+        print(f"[icon] 生成 .ico 失败，回退 PyInstaller 默认图标: {_iph}")
+        _app_icon = None
+
 
 exe = EXE(
     pyz,
@@ -209,17 +289,17 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=True,
-    console=False,
+    console=(os.environ.get("QGIS_BUILD_CONSOLE") == "1"),
+    icon=_app_icon,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # PyInstaller 6.x 默认把 bundled 文件放进 `_internal/`；这里关掉 contents
-    # 目录，恢复旧 onedir 布局（datas/binaries 落在 dist/app 根下），否则
-    # build_windows.ps1 的 STAGE 4 校验与运行时便携探测（app.exe 旁找
-    # `qgis/`+`proj.db`）都会因路径变化而失败。
-    contents_directory=".",
+    # PyInstaller 6 默认把 collected 文件放进 `_internal/`。Windows 保留这个默认，
+    # 根目录只留 app.exe / start_runtime.bat / config / resource / logs / runtime；
+    # Linux 构建脚本已按 lib/ share/qgis/ 等自建布局，改动风险大，继续用扁平。
+    contents_directory=("_internal" if IS_WIN else "."),
 )
 
 coll = COLLECT(

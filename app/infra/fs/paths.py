@@ -46,8 +46,8 @@ class Paths:
     # ------------------------------------------------------------------ 工厂
 
     @classmethod
-    def default(cls) -> "Paths":
-        """基于 ``__file__`` 推导的默认路径。"""
+    def _file_based(cls) -> "Paths":
+        """仅基于 ``__file__`` 推导（不含环境变量覆盖）。"""
         return cls(
             project_root=_PROJECT_ROOT,
             resources=_PROJECT_ROOT / "resource",
@@ -58,25 +58,50 @@ class Paths:
 
     @classmethod
     def from_env(cls, base: Optional["Paths"] = None) -> "Paths":
-        """结合环境变量覆盖默认路径。"""
-        default = base or cls.default()
+        """在 ``base``（缺省 :meth:`_file_based`）之上应用 ``QGIS_DEV_PATHS_*``。
+
+        只要设了 ``QGIS_DEV_PATHS_PROJECT_ROOT``，其余子目录默认相对它推导
+        （各自仍可用对应环境变量单独覆盖）——因为打包后只有 ``PROJECT_ROOT``
+        是可靠的，``__file__`` 推出的兄弟目录都在 ``_internal/`` 下。
+        """
+        default = base if base is not None else cls._file_based()
+        if _ENV_PROJECT_ROOT in os.environ:
+            root = Path(os.environ[_ENV_PROJECT_ROOT])
+            fb_resources, fb_logs = root / "resource", root / "logs"
+            fb_tmp, fb_config = root / ".tmp", root / "config"
+        else:
+            root = default.project_root
+            fb_resources, fb_logs = default.resources, default.logs
+            fb_tmp, fb_config = default.tmp, default.config
         return cls(
-            project_root=Path(os.environ[_ENV_PROJECT_ROOT])
-            if _ENV_PROJECT_ROOT in os.environ
-            else default.project_root,
+            project_root=root,
             resources=Path(os.environ[_ENV_RESOURCE_DIR])
             if _ENV_RESOURCE_DIR in os.environ
-            else default.resources,
+            else fb_resources,
             logs=Path(os.environ[_ENV_LOG_DIR])
             if _ENV_LOG_DIR in os.environ
-            else default.logs,
+            else fb_logs,
             tmp=Path(os.environ[_ENV_TMP_DIR])
             if _ENV_TMP_DIR in os.environ
-            else default.tmp,
+            else fb_tmp,
             config=Path(os.environ[_ENV_CONFIG_DIR])
             if _ENV_CONFIG_DIR in os.environ
-            else default.config,
+            else fb_config,
         )
+
+    @classmethod
+    def default(cls) -> "Paths":
+        """进程当前生效的路径：``__file__`` 推导 + ``QGIS_DEV_PATHS_*`` 环境变量覆盖。
+
+        打包后（PyInstaller ``_internal/``）``__file__`` 落在 ``_internal/`` 下，
+        单靠它会得到 ``_internal/resource`` 这种**不存在**的路径；必须用 launcher /
+        :func:`app.bootstrap._ensure_portable_env` 注入的环境变量纠正。
+
+        因此 ``default()`` 本身就应用环境变量，调用方（如
+        :class:`app.ui.common.icons.Icons`）不必再套一层 :meth:`from_env`。
+        在开发态（无环境变量）行为与以前一致，仍是仓库根。
+        """
+        return cls.from_env(cls._file_based())
 
     # ------------------------------------------------------------------ 行为
 

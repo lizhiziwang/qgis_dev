@@ -98,6 +98,28 @@ echo ""
 echo "STAGE 1: 清理旧产物"
 rm -rf "$PROJECT_ROOT/dist" "$PROJECT_ROOT/build"
 
+# ---------------------------------------------------------------- STAGE 1.5: 编译保护
+# 与 Windows 一致：把 Qt-free 纯 Python 模块编成原生 .so，产物里不留字节码。
+# QGIS_PROTECT=0 可关闭；失败（缺 Cython / Python 开发文件）降级为警告，不阻断构建。
+PROTECT_DIR="$PROJECT_ROOT/build/protect"
+PROTECT_MANIFEST="$PROTECT_DIR/manifest.json"
+if [ "${QGIS_PROTECT:-1}" = "1" ] && [ -f "$SCRIPT_DIR/protect_cython.py" ]; then
+    echo ""
+    echo "STAGE 1.5: Cython 原生编译保护"
+    if python3 "$SCRIPT_DIR/protect_cython.py" \
+        --project-root "$PROJECT_ROOT" \
+        --config "$PROJECT_ROOT/config/app.yaml" \
+        --out "$PROTECT_DIR" \
+        --manifest "$PROTECT_MANIFEST" \
+        --clean; then
+        export QGIS_PROTECT_MANIFEST="$PROTECT_MANIFEST"
+        echo "  保护清单: $PROTECT_MANIFEST"
+    else
+        echo "  WARN: 编译保护失败（缺 Cython 或 Python 开发文件？），本次跳过保护继续构建"
+        unset QGIS_PROTECT_MANIFEST
+    fi
+fi
+
 # ---------------------------------------------------------------- STAGE 2: PyInstaller
 echo ""
 echo "STAGE 2: PyInstaller（$SPEC_FILE）"

@@ -53,6 +53,9 @@ from qgis.PyQt.QtGui import QColor
 
 from app.core.domain.check.query import intersect_features
 from app.core.domain.check.space_index import clear_spatial_index
+from app.infra.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 class FeatureEditTool(QgsMapTool):

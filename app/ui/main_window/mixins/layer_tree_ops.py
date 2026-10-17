@@ -317,10 +317,11 @@ class LayerTreeOpsMixin:
             if isinstance(node, QgsLayerTreeLayer):
                 layer = node.layer()
                 if layer is not None:
-                    self._remove_layer(layer)
+                    self._remove_layer(layer, confirm=True)
                 return
-            self._remove_layer_group(node)
-            return
+            if isinstance(node, QgsLayerTreeGroup):
+                self._remove_layer_group(node)
+                return
 
         # 多选：选中的组里已经包含的节点不再单列（否则会被删两遍 / 组删完节点悬空）
         selected_groups = {

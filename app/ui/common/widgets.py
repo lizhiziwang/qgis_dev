@@ -165,7 +165,10 @@ class CenteredCheckDelegate(QStyledItemDelegate):
         if not (option.features & QStyleOptionViewItem.ViewItemFeature.HasCheckIndicator):
             return False
         if option.text:
-            return False      # 有文字的格子不归这里管（与绘制分支一致）
+            # 有文字的格子：勾选框由基类按"文字左侧"画（见 paint 分支），命中几何与
+            # 绘制一致，交回基类处理（点勾选框即切换）。这里若直接 return False，
+            # 列表项（如「组织列」）就永远点不动——只能靠全选/全不选按钮。
+            return super().editorEvent(event, model, option, index)
         if event.type() not in (
             QEvent.Type.MouseButtonRelease,
             QEvent.Type.MouseButtonDblClick,

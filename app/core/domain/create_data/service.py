@@ -51,7 +51,7 @@ from typing import TYPE_CHECKING
 
 from app.core.domain.create_data.fields import FieldSpec, qgs_field
 from app.core.util.vector_formats import container_drivers
-from app.infra.logging import get_logger
+from app.infra.logging import get_logger, log_operation
 
 if TYPE_CHECKING:
     from qgis.core import QgsCoordinateReferenceSystem, QgsVectorLayer
@@ -149,6 +149,7 @@ class CreateDataService:
     后续编辑的事。失败一律抛 :class:`CreateDataError`。
     """
 
+    @log_operation("创建矢量数据")
     def create(self, spec: CreateDataSpec) -> QgsVectorLayer:
         """按 ``spec`` 建出数据文件，返回从文件回读的图层（尚未加入工程）。"""
         crs = self._resolve_crs(spec)

@@ -68,3 +68,38 @@ server:
   host: 0.0.0.0
   port: 8000
   workers: 1
+
+# ---------------------------------------------------------------------------
+# 打包保护（tools/build_windows.ps1 的「原生编译保护」阶段读取）
+# ---------------------------------------------------------------------------
+build:
+  protect:
+    cython:
+      # 把纯 Python 模块编译成原生扩展（Windows .pyd / Linux .so），产物里既不留
+      # .py 也不留 .pyc，只剩机器码。这是本项目当前唯一「真正有效且免费」的
+      # 编译保护：PyArmor 试用版拒绝大脚本，PyInstaller 6 已移除内置加密。
+      enabled: true
+      # 编译范围（点分包/模块，包会递归）。想把范围收窄可改成 app.core.auth 等。
+      include:
+        - app
+      # 跳过编译、保持字节码的模块/包（点分路径，包会递归）
+      exclude: []
+      # 单个模块编译失败时回退为字节码，不中断构建
+      fail_open: true
+      # 模块级 ``def __getattr__``（PEP 562 惰性导出）的模块跳过编译：实测
+      # Cython 编译后访问属性会与导入机无限递归（栈溢出），保持字节码。
+      skip_module_getattr: true
+      # 【重要】只编译不 import qgis/PyQt 的模块。Cython 编译后的函数/类与
+      # PyQt 的 signal/slot 不兼容（.connect(编译方法) 会 TypeError 甚至硬崩溃
+      # 0xC0000409），所以所有 Qt/QGIS 依赖模块一律保持字节码。
+      # 本项目 Qt-free 模块 ≈110 个，已覆盖全部 app.core.auth（密钥/授权/凭据）、
+      # app.core.data、app.core.util、app.core.domain 算法、app.infra、app.env、
+      # app.server 等核心逻辑；剩下的主要是 UI。
+      qt_free_only: true
+      # 并行编译任务数；0 = 自动（CPU 核数）
+      jobs: 0
+      # 当前 QGIS 自带 Python 缺 Include/ 与 libs/。留空则自动探测：
+      #   sysconfig → 环境变量 QGIS_PYTHON_INCLUDE / QGIS_PYTHON_LIBS
+      #   → 同类 OSGeo4W / conda 安装（要求 python3XX.lib 次版本匹配）
+      compiler_include: ""
+      compiler_libs: ""
