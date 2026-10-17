@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
+from pathlib import Path
 from typing import Optional
 
 from qgis.PyQt.QtCore import QEvent, QRect, Qt
@@ -25,7 +29,10 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from app.infra.logging import get_logger
 from app.ui.common.icons import Icons
+
+logger = get_logger(__name__)
 
 
 def open_file_dir(
@@ -210,8 +217,38 @@ def centered_check_delegate(view):
     return delegate
 
 
+def reveal_in_file_manager(path: str) -> bool:
+    """在系统文件管理器里**定位**一个文件 / 文件夹（返回是否成功唤起）。
+
+    - Windows：``explorer /select,<路径>``（选中它，而不是只打开目录）；
+    - macOS：``open -R``（同样是选中）；
+    - 其它（麒麟 / UOS 等）：打开它所在的目录（没有统一的"选中"接口）。
+
+    路径已经不存在时，退而打开上一层仍存在的目录 —— 数据管理里的库被手动挪走 /
+    删掉之后点「打开文件所在位置」，能看到它原来在哪儿，比什么都不发生好。
+    """
+    if not path:
+        return False
+    target = Path(path)
+    while not target.exists() and target != target.parent:
+        target = target.parent
+    try:
+        if os.name == "nt":
+            # explorer 的参数约定：/select 后面直接跟逗号与路径（整串作为一个参数）
+            subprocess.Popen(["explorer", f"/select,{os.path.normpath(str(target))}"])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(target)])
+        else:
+            subprocess.Popen(["xdg-open", str(target if target.is_dir() else target.parent)])
+    except OSError as exc:
+        logger.warning("打开文件所在位置失败：%s（%s）", target, exc)
+        return False
+    return True
+
+
 __all__ = [
     "open_file_dir",
+    "reveal_in_file_manager",
     "save_file",
     "make_table",
     "make_refresh_button",

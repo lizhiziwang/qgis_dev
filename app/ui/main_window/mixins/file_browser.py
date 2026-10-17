@@ -44,6 +44,10 @@ _VECTOR_HINT_EXTS = frozenset({
     ".csv", ".tab", ".mif", ".fgb", ".gpx", ".dxf",
 })
 
+#: 多图层容器（一个文件装多个图层）：加载前先把里面的图层列出来让用户挑。
+#: ``.gdb`` 是目录，走 ``load_file`` 的目录分支，不在这里。
+_CONTAINER_VECTOR_EXTS = frozenset({".gpkg", ".sqlite", ".sqlite3", ".db"})
+
 #: 文件对话框的过滤器（矢量 + 栅格）
 _DATA_FILE_FILTER = (
     "矢量 / 栅格数据 (*.shp *.geojson *.json *.gpkg *.gml *.kml *.sqlite *.csv *.tab *.mif *.fgb *.gpx"
@@ -95,7 +99,12 @@ class FileBrowserMixin:
             self.load_file(path)
 
     def load_file(self, file_path: str) -> None:
-        """加载到项目：矢量（shp/gpkg/geojson/…）、栅格（tif/img/…）、或 GDB 目录。"""
+        """加载到项目：矢量（shp/gpkg/geojson/…）、栅格（tif/img/…）、或 GDB 目录。
+
+        **容器型矢量数据源**（``.gdb`` 目录 / ``.gpkg`` / ``.sqlite``）会先弹出里面的
+        图层列表，让用户挑一个或多个再加载 —— 以前 gpkg/sqlite 只开第一层、GDB 整库全加，
+        都不是用户要的。
+        """
 
         ext = os.path.splitext(file_path)[1].lower()
         self._begin_layer_loading(f"正在加载图层：{os.path.basename(file_path)}")
@@ -105,6 +114,8 @@ class FileBrowserMixin:
                 self._load_gdb(file_path)
             elif ext in _RASTER_EXTS:
                 self._load_raster(file_path)
+            elif ext in _CONTAINER_VECTOR_EXTS:
+                self._load_container(file_path)
             else:
                 # 其余按矢量；扩展名不认识时就"矢量试一次、栅格试一次"
                 if self._load_vector(file_path) is None and ext not in _VECTOR_HINT_EXTS:
@@ -114,6 +125,41 @@ class FileBrowserMixin:
             QMessageBox.critical(self, "加载错误", f"文件加载失败：{e}")
         finally:
             self._end_layer_loading()
+
+    def _load_container(self, path: str, *, title: str = "选择要加载的图层") -> None:
+        """容器数据源：**先列图层、再加载选中的那些**（可多选）。
+
+        打开按 :func:`~app.core.util.sublayers.open_sublayer`（本地库沿用统一打开策略，
+        ``.sqlite`` 不会凭空多出 ``rowid`` 列）。
+        """
+        from app.core.util.sublayers import open_sublayer
+        from app.ui.dialogs.sublayer_pick_dialog import SublayerPickDialog
+
+        dialog = SublayerPickDialog(self, path=path, title=title)
+        accepted = dialog.exec()
+        selected = dialog.selected_sublayers() if accepted else []
+        dialog.deleteLater()
+        if not selected:
+            return
+        added = 0
+        failures: list[str] = []
+        for sublayer in selected:
+            layer, error = open_sublayer(path, sublayer)
+            if layer is None:
+                logger.warning("容器图层打不开，跳过：%s（%s）", sublayer.name, error)
+                failures.append(f"{sublayer.name}：{error}")
+                continue
+            layer.path_c = path
+            self._add_layer_to_project(layer)
+            added += 1
+        if added:
+            logger.info("容器加载完成：%s（%d 个图层）", path, added)
+        if failures:
+            QMessageBox.warning(
+                self,
+                "部分图层没加载",
+                "以下图层打不开：\n" + "\n".join(failures),
+            )
 
     # ------------------------------------------------------- 各类型加载
 
@@ -150,10 +196,9 @@ class FileBrowserMixin:
         return layer
 
     def _load_gdb(self, gdb_path: str) -> None:
-        """加载 File Geodatabase 目录里的全部图层。"""
+        """File Geodatabase：先诊断驱动问题，再让用户挑图层（可多选）加载。"""
 
         from osgeo import gdal, ogr
-        from qgis.core import QgsVectorLayer
 
         ogr.RegisterAll()
         # 用 gdal 的错误栈拿到**具体原因**：GDB 打不开最常见的原因是这种库只有
@@ -176,27 +221,9 @@ class FileBrowserMixin:
                 hint = "\n\n（该目录不是有效的 File Geodatabase：里面没有 .gdbtable 文件？）"
             QMessageBox.warning(self, "无法打开 GDB", f"{name}\n{error}{hint}")
             return
-
-        added = 0
-        try:
-            for i in range(ds.GetLayerCount()):
-                fc = ds.GetLayerByIndex(i)
-                name = fc.GetName()
-                layer = QgsVectorLayer(f"{gdb_path}|layername={name}", name, "ogr")
-                if not layer.isValid():
-                    logger.warning("GDB 里的图层打不开，跳过：%s", name)
-                    continue
-                layer.path_c = gdb_path
-                self._add_layer_to_project(layer)
-                added += 1
-            if added == 0:
-                QMessageBox.warning(
-                    self, "无法打开 GDB",
-                    f"{os.path.basename(gdb_path)} 里没有可加载的图层。",
-                )
-        finally:
-            ds.Destroy()
-        logger.info("GDB 加载完成：%s（%d 个图层）", gdb_path, added)
+        ds.Destroy()
+        # 能打开：列图层让用户挑（不再整库全加载）
+        self._load_container(gdb_path, title="选择 GDB 里要加载的图层")
 
     # ===================================================== 浏览器事件
 

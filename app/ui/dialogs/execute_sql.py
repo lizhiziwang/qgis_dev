@@ -27,6 +27,7 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
 )
 
+from app.core.util.local_layer_loader import layer_source_container
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.dialogs.query_builder import QueryBuilderDialog
@@ -152,17 +153,17 @@ STREAM_CHUNK = 5000
 def _container_path(layer) -> str:
     """矢量图层 → 供 ``ogr.Open`` 的**容器路径**。
 
-    ``layer.path_c``（若被设置）或 ``layer.source()`` 可能是 QGIS 数据源
-    URI——浏览器双击 / 画布拖拽载入的 gdb/gpkg 子图层形如
-    ``D:/xxx.gdb|layername=要素类名``，而 ``ogr.Open`` 只认容器路径，
-    ``|layername=`` 是 QGIS provider 选项、GDAL 并不认识（直接 Open 会抛
-    “does not exist … not recognized as a supported dataset name”）。
-    这里把 ``|`` 及之后的所有 provider 选项剥掉，得到容器本身。
+    直接交给 :func:`~app.core.util.local_layer_loader.layer_source_container`：
+    它会先取加载方挂的 ``layer.path_c``，否则从数据源里剥掉子图层 / provider 选项
+    （OGR 形态 ``D:/x.gpkg|layername=t`` 或 spatialite provider 形态
+    ``dbname='D:/x.db' table="t" (geom)`` —— 后者的 ``|`` 切法切不出路径）。
+    ``ogr.Open`` 只认容器路径，``|layername=`` 是 QGIS provider 选项、GDAL 并不
+    认识（直接 Open 会抛 “does not exist … not recognized as a supported
+    dataset name”）。
     """
-    uri = getattr(layer, "path_c", None) or layer.source()
-    if not uri:
-        return ""
-    return uri.split("|", 1)[0]
+    return layer_source_container(layer)
+
+
 #: 冲刷时间下限（秒）：单条行转换慢时仍能按时刷新状态栏
 FLUSH_INTERVAL = 0.1
 #: 模型按需读取的行缓存上限。QTableView 只渲染可视行（几百行），缓存 500 行
@@ -339,10 +340,12 @@ class ExecuteSqlDialog(BaseDialog):
             QMessageBox.warning(self, "警告", "请输入 SQL 查询！")
             return
         path = _container_path(self.layer)
-        # 仅支持本地文件/容器数据源（shp / gpkg / gdb / geojson …）：
-        # 内存图层、postgres 等连接源 ogr.Open 打不开，弹窗而非抛 GDAL 错
+        # 仅支持本地文件/容器数据源（shp / gpkg / gdb / geojson / 本地库里的 Sqlite
+        # 矢量层…）：内存图层、postgres 等连接源 ogr.Open 打不开，弹窗而非抛 GDAL 错。
+        # spatialite 也放行 —— 本地库的 SpatiaLite 表走的就是该 provider（见
+        # local_layer_loader.open_local_vector_table），容器路径同样是那个 .db 文件。
         if (
-            self.layer.providerType() != "ogr"
+            self.layer.providerType() not in ("ogr", "spatialite")
             or not path
             or not (os.path.isfile(path) or os.path.isdir(path))
         ):

@@ -3,6 +3,7 @@
 '''
 
 import ctypes
+import datetime
 import json
 import math
 import os
@@ -116,6 +117,59 @@ def _http_error_hint(text: str) -> str:
     hint = re.sub(r"<[^>]+>", " ", text)
     hint = re.sub(r"\s+", " ", hint).strip()
     return hint[:200]
+
+
+def _sqlite_bindable(value: Any) -> Any:
+    """把要素值收成 sqlite3 **绑得上**的类型(绑定前的最后一道口子)。
+
+    QGIS 从 OGR 数据源读出来的值不全是 Python 原生类型: **Date / DateTime / Time
+    字段给的是 PyQt 的 QDateTime**(GDB / shp / FileGDB 都这样), Binary 给
+    QByteArray, 数组 / 列表字段给 list。这些 sqlite3 一个都绑不上 —— 直接塞进
+    ``execute`` 会整批回滚, 报的却是 ``Error binding parameter 277 - probably
+    unsupported type``(用户报的 GDB → sqlite 导入失败就是这条, 参数号是字段序号,
+    看不出是哪一列)。
+
+    转换口径(与建表时的列类型对得上 —— 见 ``import_layer._build_columns`` 把
+    Date/Time/DateTime/Binary 之外的类型统一声明成 TEXT):
+
+    - ``None`` / ``int`` / ``float`` / ``str`` / ``bytes`` 系原样;
+    - ``bool`` → ``int``;
+    - ``date`` / ``datetime`` / ``time`` → ISO 字符串(列声明是 TEXT);
+    - ``QDate`` / ``QDateTime`` / ``QTime`` → 同上的 ISO 串;
+    - ``QByteArray`` → ``bytes``;
+    - ``list`` / ``tuple`` / ``dict`` → JSON 文本(OGG 的数组字段);
+    - 其余(Decimal / UUID / 未知对象) → ``str()``。
+
+    宁可收成文本也不让整批导入失败: 值本身还在, 用户看得见; 抛异常则一条都进不去。
+    """
+    if value is None or isinstance(value, (str, bytes, bytearray, memoryview)):
+        return value
+    if isinstance(value, bool):  # bool 是 int 子类; 单独写出来是为了口径明确
+        return int(value)
+    if isinstance(value, int | float):
+        return value
+    if isinstance(value, datetime.datetime | datetime.date | datetime.time):
+        return value.isoformat()
+    # PyQt 的日期 / 时间 / 字节串: 延迟导入, 且**允许失败** —— 本模块是纯 sqlite
+    # 工具, 要能脱离 QGIS 运行时单独跑(见模块头), 那种环境下这些值根本不会出现。
+    try:
+        from qgis.PyQt.QtCore import QByteArray, QDate, QDateTime, QTime
+    except ImportError:
+        pass
+    else:
+        if isinstance(value, QDateTime):
+            return value.toString("yyyy-MM-ddTHH:mm:ss")
+        if isinstance(value, QDate):
+            return value.toString("yyyy-MM-dd")
+        if isinstance(value, QTime):
+            return value.toString("HH:mm:ss")
+        if isinstance(value, QByteArray):
+            return bytes(value)
+    if isinstance(value, list | tuple | dict):
+        with suppress(TypeError, ValueError):
+            return json.dumps(value, ensure_ascii=False, default=str)
+    return str(value)
+
 
 def _sql_token(name: str | None) -> str:
     """把任意字符串清洗成可安全作表名/列名的标识符。
@@ -501,6 +555,153 @@ class local_db_util:
         # 开库都会报 "GPKG: unrecognized user_version=0x00000000 (0)" 警告。
         self.cursor.execute("PRAGMA user_version = 10300")
         self.conn.commit()
+
+    def ensure_gpkg_srs(
+        self,
+        srid: int,
+        *,
+        name: str = "",
+        wkt: str = "",
+        auth_name: str = "EPSG",
+    ) -> bool:
+        """幂等确保 ``gpkg_spatial_ref_sys`` 里有 ``srid`` 这一行（返回是否新写入）。
+
+        **建空间表的前置条件**：``gpkg_contents`` / ``gpkg_geometry_columns`` 的
+        ``srs_id`` 都有指向 ``gpkg_spatial_ref_sys`` 的外键，而连接开了
+        ``PRAGMA foreign_keys = ON``（见 ``__init__``）——库里没有这一行时插
+        ``gpkg_contents`` 会直接 ``FOREIGN KEY constraint failed``。
+
+        :meth:`init_gpkg_db` 只种了 0/-1/4326/3857/4490 五个（工程实际用到的那几个），
+        用户在建图层时选了别的坐标系（如 4547 / 32650）就得先在这里补种一行。
+        已有行不动（``INSERT OR IGNORE``），非 gpkg 库直接返回 ``False``。
+
+        Args:
+            srid: 空间参考号（EPSG 代码，如 4490）。
+            name: ``srs_name``；留空按 ``<auth_name>:<srid>`` 记。
+            wkt: ``definition``（WKT 串）。留空时写 ``undefined``——GDAL 读不到
+                WKT 会退回 ``organization`` / ``organization_coordsys_id`` 认
+                授权代码，多数场景仍能正确定位坐标系。
+            auth_name: 授权名（默认 ``EPSG``；``ESRI:102100`` 这类传 ``ESRI``）。
+        """
+        if self.kind != "gpkg":
+            return False
+        srs = int(srid)
+        org = str(auth_name or "EPSG")
+        self.cursor.execute(
+            'INSERT OR IGNORE INTO "gpkg_spatial_ref_sys" '
+            "(srs_name, srs_id, organization, organization_coordsys_id, definition) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (str(name or f"{org}:{srs}"), srs, org, srs, str(wkt or "undefined")),
+        )
+        added = self.cursor.rowcount > 0
+        self.conn.commit()
+        return added
+
+    def set_gpkg_column_alias(self, table_name: str, column_name: str, alias: str) -> bool:
+        """把某列的**字段别名**写进 gpkg 的 ``gpkg_data_columns.name``（返回是否写入）。
+
+        GeoPackage 规范里列别名就住在这张目录表里，而 QGIS 的 OGR provider 回读时
+        直接把它当 :meth:`QgsField.alias`（实测：手写一行 ``name`` 再打开图层，
+        别名就出来了；反过来 QGIS 设了别名的图层写 gpkg，GDAL 也会写这张表）。
+        所以库内图层的别名是**真能落盘**的 —— 这是 SpatiaLite 没有的能力
+        （它没有对应的目录表，别名只留在工程里）。
+
+        ``constraint_name`` 留空（本工程没用到 GPKG 的值域约束），
+        非 gpkg 库返回 ``False`` 不做任何事。
+        """
+        if self.kind != "gpkg":
+            return False
+        table = str(table_name or "").strip()
+        column = str(column_name or "").strip()
+        if not table or not column:
+            return False
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS "gpkg_data_columns" (
+              "table_name" TEXT NOT NULL,
+              "column_name" TEXT NOT NULL,
+              "name" TEXT,
+              "title" TEXT,
+              "description" TEXT,
+              "mime_type" TEXT,
+              "constraint_name" TEXT,
+              PRIMARY KEY ("table_name", "column_name")
+            )
+        ''')
+        self.cursor.execute(
+            'INSERT OR REPLACE INTO "gpkg_data_columns" '
+            "(table_name, column_name, name) VALUES (?, ?, ?)",
+            (table, column, str(alias)),
+        )
+        self.conn.commit()
+        return self.cursor.rowcount > 0
+
+    def set_column_aliases(self, table_name: str, aliases: dict[str, str]) -> int:
+        """把一张表若干列的**字段别名**写进本工程自己的别名表（返回写入条数）。
+
+        **SpatiaLite 没有存别名的地方**（GeoPackage 有 ``gpkg_data_columns``，见
+        :meth:`set_gpkg_column_alias`），所以本工程自建一张
+        ``qgis_dev_column_alias`` 来记：用户给字段起的别名（``FEAT_ID`` → 「要素ID」）
+        不落到库里的话，关掉再打开就没了 —— 用户报的就是这个。
+
+        表是所有本地库通用的（gpkg 也写得进，只是 gpkg 走标准位置、不必用这张），
+        读回见 :meth:`column_aliases`，套到图层上是
+        :func:`~app.core.util.local_layer_loader.open_local_vector_table` 的收尾动作。
+
+        Args:
+            table_name: 图层（表）名。
+            aliases: ``{列名: 别名}``；空别名 / 空列名直接跳过。
+
+        Returns:
+            实际写入（或更新）的条数。
+        """
+        table = str(table_name or "").strip()
+        if not table or not aliases:
+            return 0
+        self._ensure_column_alias_table()
+        written = 0
+        for column, alias in aliases.items():
+            name = str(column or "").strip()
+            text = str(alias or "").strip()
+            if not name or not text:
+                continue
+            self.cursor.execute(
+                'INSERT OR REPLACE INTO "qgis_dev_column_alias" '
+                "(table_name, column_name, alias) VALUES (?, ?, ?)",
+                (table, name, text),
+            )
+            written += 1
+        self.conn.commit()
+        return written
+
+    def column_aliases(self, table_name: str) -> dict[str, str]:
+        """读回一张表的字段别名（``{列名: 别名}``）；没有这张表 / 没有记录返回空字典。
+
+        老库（还没写过别名的）里没有 ``qgis_dev_column_alias``，这里按「没有别名」处理，
+        不建表也不报错 —— 纯读的路径不该改人家的库。
+        """
+        table = str(table_name or "").strip()
+        if not table:
+            return {}
+        try:
+            rows = self.cursor.execute(
+                'SELECT column_name, alias FROM "qgis_dev_column_alias" WHERE table_name = ?',
+                (table,),
+            ).fetchall()
+        except sqlite3.Error:
+            # 表不存在（老库）/ 结构不符：都按「没有别名」处理
+            return {}
+        return {str(name): str(alias) for name, alias in rows if name and alias}
+
+    def _ensure_column_alias_table(self) -> None:
+        """幂等建出本工程的字段别名表（只在写的时候建，读不建）。"""
+        self.cursor.execute('''
+            CREATE TABLE IF NOT EXISTS "qgis_dev_column_alias" (
+              "table_name" TEXT NOT NULL,
+              "column_name" TEXT NOT NULL,
+              "alias" TEXT,
+              PRIMARY KEY ("table_name", "column_name")
+            )
+        ''')
 
     #: 早期私有压缩几何可能出现的 flags 值(bit5=1; 本工程只写过 0x20-0x27)
     _COMPRESSED_FLAGS = (
@@ -1095,9 +1296,28 @@ class local_db_util:
             self.conn.commit()
 
         col_defs = [f"{_quote_ident(n)} {t}" for n, t in cols]
+        drop_placeholder = ""
         if gt is not None and self.kind == "gpkg":
             # 几何列并入 CREATE TABLE(BLOB 承载 GPKG 二进制),免 AddGeometryColumn
+            #
+            # **必须带 INTEGER PRIMARY KEY**：QGIS 的 OGR provider 在「没有整型主键」的
+            # gpkg 表上不暴露 DeleteFeatures / ChangeAttributeValues 能力（实测都是
+            # False）—— 属性表里删要素、改单元格会**静默失败**，用户看到的就是"删除没
+            # 效果、停止编辑也停不掉"。GDAL 自己写 gpkg 时也总是带这个列。
+            # 用户列里已经有 fid（不分大小写）时不加，免得重名（这种表也就不能编辑）。
+            existing = {n.lower() for n, _ in cols}
+            if "fid" not in existing:
+                col_defs.insert(0, '"fid" INTEGER PRIMARY KEY AUTOINCREMENT')
             col_defs = col_defs + [_quote_ident(geom_raw) + " BLOB"]
+        elif gt is not None and not col_defs:
+            # SpatiaLite: 几何列是建完表再 AddGeometryColumn 加的,属性列可以为空(建
+            # "空矢量表"就是这用法) —— 但 SQLite 不允许零列表,``CREATE TABLE "x" ()``
+            # 直接 near ")": syntax error。只能先塞一个占位列把表建出来,加完几何列再删掉,
+            # 这样最终的表与导入链路建出来的一样:没有主键、没有多余字段
+            # (别改用 PKUID 之类的主键列:GDAL 拿它当 FID,而 QGIS 的 OGR provider 仍会把
+            #  FID 列列成一个可见字段,用户会凭空多出一个属性列)
+            drop_placeholder = "_gpkg_dev_placeholder"
+            col_defs = [f"{_quote_ident(drop_placeholder)} TEXT"]
         try:
             self.cursor.execute(
                 f"CREATE TABLE {_quote_ident(tn)} ({', '.join(col_defs)})"
@@ -1125,6 +1345,12 @@ class local_db_util:
                     self.cursor.execute(
                         "SELECT CreateSpatialIndex(?, ?)", (tn, geom_raw)
                     )
+                    if drop_placeholder:
+                        # 占位列的使命结束：表已经有几何列，不删它用户会多一个空属性列
+                        self.cursor.execute(
+                            f"ALTER TABLE {_quote_ident(tn)} "
+                            f"DROP COLUMN {_quote_ident(drop_placeholder)}"
+                        )
             self.conn.commit()
         except Exception:
             # 半成品清理后原样抛出,不留脏表
@@ -1269,7 +1495,7 @@ class local_db_util:
                     if real is None:
                         continue  # 未知键忽略
                     insert_cols.append(real)
-                    params.append(val)
+                    params.append(_sqlite_bindable(val))
 
                 placeholders = ["?"] * len(insert_cols)
                 geo_expr_sql = ""  # spatialite 专用: 几何表达式(ST_GeomFromText 等)
@@ -2305,6 +2531,32 @@ def _table_meta(conn, names: Iterable[str]) -> dict[str, dict]:
             "fields": fields,
         }
     return out
+
+
+def table_geometry_column(db_path: str | Path, table_name: str) -> str:
+    """库里某张**空间表**的几何列名; 不是空间表 / 读不到 → 空串。
+
+    给「按表打开图层」用: spatialite provider 的 URI 必须显式带几何列名 ——
+    留空时它会把整张表当成纯属性表读(**几何列变成普通字段、CRS 丢失**, 实测)。
+    SRID 不用从这里取: provider 自己读库里的 ``geometry_columns``。
+
+    非破坏性只读: 只查 ``geometry_columns`` / ``gpkg_geometry_columns``,
+    不建文件、不改库。
+    """
+    p = Path(db_path)
+    if not p.is_file() or not table_name:
+        return ""
+    try:
+        conn = sqlite3.connect(str(p), timeout=5.0)
+    except sqlite3.Error:
+        return ""
+    try:
+        meta = _table_meta(conn, [str(table_name)]).get(str(table_name)) or {}
+    except sqlite3.Error:
+        return ""
+    finally:
+        conn.close()
+    return str(meta.get("geom_col") or "")
 
 
 def describe_local_db(db_path: str | Path) -> dict[str, Any]:

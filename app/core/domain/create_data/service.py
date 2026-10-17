@@ -12,6 +12,9 @@
   「甲图层」写完「乙图层」后就只剩「乙图层」）。要保留原有图层必须显式用
   ``CreateOrOverwriteLayer``。本服务按「目标已存在一律不写」的约定从源头避开
   这个坑（见 :meth:`CreateDataService._check_target`）。
+  **「往库里再建一个图层」是另一条需求、另走一条路**：建空库与往已有库里加图层
+  见 :mod:`app.core.domain.create_data.library`（用本工程自己的 SQL 建表原语，
+  只碰那一张新表）。本服务仍只管「一个文件就是一层」的单图层文件。
 - **空文件存不下几何类型**：GeoJSON / KML / DXF / CSV / GPX / MapInfo TAB 的几何
   类型是从要素里推出来的，空图层回读只会得到 ``NoGeometry``（TAB 连坐标系都会一起
   丢）；回读时补 ``|geometrytype=`` 提示。
@@ -29,6 +32,14 @@
 - **几何类型不被格式接受时**：写盘直接失败（如 GPX + 面 → ``Geometry type of
   `Polygon' not supported in GPX``），错误原样报给用户，不加前置表（各驱动的
   支持面随 GDAL 版本变，猜不如让 GDAL 说话）。
+- **字段结构**（向导第二步填的）写盘后活不活得下来，随格式而定（都在本机实测过）：
+  字段名 / 类型 / 长度 / 小数位数在 Shapefile / GML / MapInfo TAB / FlatGeobuf 保得住，
+  CSV 保得住列名但类型一律变文本；**GeoJSON / KML / DXF / GPX 的空文件根本存不下字段结构**
+  （它们的 schema 是从要素里推的，而本服务建的就是空图层 —— 实测空 GeoJSON 回读字段数为 0）；
+  别名只有 GPKG / FlatGeobuf 保留（GDAL 会写 ``gpkg_data_columns``），
+  「不可为空」没有任何格式接受（OGR 不写 NOT NULL）。落不下的那部分由调用方在建完之后
+  经 :func:`~app.core.domain.create_data.fields.configure_created_layer` 落在**工程里**
+  （那是工程状态，不是数据源内容，所以不归本服务管），并如实报给用户。
 """
 
 from __future__ import annotations
@@ -38,6 +49,8 @@ import shutil
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from app.core.domain.create_data.fields import FieldSpec, qgs_field
+from app.core.util.vector_formats import container_drivers
 from app.infra.logging import get_logger
 
 if TYPE_CHECKING:
@@ -46,7 +59,8 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 #: 多图层容器格式：一个文件里能放多个图层，回读要带 ``|layername=``
-_CONTAINER_DRIVERS = frozenset({"GPKG", "SQLite", "FileGDB"})
+#: （驱动名清单从 :func:`container_drivers` 派生，``VectorFormat.container`` 是唯一真相）
+_CONTAINER_DRIVERS = container_drivers()
 
 #: 文件本身不记几何类型的格式：空图层回读要带 ``|geometrytype=`` 提示
 _GEOMETRY_HINT_DRIVERS = frozenset({"GeoJSON", "KML", "DXF", "CSV", "GPX", "MapInfo File"})
@@ -66,6 +80,12 @@ _PLACEHOLDER_FIELD = "name"
 
 #: ``QgsDataProvider.subLayers`` 各字段间的分隔符（见 :meth:`CreateDataService._layer_names`）
 _SUBLAYER_SEP = "!!::!!"
+
+#: 可写驱动清单的进程级缓存。**别省这一步**：``ogrDriverList()`` 实测要 70~130ms
+#: （GDAL 把驱动一个个初始化一遍），而「创建数据」对话框开一次要问它三次
+#: （单图层格式下拉 / 本地库格式下拉 / 生成空模板能不能点）—— 实测占了打开耗时的大头。
+#: 进程生命周期里驱动集不会变（不装/卸 QGIS 插件），缓存是安全的。
+_WRITABLE_DRIVERS: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +110,10 @@ class CreateDataSpec:
     crs_authid: str
     #: 坐标系描述（如 ``China Geodetic Coordinate System 2000``），供日志 / 回显
     crs_description: str = ""
+    #: 用户在「数据字段设置」那一步定下的字段结构（空 = 只建一个空图层）。
+    #: **必须是 tuple**：spec 之间要能按 ``==`` 比（对话框的「应用」防重复创建），
+    #: list 会让 frozen dataclass 不可哈希（见 :class:`FieldSpec` 的说明）。
+    fields: tuple[FieldSpec, ...] = ()
 
     @property
     def file_path(self) -> str:
@@ -102,10 +126,20 @@ class CreateDataError(RuntimeError):
 
 
 def available_drivers() -> frozenset[str]:
-    """本机 QGIS 可写出的 OGR 驱动名（对话框据此灰掉装不了的格式）。"""
-    from qgis.core import QgsVectorFileWriter
+    """本机 QGIS 可写出的 OGR 驱动名（对话框据此灰掉装不了的格式）。
 
-    return frozenset(meta.driverName for meta in QgsVectorFileWriter.ogrDriverList())
+    结果带进程级缓存：``ogrDriverList()`` 要 70~130ms，界面一次开窗会问好几遍，
+    而驱动集在进程里不会变（见 :data:`_WRITABLE_DRIVERS`）。
+    """
+    global _WRITABLE_DRIVERS
+
+    if _WRITABLE_DRIVERS is None:
+        from qgis.core import QgsVectorFileWriter
+
+        _WRITABLE_DRIVERS = frozenset(
+            meta.driverName for meta in QgsVectorFileWriter.ogrDriverList()
+        )
+    return _WRITABLE_DRIVERS
 
 
 class CreateDataService:
@@ -179,16 +213,28 @@ class CreateDataService:
 
     @staticmethod
     def _empty_layer(spec: CreateDataSpec, crs: QgsCoordinateReferenceSystem) -> QgsVectorLayer:
-        """空的内存图层：URI 直接给几何类型 + 坐标系，字段按格式的最小要求给。"""
+        """空的内存图层：URI 给几何类型 + 坐标系，属性列按第二步填的字段结构加。
+
+        字段走 ``addAttributes``（不是 URI 的 ``&field=``）：URI 那套语法只能表达
+        ``name:string(50)`` 这种最简形式，拿不到别名 / NotNull 约束。
+        """
         from qgis.core import QgsVectorLayer
 
         crs_text = crs.authid() or crs.toProj()
         uri = f"{spec.geometry_type}?crs={crs_text}"
-        if spec.driver in _MIN_ONE_FIELD_DRIVERS:
+        if spec.driver in _MIN_ONE_FIELD_DRIVERS and not spec.fields:
+            # MapInfo TAB 0 字段会写出坏文件，得补一个占位列。**只在用户没填字段时补** ——
+            # 否则占位列会跟着写进文件，用户凭空多出一个空属性列。
             uri += f"&field={_PLACEHOLDER_FIELD}:string(50)"
         layer = QgsVectorLayer(uri, spec.layer_name, "memory")
         if not layer.isValid():
             raise CreateDataError(f"建不出{spec.geometry_type}几何的空图层（坐标系 {crs_text}）")
+        if spec.fields:
+            added = layer.dataProvider().addAttributes([qgs_field(f) for f in spec.fields])
+            if not added:
+                names = "、".join(f.name for f in spec.fields)
+                raise CreateDataError(f"给新图层加字段失败：{names}")
+            layer.updateFields()
         return layer
 
     @staticmethod

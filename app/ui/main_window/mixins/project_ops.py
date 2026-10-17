@@ -11,7 +11,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 
@@ -40,9 +39,6 @@ _PROJECT_FILTER = "工程文件 (*.pgs);;所有文件 (*)"
 #: 默认坐标系兜底（配置读不到时用）：CGCS2000 / 中国 2000，见 :meth:`ProjectOpsMixin._default_crs_authid`
 _DEFAULT_CRS_AUTHID = "EPSG:4490"
 
-#: 应用私有数据在工程文件里的存放位置（QgsProject.writeEntry 的 scope/key）
-_DM_SCOPE = "qgis_dev"
-_DM_KEY = "data_manage"
 
 
 class ProjectOpsMixin:
@@ -119,8 +115,8 @@ class ProjectOpsMixin:
 
         # 新建工程 ⇒ 尚未关联工程文件，关闭/保存时需另存
         self._project_path = None
-        # 数据管理连接不属于新工程：清空 Dock / 待恢复状态
-        self._reset_data_manage_state()
+        # 注意：**数据管理的连接清单不跟着工程走**（它是系统级配置，存在
+        # app.infra.fs.state 的状态文件里），所以新建工程不该清它。
 
         # 底图进参考分组
         self._load_config_base_tile_into_ref_group()
@@ -192,8 +188,6 @@ class ProjectOpsMixin:
         """
         # 把画布当前显示范围写进工程视图设置，供下次打开恢复
         self._store_canvas_extent()
-        # 把数据管理里添加的本地库 / 服务器连接一并写进工程
-        self._store_data_manage_state()
         self._begin_layer_loading(f"正在保存工程：{os.path.basename(path)}")
         try:
             saved = self.project.write(path)
@@ -317,63 +311,6 @@ class ProjectOpsMixin:
             return self._save_current_project()
         return True  # 否（不保存）
 
-    def _store_data_manage_state(self) -> None:
-        """把数据管理 Dock 里的本地库 / 服务器连接写入工程文件。
-
-        Dock 尚未创建（本次会话没开过数据管理）时，若有从工程恢复的待应用
-        状态则原样写回，避免重存工程丢掉连接信息。失败只记日志、不阻断保存。
-        """
-        try:
-            dock = getattr(self, "_data_manage_dock", None)
-            if dock is not None:
-                state = dock.export_state()
-            else:
-                state = getattr(self, "_dm_pending_state", None)
-                if not state:
-                    return
-            self.project.writeEntry(
-                _DM_SCOPE, _DM_KEY, json.dumps(state, ensure_ascii=False)
-            )
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("保存数据管理连接失败：%s", exc, exc_info=True)
-
-    def _restore_data_manage_state(self) -> None:
-        """从工程文件恢复数据管理里的本地库 / 服务器连接。
-
-        工程里没有该项时按“空”处理（新工程式工作区，清空残留连接）。Dock 已
-        创建（用户开过数据管理）→ 立即应用；尚未创建 → 暂存到
-        ``_dm_pending_state``，等 Dock 首次创建时再由
-        :meth:`_apply_pending_data_manage_state` 应用。
-        """
-        state: dict = {}
-        try:
-            raw, ok = self.project.readEntry(_DM_SCOPE, _DM_KEY, "")
-            if ok and raw:
-                parsed = json.loads(raw) if isinstance(raw, str) else raw
-                if isinstance(parsed, dict):
-                    state = parsed
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("恢复数据管理连接失败：%s", exc, exc_info=True)
-        dock = getattr(self, "_data_manage_dock", None)
-        if dock is not None:
-            dock.restore_state(state)
-        else:
-            self._dm_pending_state = state
-
-    def _apply_pending_data_manage_state(self, dock) -> None:
-        """把打开工程时暂存的连接状态应用到刚创建的 Dock（无暂存则不动）。"""
-        state = getattr(self, "_dm_pending_state", None)
-        self._dm_pending_state = None
-        if state:
-            dock.restore_state(state)
-
-    def _reset_data_manage_state(self) -> None:
-        """新建工程：丢掉待恢复状态，并把已存在的 Dock 清空成空树。"""
-        self._dm_pending_state = None
-        dock = getattr(self, "_data_manage_dock", None)
-        if dock is not None:
-            dock.restore_state({})
-
     def _store_canvas_extent(self) -> None:
         """把画布当前显示范围写入工程视图设置（保存工程时调用）。"""
         try:
@@ -444,8 +381,6 @@ class ProjectOpsMixin:
             self._project_path = path
             # 恢复保存工程时的画布范围（无记录时保持默认全图）
             self._restore_canvas_extent()
-            # 恢复工程里保存的数据管理连接（本地库 / 服务器）
-            self._restore_data_manage_state()
             self.canvas.refreshAllLayers()
             title = self.project.title() or Path(path).stem
             self.setWindowTitle(f"{self._app_name} - {title}")

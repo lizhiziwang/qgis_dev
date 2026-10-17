@@ -43,14 +43,27 @@ class OrganizeColumnsDialog(BaseDialog):
         layer: QgsVectorLayer,
         visible_names: Collection[str] | None = None,
         parent: QWidget | None = None,
+        *,
+        title: str = "",
+        hint: str = "",
     ) -> None:
+        """
+        Args:
+            layer: 目标矢量图层。
+            visible_names: 当前可见的字段名集合；``None`` 表示全部可见（默认）。
+            parent: 父窗口。
+            title: 自定义窗口标题（默认「<图层> - 组织列」）；导出字段选择复用本对话框。
+            hint: 自定义提示文案（默认说明属性表列显示）。
+        """
         super().__init__(parent)
         self.layer = layer
         self._visible = None if visible_names is None else set(visible_names)
+        self._title = title
+        self._hint = hint
         self._init_ui()
 
     def _init_ui(self) -> None:
-        self.setWindowTitle(f"{self.layer.name()} - 组织列")
+        self.setWindowTitle(self._title or f"{self.layer.name()} - 组织列")
         self.setModal(True)
         # 无边框标题栏占高 34px，固定高度 +title_bar.height() 保住内容区
         self.setFixedSize(360, 460 + self.title_bar.height())
@@ -59,7 +72,7 @@ class OrganizeColumnsDialog(BaseDialog):
         main.setContentsMargins(10, 10, 10, 10)
         main.setSpacing(6)
 
-        hint = QLabel("勾选要在属性表中显示的字段（ID 列固定显示）：")
+        hint = QLabel(self._hint or "勾选要在属性表中显示的字段（ID 列固定显示）：")
         main.addWidget(hint)
 
         self._list = QListWidget()

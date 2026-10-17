@@ -32,7 +32,10 @@ from qgis.PyQt.QtWidgets import (
 
 from app.ui.common.base_dialog import BaseDialog
 
-_OPERATORS = ["=", "<", ">", "LIKE", "%", "IN", "NOT IN", "<=", ">=", "!=", "ILIKE", "AND", "OR", "NOT"]
+_OPERATORS = [
+    "=", "<", ">", "LIKE", "%", "IN", "NOT IN", "<=", ">=", "!=", "ILIKE",
+    "IS NULL", "IS NOT NULL", "AND", "OR", "NOT",
+]
 
 
 class _SqlCountWorker(QObject):
@@ -77,18 +80,39 @@ class QueryBuilderDialog(BaseDialog):
 
     sqlConfirmed = pyqtSignal(str)
 
-    def __init__(self, layer: QgsVectorLayer, parent: QDialog | None = None) -> None:
+    def __init__(
+        self,
+        layer: QgsVectorLayer,
+        parent: QDialog | None = None,
+        *,
+        apply_to_layer: bool = True,
+    ) -> None:
+        """
+        Args:
+            layer: 要写条件的图层（字段列表、值预览都取自它）。
+            parent: 父窗口。
+            apply_to_layer: ``True`` = 老行为，点确定把条件写成图层的
+                ``setSubsetString``（属性表筛选 / 条件查询走这个）；
+                ``False`` = **只取条件**，不碰图层 —— 导出这类"条件只用于本次操作"
+                的场合用（免得为了拿去导出，把地图上的图层也筛了一遍）。
+        """
         super().__init__(parent)
         self.setWindowTitle("属性查询器")
         self.setMinimumSize(720, 500)
         self.layer = layer
         self.valid_fields = [f.name() for f in layer.fields()]
+        #: 只取条件、不写回图层（见参数说明）
+        self._apply_to_layer = apply_to_layer
         #: 当前选中字段；由字段下拉初值与 ``fieldChanged`` 共同维护
         self.current_field: str = ""
         self._test_worker: _SqlCountWorker | None = None
         self._init_ui()
         self._init_signals()
-        self._restore_applied_filter()
+        if self._apply_to_layer:
+            self._restore_applied_filter()
+        else:
+            self.applied_label.setText("条件只用于本次操作，不会改动图层本身的筛选")
+            self.ok_btn.setText("确定")
 
     def _init_ui(self) -> None:
         main = QVBoxLayout()
@@ -296,6 +320,16 @@ class QueryBuilderDialog(BaseDialog):
 
     def _on_ok(self) -> None:
         cond = self.sql_edit.toPlainText().strip()
+        if not self._apply_to_layer:
+            # 只取条件：校验后发信号就走，**不改图层的子集串**（导出用）
+            if cond:
+                error = self._condition_error(cond)
+                if error is not None:
+                    QMessageBox.critical(self, "条件有误", error)
+                    return
+            self.sqlConfirmed.emit(cond)
+            self.accept()
+            return
         if not cond:
             # 空条件 = 取消筛选（与「测试条件」不同：这里不报错，直接清子集串）
             self.layer.setSubsetString("")
