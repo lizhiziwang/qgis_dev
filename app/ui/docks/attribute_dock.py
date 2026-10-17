@@ -35,7 +35,7 @@ from qgis.core import (
     QgsRectangle,
     QgsVectorLayer,
 )
-from qgis.PyQt.QtCore import (QAbstractTableModel, QItemSelection, QItemSelectionModel,
+from qgis.PyQt.QtCore import (QAbstractTableModel, QEvent, QItemSelection, QItemSelectionModel,
                               QModelIndex, QObject, Qt, QTimer, QVariant, pyqtSignal)
 from qgis.PyQt.QtGui import QBrush, QColor, QKeySequence
 from qgis.PyQt.QtWidgets import (
@@ -67,9 +67,8 @@ from app.ui.common.widgets import save_file
 from app.ui.dialogs.organize_columns import OrganizeColumnsDialog
 from app.ui.dialogs.query_builder import QueryBuilderDialog
 from app.ui.tools.feature_attrs import (
-    auto_id_field_index,
     field_alias,
-    uid_field_index,
+    readonly_field_indices,
 )
 
 logger = get_logger(__name__)
@@ -108,6 +107,10 @@ EXTRA_SELECT_LIMIT = 5000
 #: 改成**用模型背景色画高亮**（:meth:`PagedAttributeTableModel.set_band_rows`）——
 #: 视图只问可视行的 ``data()``，代价与总行数无关，所以多少行都不卡。
 MAX_TABLE_SELECTION_ROWS = 1000
+
+#: 冻结列集合里代表**ID 列**（第 0 列，无对应字段）的哨兵键。字段列直接以字段名
+#: 为键（按名存，模型 reset / 新增字段后仍能对上，同 :attr:`_hidden_field_names`）。
+_ID_COLUMN_KEY = "\uf8ff__id__"
 
 #: 导出 CSV 时每批写多少行。写完一批就回事件循环（刷新进度、保持界面可响应），
 #: 否则十几万行一口气写完界面会僵住。
@@ -440,8 +443,15 @@ class PagedAttributeTableModel(QAbstractTableModel):
         - 数据源自增/自维护的主键（OBJECTID / fid / ogc_fid…）：保存时数据源自己填。
         """
         fields = self.layer.fields()
-        idx = {i for i in (uid_field_index(fields), auto_id_field_index(fields)) if i is not None}
-        return {i + 1 for i in idx}
+        return {i + 1 for i in readonly_field_indices(fields)}
+
+    @property
+    def readonly_cols(self) -> set[int]:
+        """编辑态下禁止改值的列（系统自维护 / 全局唯一标识；列 0 是 ID 列）。
+
+        只读列不仅有 :meth:`flags` 里的不可编辑，属性表列头右键也据此**禁止删除**。
+        """
+        return self._readonly_cols
 
     @property
     def has_more(self) -> bool:
@@ -944,6 +954,21 @@ class _AttributeTableView(QTableView):
     #: 用户按了 Ctrl+A
     select_all_requested = pyqtSignal()
 
+    #: 视图几何变化（尺寸 / 内边距被 Qt 重算）后的回调。宿主把它指到
+    #: :meth:`PagedAttributeTableWidget._update_frozen_geometry`：``QTableView``
+    #: 会在每次 ``updateGeometries`` 里把 ``setViewportMargins`` 重置回默认
+    #: （只按表头留边），所以冻结区必须在这里**重新**压回去。
+    on_resized = None
+
+    def resizeEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        super().resizeEvent(event)
+        callback = self.on_resized
+        if callback is not None:
+            try:
+                callback()
+            except Exception:  # noqa: BLE001 —— 槽里未捕获异常是原生崩溃，兜住
+                pass
+
     def keyPressEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
         if event.matches(QKeySequence.StandardKey.SelectAll):
             self.select_all_requested.emit()
@@ -1009,6 +1034,14 @@ class PagedAttributeTableWidget(QWidget):
         self.model: Optional[PagedAttributeTableModel] = None
         #: 「组织列」隐藏的字段名（按名存，模型 reset/新增字段后仍能对上）
         self._hidden_field_names: set[str] = set()
+        #: 被冻结的列（按名存；ID 列用 :data:`_ID_COLUMN_KEY`）。冻结列由**冻结视图**
+        #: 显示，主表里对应隐藏（见 :meth:`_sync_column_visibility`）。
+        self._frozen_keys: set[str] = set()
+        #: 冻结视图（主表的子控件，盖在左侧；无冻结列时隐藏）。模型建好后装配，
+        #: 见 :meth:`_setup_frozen_view`。
+        self.frozen_view: Optional[_AttributeTableView] = None
+        #: 装了列头右键事件过滤器的 widget → 对应的列表头（见 :meth:`_install_header_menu`）
+        self._header_event_targets: dict[QObject, object] = {}
         #: 程序性改表格选中集期间为 True：防止"表格→图层→表格"来回触发成环
         self._suppress_selection_sync = False
         #: 刚排过序、行号整体变了，等加载完要按 fid 把选中重新标回去
@@ -1136,9 +1169,34 @@ class PagedAttributeTableWidget(QWidget):
         header.setSortIndicatorShown(True)
         header.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)   # 未排序：不显示箭头
         header.sectionClicked.connect(self._on_header_clicked)
+        # 列头右键 → 冻结 / 取消冻结该列（见 _show_header_menu）
+        self._install_header_menu(header)
         self.table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table_view.customContextMenuRequested.connect(self._show_context_menu)
         main_layout.addWidget(self.table_view)
+
+        # 冻结列视图：主表的子控件，浮在左侧盖住主表行号栏那一带（见
+        # _update_frozen_geometry）。自身画一条行号栏（▶ 定位标记）+ 冻结列，
+        # 与主表共享 model / selectionModel / 纵向滚动。默认隐藏，不占空间。
+        self.frozen_view = _AttributeTableView(self.table_view)
+        self.frozen_view.setObjectName("FrozenColumnsView")
+        self.frozen_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.frozen_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        self.frozen_view.setAlternatingRowColors(True)
+        self.frozen_view.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
+        self.frozen_view.setVerticalHeader(
+            _LocatedHeaderView(Qt.Orientation.Vertical, self.frozen_view)
+        )
+        fheader = self.frozen_view.horizontalHeader()
+        fheader.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+        fheader.setStretchLastSection(False)
+        fheader.setSectionsClickable(True)
+        fheader.setSortIndicatorShown(True)
+        fheader.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+        self._install_header_menu(fheader)
+        self.frozen_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.frozen_view.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.frozen_view.hide()
 
         # 底部动态加载条（加载状态 + 加载更多按钮）
         self._setup_load_bar(main_layout)
@@ -1184,6 +1242,7 @@ class PagedAttributeTableWidget(QWidget):
         )
         # Ctrl+A 自己接管：行数多时不能真的逐行全选（Qt 要 ~0.4ms/行，见视图类注释）
         self.table_view.select_all_requested.connect(self._on_select_all_requested)
+        self._setup_frozen_view()
         self._refresh_load_state()
 
     def _setup_load_bar(self, main_layout) -> None:
@@ -1318,6 +1377,11 @@ class PagedAttributeTableWidget(QWidget):
         header = self.table_view.verticalHeader()
         if header is not None:
             header.viewport().update()
+        if self.frozen_view is not None:
+            self.frozen_view.viewport().update()
+            fheader = self.frozen_view.verticalHeader()
+            if fheader is not None:
+                fheader.viewport().update()
 
     def _on_model_reset(self) -> None:
         """表被重置（刷新 / 换筛选 / 换显示范围）→ 定位行先归零。
@@ -1428,6 +1492,8 @@ class PagedAttributeTableWidget(QWidget):
         """
         try:
             self._apply_icons((theme or ThemeManager.instance().current()).toolbar_text)
+            # 主题可能连字体一起换（表头高度变）→ 重算冻结区几何，避免错位
+            self._update_frozen_geometry()
         except RuntimeError:
             pass  # 收尾阶段 C++ 对象已销毁
 
@@ -1642,6 +1708,8 @@ class PagedAttributeTableWidget(QWidget):
         """换"底色高亮"的行集合并让视图重画（只重画可视区，与行数无关）。"""
         if self.model is not None and self.model.set_band_rows(rows):
             self.table_view.viewport().update()
+            if self.frozen_view is not None:
+                self.frozen_view.viewport().update()
 
     def _on_header_clicked(self, section: int) -> None:
         """点表头 → 按该列排序；同一列再点切换升降序。"""
@@ -1649,8 +1717,17 @@ class PagedAttributeTableWidget(QWidget):
         if model is None:
             return
         ascending = (not model.sort_ascending) if section == model.sort_column else True
+        self._sort_by_column(section, ascending)
+
+    def _sort_by_column(self, section: int, ascending: bool) -> None:
+        """按指定列 / 方向排序（表头点击与列头右键菜单「升序/降序」共用）。"""
+        model = self.model
+        if model is None:
+            return
         order = Qt.SortOrder.AscendingOrder if ascending else Qt.SortOrder.DescendingOrder
         self.table_view.horizontalHeader().setSortIndicator(section, order)
+        if self.frozen_view is not None:
+            self.frozen_view.horizontalHeader().setSortIndicator(section, order)
         self._suppress_selection_sync = True
         try:
             model.sort(section, order)
@@ -1944,23 +2021,308 @@ class PagedAttributeTableWidget(QWidget):
         self._sync_column_visibility()
 
     def _sync_column_visibility(self) -> None:
-        """按字段名重算隐藏列。
+        """按字段名重算主表 / 冻结视图的列显示，并更新冻结区几何。
 
         列显示走 ``QTableView.setColumnHidden``（视图层隐藏）：模型列定义不变，
         取值/编辑/筛选逻辑无需改动，列宽在重新勾选后也能保留。第 0 列是 fid
-        （ID），恒显示，故字段列从 1 起映射。
+        （ID）。规则：
+
+        - 被「组织列」隐藏的字段列 → 主表隐藏（本就该隐藏）；
+        - 被冻结的列 → 主表隐藏、冻结视图显示；
+        - 其余列 → 主表显示、冻结视图隐藏。
         """
-        if self.model is None:
+        if self.model is None or self.frozen_view is None:
             return
+        # 冻结列若被「组织列」隐去（或字段已删）→ 一并取消冻结（冻结列必须可见）
+        for key in list(self._frozen_keys):
+            col = self._column_of_key(key)
+            if col is None or self._column_key(col) in self._hidden_field_names:
+                self._frozen_keys.discard(key)
+        frozen_cols = set(self._frozen_columns())
+        self.table_view.setColumnHidden(0, 0 in frozen_cols)
+        self.frozen_view.setColumnHidden(0, 0 not in frozen_cols)
         for col, name in enumerate(self.model.field_names, start=1):
-            self.table_view.setColumnHidden(col, name in self._hidden_field_names)
+            hidden = name in self._hidden_field_names
+            self.table_view.setColumnHidden(col, hidden or col in frozen_cols)
+            self.frozen_view.setColumnHidden(col, col not in frozen_cols)
+        self._update_frozen_geometry()
+
+    # ------------------------------------------------- 冻结 / 解冻列
+
+    def _setup_frozen_view(self) -> None:
+        """装配冻结视图：共享 model / selectionModel，接好滚动与列宽同步。"""
+        fv = self.frozen_view
+        if fv is None or self.model is None:
+            return
+        fv.setModel(self.model)
+        sel_model = self.table_view.selectionModel()
+        if sel_model is not None:
+            fv.setSelectionModel(sel_model)
+        # 默认列宽 / 行高与主表一致，换视图不会跳宽跳高
+        fv.horizontalHeader().setDefaultSectionSize(
+            self.table_view.horizontalHeader().defaultSectionSize()
+        )
+        fv.verticalHeader().setDefaultSectionSize(
+            self.table_view.verticalHeader().defaultSectionSize()
+        )
+        # 纵向滚动双向同步：两视图 viewport 高度与行高一致 → 精确对齐（见类注释）
+        self.table_view.verticalScrollBar().valueChanged.connect(
+            fv.verticalScrollBar().setValue
+        )
+        fv.verticalScrollBar().valueChanged.connect(
+            self.table_view.verticalScrollBar().setValue
+        )
+        # 冻结列被拖宽 / 点表头排序 / 双击定位 / Ctrl+A / 右键菜单，行为与主表一致
+        fv.horizontalHeader().sectionResized.connect(lambda *_: self._update_frozen_geometry())
+        fv.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
+        fv.doubleClicked.connect(self._on_row_double_clicked)
+        fv.select_all_requested.connect(self._on_select_all_requested)
+        fv.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        fv.customContextMenuRequested.connect(self._show_context_menu)
+        # 主表每次几何重算（含 Qt 自己重置 viewport 内边距）后，把冻结区重新压回去
+        self.table_view.on_resized = self._update_frozen_geometry
+        self._sync_column_visibility()
+
+    def _column_key(self, col: int):
+        """列号 → 冻结标识（ID 列用哨兵、字段列用字段名；越界返回 ``None``）。"""
+        if col == 0:
+            return _ID_COLUMN_KEY
+        idx = col - 1
+        if self.model is not None and 0 <= idx < len(self.model.field_names):
+            return self.model.field_names[idx]
+        return None
+
+    def _column_of_key(self, key):
+        """冻结标识 → 当前列号（字段已不存在时返回 ``None``）。"""
+        if key == _ID_COLUMN_KEY:
+            return 0
+        if self.model is None:
+            return None
+        try:
+            return self.model.field_names.index(key) + 1
+        except ValueError:
+            return None
+
+    def _frozen_columns(self) -> list[int]:
+        """当前冻结列号（升序；字段已删的键自动落空）。"""
+        cols = []
+        for key in self._frozen_keys:
+            col = self._column_of_key(key)
+            if col is not None:
+                cols.append(col)
+        return sorted(cols)
+
+    def _update_frozen_geometry(self) -> None:
+        """重排主表左内边距与冻结视图几何（没有任何冻结列时隐藏并还原）。
+
+        冻结视图是主表的子控件，盖住主表左侧（含主表原行号栏）那一带；它自己画
+        一条行号栏（▶ 定位标记）+ 冻结列。主表 viewport 左内边距留出与冻结视图
+        等宽的空间，两者严丝合缝、不重叠不露缝。
+        """
+        fv = self.frozen_view
+        if fv is None:
+            return
+        try:
+            header = self.table_view.horizontalHeader()
+            vheader = self.table_view.verticalHeader()
+            vh = vheader.width() if (vheader is not None and vheader.isVisible()) else 0
+            hh = header.height() if (header is not None and header.isVisible()) else 0
+            cols = self._frozen_columns()
+            if not cols:
+                fv.hide()
+                self.table_view.setViewportMargins(vh, hh, 0, 0)
+                return
+            fw = vh + sum(fv.columnWidth(c) for c in cols)
+            # 先摆好冻结视图（show / raise），**最后**才设主表内边距。setViewportMargins
+            # 会同步触发一次 resizeEvent（Qt 在 updateGeometries 里把内边距重置回默认），
+            # 那次 resizeEvent 会再进本方法把内边距**重新**压回去——所以**不能**加防重入
+            # 闸门挡住它，否则内边距每次都被重置掉。重入自然收敛：第二次设的是同一组值，
+            # 不再改变几何、不再触发 resizeEvent。
+            fv.setGeometry(1, 1, fw, self.table_view.viewport().height() + hh)
+            fv.show()
+            fv.raise_()
+            self.table_view.setViewportMargins(fw, hh, 0, 0)
+        except RuntimeError:
+            pass  # 收尾阶段 C++ 对象已销毁
+
+    def _freeze_column(self, key) -> None:
+        """冻结某一列：先把它当前的列宽带到冻结视图（视觉不跳），再隐藏到冻结区。"""
+        col = self._column_of_key(key)
+        if col is None or self.frozen_view is None:
+            return
+        self.frozen_view.setColumnWidth(col, self.table_view.columnWidth(col))
+        self._frozen_keys.add(key)
+        self._sync_column_visibility()
+
+    def _unfreeze_column(self, key) -> None:
+        """解冻某一列：列宽带回主表后重新显示。"""
+        if key not in self._frozen_keys:
+            return
+        self._frozen_keys.discard(key)
+        col = self._column_of_key(key)
+        if col is not None and self.frozen_view is not None:
+            self.table_view.setColumnWidth(col, self.frozen_view.columnWidth(col))
+        self._sync_column_visibility()
+
+    def _unfreeze_all(self) -> None:
+        """取消全部冻结。"""
+        if not self._frozen_keys:
+            return
+        widths = {c: self.frozen_view.columnWidth(c) for c in self._frozen_columns()}
+        self._frozen_keys.clear()
+        for col, width in widths.items():
+            self.table_view.setColumnWidth(col, width)
+        self._sync_column_visibility()
+
+    def _install_header_menu(self, header) -> None:
+        """给列头装右键菜单（事件过滤器方式）。
+
+        Qt6 里表头右键事件的落点在不同平台/控件层级可能是 ``header`` 本身，也可能是
+        它的 ``viewport()``；而 ``setContextMenuPolicy`` 只有在事件**真正落到设了
+        policy 的那个 widget** 时才发 ``customContextMenuRequested``，设错一层就
+        "右键表头没反应"（用户报过）。这里干脆在两层 widget 上都装事件过滤器，谁先
+        收到 ``ContextMenu`` 谁弹菜单（装了过滤器后不会再走 policy 那条路）。
+        """
+        self._header_event_targets[header] = header
+        self._header_event_targets[header.viewport()] = header
+        header.installEventFilter(self)
+        header.viewport().installEventFilter(self)
+
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 —— Qt 命名
+        """拦列表头（或其 viewport）的右键事件 → 弹出冻结/解冻菜单。"""
+        header = self._header_event_targets.get(obj)
+        if header is not None and event.type() == QEvent.Type.ContextMenu:
+            try:
+                try:
+                    global_pos = event.globalPos()
+                except (AttributeError, TypeError):
+                    global_pos = event.globalPosition().toPoint()
+                pos = header.viewport().mapFromGlobal(global_pos)
+                self._show_header_menu(header, pos)
+            except Exception:  # noqa: BLE001 —— Qt 虚函数里未捕获异常是原生崩溃
+                logger.debug("列头右键菜单失败", exc_info=True)
+            return True
+        return super().eventFilter(obj, event)
+
+    def _show_header_menu(self, header, position) -> None:
+        """列头右键：冻结 / 解冻该列；字段列还可删除字段 / 打开字段计算器。"""
+        from qgis.PyQt.QtGui import QAction
+        from qgis.PyQt.QtWidgets import QMenu
+
+        col = header.logicalIndexAt(position)
+        if col < 0:
+            return
+        key = self._column_key(col)
+        if key is None:
+            return
+        menu = QMenu(self)
+        # 排序（ID 列与字段列都可排）
+        act_asc = QAction("升序", self)
+        act_asc.triggered.connect(lambda: self._sort_by_column(col, True))
+        menu.addAction(act_asc)
+        act_desc = QAction("降序", self)
+        act_desc.triggered.connect(lambda: self._sort_by_column(col, False))
+        menu.addAction(act_desc)
+        menu.addSeparator()
+        if key in self._frozen_keys:
+            act = QAction("取消冻结列", self)
+            act.triggered.connect(lambda: self._unfreeze_column(key))
+        else:
+            act = QAction("冻结列", self)
+            act.triggered.connect(lambda: self._freeze_column(key))
+        menu.addAction(act)
+        if self._frozen_keys:
+            menu.addSeparator()
+            act_all = QAction("取消全部冻结", self)
+            act_all.triggered.connect(self._unfreeze_all)
+            menu.addAction(act_all)
+        # ID 列没有对应字段：删除字段 / 字段计算器只对字段列开放
+        if key != _ID_COLUMN_KEY:
+            menu.addSeparator()
+            readonly = bool(self.model is not None and col in self.model.readonly_cols)
+            editing = bool(self.layer is not None and self.layer.isEditable())
+            act_del = QAction("删除字段", self)
+            act_del.triggered.connect(lambda: self._delete_field(key))
+            if readonly or editing:
+                # 只读字段 / 编辑状态下都不允许删除字段（置灰并给出原因）
+                act_del.setEnabled(False)
+                if editing:
+                    act_del.setToolTip("图层处于编辑状态，请先保存 / 停止编辑后再删除字段")
+                else:
+                    act_del.setToolTip("系统自维护 / 唯一标识字段，不允许删除")
+            menu.addAction(act_del)
+            act_calc = QAction("字段计算器", self)
+            act_calc.triggered.connect(lambda: self._open_field_calculator(key))
+            menu.addAction(act_calc)
+        menu.setToolTipsVisible(True)
+        menu.exec(header.viewport().mapToGlobal(position))
+
+    def _delete_field(self, name: str) -> None:
+        """列头菜单「删除字段」：确认后从图层删字段（与图层属性「字段」页同一逻辑）。"""
+        from app.ui.dialogs.layer_properties.fields import _delete_field_from_layer
+
+        if self.layer is None or not name:
+            return
+        # 系统自维护 / 唯一标识字段只读：不允许删除（菜单项已置灰，这里再兜一层）
+        col = self._column_of_key(name)
+        if col is not None and self.model is not None and col in self.model.readonly_cols:
+            QMessageBox.information(
+                self, "删除字段",
+                f"字段「{name}」为系统自维护 / 唯一标识字段，不允许删除。",
+            )
+            return
+        # 编辑状态不允许删除字段（先保存/停止编辑再改 schema）
+        if self.layer.isEditable():
+            QMessageBox.information(
+                self, "删除字段",
+                "图层处于编辑状态，请先保存 / 停止编辑后再删除字段。",
+            )
+            return
+        answer = QMessageBox.question(
+            self, "删除字段", f"确定从图层中删除字段「{name}」？该操作不可撤销。"
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            ok = _delete_field_from_layer(self.layer, name)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("删除字段失败: %s", exc, exc_info=True)
+            QMessageBox.warning(self, "删除字段", f"删除字段失败：{exc}")
+            return
+        if not ok:
+            QMessageBox.warning(
+                self, "删除字段",
+                f"删除字段「{name}」失败（provider 不支持或图层只读）",
+            )
+            return
+        # 字段没了：从冻结集合里摘掉，并让模型重读列定义（updatedFields 信号多半也会触发，
+        # 这里显式再刷一次，保证面板立即跟上）。
+        self._frozen_keys.discard(name)
+        if self.model is not None:
+            self.model.reload_fields()
+
+    def _open_field_calculator(self, name: str) -> None:
+        """列头菜单「字段计算器」：打开并默认切到「更新已有字段」= 该列字段。"""
+        from app.ui.dialogs.field_calculator import FieldCalculatorDialog
+
+        dlg = FieldCalculatorDialog(self.layer, self, initial_field=name)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        # 计算器可能启动了编辑 / 改了字段：同步按钮并刷新列与值
+        self._sync_edit_buttons()
+        if self.model is not None:
+            self.model.reload_fields()
 
     def _show_context_menu(self, position) -> None:
         from qgis.PyQt.QtGui import QAction
         from qgis.PyQt.QtWidgets import QMenu
         if not self.model:
             return
-        idx = self.table_view.indexAt(position)
+        # 主表 / 冻结视图共用本方法：按信号发出者取正确的视图与坐标系
+        view = self.sender()
+        if not isinstance(view, QAbstractItemView):
+            view = self.table_view
+        idx = view.indexAt(position)
         if not idx.isValid():
             return
         feature = self.model.feature_at(idx.row())
@@ -1977,7 +2339,7 @@ class PagedAttributeTableWidget(QWidget):
             delete = QAction("删除", self)
             delete.triggered.connect(lambda: self.layer.deleteFeature(fid=feature.id()))
             menu.addAction(delete)
-        menu.exec(self.table_view.viewport().mapToGlobal(position))
+        menu.exec(view.viewport().mapToGlobal(position))
 
 
 class AttributeDock(QDockWidget):

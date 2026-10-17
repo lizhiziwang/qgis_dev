@@ -65,7 +65,7 @@ _TYPE_OPTIONS = (
 class FieldCalculatorDialog(BaseDialog):
     """按表达式新建 / 更新字段（布局对齐 QGIS 字段计算器）。"""
 
-    def __init__(self, layer: QgsVectorLayer, parent=None) -> None:
+    def __init__(self, layer: QgsVectorLayer, parent=None, initial_field: str | None = None) -> None:
         super().__init__(parent, f"字段计算器 - {layer.name()}")
         self._layer = layer
         self._result_field: str | None = None
@@ -73,7 +73,10 @@ class FieldCalculatorDialog(BaseDialog):
         self.resize(820, 680)
 
         self._build()
-        self._on_new_toggled(True)
+        # 传入 initial_field（列头右键进入）→ 默认切到「更新已有字段」并选中该字段；
+        # 否则维持默认的「创建新字段」。
+        if not (initial_field and self._activate_update_field(initial_field)):
+            self._on_new_toggled(True)
 
     # ------------------------------------------------------------- 构建
 
@@ -240,6 +243,20 @@ class FieldCalculatorDialog(BaseDialog):
     def _set_subtree_enabled(group: QGroupBox, enabled: bool) -> None:
         for widget in group.findChildren(QWidget):
             widget.setEnabled(enabled)
+
+    def _activate_update_field(self, name: str) -> bool:
+        """打开时默认切到「更新已有字段」并选中 ``name``；字段不存在返回 ``False``。"""
+        index = self.update_combo.findText(name)
+        if index < 0:
+            return False
+        self.update_combo.setCurrentIndex(index)
+        # 用 _set_group_checked 绕开互斥回调，再手动同步两组的启用状态
+        self._set_group_checked("new", False)
+        self._set_group_checked("update", True)
+        self._set_subtree_enabled(self.new_group, False)
+        self._set_subtree_enabled(self.update_group, True)
+        self.virtual_check.setEnabled(False)
+        return True
 
     def _on_type_changed(self, index: int) -> None:
         data = self.type_combo.itemData(index)
