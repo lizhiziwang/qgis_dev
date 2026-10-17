@@ -49,6 +49,7 @@ from pathlib import Path
 
 from .config import LogConfig
 from .operation import attach_filter
+from .redaction import attach_redaction
 
 logger = logging.getLogger(__name__)
 
@@ -226,7 +227,7 @@ def _configure_crash_logger(path: Path, max_bytes: int, backup_count: int) -> lo
             _CRASH_FORMAT, datefmt=_CRASH_DATE_FORMAT, defaults={"op_id": "-"}
         )
     )
-    log.addHandler(attach_filter(handler))
+    log.addHandler(attach_redaction(attach_filter(handler)))
     return log
 
 

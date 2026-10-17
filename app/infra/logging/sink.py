@@ -10,16 +10,22 @@ from __future__ import annotations
 import logging
 import sys
 from logging.handlers import RotatingFileHandler
+from typing import ClassVar
 
 from .config import LogConfig
 from .formatter import HtmlLogFormatter
 from .operation import attach_filter
+from .redaction import attach_redaction
+from .session import reset as reset_session
 
 
 class _RootSink:
     """维护 Python root logger 上的 handlers。"""
 
     _configured: bool = False
+    #: 本类建出来的 handler。**只关这些**——root 上还可能有别人的 handler
+    #: （pytest 的 caplog 就是），关掉别人正在用的流会直接破坏调用方。
+    _handlers: ClassVar[list[logging.Handler]] = []
 
     @classmethod
     def configure(cls, config: LogConfig) -> None:
@@ -68,7 +74,11 @@ class _RootSink:
         )
 
         for handler in (console, all_file, error_file):
-            root.addHandler(attach_filter(handler))
+            # 编号注入（op=…）+ 凭据打码（tk=… / password=…）：见各自模块。
+            # 打码挂在这里而不是"导出诊断包时再抹"，是因为用户不一定按我们想的走
+            # ——他可能直接把 logs/app.log 拖给别人（见 app.infra.logging.redaction）。
+            root.addHandler(attach_redaction(attach_filter(handler)))
+        cls._handlers = [console, all_file, error_file]
 
         cls._configured = True
 
@@ -91,8 +101,23 @@ class _RootSink:
 
     @classmethod
     def reset(cls) -> None:
-        """测试用：解除装配标志并清空 handlers。"""
+        """测试用：解除装配标志并清空 handlers。
+
+        连会话日志一起拆（:mod:`app.infra.logging.session` 的 handler 也挂在 root
+        上）：root 上的东西被清空、而会话模块还记着"已装配"，它就会在下一次
+        :func:`~app.infra.logging.session.install` 时直接返回、**无声地不再记录**。
+
+        自己建的 handler 要 ``close()``（不关的话文件句柄悬着：Windows 上日志目录
+        删不掉，测试里表现为"清理失败"这种跟断言无关的怪错）。别人的 handler 只摘
+        不关——caplog 之类的记录器还要继续用那份流。
+        """
+        reset_session()
+
         root = logging.getLogger()
-        for h in list(root.handlers):
-            root.removeHandler(h)
+        for handler in cls._handlers:
+            root.removeHandler(handler)
+            handler.close()
+        cls._handlers = []
+        for handler in list(root.handlers):
+            root.removeHandler(handler)
         cls._configured = False

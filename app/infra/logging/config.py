@@ -58,6 +58,14 @@ class LogConfig:
     crash_max_bytes: int = 5 * 1024 * 1024
     crash_backup_count: int = 3
 
+    #: 会话日志（``logs/session/``，见 :mod:`app.infra.logging.session`）：一次运行
+    #: 一对文件（纯文本 + JSONL）。上限比 ``app.log`` 小——它是给用户回传用的，
+    #: 长跑一整天也不该在便携包里堆出几百 MB；``session_keep`` 是**保留几次会话**
+    #: （每次启动清一次旧的，轮转出来的 ``.1`` 备份跟着主文件一起算一次会话）。
+    session_max_bytes: int = 5 * 1024 * 1024
+    session_backup_count: int = 1
+    session_keep: int = 5
+
     @classmethod
     def from_env(cls) -> "LogConfig":
         """根据环境变量生成配置覆盖项。"""

@@ -17,8 +17,8 @@ traceback 往往只说到"processing 返回了失败"，看不出输入本身就
   QGIS 消息日志、Qt 消息、崩溃 hook 打出来的**所有**行都带同一个 ``op=N``，出了事
   按编号整段捞出来即可，不会被其它并行动作的行插花。
 - **快照必须先打码**：图层 ``source()`` 里可能带业务 key（XYZ 底图 URL 的 ``tk=``），
-  目标库 dict 里可能带密码。:func:`_redact` / :data:`_SECRET_KEYS` 负责把值里的
-  ``tk=…`` 和键名是 password/token 的项换成 ``***``——**日志是会被回传的文件**。
+  目标库 dict 里可能带密码。键名表与正则都在 :mod:`app.infra.logging.redaction` 里
+  ——诊断包导出用的是同一份，免得两边各补一半、从缝里漏凭据——**日志是会被回传的文件**。
 - 快照本身绝不能拖慢或拖垮操作：单个值有长度上限，取不到的属性退化成 ``?``，
   任何内部异常都吞掉退化成 ``<类型名 记录失败>``。
 
@@ -33,13 +33,14 @@ import functools
 import inspect
 import itertools
 import logging
-import re
 import time
 from collections.abc import Callable, Iterator
 from contextvars import ContextVar
 from dataclasses import fields, is_dataclass
 from pathlib import Path
 from typing import Any
+
+from .redaction import REDACTED, is_secret_key, redact
 
 logger = logging.getLogger(__name__)
 
@@ -53,21 +54,17 @@ _op_id: ContextVar[str] = ContextVar("qgis_dev_op_id", default="-")
 #: 快照里忽略的形参名：``feedback`` 是 QgsProcessingFeedback，repr 只是一串地址
 _SKIP_PARAMS = frozenset({"self", "cls", "feedback"})
 
-#: 长度上限：单个值 / 容器与 dataclass 里的每项 / 整条快照
+#: 长度上限：单个值 / 容器与 dataclass 里的每项 / 整条快照 / dataclass 与 dict。
+#: 嵌套上限放到 120：图层的完整描述（名字 / provider / 几何 / 坐标系 / 字段数 /
+#: 源路径）就是六七十个字符，卡在 60 会把坐标系和字段数切掉——而那两项恰恰是
+#: 排查"为什么写不进去"的关键。
+#: dataclass 单独给 500：``BufferJob`` / ``CreateDataSpec`` 这种参数包是**唯一**
+#: 说明"用户选了什么"的载体，实测按 200 卡会把尾部的 ``output_path`` 切掉——
+#: 而"结果写到哪"正是失败时要看的。
 _MAX_VALUE = 200
-_MAX_NESTED = 60
+_MAX_NESTED = 120
 _MAX_TOTAL = 900
-
-#: 键名命中即整项打码（dict / dataclass 里以键出现，如目标库连接信息里的密码）
-_SECRET_KEYS = frozenset(
-    {"tk", "token", "access_token", "password", "passwd", "pwd", "secret", "api_key", "apikey"}
-)
-
-#: 值里以 ``k=v`` 形式出现的凭据（XYZ 底图 source 里的 ``&tk=…`` 就是这么进来的）
-_SECRET_RE = re.compile(
-    r"(?i)\b(tk|token|access_?token|password|passwd|pwd|secret|api_?key)=([^&\s;,'\"]+)"
-)
-_REDACTED = "***"
+_MAX_STRUCT = 500
 
 
 def current_op_id() -> str:
@@ -128,7 +125,7 @@ def log_operation(name: str) -> Callable:
                 logger.info("OP %s 开始 %s | %s", op_id, name, snapshot)
                 try:
                     result = fn(*args, **kwargs)
-                except Exception as exc:  # noqa: BLE001 —— 记完就原样抛
+                except Exception as exc:  # 记完就原样抛，所以不算"盲捕"
                     logger.error(
                         "OP %s 失败 %s 耗时 %d ms | %s | %s: %s",
                         op_id,
@@ -205,9 +202,16 @@ def _snapshot(inputs: dict[str, Any]) -> str:
 def _describe(value: Any) -> str:
     """一个实参 → 短文本（打码 + 截断）。**任何失败都不抛**。"""
     try:
-        return _redact(_inner(value, _MAX_VALUE))
+        return redact(_inner(value, _budget(value)))
     except Exception:  # noqa: BLE001 —— 记入参绝不能影响操作本身
         return f"<{type(value).__name__} 记录失败>"
+
+
+def _budget(value: Any) -> int:
+    """整段渲染的字符额度：参数包（dataclass / dict）给宽一点，单个值 200 够。"""
+    if isinstance(value, dict) or (is_dataclass(value) and not isinstance(value, type)):
+        return _MAX_STRUCT
+    return _MAX_VALUE
 
 
 def _inner(value: Any, limit: int) -> str:
@@ -232,18 +236,20 @@ def _inner(value: Any, limit: int) -> str:
 
 
 def _describe_layer(layer: Any) -> str:
-    """``图层<名称> source=… provider=… 几何=… crs=… 字段=N``，取不到的项写 ``?``。"""
+    """``图层<名称> provider/几何/坐标系/字段N source=…``，取不到的项写 ``?``。
+
+    故意紧凑：图层通常是被嵌在 job dataclass 里记的，太长会被外层截断，而
+    "哪个文件 / 什么几何 / 什么坐标系 / 几个字段"是最该保住的部分。
+    """
     crs = _call(layer, "crs")
     fields = _call(layer, "fields")
-    bits = (
-        f"图层<{_call(layer, 'name') or '?'}>",
-        f"source={_call(layer, 'source') or '?'}",
-        f"provider={_call(layer, 'providerType') or '?'}",
-        f"几何={_enum_name(_call(layer, 'wkbType'))}",
-        f"crs={_crs_authid(crs)}",
-        f"字段={len(fields) if fields is not None else '?'}",
+    where = _call(layer, "providerType") or "?"
+    shape = _enum_name(_call(layer, "wkbType"))
+    count = len(fields) if fields is not None else "?"
+    return (
+        f"图层<{_call(layer, 'name') or '?'}> {where}/{shape}/{_crs_authid(crs)}/字段{count} "
+        f"source={_call(layer, 'source') or '?'}"
     )
-    return " ".join(bits)
 
 
 def _describe_crs(crs: Any) -> str:
@@ -258,10 +264,10 @@ def _describe_dataclass(obj: Any) -> str:
 
 
 def _describe_pairs(items: Any) -> str:
-    """dict → ``{键=值, …}``；键名命中 :data:`_SECRET_KEYS` 的值整项打码。"""
+    """dict → ``{键=值, …}``；键名命中凭据表的（严格匹配）值整项打码。"""
     parts = []
     for key, value in items:
-        text = _REDACTED if str(key).lower() in _SECRET_KEYS else _field(value)
+        text = REDACTED if is_secret_key(key) else _field(value)
         parts.append(f"{key}={text}")
     return "{" + ", ".join(parts) + "}"
 
@@ -304,11 +310,6 @@ def _call(obj: Any, name: str) -> Any:
 
 def _cut(text: str, limit: int) -> str:
     return text if len(text) <= limit else f"{text[:limit]}…(+{len(text) - limit})"
-
-
-def _redact(text: str) -> str:
-    """把值里的 ``tk=…`` / ``token=…`` 打成 ``***``。"""
-    return _SECRET_RE.sub(rf"\1={_REDACTED}", text)
 
 
 __all__ = [

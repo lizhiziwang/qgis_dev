@@ -12,17 +12,33 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-def copy_with_widened_string_fields(layer: "QgsVectorLayer") -> "QgsVectorLayer":
+def _maximum_string_length(layer: QgsVectorLayer, field_name: str):
+    """返回 ``(最大字符串长度, 是否成功)``；失败时调用方退回声明长度。"""
+    from qgis.core import QgsAggregateCalculator
+
+    try:
+        return layer.aggregate(
+            QgsAggregateCalculator.Aggregate.StringMaximumLength, field_name
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("聚合取字段 %s 最大长度失败: %s", field_name, exc)
+        return None, False
+
+
+def copy_with_widened_string_fields(layer: QgsVectorLayer) -> QgsVectorLayer:
     """把 String 字段长度放宽到实际最大值，返回修正后的临时图层。
 
     GDB/ArcGIS 导出的图层常有「字段声明长度 < 实际数据长度」的脏数据：
     短代码字段（如 XIANG 声明 3）里存了字面量 ``'NULL'``（4 字符）。
     QGIS memory provider 严格校验字符串长度，超长值在 sink 写入时被拒绝，
-    导致 ``native:buffer`` / 叠加算法报「无法将要素写入 OUTPUT」。此函数扫描一遍数据，
-    把超长字段的长度放宽到实际最大值，并拷贝成临时 memory 图层；
-    无需修正时原样返回，不产生额外开销。
+    导致 ``native:buffer`` / 叠加算法报「无法将要素写入 OUTPUT」。此函数扫描
+    字段实际最大长度（C++ 聚合，不逐要素进 Python），把超长字段放宽后拷贝成
+    临时 memory 图层；无需修正时原样返回，不产生额外开销。声明长度 0 表示
+    无上限（GeoJSON 等），不在修正范围内。
+
+    注意：数据本身有超长值时仍需逐要素拷贝一次（字段声明不可原地修改），
+    这一步在主线程完成；干净数据只做聚合扫描，不会创建图层。
     """
-    from qgis.PyQt.QtCore import QVariant
     from qgis.core import (
         Qgis,
         QgsFeature,
@@ -31,21 +47,25 @@ def copy_with_widened_string_fields(layer: "QgsVectorLayer") -> "QgsVectorLayer"
         QgsVectorLayer,
         QgsWkbTypes,
     )
+    from qgis.PyQt.QtCore import QVariant
 
     try:
         fields = layer.fields()
-        string_fields = [fd for fd in fields if fd.type() == QVariant.String]
+        # 声明长度 0 = 无上限（GeoJSON / 部分 GPKG 等），memory provider 不会
+        # 拒绝长值，无需扫描，更不能为此整层拷贝（大图层会卡住主线程）。
+        string_fields = [
+            fd for fd in fields if fd.type() == QVariant.String and fd.length() > 0
+        ]
         if not string_fields:
             return layer
-        # 扫描一遍，取每个字符串字段的实际最大长度
+        # 取每个字符串字段的实际最大长度。用 QgsAggregateCalculator（C++ 计算，
+        # 数据库源还可能下推成 SQL）而不是 Python 逐要素循环：这一步在异步路径里
+        # 仍跑在主线程，逐要素 Python 会把大图层的 UI 卡住数秒。
         max_lengths = {fd.name(): fd.length() for fd in string_fields}
-        for feature in layer.getFeatures():
-            for name in max_lengths:
-                value = feature.attribute(name)
-                if value is not None and value != "":
-                    actual = len(str(value))
-                    if actual > max_lengths[name]:
-                        max_lengths[name] = actual
+        for name in max_lengths:
+            value, ok = _maximum_string_length(layer, name)
+            if ok and value is not None and int(value) > max_lengths[name]:
+                max_lengths[name] = int(value)
         widened = {
             name
             for name, length in max_lengths.items()
@@ -89,7 +109,7 @@ def copy_with_widened_string_fields(layer: "QgsVectorLayer") -> "QgsVectorLayer"
             {name: max_lengths[name] for name in widened},
         )
         return cleaned
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.warning("字段长度修正扫描失败，退回原图层: %s", exc, exc_info=True)
         return layer
 

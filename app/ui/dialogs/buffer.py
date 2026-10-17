@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 
+from qgis.core import QgsApplication, QgsMapLayer, QgsProject
 from qgis.PyQt.QtCore import QTimer
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
@@ -21,8 +22,6 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from qgis.core import QgsMapLayer, QgsProject
-
 from app.core.domain.buffer import BufferJob, BufferService
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
@@ -33,7 +32,12 @@ logger = get_logger(__name__)
 
 
 class BufferDialog(BaseDialog):
-    """矢量缓冲区生成 Dialog（同步执行）。"""
+    """矢量缓冲区生成 Dialog。
+
+    算法在后台线程执行（``QgsProcessingAlgRunnerTask``，与 QGIS processing
+    对话框同一机制）：主线程事件循环不阻塞，进度经 ``progress_updated`` 信号
+    回主线程更新进度条；可随时取消。
+    """
 
     #: native:buffer 的样式枚举中文名，索引即算法取值（0 圆 / 1 平 / 2 方 等）
     _END_CAP_LABELS = ("圆", "平", "方")
@@ -57,6 +61,15 @@ class BufferDialog(BaseDialog):
         self.setMinimumSize(760, 520)
         self.project = QgsProject.instance()
         self.buffer_service = BufferService()
+        #: 当前后台任务及其上下文 / 反馈。任务结束后 ``_task`` 立即置 None；
+        #: context / feedback 继续保留（QgsProcessingAlgRunnerTask 内部保存的是
+        #: 裸指针，任务收尾阶段仍会使用），下次执行时被新实例覆盖。
+        self._task = None
+        self._context = None
+        self._feedback = None
+        self._job: BufferJob | None = None
+        #: 最近一条 ERROR 级算法日志（任务失败时展示到 messagebar）
+        self._last_error = ""
         self._init_ui()
 
     def _init_ui(self) -> None:
@@ -79,10 +92,10 @@ class BufferDialog(BaseDialog):
         self.loading = QProgressBar()
         self.loading.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         self.loading.setRange(0, 100)
-        # 重要：不要 connect feedback.progressChanged → setValue。实测这套环境里
+        # 进度来自后台任务的 progress_updated 信号（普通 Python 方法转信号）。
+        # 重要：不要 connect feedback.progressChanged → setValue——实测这套环境里
         # progressChanged 无论直连还是 QueuedConnection 路由到控件槽都会原生崩溃
-        # （0xC0000409，无 Python 异常）：直连崩在 processing.run 原生栈里，排队崩
-        # 在投递时。进度条改为手动置 0 → 完成置 100。
+        # （0xC0000409，无 Python 异常），故统一走 AlgRunnerTask 的 int 信号。
         b_l.addWidget(self.loading, stretch=2)
 
         bottom = QHBoxLayout()
@@ -90,6 +103,10 @@ class BufferDialog(BaseDialog):
         self.execute_btn = QPushButton("执行")
         self.execute_btn.clicked.connect(self._on_execute)
         bottom.addWidget(self.execute_btn)
+        self.cancel_btn = QPushButton("取消")
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.clicked.connect(self._on_cancel)
+        bottom.addWidget(self.cancel_btn)
         close = QPushButton("关闭")
         close.clicked.connect(self.close)
         bottom.addWidget(close)
@@ -212,35 +229,139 @@ class BufferDialog(BaseDialog):
             output_path=self.output_path_edit.text().strip() or None,
         )
 
-        # 不能留在 clicked 信号栈里同步跑 processing.run + addMapLayer + refresh：
-        # 仓库记录过的原生崩溃机制（见 main_window._remove_layer 注释）——Qt 信号
-        # 回调里重入原生渲染 → 0xC0000409 进程崩溃且无 Python 异常可记日志。
-        # 统一推迟到事件栈外（QTimer.singleShot），与仓库既定修法一致。
+        # 不在 clicked 信号栈里创建临时图层 / 启动任务（仓库记录过的原生崩溃
+        # 机制，见 main_window._remove_layer 注释）；统一推迟到事件栈外。
         self.execute_btn.setEnabled(False)
+        self.cancel_btn.setEnabled(False)
         self.loading.setValue(0)
-        QTimer.singleShot(0, lambda: self._run(job))
+        self._last_error = ""
+        QTimer.singleShot(0, lambda: self._start_task(job))
 
-    def _run(self, job: BufferJob) -> None:
-        """事件栈外真正执行缓冲区（不在任何 Qt 信号回调栈里）。"""
-        self.loading.setValue(0)
+    # ------------------------------------------------------ 后台任务
+
+    def _start_task(self, job: BufferJob) -> None:
+        """事件栈外准备参数并启动后台任务（不在任何 Qt 信号回调栈里）。"""
         try:
-            # 不传 feedback：服务内部自建空 QgsProcessingFeedback，进度信号不接任何
-            # 槽（接控件槽即原生崩溃，见 _init_ui 注释）
-            result = self.buffer_service.run(job)
-        except Exception as exc:  # noqa: BLE001
-            logger.error("缓冲区生成失败: %s", exc, exc_info=True)
+            task, context, feedback = self.buffer_service.build_task(job)
+        except Exception as exc:
+            logger.error("缓冲区任务准备失败: %s", exc, exc_info=True)
+            self.execute_btn.setEnabled(True)
+            send("critical", f"缓冲区生成失败：{exc}", duration=5)
+            return
+
+        # context / feedback 必须持有到任务结束（task 内部是裸指针，被 GC 会悬垂）
+        self._task = task
+        self._context = context
+        self._feedback = feedback
+        self._job = job
+        task.progress_updated.connect(self._on_task_progress)
+        # executed(successful, results) 在主线程回调里装配结果
+        task.executed.connect(self._on_task_executed)
+        # 取消 / 异常终止时 executed 可能不发，用 taskTerminated 兜底复位按钮
+        task.taskTerminated.connect(self._on_task_terminated)
+        # 算法日志（worker 线程发出）跨线程投递到普通 Python 方法（安全）
+        feedback.log_line.connect(self._on_alg_log)
+        self.cancel_btn.setEnabled(True)
+        self.cancel_btn.setText("取消")
+        QgsApplication.taskManager().addTask(task)
+
+    def _on_task_progress(self, value: int) -> None:
+        """worker 线程进度跨线程投递到这里（普通 Python 方法，投递安全）。"""
+        self.loading.setValue(int(value))
+
+    def _on_alg_log(self, level: str, message: str) -> None:
+        """worker 线程算法日志跨线程投递到这里；ERROR 留作失败提示。"""
+        if level == "ERROR":
+            self._last_error = message
+        if level in ("ERROR", "WARNING"):
+            logger.warning("[%s] %s", level, message)
+        else:
+            logger.debug("[%s] %s", level, message)
+
+    def _on_task_executed(self, ok: bool, results: dict) -> None:
+        """后台任务结束（``executed``，主线程回调）。
+
+        先快照再复位：任务随时可能被 ``QgsTaskManager`` 删除，不能再访问任务
+        成员；context / feedback 继续保留到下次执行（任务收尾阶段仍会用到）。
+        """
+        if self._task is None:
+            return  # 已由 _on_task_terminated 处理（取消 / 异常终止）
+        job = self._job
+        context = self._context
+        feedback = self._feedback
+        error = self._last_error
+        self._reset_task_ui()
+        if job is None:
+            return
+
+        if feedback is not None and feedback.isCanceled():
+            self.loading.setValue(0)
+            send("warning", "已取消缓冲区生成", duration=3)
+            return
+        if not ok or bool(getattr(feedback, "failed", False)):
+            self.loading.setValue(0)
+            detail = f"：{error}" if error else ""
+            logger.error("缓冲区生成失败%s", detail)
+            send("critical", f"缓冲区生成失败{detail}", duration=5)
+            return
+
+        try:
+            result = self.buffer_service.finish(job, context, results or {})
+        except Exception as exc:
+            logger.error("缓冲区结果装配失败: %s", exc, exc_info=True)
             self.loading.setValue(0)
             send("critical", f"缓冲区生成失败：{exc}", duration=5)
             return
-        finally:
-            self.execute_btn.setEnabled(True)
 
-        # 结果加入工程（已出信号栈）；画布刷新再推迟一拍，等 layersAdded 信号链走完
-        self.project.addMapLayer(result)
         self.loading.setValue(100)
+        # 结果加入工程；画布刷新再推迟一拍，等 layersAdded 信号链走完
+        self.project.addMapLayer(result)
         dest = f" → {job.output_path}" if job.output_path else ""
         send("success", f"缓冲区生成完成：{result.featureCount()} 个要素{dest}", duration=3)
         QTimer.singleShot(0, self._refresh_canvas)
+
+    def _on_task_terminated(self) -> None:
+        """任务异常终止 / 取消（``executed`` 未送达时的兜底）。"""
+        if self._task is None:
+            return  # 已由 _on_task_executed 处理
+        feedback = self._feedback
+        error = self._last_error
+        self._reset_task_ui()
+        self.loading.setValue(0)
+        if feedback is not None and feedback.isCanceled():
+            send("warning", "已取消缓冲区生成", duration=3)
+            return
+        detail = f"：{error}" if error else ""
+        logger.error("缓冲区生成失败%s", detail)
+        send("critical", f"缓冲区生成失败{detail}", duration=5)
+
+    def _reset_task_ui(self) -> None:
+        """复位「执行中」状态（按钮 / 任务引用），保留 context / feedback。"""
+        self._task = None
+        self._job = None
+        self._last_error = ""
+        self.execute_btn.setEnabled(True)
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setText("取消")
+
+    def _on_cancel(self) -> None:
+        """请求取消后台任务（转发到 ``feedback.cancel()``，算法尽早停止）。"""
+        task = self._task
+        if task is None:
+            return
+        try:
+            task.cancel()
+        except RuntimeError:
+            # 任务已完成，C++ 对象已被 QgsTaskManager 删除
+            self._task = None
+            return
+        self.cancel_btn.setEnabled(False)
+        self.cancel_btn.setText("取消中…")
+
+    def closeEvent(self, event) -> None:
+        """关闭对话框时取消在跑的后台任务（实例被工具树复用）。"""
+        self._on_cancel()
+        super().closeEvent(event)
 
     def _refresh_canvas(self) -> None:
         canvas = self.parent().canvas if self.parent() and hasattr(self.parent(), "canvas") else None

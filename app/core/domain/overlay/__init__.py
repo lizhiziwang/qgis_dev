@@ -2,6 +2,6 @@
 
 from __future__ import annotations
 
-from .service import OPERATION_NAMES, OverlayJob, OverlayService
+from .service import OPERATION_NAMES, OverlayJob, OverlayRun, OverlayService
 
-__all__ = ["OPERATION_NAMES", "OverlayJob", "OverlayService"]
+__all__ = ["OPERATION_NAMES", "OverlayJob", "OverlayRun", "OverlayService"]
