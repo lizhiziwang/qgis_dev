@@ -12,10 +12,11 @@
 
 控件布局与 QGIS 表达式构建器一致——一行三栏 + 底部预览：
 
-- 左栏：表达式编辑框（自建 :class:`CodeEditor`，等宽 + 语法高亮 + 行号 + 补全）；
-- 中栏：``QTreeWidget``（窄）：字段与值 / 运算符 / 函数（按 ``group`` 归类）/
-  特殊变量，**双击叶子节点**把对应文本插入编辑框（函数插入 ``name()`` 且光标
-  停在括号内）；
+- 左栏：表达式编辑框（自建 :class:`CodeEditor`，等宽 + 语法高亮 + 行号 + 补全），
+  下方一排运算符按钮，点击即插入光标处；
+- 中栏：``QTreeWidget``（窄）：字段与值 / 函数（按 ``group`` 归类）/ 特殊变量，
+  **双击叶子节点**把对应文本插入编辑框（函数插入 ``name()`` 且光标停在括号内）。
+  字段节点按需加载去重值（最多 50 个），双击值插入其字面量；
 - 右栏：``QTextBrowser``：显示当前选中项的帮助，函数帮助直接渲染
   ``QgsExpressionFunction.helpText()`` 返回的 HTML；
 - 底部：实时预览，用图层首个要素求值，解析 / 求值出错就地标红。
@@ -34,8 +35,10 @@ from qgis.PyQt.QtCore import QRegularExpression, Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QSyntaxHighlighter, QTextCharFormat, QTextCursor
 from qgis.PyQt.QtWidgets import (
     QDialogButtonBox,
+    QGridLayout,
     QLabel,
     QMessageBox,
+    QPushButton,
     QSplitter,
     QTabWidget,
     QTextBrowser,
@@ -57,6 +60,9 @@ logger = get_logger(__name__)
 _BARE_FIELD_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _TAG_RE = re.compile(r"<[^>]+>")
 
+#: 字段值列表最多列出的去重值数量（与属性查询器的采样值同一量级）
+_FIELD_VALUE_LIMIT = 50
+
 #: 运算符（插入时两边留空格，便于继续拼）
 _OPERATORS = (
     " + ",
@@ -74,14 +80,14 @@ _OPERATORS = (
     " >= ",
     " AND ",
     " OR ",
-    " NOT ",
     " || ",
     " LIKE ",
     " ILIKE ",
     " IN ",
-    " IS NULL ",
-    " IS NOT NULL ",
     " BETWEEN ",
+    " IS ",
+    " NOT ",
+    " NULL ",
 )
 
 #: 常用特殊变量 / 常量
@@ -207,15 +213,54 @@ def _quote_field(name: str) -> str:
     return '"' + name.replace('"', '""') + '"'
 
 
+def _value_text(value) -> str:
+    """字段值在树里的显示文本（过长截断）。"""
+    if value is None:
+        return "NULL"
+    text = str(value)
+    return text if len(text) <= 80 else text[:77] + "…"
+
+
+def _value_literal(value) -> str:
+    """字段值 → 可插入表达式的字面量。"""
+    if value is None:
+        return "NULL"
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    if isinstance(value, str):
+        return "'" + value.replace("'", "''") + "'"
+    # 日期 / 时间值（QDate / QDateTime / QTime）用 ISO 文本 + 单引号
+    to_string = getattr(value, "toString", None)
+    if callable(to_string):
+        try:
+            text = to_string(Qt.DateFormat.ISODate)
+        except Exception:  # noqa: BLE001
+            text = ""
+        if text:
+            return "'" + text.replace("'", "''") + "'"
+    return str(value)
+
+
+def _sorted_values(values) -> list:
+    """字段去重值排序：纯数字按数值序，其余按显示文本（短值优先）。"""
+    values = list(values)
+    numbers = [v for v in values if isinstance(v, int | float) and not isinstance(v, bool)]
+    if values and len(numbers) == len(values):
+        return sorted(values)
+    return sorted(values, key=lambda v: (len(_value_text(v)), _value_text(v)))
+
+
 class ExpressionBuilderWidget(QWidget):
     """表达式构建器本体（可内嵌，字段计算器的表达式区就用它）。"""
 
     #: 表达式有效性变化（True = 当前表达式可求值）。宿主据此启用/禁用「确定」。
     validation_changed = pyqtSignal(bool)
 
-    def __init__(self, layer=None, parent=None) -> None:
+    def __init__(self, layer=None, parent=None, *, show_field_values: bool = True) -> None:
         super().__init__(parent)
         self._layer = layer
+        #: 字段节点是否加载并展示去重值（字段计算器里关闭，避免无谓的全表取值）
+        self._show_field_values = bool(show_field_values)
         #: 当前表达式是否有效（空 / 语法错误 / 求值错误均为 False）
         self._valid = False
         #: 预览用的首个要素（惰性取一次）
@@ -273,13 +318,14 @@ class ExpressionBuilderWidget(QWidget):
         self.expr_edit.setMinimumHeight(120)
         self._highlighter = _ExpressionHighlighter(self.expr_edit.document())
         self.expr_edit.textChanged.connect(self._preview_timer.start)
-        splitter.addWidget(make_pane("表达式", self.expr_edit))
+        splitter.addWidget(self._build_expression_pane(page))
 
         self.tree = QTreeWidget(page)
         self.tree.setHeaderHidden(True)
         self.tree.setMinimumWidth(120)
         self.tree.itemDoubleClicked.connect(self._on_double_clicked)
         self.tree.currentItemChanged.connect(self._on_current_changed)
+        self.tree.itemExpanded.connect(self._on_item_expanded)
         splitter.addWidget(make_pane("字段与函数", self.tree))
 
         self.help_view = QTextBrowser(page)
@@ -304,6 +350,49 @@ class ExpressionBuilderWidget(QWidget):
         root.addWidget(self.preview_label)
         return page
 
+    def _build_expression_pane(self, parent) -> QWidget:
+        """左栏：表达式编辑框 + 下方运算符按钮。"""
+        pane = QWidget(parent)
+        layout = QVBoxLayout(pane)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        layout.addWidget(QLabel("表达式", pane))
+        layout.addWidget(self.expr_edit, 1)
+        layout.addWidget(self._build_operator_bar(pane))
+        return pane
+
+    def _build_operator_bar(self, parent) -> QWidget:
+        """表达式框下方的运算符按钮（点击插入光标处；树里不再单列运算符）。"""
+        box = QWidget(parent)
+        layout = QVBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        title = QLabel("运算符", box)
+        title.setObjectName("PropHint")
+        layout.addWidget(title)
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(4)
+        grid.setVerticalSpacing(4)
+        for i, op in enumerate(_OPERATORS):
+            text = op.strip()
+            button = QPushButton(text, box)
+            button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            button.setMinimumHeight(24)
+            button.setToolTip(f"插入 {text}")
+            button.clicked.connect(
+                lambda _checked=False, insert=op: self._insert_operator(insert)
+            )
+            row, col = divmod(i, 5)
+            grid.addWidget(button, row, col)
+        layout.addLayout(grid)
+        return box
+
+    def _insert_operator(self, text: str) -> None:
+        self.expr_edit.insertPlainText(text)
+        self.expr_edit.setFocus()
+        self._preview_timer.start()
+
     def _on_tab_changed(self, index: int) -> None:
         # 切回「表达式」时刷新函数树 / 补全（函数编辑器里可能刚加了函数）
         if index == 0:
@@ -321,40 +410,43 @@ class ExpressionBuilderWidget(QWidget):
                 fld = fields.at(i)
                 name = fld.name()
                 words.append(name)
+                help_html = (
+                    f"<p><b>{html.escape(name)}</b></p>"
+                    f"<p>类型：{html.escape(fld.typeName())}"
+                    + (
+                        f"<br>别名：{html.escape(field_alias(fld))}"
+                        if field_alias(fld)
+                        else ""
+                    )
+                    + "</p>"
+                )
+                if self._show_field_values:
+                    help_html += (
+                        f"<p>展开该字段可查看字段值（最多 {_FIELD_VALUE_LIMIT} 个），"
+                        "双击值即可插入表达式。</p>"
+                    )
                 item = QTreeWidgetItem([name])
                 item.setData(
                     0,
                     Qt.ItemDataRole.UserRole,
                     {
                         "kind": "field",
+                        "field": name,
                         "insert": _quote_field(name),
-                        "help": (
-                            f"<p><b>{html.escape(name)}</b></p>"
-                            f"<p>类型：{html.escape(fld.typeName())}"
-                            + (
-                                f"<br>别名：{html.escape(field_alias(fld))}"
-                                if field_alias(fld)
-                                else ""
-                            )
-                            + "</p>"
-                        ),
+                        "help": help_html,
                     },
                 )
                 item.setToolTip(0, f"{name} ({fld.typeName()})")
+                if self._show_field_values:
+                    placeholder = QTreeWidgetItem(["（展开查看字段值）"])
+                    placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
+                    placeholder.setData(
+                        0, Qt.ItemDataRole.UserRole, {"kind": "placeholder"}
+                    )
+                    item.addChild(placeholder)
                 fields_root.addChild(item)
         self.tree.addTopLevelItem(fields_root)
         fields_root.setExpanded(True)
-
-        ops_root = QTreeWidgetItem(["运算符"])
-        for op in _OPERATORS:
-            item = QTreeWidgetItem([op.strip()])
-            item.setData(
-                0,
-                Qt.ItemDataRole.UserRole,
-                {"kind": "operator", "insert": op, "help": f"<p>运算符 <b>{op.strip()}</b></p>"},
-            )
-            ops_root.addChild(item)
-        self.tree.addTopLevelItem(ops_root)
 
         self._functions_root = QTreeWidgetItem(["函数"])
         groups: dict[str, list] = {}
@@ -425,10 +517,80 @@ class ExpressionBuilderWidget(QWidget):
 
     def _on_current_changed(self, current, _previous) -> None:
         info = self._info(current)
+        if info and info.get("kind") == "field" and self._show_field_values:
+            self._load_field_values(current, info)
+            current.setExpanded(True)
         if info and info.get("help"):
             self.help_view.setHtml(info["help"])
         else:
             self.help_view.setHtml(_DEFAULT_HELP)
+
+    def _on_item_expanded(self, item) -> None:
+        info = self._info(item)
+        if info and info.get("kind") == "field" and self._show_field_values:
+            self._load_field_values(item, info)
+
+    def _load_field_values(self, item, info) -> None:
+        """把字段的去重值按需填进字段节点（只加载一次，最多 ``_FIELD_VALUE_LIMIT`` 个）。"""
+        if not self._show_field_values or item.childCount() != 1:
+            return
+        placeholder = self._info(item.child(0))
+        if not placeholder or placeholder.get("kind") != "placeholder":
+            return
+        name = info.get("field") or item.text(0)
+        values, truncated, error = self._read_field_values(name)
+        item.takeChildren()
+        if error:
+            self._add_field_value_message(item, f"（读取字段值失败：{error}）")
+            return
+        if not values:
+            self._add_field_value_message(item, "（该字段没有可用值）")
+            return
+        for value in values:
+            text = _value_text(value)
+            child = QTreeWidgetItem([text])
+            child.setData(
+                0,
+                Qt.ItemDataRole.UserRole,
+                {
+                    "kind": "value",
+                    "insert": _value_literal(value),
+                    "help": (
+                        f"<p><b>{html.escape(_quote_field(name))}</b> 的值</p>"
+                        f"<p>{html.escape(text)}</p>"
+                        "<p>双击插入表达式。</p>"
+                    ),
+                },
+            )
+            child.setToolTip(0, text)
+            item.addChild(child)
+        if truncated:
+            self._add_field_value_message(
+                item, f"（仅显示前 {_FIELD_VALUE_LIMIT} 个值）"
+            )
+
+    @staticmethod
+    def _add_field_value_message(item, text: str) -> None:
+        child = QTreeWidgetItem([text])
+        child.setFlags(Qt.ItemFlag.NoItemFlags)
+        child.setData(0, Qt.ItemDataRole.UserRole, {"kind": "message"})
+        item.addChild(child)
+
+    def _read_field_values(self, name: str) -> tuple[list, bool, str | None]:
+        if self._layer is None:
+            return [], False, "未指定图层"
+        try:
+            index = self._layer.fields().indexOf(name)
+            if index < 0:
+                return [], False, "字段不存在"
+            values = list(self._layer.uniqueValues(index, _FIELD_VALUE_LIMIT + 1))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("读取字段「%s」的值失败: %s", name, exc)
+            return [], False, str(exc)
+        truncated = len(values) > _FIELD_VALUE_LIMIT
+        if truncated:
+            values = values[:_FIELD_VALUE_LIMIT]
+        return _sorted_values(values), truncated, None
 
     # ------------------------------------------------------------- 预览
 

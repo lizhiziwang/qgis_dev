@@ -391,6 +391,9 @@ class PagedAttributeTableModel(QAbstractTableModel):
         # 字段**别名**变化只发 layerModified（实测 setFieldAlias 不发 updatedFields），
         # 且字段名没变 → 不能走 reload_fields。这里只刷新列头文字（见 _on_layer_modified）。
         layer.layerModified.connect(self._on_layer_modified)
+        # 图层显示条件（subsetString，含「图层属性 → 条件」页 / 属性查询器）变了 →
+        # 按新条件重流。不接这个信号的话，已打开的属性表仍显示旧条件的数据。
+        layer.subsetStringChanged.connect(self._on_subset_string_changed)
         # 删 / 增要素也要让表跟上：**不接 featureDeleted 的话，编辑时右键「删除」只改了
         # 编辑缓冲，表格还显示那一行** —— 用户看到的就是"删除没有效果"（用户报的）。
         layer.featureDeleted.connect(self._on_feature_deleted)
@@ -451,6 +454,10 @@ class PagedAttributeTableModel(QAbstractTableModel):
             return
         self.header_names = headers
         self.headerDataChanged.emit(Qt.Orientation.Horizontal, 0, self.columnCount() - 1)
+
+    def _on_subset_string_changed(self, *_args) -> None:
+        """图层显示条件变了 → 清掉当前结果，按新条件重新流式加载。"""
+        self._reset_and_restart()
 
     def _on_layer_values_changed(self, *_args) -> None:
         """编辑缓冲改了值：清要素缓存 + 让整张表重画。
@@ -2608,6 +2615,12 @@ class AttributeDock(QDockWidget):
         try:
             if self.content_widget is not None and self.content_widget.model is not None:
                 self.content_widget.model.cancel_stream()
+                try:
+                    self.layer.subsetStringChanged.disconnect(
+                        self.content_widget.model._on_subset_string_changed
+                    )
+                except (TypeError, RuntimeError):
+                    pass
             if self.layer.subsetString():
                 self.layer.setSubsetString("")
             if self.layer.isEditable():

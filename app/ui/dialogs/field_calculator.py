@@ -104,8 +104,11 @@ class FieldCalculatorDialog(BaseDialog):
         self.update_group = self._build_update_group()
         root.addWidget(self.update_group, 1, 1)
 
-        # 表达式区：内嵌表达式构建器控件（同 QGIS 字段计算器）
-        self.builder = ExpressionBuilderWidget(self._layer, self)
+        # 表达式区：内嵌表达式构建器控件（同 QGIS 字段计算器）。
+        # 字段计算器不需要字段值列表——关闭后字段节点保持叶子，不展开取值。
+        self.builder = ExpressionBuilderWidget(
+            self._layer, self, show_field_values=False
+        )
         root.addWidget(self.builder, 2, 0, 1, 2)
 
         # 按钮
