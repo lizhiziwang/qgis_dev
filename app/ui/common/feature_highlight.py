@@ -22,7 +22,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from qgis.core import QgsVectorLayer
+from qgis.core import QgsFeature, QgsVectorLayer
 from qgis.gui import QgsRubberBand
 from qgis.PyQt.QtCore import QObject, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QColor
@@ -53,9 +53,13 @@ class FeatureHighlighter(QObject):
 
     # ------------------------------------------------------------ 对外
 
-    def flash(self, fid: int) -> None:
-        """把 ``fid`` 画到高亮带上并闪烁几下，闪完保持可见。"""
-        if not self._draw(fid):
+    def flash(self, fid: int, feature: QgsFeature | None = None) -> None:
+        """把 ``fid`` 画到高亮带上并闪烁几下，闪完保持可见。
+
+        ``feature`` 可由调用方传入已缓存的要素，避免再向图层按 fid 取一次
+        （GeoJSON 等无索引数据源按 fid 取要素会从头扫描，很慢）。
+        """
+        if not self._draw(fid, feature):
             return
         self._left = _FLASH_TOGGLES
         if self._timer is None:
@@ -90,7 +94,7 @@ class FeatureHighlighter(QObject):
 
     # ------------------------------------------------------------ 内部
 
-    def _draw(self, fid: int) -> bool:
+    def _draw(self, fid: int, feature: QgsFeature | None = None) -> bool:
         """把要素几何设进高亮带并显示；画上了返回 ``True``。
 
         几何失效 / 已删除时清掉并返回 ``False`` —— 留着上一次的高亮会指错要素。
@@ -99,10 +103,11 @@ class FeatureHighlighter(QObject):
         if band is None:
             return False
         # 每次画之前重新上色：高亮样式是系统级配置，用户随时可能改（见「选择」页），
-        # 带子只在创建时上色的话，改完得等下次重建才生效
+        # 带子只在创建时上色的话，改完得等下次重建才生效。
         self._style_band(band)
         try:
-            feature = self._layer.getFeature(int(fid))
+            if feature is None:
+                feature = self._layer.getFeature(int(fid))
             geometry = feature.geometry() if feature.isValid() else None
             if geometry is None or geometry.isNull() or geometry.isEmpty():
                 self.clear()

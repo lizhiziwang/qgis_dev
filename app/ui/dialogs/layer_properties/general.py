@@ -16,6 +16,7 @@ import os
 from qgis.core import QgsRasterLayer, QgsVectorLayer
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -221,12 +222,24 @@ class GeneralTab(LayerPropertyTab):
         for key, text in (("left", "左"), ("top", "上"), ("right", "右"), ("bottom", "下")):
             lbl = QLabel("—", extent)
             lbl.setObjectName("PropValue")
+            # 允许鼠标选中 + Ctrl+C，复制单个值
+            lbl.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse | Qt.TextInteractionFlag.TextSelectableByKeyboard
+            )
             self.ext_labels[key] = lbl
             ext_grid.addRow(text, lbl)
         ext_layout.addLayout(ext_grid)
+        buttons = QHBoxLayout()
+        buttons.setSpacing(8)
+        self.copy_extent_btn = QPushButton("复制数据范围", extent)
+        self.copy_extent_btn.setToolTip("把左/上/右/下数据范围复制到剪贴板")
+        self.copy_extent_btn.setEnabled(False)
+        self.copy_extent_btn.clicked.connect(self._on_copy_extent)
+        buttons.addWidget(self.copy_extent_btn)
         self.recalc_btn = QPushButton("重新计算数据范围", extent)
         self.recalc_btn.clicked.connect(self._on_recalc_extent)
-        ext_layout.addWidget(self.recalc_btn)
+        buttons.addWidget(self.recalc_btn)
+        ext_layout.addLayout(buttons)
         layout.addWidget(extent)
 
         layout.addStretch(1)
@@ -293,7 +306,9 @@ class GeneralTab(LayerPropertyTab):
         if ext is None or ext.isNull():
             for lbl in self.ext_labels.values():
                 lbl.setText("—")
+            self.copy_extent_btn.setEnabled(False)
             return
+        self.copy_extent_btn.setEnabled(True)
         geographic = layer.crs().isGeographic() if layer.crs().isValid() else False
         fmt = (lambda v: f"{v:.5f}") if geographic else (lambda v: f"{v:.2f}")
         self.ext_labels["left"].setText(fmt(ext.xMinimum()))
@@ -302,6 +317,25 @@ class GeneralTab(LayerPropertyTab):
         self.ext_labels["bottom"].setText(fmt(ext.yMinimum()))
 
     # ------------------------------------------------------------- 交互
+
+    def _on_copy_extent(self) -> None:
+        """把当前显示的数据范围复制到剪贴板。"""
+        if self._layer is None:
+            return
+        try:
+            ext = self._layer.extent()
+            if ext is None or ext.isNull():
+                return
+            text = (
+                f"左: {self.ext_labels['left'].text()}\n"
+                f"上: {self.ext_labels['top'].text()}\n"
+                f"右: {self.ext_labels['right'].text()}\n"
+                f"下: {self.ext_labels['bottom'].text()}"
+            )
+            QApplication.clipboard().setText(text)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("复制数据范围失败: %s", exc, exc_info=True)
+            QMessageBox.warning(self, "图层属性", f"复制数据范围失败：{exc}")
 
     def _on_scale_toggled(self, checked: bool) -> None:
         self.min_scale_edit.setEnabled(checked)

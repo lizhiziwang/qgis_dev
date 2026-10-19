@@ -383,6 +383,21 @@ _ALGO_FALLBACK_DESC: dict[str, str] = {
         "可填写<b>输出文件路径</b>（GeoPackage / Shapefile）保存到文件；"
         "留空则生成临时图层。</p>"
     ),
+    "vector:convert": (
+        "<h2>矢量格式转换</h2>"
+        "<p>把矢量图层转换为 GDAL/OGR 常见的矢量格式，保留几何与属性，"
+        "并尽量保留原坐标系。</p>"
+        "<p>支持：GeoPackage（.gpkg）、ESRI Shapefile（.shp）、GeoJSON、"
+        "ESRI File Geodatabase（.gdb）、KML、GML、FlatGeobuf（.fgb）、"
+        "SQLite、MapInfo TAB、AutoCAD DXF、CSV。</p>"
+        "<p>选择输入图层、输出格式与输出文件即可；可只导出选中要素，"
+        "并可把结果自动加载到工程。</p>"
+        "<p><b>注意</b>：GeoJSON / KML / GML 是文本格式，默认不自动加载到工程；"
+        "大文件加载、改字段和属性表定位都很慢，KML / GML 还可能因整文件解析而内存不足。"
+        "需要编辑请使用 GeoPackage。"
+        "Shapefile 字段名最长 10 字符；DXF 不支持任意属性字段，仅导出几何；"
+        "CSV 的几何以 WKT 文本保存且不保存坐标系；KML 会自动转换为 WGS84 经纬度。</p>"
+    ),
     "native:tilesxyzdirectory": (
         "<h2>影像切片（XYZ）</h2>"
         "<p>把<b>当前地图画布内容</b>渲染为 XYZ 瓦片目录，输出按 "

@@ -44,6 +44,10 @@ _VECTOR_HINT_EXTS = frozenset({
     ".csv", ".tab", ".mif", ".fgb", ".gpx", ".dxf",
 })
 
+#: 文本 / XML 矢量格式：超过该大小加载可能卡顿甚至 OOM（KML 常见），加载前先提示
+_LARGE_TEXT_VECTOR_EXTS = frozenset({".geojson", ".json", ".kml", ".gml"})
+_LARGE_TEXT_VECTOR_BYTES = 50 * 1024 * 1024
+
 #: 文件对话框的过滤器（矢量 + 栅格）
 _DATA_FILE_FILTER = (
     "矢量 / 栅格数据 (*.shp *.geojson *.json *.gpkg *.gml *.kml *.sqlite *.csv *.tab *.mif *.fgb *.gpx"
@@ -98,6 +102,8 @@ class FileBrowserMixin:
         """加载到项目：矢量（shp/gpkg/geojson/…）、栅格（tif/img/…）、或 GDB 目录。"""
 
         ext = os.path.splitext(file_path)[1].lower()
+        if ext in _LARGE_TEXT_VECTOR_EXTS and not self._confirm_large_text_vector(file_path):
+            return
         self._begin_layer_loading(f"正在加载图层：{os.path.basename(file_path)}")
         try:
             if os.path.isdir(file_path):
@@ -116,6 +122,30 @@ class FileBrowserMixin:
             self._end_layer_loading()
 
     # ------------------------------------------------------- 各类型加载
+
+    def _confirm_large_text_vector(self, file_path: str) -> bool:
+        """大 GeoJSON / KML / GML 加载前提示改用 GeoPackage；取消返回 ``False``。"""
+        try:
+            size = os.path.getsize(file_path)
+        except OSError:
+            return True
+        if size <= _LARGE_TEXT_VECTOR_BYTES:
+            return True
+        ext = os.path.splitext(file_path)[1].lower()
+        format_name = {".geojson": "GeoJSON", ".json": "GeoJSON", ".kml": "KML", ".gml": "GML"}.get(
+            ext, "文本矢量"
+        )
+        answer = QMessageBox.question(
+            self,
+            f"{format_name} 文件较大",
+            f"{os.path.basename(file_path)} 约 {size / (1024 * 1024):.1f} MB。\n\n"
+            f"{format_name} 是文本交换格式，QGIS 加载、修改字段和属性表定位都会很慢，"
+            "部分驱动还会因整文件解析而内存不足。\n"
+            "建议先用「矢量格式转换」转为 GeoPackage 再加载 / 编辑。\n\n仍要加载吗？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        return answer == QMessageBox.StandardButton.Yes
 
     def _load_vector(self, file_path: str):
         """按矢量加载，成功返回图层，失败返回 ``None``。

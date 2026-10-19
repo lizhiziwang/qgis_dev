@@ -822,6 +822,17 @@ class PagedAttributeTableModel(QAbstractTableModel):
         while len(self._feature_cache) > MAX_FEATURE_CACHE:
             self._feature_cache.pop(next(iter(self._feature_cache)))
 
+    def feature_by_fid(self, fid: int) -> Optional[QgsFeature]:
+        """按 fid 取要素并走 LRU 缓存（定位 / 闪烁也复用这份缓存）。"""
+        feat = self._feature_cache.get(int(fid))
+        if feat is not None:
+            return feat
+        feat = self.layer.getFeature(int(fid))
+        if feat is None or not feat.isValid():
+            return None
+        self._cache_feature(int(fid), feat)
+        return feat
+
     def feature_at(self, row: int) -> Optional[QgsFeature]:
         """取第 ``row`` 行的要素：按 fid 从图层按需取回，LRU 缓存可视窗口。
 
@@ -830,15 +841,7 @@ class PagedAttributeTableModel(QAbstractTableModel):
         """
         if row < 0 or row >= len(self._fids):
             return None
-        fid = self._fids[row]
-        feat = self._feature_cache.get(fid)
-        if feat is not None:
-            return feat
-        feat = self.layer.getFeature(fid)
-        if feat is None or not feat.isValid():
-            return None
-        self._cache_feature(fid, feat)
-        return feat
+        return self.feature_by_fid(self._fids[row])
 
     def data(self, index, role=Qt.ItemDataRole.DisplayRole):
         if not index.isValid() or index.row() >= len(self._fids):
@@ -2259,7 +2262,10 @@ class PagedAttributeTableWidget(QWidget):
 
     def _delete_field(self, name: str) -> None:
         """列头菜单「删除字段」：确认后从图层删字段（与图层属性「字段」页同一逻辑）。"""
-        from app.ui.dialogs.layer_properties.fields import _delete_field_from_layer
+        from app.ui.dialogs.layer_properties.fields import (
+            _delete_field_from_layer,
+            is_geojson_layer,
+        )
 
         if self.layer is None or not name:
             return
@@ -2278,9 +2284,20 @@ class PagedAttributeTableWidget(QWidget):
                 "图层处于编辑状态，请先保存 / 停止编辑后再删除字段。",
             )
             return
-        answer = QMessageBox.question(
-            self, "删除字段", f"确定从图层中删除字段「{name}」？该操作不可撤销。"
-        )
+        if is_geojson_layer(self.layer):
+            answer = QMessageBox.warning(
+                self,
+                "删除字段",
+                f"GeoJSON 是文本交换格式，删除字段会重写整个文件，"
+                f"大图层可能长时间无响应。\n\n建议先将图层另存为 GeoPackage 再编辑。\n\n"
+                f"仍要删除字段「{name}」吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+        else:
+            answer = QMessageBox.question(
+                self, "删除字段", f"确定从图层中删除字段「{name}」？该操作不可撤销。"
+            )
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
@@ -2598,6 +2615,32 @@ class AttributeDock(QDockWidget):
         c = bbox.center()
         return QgsRectangle(c.x() - w / 2.0, c.y() - h / 2.0, c.x() + w / 2.0, c.y() + h / 2.0)
 
+    def _feature_by_fid(self, fid: int) -> Optional[QgsFeature]:
+        """按 fid 取要素：优先用属性表模型的 LRU 缓存。
+
+        GeoJSON 等无空间索引的 OGR 数据源按 fid 取要素可能从头扫描整个文件；
+        属性表渲染已经缓存了可视窗口的要素，双击定位 / 闪烁直接复用，避免第二次扫描。
+        """
+        model = self.model
+        getter = getattr(model, "feature_by_fid", None) if model is not None else None
+        if callable(getter):
+            try:
+                feature = getter(int(fid))
+                if feature is not None:
+                    return feature
+            except Exception:
+                logger.debug("从属性表缓存取要素失败: fid=%s", fid, exc_info=True)
+        if self.layer is None:
+            return None
+        try:
+            feature = self.layer.getFeature(int(fid))
+        except Exception:
+            logger.debug("从图层取要素失败: fid=%s", fid, exc_info=True)
+            return None
+        if feature is None or not feature.isValid():
+            return None
+        return feature
+
     def _locate_feature(self, fid: int) -> None:
         """把地图**缩放到**这个要素（属性表双击单元格用）。
 
@@ -2610,8 +2653,8 @@ class AttributeDock(QDockWidget):
         if canvas is None:
             return
         try:
-            feature = self.layer.getFeature(int(fid))
-            geom = feature.geometry() if feature.isValid() else None
+            feature = self._feature_by_fid(fid)
+            geom = feature.geometry() if feature is not None else None
             if geom is None or geom.isNull() or geom.isEmpty():
                 return
             extent = self._zoom_extent_for(geom.boundingBox())
@@ -2637,9 +2680,12 @@ class AttributeDock(QDockWidget):
         if canvas is None:
             return
         try:
+            feature = self._feature_by_fid(fid)
+            if feature is None:
+                return
             flasher = self._ensure_flasher(canvas)
             if flasher is not None:
-                flasher.flash(fid)
+                flasher.flash(fid, feature=feature)
         except Exception:  # noqa: BLE001
             logger.warning("闪烁要素失败: fid=%s", fid, exc_info=True)
 

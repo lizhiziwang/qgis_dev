@@ -41,6 +41,7 @@ from app.ui.dialogs.oriented_bbox import OrientedBBoxDialog
 from app.ui.dialogs.overlay import OverlayDialog
 from app.ui.dialogs.reproject import ReprojectDialog
 from app.ui.dialogs.shortest_path import ShortestPathDialog
+from app.ui.dialogs.vector_format import VectorFormatDialog
 from app.ui.dialogs.vector_tile import VectorTileDialog
 
 logger = get_logger(__name__)
@@ -74,6 +75,11 @@ def _make_shortest_path_dialog(parent):
 def _make_reproject_dialog(parent):
 
     return ReprojectDialog(parent, title="重投影")
+
+
+def _make_vector_format_dialog(parent):
+
+    return VectorFormatDialog(parent, title="矢量格式转换")
 
 
 def _make_imagery_tile_dialog(parent):
@@ -214,6 +220,7 @@ _DIALOG_FACTORIES: dict = {
     "overlay": _make_overlay_dialog,
     "native:shortestpathpointtopoint": _make_shortest_path_dialog,
     "native:reprojectlayer": _make_reproject_dialog,
+    "vector:convert": _make_vector_format_dialog,
     "native:tilesxyzdirectory": _make_imagery_tile_dialog,
     "native:tilesxyzmbtiles": _make_imagery_mbtiles_dialog,
 }
@@ -238,6 +245,7 @@ _TOOL_TIPS: dict = {
     "overlay": "对两个矢量图层做叠加分析",
     "native:shortestpathpointtopoint": "计算两点之间的最短路径",
     "native:reprojectlayer": "把图层重投影到目标坐标系",
+    "vector:convert": "把矢量图层转换为 GeoPackage / Shapefile / GeoJSON 等常见格式",
     "native:tilesxyzdirectory": "把当前地图画布切片为 XYZ 瓦片目录",
     "native:tilesxyzmbtiles": "把当前地图画布切片为 MBTiles 文件",
     "flow:editor": "可视化流程节点编排：拖节点建流程、连线、运行与导出",
@@ -254,6 +262,7 @@ _TOOL_GROUPS: list = [
             ("叠加分析", "overlay"),
             ("最短路径分析", "native:shortestpathpointtopoint"),
             ("重投影", "native:reprojectlayer"),
+            ("矢量格式转换", "vector:convert"),
         ],
     ),
     (

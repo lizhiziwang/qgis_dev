@@ -25,23 +25,33 @@ def _maximum_string_length(layer: QgsVectorLayer, field_name: str):
         return None, False
 
 
-def copy_with_widened_string_fields(layer: QgsVectorLayer) -> QgsVectorLayer:
+def copy_with_widened_string_fields(
+    layer: QgsVectorLayer,
+    *,
+    only_selected: bool = False,
+) -> QgsVectorLayer:
     """把 String 字段长度放宽到实际最大值，返回修正后的临时图层。
 
     GDB/ArcGIS 导出的图层常有「字段声明长度 < 实际数据长度」的脏数据：
     短代码字段（如 XIANG 声明 3）里存了字面量 ``'NULL'``（4 字符）。
-    QGIS memory provider 严格校验字符串长度，超长值在 sink 写入时被拒绝，
-    导致 ``native:buffer`` / 叠加算法报「无法将要素写入 OUTPUT」。此函数扫描
+    QGIS memory provider / OGR 输出驱动会严格校验字符串长度，超长值在写入
+    时被拒绝，导致 ``native:buffer`` / 叠加算法 / 格式转换报错。此函数扫描
     字段实际最大长度（C++ 聚合，不逐要素进 Python），把超长字段放宽后拷贝成
     临时 memory 图层；无需修正时原样返回，不产生额外开销。声明长度 0 表示
     无上限（GeoJSON 等），不在修正范围内。
 
     注意：数据本身有超长值时仍需逐要素拷贝一次（字段声明不可原地修改），
     这一步在主线程完成；干净数据只做聚合扫描，不会创建图层。
+
+    Args:
+        layer: 待检查的输入图层。
+        only_selected: 为 ``True`` 时只拷贝选中要素，并在结果图层中选中它们，
+            以便调用方继续按 ``onlySelectedFeatures`` 写出。
     """
     from qgis.core import (
         Qgis,
         QgsFeature,
+        QgsFeatureRequest,
         QgsField,
         QgsFields,
         QgsVectorLayer,
@@ -93,16 +103,23 @@ def copy_with_widened_string_fields(layer: QgsVectorLayer) -> QgsVectorLayer:
         cleaned.dataProvider().addAttributes(new_fields)
         cleaned.updateFields()
 
+        if only_selected:
+            request = QgsFeatureRequest().setFilterFids(layer.selectedFeatureIds())
+        else:
+            request = QgsFeatureRequest()
         features = []
-        for source in layer.getFeatures():
+        for source in layer.getFeatures(request):
             feature = QgsFeature(cleaned.fields())
             feature.setGeometry(source.geometry())
             feature.setAttributes(source.attributes())
             features.append(feature)
-        ok, _ = cleaned.dataProvider().addFeatures(features)
+        ok, _added = cleaned.dataProvider().addFeatures(features)
         if not ok:
             logger.warning("字段长度修正后写入临时图层失败，退回原图层")
             return layer
+        if only_selected:
+            # 临时图层只装了选中要素，重新全选，供 onlySelectedFeatures 写出
+            cleaned.selectAll()
         logger.info(
             "输入图层字段长度修正 %s 个字段后用于算法：%s",
             sorted(widened),

@@ -64,6 +64,23 @@ _ACTION_COL = len(_HEADERS) - 1
 # 走通，修复「添加字段后 apply 报 addAttributes 返回 False」。
 
 
+def is_geojson_layer(layer) -> bool:
+    """图层是否来自 GeoJSON 文件。
+
+    GeoJSON 是文本交换格式，改字段需要重写整个文件；大图层上操作会长时间
+    阻塞主线程。UI 在删除字段前据此提示用户改用 GeoPackage。
+    """
+    if layer is None:
+        return False
+    try:
+        if layer.providerType() != "ogr":
+            return False
+        source = layer.source().split("|", 1)[0].split("?", 1)[0].strip().lower()
+    except Exception:  # noqa: BLE001 —— 图层销毁 / source 异常时按普通图层处理
+        return False
+    return source.endswith((".geojson", ".json"))
+
+
 def _add_field_to_layer(layer, field: QgsField) -> bool:
     """给图层加字段；编辑态走 edit buffer，否则直接落 provider。"""
     if layer.isEditable():
@@ -608,9 +625,20 @@ class FieldsTab(LayerPropertyTab):
                 "图层处于编辑状态，请先保存 / 停止编辑后再删除字段。",
             )
             return
-        answer = QMessageBox.question(
-            self, "删除字段", f"确定从图层中删除字段「{name}」？该操作不可撤销。"
-        )
+        if is_geojson_layer(self._layer):
+            answer = QMessageBox.warning(
+                self,
+                "删除字段",
+                f"GeoJSON 是文本交换格式，删除字段会重写整个文件，"
+                f"大图层可能长时间无响应。\n\n建议先将图层另存为 GeoPackage 再编辑。\n\n"
+                f"仍要删除字段「{name}」吗？",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+        else:
+            answer = QMessageBox.question(
+                self, "删除字段", f"确定从图层中删除字段「{name}」？该操作不可撤销。"
+            )
         if answer != QMessageBox.StandardButton.Yes:
             return
         try:
