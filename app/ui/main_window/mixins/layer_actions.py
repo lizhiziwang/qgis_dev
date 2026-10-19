@@ -9,6 +9,8 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
+
 from qgis.core import (
     Qgis,
     QgsCoordinateTransform,
@@ -117,7 +119,7 @@ class LayerActionsMixin:
     # ===================================================== 图层右键菜单
 
     def _on_layer_tree_blank_context_menu(self, global_pos: QPoint) -> None:
-        """图层树**空白处**右键：添加组 / 全部展开 / 全部折叠 / 粘贴图层或组。
+        """图层树**空白处**右键：添加组 / 展开折叠 / 粘贴 / 全部显示隐藏移除。
 
         这几项都不针对某个节点（粘贴默认落到工程根），所以单独一套菜单。
         """
@@ -133,6 +135,7 @@ class LayerActionsMixin:
         act_paste = menu.addAction("粘贴图层 / 组")
         act_paste.setEnabled(bool(getattr(self, "_layer_clipboard", None)))
         act_paste.triggered.connect(lambda: self._paste_tree_nodes(self.project.layerTreeRoot()))
+        self._add_all_layers_actions(menu)
         menu.exec(global_pos)
 
     def _on_layer_group_context_menu(self, group, global_pos: QPoint) -> None:
@@ -140,7 +143,7 @@ class LayerActionsMixin:
 
         图层面板的组节点在走"图层菜单"时被 ``layer is None`` 挡掉了，于是右键组
         什么也没有（用户报过）。这里给组一套自己的菜单：缩放到组 / 复制组 /
-        粘贴图层或组 / 重命名组 / 添加组 / 移除组。
+        粘贴图层或组 / 重命名组 / 添加组 / 移动 / 全部图层显示隐藏移除 / 移除组。
 
         各动作直接**闭包捕获**右键的那个组，不依赖"当前选中节点"——右键的未必是
         已选中的那个（与图层菜单同样的取舍）。
@@ -163,6 +166,8 @@ class LayerActionsMixin:
         act_rename.triggered.connect(lambda: self._rename_layer_group(group))
         act_add = menu.addAction("添加组")
         act_add.triggered.connect(lambda: self._add_layer_group_under(group))
+        self._add_node_move_actions(menu, group)
+        self._add_all_layers_actions(menu)
         menu.addSeparator()
         act_remove = menu.addAction("移除组")
         act_remove.triggered.connect(lambda: self._remove_layer_group(group))
@@ -171,22 +176,37 @@ class LayerActionsMixin:
     # ---------------------------------------------------------- 组菜单动作
 
     def _zoom_to_layer_group(self, group) -> None:
-        """缩放到组：合并组内**全部子图层**（含嵌套子组）的范围。
-
-        与「全图」同一套口径：每个图层的 extent 先换算到画布 CRS 再合并，否则
-        经纬度（度）与投影（米）混在一起会偏。
-        """
+        """缩放到组：合并组内**全部子图层**（含嵌套子组）的范围。"""
         from qgis.core import QgsLayerTreeGroup
 
         if not isinstance(group, QgsLayerTreeGroup):
             return
-        dest_crs = self.canvas.mapSettings().destinationCrs()
-        combined = None
+        layers = []
         for node in group.findLayers():
             layer = node.layer()
-            if layer is None or not layer.isValid():
+            if layer is not None:
+                layers.append(layer)
+        self._zoom_to_layers(layers, empty_message="该图层组里没有可定位的图层")
+
+    def _zoom_to_layers(
+        self, layers, *, empty_message: str = "没有可定位的图层"
+    ) -> None:
+        """缩放至一组图层的合并范围。
+
+        与「全图」同一套口径：每个图层的 extent 先换算到画布 CRS 再合并，否则
+        经纬度（度）与投影（米）混在一起会偏。
+        """
+        dest_crs = self.canvas.mapSettings().destinationCrs()
+        combined = None
+        for layer in layers:
+            if layer is None:
                 continue
-            extent = layer.extent()
+            try:
+                if not layer.isValid():
+                    continue
+                extent = layer.extent()
+            except RuntimeError:  # 图层已销毁
+                continue
             if extent.isNull():
                 continue
             if layer.crs() != dest_crs:
@@ -194,7 +214,11 @@ class LayerActionsMixin:
                     transform = QgsCoordinateTransform(layer.crs(), dest_crs, self.project)
                     extent = transform.transformBoundingBox(extent)
                 except Exception:  # noqa: BLE001 —— 脏数据的越界范围，跳过该图层
-                    logger.warning("缩放到组：图层 %s 范围转换失败，已跳过", layer.name(), exc_info=True)
+                    logger.warning(
+                        "缩放图层：图层 %s 范围转换失败，已跳过",
+                        layer.name(),
+                        exc_info=True,
+                    )
                     continue
             if combined is None:
                 combined = QgsRectangle(extent)
@@ -202,12 +226,12 @@ class LayerActionsMixin:
                 combined.combineExtentWith(extent)
         if combined is None or combined.isNull():
             self.messageBar.pushMessage(
-                "该图层组里没有可定位的图层", level=Qgis.MessageLevel.Info, duration=3
+                empty_message, level=Qgis.MessageLevel.Info, duration=3
             )
             return
-        # 组里全是点（或共线）时范围是**零尺寸**的：注意 ``isEmpty()`` 对零尺寸范围
-        # 返回 True，所以这里**不能**拿它当"空的"判据（会把点图层组误判成没内容），
-        # 只按宽高是否 > 0 补一圈 —— 与「放大至选中要素」同一套做法。
+        # 全是点（或共线）时范围是**零尺寸**的：注意 ``isEmpty()`` 对零尺寸范围
+        # 返回 True，所以这里**不能**拿它当"空的"判据，只按宽高是否 > 0 补一圈
+        # —— 与「放大至选中要素」同一套做法。
         if combined.width() <= 0 or combined.height() <= 0:
             center = combined.center()
             half = 0.001
@@ -271,13 +295,247 @@ class LayerActionsMixin:
         )
 
     def _on_layer_context_menu(self, layer, global_pos: QPoint) -> None:
-        """图层树 / 工程管理 Dock 右键 → 同一套 QGIS 式图层菜单。
+        """图层树 / 工程管理 Dock 右键 → 图层菜单。
+
+        右键的图层**属于当前多选**且选中了多个图层时，走精简的批量菜单
+        （移除 / 组合 / 打开 / 关闭 / 缩放图层），动作统一作用于选中的全部图层；
+        其余情况仍走单个图层的完整菜单。
 
         图层由发信号的 Dock 用 ``index2node`` 自己解析后带出来（两个 Dock 都
         只发信号），所以这里不再拿显示名去 ``mapLayersByName`` 回查——那样
         同名图层会拿到错的那个。
         """
+        from qgis.core import QgsLayerTreeLayer
+
+        node = None
+        if layer is not None:
+            node = self.project.layerTreeRoot().findLayer(layer.id())
+        selected_nodes = self._selected_dock_nodes()
+        if node is not None and any(n is node for n in selected_nodes):
+            selected_layers = [
+                n.layer()
+                for n in selected_nodes
+                if isinstance(n, QgsLayerTreeLayer) and n.layer() is not None
+            ]
+            if len(selected_layers) >= 2:
+                self._build_selected_layers_context_menu(selected_layers, global_pos)
+                return
         self._build_layer_context_menu(layer, global_pos)
+
+    def _build_selected_layers_context_menu(self, layers, global_pos: QPoint) -> None:
+        """多选图层右键菜单：动作统一作用于选中的全部图层。"""
+        menu = QMenu(self)
+        act_remove = menu.addAction("移除")
+        act_remove.setIcon(Icons.remove())
+        act_remove.triggered.connect(lambda: self._remove_layers(layers, confirm=True))
+        act_group = menu.addAction("组合")
+        act_group.triggered.connect(lambda: self._group_layers(layers))
+        act_open = menu.addAction("打开")
+        act_open.triggered.connect(lambda: self._set_layers_visible(layers, True))
+        act_close = menu.addAction("关闭")
+        act_close.triggered.connect(lambda: self._set_layers_visible(layers, False))
+        act_zoom = menu.addAction("缩放图层")
+        act_zoom.triggered.connect(lambda: self._zoom_to_layers(layers))
+        menu.exec(global_pos)
+
+    def _remove_layers(self, layers, *, confirm: bool = True) -> None:
+        """移除一组选中的图层（可统一确认 / 统一提示）。"""
+        layers = [layer for layer in layers if layer is not None]
+        if not layers:
+            return
+        if confirm:
+            ret = QMessageBox.question(
+                self,
+                "移除图层",
+                f"确定移除选中的 {len(layers)} 个图层吗？\n\n"
+                "此操作不会删除磁盘上的数据文件。",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if ret != QMessageBox.StandardButton.Yes:
+                return
+        removed = 0
+        for layer in layers:
+            try:
+                self._remove_layer(layer, notify=False)
+                removed += 1
+            except RuntimeError:  # 图层已被其他回调删除
+                continue
+        self.messageBar.pushMessage(
+            f"已移除 {removed} 个图层", level=Qgis.MessageLevel.Info, duration=3
+        )
+
+    def _group_layers(self, layers) -> None:
+        """把选中的图层组合到同一父分组下的新建组里。"""
+        from qgis.core import QgsLayerTreeGroup, QgsLayerTreeLayer
+
+        root = self.project.layerTreeRoot()
+        if root is None:
+            return
+        nodes = []
+        for layer in layers:
+            if layer is None:
+                continue
+            node = root.findLayer(layer.id())
+            if isinstance(node, QgsLayerTreeLayer):
+                nodes.append(node)
+        if not nodes:
+            return
+        try:
+            parent = nodes[0].parent()
+        except RuntimeError:
+            return
+        if not isinstance(parent, QgsLayerTreeGroup):
+            return
+        base = "新建图层组"
+        name = base
+        i = 2
+        while parent.findGroup(name) is not None:
+            name = f"{base} {i}"
+            i += 1
+        try:
+            insert_idx = parent.children().index(nodes[0])
+        except ValueError:
+            return
+
+        group = QgsLayerTreeGroup(name)
+        # 先克隆进新组（layer 始终在树里有节点，bridge 不会删图层），再删旧节点。
+        for node in nodes:
+            group.addChildNode(node.clone())
+        parent.insertChildNode(insert_idx, group)
+        self._clear_view_current()
+        for node in nodes:
+            try:
+                old_parent = node.parent()
+            except RuntimeError:
+                continue
+            if old_parent is not None:
+                old_parent.removeChildNode(node)
+        with suppress(Exception):
+            self.layer_dock.view.setCurrentNode(group)
+        self.messageBar.pushMessage(
+            f"已组合 {len(nodes)} 个图层：{name}",
+            level=Qgis.MessageLevel.Info,
+            duration=2,
+        )
+
+    def _set_layers_visible(self, layers, visible: bool) -> None:
+        """打开 / 关闭一组图层（只改这些节点的勾选状态）。"""
+        root = self.project.layerTreeRoot()
+        if root is None:
+            return
+        changed = 0
+        for layer in layers:
+            if layer is None:
+                continue
+            try:
+                node = root.findLayer(layer.id())
+            except RuntimeError:
+                continue
+            if node is not None:
+                node.setItemVisibilityChecked(visible)
+                changed += 1
+        if changed:
+            self.messageBar.pushMessage(
+                f"已{'打开' if visible else '关闭'} {changed} 个图层",
+                level=Qgis.MessageLevel.Info,
+                duration=2,
+            )
+
+    def _add_node_move_actions(self, menu: QMenu, node) -> None:
+        """给右键菜单追加「置顶 / 上移 / 下移 / 置底」。
+
+        动作直接闭包捕获右键的那个节点，不依赖当前选中项；到边界时置灰。
+        """
+        from qgis.core import QgsLayerTreeGroup
+
+        if node is None:
+            return
+        try:
+            parent = node.parent()
+        except RuntimeError:  # 节点已被别的入口删除
+            return
+        if not isinstance(parent, QgsLayerTreeGroup):
+            return
+        siblings = parent.children()
+        try:
+            pos = siblings.index(node)
+        except ValueError:
+            return
+        last = len(siblings) - 1
+        specs = (
+            ("置顶", "top", pos > 0),
+            ("上移", "up", pos > 0),
+            ("下移", "down", pos < last),
+            ("置底", "bottom", pos < last),
+        )
+        menu.addSeparator()
+        for text, where, enabled in specs:
+            act = menu.addAction(text)
+            act.setEnabled(enabled)
+            act.triggered.connect(
+                lambda _checked=False, w=where, n=node: self._move_dock_node_to(n, w)
+            )
+
+    def _add_all_layers_actions(
+        self, menu: QMenu, *, include_remove: bool = True
+    ) -> None:
+        """给右键菜单追加「关闭所有图层 / 打开所有图层」（可选「移除所有图层」）。
+
+        ``include_remove=False`` 时只加显示 / 隐藏两项，移除项由调用方放到指定位置。
+        """
+        menu.addSeparator()
+        act_hide = menu.addAction("关闭所有图层")
+        act_hide.triggered.connect(lambda: self._set_all_layers_visible(False))
+        act_show = menu.addAction("打开所有图层")
+        act_show.triggered.connect(lambda: self._set_all_layers_visible(True))
+        if include_remove:
+            menu.addSeparator()
+            self._add_remove_all_layers_action(menu)
+
+    def _add_remove_all_layers_action(self, menu: QMenu) -> None:
+        """追加「移除所有图层」（不额外加分隔线，位置由调用方决定）。"""
+        act_remove_all = menu.addAction("移除所有图层")
+        act_remove_all.setIcon(Icons.remove())
+        act_remove_all.triggered.connect(self._remove_all_layers)
+
+    def _remove_all_layers(self) -> None:
+        """移除工程里的全部图层（保留图层组结构）。"""
+        root = self.project.layerTreeRoot()
+        if root is None:
+            return
+        layers = [
+            node.layer()
+            for node in root.findLayers()
+            if node.layer() is not None
+        ]
+        if not layers:
+            self.messageBar.pushMessage(
+                "当前没有可移除的图层", level=Qgis.MessageLevel.Info, duration=2
+            )
+            return
+        ret = QMessageBox.question(
+            self,
+            "移除所有图层",
+            f"确定移除所有 {len(layers)} 个图层吗？\n\n"
+            "图层组会保留（组内图层全部移除）；此操作不会删除磁盘上的数据文件。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+
+        removed = 0
+        for layer in layers:
+            try:
+                self._remove_layer(layer, notify=False)
+                removed += 1
+            except RuntimeError:  # 图层已被其他回调删除
+                continue
+        self._clear_view_current()
+        self.messageBar.pushMessage(
+            f"已移除 {removed} 个图层", level=Qgis.MessageLevel.Info, duration=3
+        )
 
     def _build_layer_context_menu(self, layer, global_pos: QPoint) -> None:
         """QGIS 式图层右键菜单（图层树与工程 Dock 共用）。
@@ -291,12 +549,14 @@ class LayerActionsMixin:
 
         布局贴近 QGIS 原生图层面板：缩放至图层 / 放大至选中要素 → 打开属性表 /
         执行SQL（仅矢量）→ 重命名 / 复制图层 → 样式（含复制/粘贴样式）→ 移到
-        分组 → 移除 / 导出 / 属性。
+        分组 → 关闭/打开所有图层 → 移除 / 移除所有图层 → 导出 / 属性 →
+        置顶 / 上移 / 下移 / 置底。
         """
         if layer is None:
             return
         self._selected_layer = layer
         is_vector = isinstance(layer, QgsVectorLayer)
+        node = self.project.layerTreeRoot().findLayer(layer.id())
         menu = QMenu(self)
         # 缩放至图层
         act_zoom = QAction("缩放至图层", self)
@@ -353,12 +613,15 @@ class LayerActionsMixin:
             act_to_data = QAction("移到数据图层", self)
             act_to_data.triggered.connect(lambda: self._move_layer_to_group(self._selected_layer, self._data_group))
             menu.addAction(act_to_data)
-        # 移除 / 导出 / 属性
+        # 关闭 / 打开所有图层
+        self._add_all_layers_actions(menu, include_remove=False)
+        # 移除 / 移除所有 / 导出 / 属性
         menu.addSeparator()
         act_remove = QAction("移除", self)
         act_remove.setIcon(Icons.remove())
         act_remove.triggered.connect(lambda: self._remove_layer(self._selected_layer, confirm=True))
         menu.addAction(act_remove)
+        self._add_remove_all_layers_action(menu)
         if is_vector:
             # 导出走 QgsVectorLayerSaveAsDialog，仅矢量
             act_export = QAction("导出", self)
@@ -367,6 +630,8 @@ class LayerActionsMixin:
         act_props = QAction("属性", self)
         act_props.triggered.connect(lambda: self._open_layer_properties(self._selected_layer))
         menu.addAction(act_props)
+        # 顺序操作放菜单最后
+        self._add_node_move_actions(menu, node)
         menu.exec(global_pos)
 
     def _zoom_to_selection(self, layer) -> None:

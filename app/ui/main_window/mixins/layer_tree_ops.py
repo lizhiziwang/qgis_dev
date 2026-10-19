@@ -176,6 +176,26 @@ class LayerTreeOpsMixin:
                 node.setItemVisibilityChecked(not node.isVisible())
             return
 
+    def _set_all_layers_visible(self, visible: bool) -> None:
+        """打开 / 关闭所有图层（图层树勾选状态与画布同步变化）。
+
+        与 QGIS 桌面 ``showAllLayers / hideAllLayers`` 一致：显示时把根组及
+        全部子节点置为勾选；关闭时逐个取消根组子节点（根节点本身不参与显示）。
+        """
+        root = self.project.layerTreeRoot()
+        if root is None:
+            return
+        if visible:
+            root.setItemVisibilityCheckedRecursive(True)
+        else:
+            for child in root.children():
+                child.setItemVisibilityCheckedRecursive(False)
+        self.messageBar.pushMessage(
+            "已打开所有图层" if visible else "已关闭所有图层",
+            level=Qgis.MessageLevel.Info,
+            duration=2,
+        )
+
     def _on_layer_clicked_in_dock(self, index) -> None:
         """用户在图层树点击一层：仅记录为 ``_selected_layer``。
 
@@ -569,33 +589,7 @@ class LayerTreeOpsMixin:
         self.messageBar.pushMessage(f"已新建图层组：{name}", level=Qgis.MessageLevel.Info, duration=2)
 
     def _on_move_layer_node(self, delta: int) -> None:
-        """上移 / 下移当前选中的图层或组（仅在同分组内重排）。
-
-        严格按 QGIS 桌面 ``qgslayertreeviewdefaultactions.cpp`` 里
-        ``moveToTop / moveToBottom`` 的写法：**clone + insert + remove** 三步走，
-        **不是** ``takeChild + insertChildNode``。
-
-        为何不能直接 takeChild：``takeChild`` 不会发 ``willRemoveChildren`` 信号，
-        ``QgsLayerTreeRegistryBridge`` 收不到"将要删节点"的钩子，于是直接
-        ``project.removeMapLayer(layer)`` 把 layer 从工程中抹掉——肉眼看上去
-        就是"图层消失"。
-
-        正确顺序：先 ``insertChildNode`` 把克隆挂到新位置（layer 立刻在新位置
-        有 node），再 ``removeChildNode`` 删旧 node（bridge 收到
-        willRemoveChildren 时检查到 layer 还有 cloned 那个 node 挂着，**不**删
-        layer，只删旧 node）。**insert 位置要按方向偏移一格**：
-
-        - ``delta < 0``（上移）：原节点在 ``new_pos`` 之后，插到 ``new_pos`` 即
-          落在目标位置之前，删原节点后自然到位。
-        - ``delta > 0``（下移）：原节点在 ``new_pos`` 之前还占着位，插到
-          ``new_pos`` 会被推到原节点**之后**的目标位，删原节点后又落回原
-          ``pos``——下移等于没动。必须插到 ``new_pos + 1``（end-append 越界由
-          上面 ``new_pos < len(siblings)`` 已挡住）。
-
-        clone 是新对象，``view.setCurrentNode`` / messageBar 都用 cloned。
-        """
-        from qgis.core import QgsLayerTreeGroup
-
+        """上移 / 下移当前选中的图层或组（仅在同分组内重排）。"""
         node = self._current_dock_node()
         if node is None or node.parent() is None:
             self.messageBar.pushMessage(
@@ -605,6 +599,26 @@ class LayerTreeOpsMixin:
             )
             return
         parent = node.parent()
+        siblings = parent.children()
+        try:
+            pos = siblings.index(node)
+        except ValueError:
+            return
+        target_pos = pos + delta
+        if not 0 <= target_pos < len(siblings):
+            return  # 已在顶/底
+        self._move_dock_node(node, target_pos, "上移" if delta < 0 else "下移")
+
+    def _move_dock_node_to(self, node, where: str) -> None:
+        """把节点移到同组顶部 / 上一位 / 下一位 / 底部（右键菜单用）。"""
+        from qgis.core import QgsLayerTreeGroup
+
+        if node is None:
+            return
+        try:
+            parent = node.parent()
+        except RuntimeError:  # 节点已被别的入口删除
+            return
         if not isinstance(parent, QgsLayerTreeGroup):
             return
         siblings = parent.children()
@@ -612,15 +626,66 @@ class LayerTreeOpsMixin:
             pos = siblings.index(node)
         except ValueError:
             return
-        new_pos = pos + delta
-        if not 0 <= new_pos < len(siblings):
-            return  # 已在顶/底
+        if where == "top":
+            target_pos = 0
+        elif where == "up":
+            target_pos = pos - 1
+        elif where == "down":
+            target_pos = pos + 1
+        elif where == "bottom":
+            target_pos = len(siblings) - 1
+        else:
+            return
+        if not 0 <= target_pos < len(siblings) or target_pos == pos:
+            return
+        verb = {"top": "置顶", "up": "上移", "down": "下移", "bottom": "置底"}[where]
+        self._move_dock_node(node, target_pos, verb)
+
+    def _move_dock_node(self, node, target_pos: int, verb: str) -> None:
+        """按 clone + insert + remove 三步把节点移动到同组 ``target_pos``。
+
+        严格按 QGIS 桌面 ``qgslayertreeviewdefaultactions.cpp`` 里
+        ``moveToTop / moveToBottom`` 的写法，**不是** ``takeChild +
+        insertChildNode``。
+
+        为何不能直接 takeChild：``takeChild`` 不会发 ``willRemoveChildren`` 信号，
+        ``QgsLayerTreeRegistryBridge`` 收不到"将要删节点"的钩子，于是直接
+        ``project.removeMapLayer(layer)`` 把 layer 从工程中抹掉——肉眼看上去
+        就是"图层消失"。
+
+        正确顺序：先 ``insertChildNode`` 把克隆挂到新位置（layer 立刻在新位置
+        有 node），再 ``removeChildNode`` 删旧 node（bridge 收到
+        willRemoveChildren 时检查到 layer 还有 cloned 那个 node 挂着，**不**删
+        layer，只删旧 node）。**insert 位置要按目标方向偏移一格**：
+
+        - 目标在当前位置之前：插到 ``target_pos`` 即落在目标位置之前，删原节点
+          后自然到位。
+        - 目标在当前位置之后：原节点还占着位，插到 ``target_pos + 1``，删原节点
+          后才落回 ``target_pos``（否则下移等于没动）。
+
+        clone 是新对象，``view.setCurrentNode`` / messageBar 都用 cloned。
+        """
+        from qgis.core import QgsLayerTreeGroup
+
+        if node is None:
+            return
+        try:
+            parent = node.parent()
+        except RuntimeError:  # 节点已被别的入口删除
+            return
+        if not isinstance(parent, QgsLayerTreeGroup):
+            return
+        siblings = parent.children()
+        try:
+            pos = siblings.index(node)
+        except ValueError:
+            return
+        if not 0 <= target_pos < len(siblings) or target_pos == pos:
+            return
 
         cloned = node.clone()
         # 1) 先把克隆挂到新位置（layer 立即在树里有 node，bridge 不会干 layer）。
-        #    下移时原节点还占着 ``pos``，insert 必须跳到 ``new_pos + 1``，
-        #    否则删旧节点后 cloned 落回 ``pos``，下移等于没动（见 docstring）。
-        insert_pos = new_pos + (1 if delta > 0 else 0)
+        insert_pos = target_pos + (1 if target_pos > pos else 0)
         parent.insertChildNode(insert_pos, cloned)
         # 2) 若移的是「数据图层 / 参考图层」这类工程分组，克隆替换了节点身份，
         #    先把裸指针 / Dock 的 rootIndex 改指克隆，再删原节点。
@@ -631,11 +696,8 @@ class LayerTreeOpsMixin:
         parent.removeChildNode(node)
 
         view = self.layer_dock.view
-        try:
+        with suppress(Exception):
             view.setCurrentNode(cloned)
-        except Exception:  # noqa: BLE001
-            pass
-        verb = "上移" if delta < 0 else "下移"
         self.messageBar.pushMessage(
             f"已{verb}：{getattr(cloned, 'name', lambda: '')()}",
             level=Qgis.MessageLevel.Info,
