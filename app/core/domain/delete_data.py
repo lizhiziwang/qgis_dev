@@ -73,17 +73,7 @@ def delete_registered_data(db: dict[str, Any], category: str, name: str) -> None
         raise DeleteDataError(f"打开本地库失败：{path}（{exc}）") from exc
 
     try:
-        if category == "image":
-            util._drop_image_store_table(name)
-        else:
-            util._drop_spatial_table(name, _geometry_column(util, name))
-            if util.kind == "spatialite":
-                _purge_spatialite_catalog(util, name)
-        # 老库 / 纯 MBTiles 库可能压根没有 user_relation(那也就没注册行可删)
-        with suppress(sqlite3.OperationalError):
-            util.cursor.execute(
-                "DELETE FROM user_relation WHERE table_name = ?", (name,)
-            )
+        _delete_with_util(util, category, name)
         util.conn.commit()
     except sqlite3.Error as exc:
         with suppress(sqlite3.Error):
@@ -92,6 +82,89 @@ def delete_registered_data(db: dict[str, Any], category: str, name: str) -> None
     finally:
         util.conn.close()
     logger.info("已删除本地库数据: %s → %s(%s)", Path(path).name, name, category)
+
+
+def delete_all_registered_data(
+    db: dict[str, Any],
+) -> tuple[int, list[tuple[str, str, str]]]:
+    """删掉库里**注册的全部数据表** + ``user_relation`` 注册行。
+
+    数据管理左树右键库连接「移除全部图层」用。一次打开库文件、逐表删除
+    （每张表独立提交）：某张表删失败只记进失败清单，**不影响其余表** ——
+    批量操作里最怕"删到一半停下，用户不知道哪些删了哪些没删"。
+
+    Args:
+        db: 本地库连接 dict(至少 ``path`` 与 ``categories``；后者是
+            ``{类别: [表名…]}``，由 :func:`describe_local_db` 扫描得到)。
+
+    Returns:
+        ``(成功删除的表数, [(类别, 表名, 失败原因), …])``。
+        库里没有注册表时返回 ``(0, [])``。
+
+    Raises:
+        DeleteDataError: 服务器库 / 路径缺失 / 文件不存在 / 打不开库。
+    """
+    if db.get("kind") == "server":
+        raise DeleteDataError(
+            "服务器库删除尚未实现，请选用本地库（SpatiaLite / GeoPackage）"
+        )
+    path = str(db.get("path") or "")
+    if not path:
+        raise DeleteDataError("库连接缺少文件路径，无法移除图层")
+    if not Path(path).is_file():
+        raise DeleteDataError(f"本地库文件不存在：{path}")
+
+    categories = db.get("categories") or {}
+    targets = [
+        (str(category), str(name))
+        for category, names in categories.items()
+        for name in (names or [])
+        if name
+    ]
+    if not targets:
+        return 0, []
+
+    try:
+        util = local_db_util(path)
+    except sqlite3.Error as exc:
+        raise DeleteDataError(f"打开本地库失败：{path}（{exc}）") from exc
+
+    deleted = 0
+    failures: list[tuple[str, str, str]] = []
+    try:
+        for category, name in targets:
+            try:
+                _delete_with_util(util, category, name)
+                util.conn.commit()
+                deleted += 1
+            except Exception as exc:  # noqa: BLE001 —— 单表失败不能中断整批
+                with suppress(Exception):
+                    util.conn.rollback()
+                failures.append((category, name, str(exc)))
+    finally:
+        util.conn.close()
+    logger.info(
+        "已移除本地库 %s 的 %d 个图层（失败 %d 个）",
+        Path(path).name,
+        deleted,
+        len(failures),
+    )
+    return deleted, failures
+
+
+def _delete_with_util(util: local_db_util, category: str, name: str) -> None:
+    """在已打开的库连接上删一张表 + 它的注册行（不提交，由调用方提交 / 回滚）。"""
+    if category == "image":
+        util._drop_image_store_table(name)
+    else:
+        util._drop_spatial_table(name, _geometry_column(util, name))
+        if util.kind == "spatialite":
+            _purge_spatialite_catalog(util, name)
+    # 老库 / 纯 MBTiles 库可能压根没有 user_relation(那也就没注册行可删)
+    with suppress(sqlite3.OperationalError):
+        util.cursor.execute(
+            "DELETE FROM user_relation WHERE table_name = ?", (name,)
+        )
 
 
 def _geometry_column(util: local_db_util, table: str) -> str:
@@ -123,4 +196,4 @@ def _purge_spatialite_catalog(util: local_db_util, table: str) -> None:
             util.cursor.execute(stmt, (arg,))
 
 
-__all__ = ["DeleteDataError", "delete_registered_data"]
+__all__ = ["DeleteDataError", "delete_all_registered_data", "delete_registered_data"]

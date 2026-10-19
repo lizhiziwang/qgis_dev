@@ -2,64 +2,60 @@
 
 弹窗内容（按用户原话）：
 
-1. **图层下拉**：列出当前工程中所有 :class:`QgsVectorLayer`（按 name 排序）。
+1. **待导入图层**：**一开始是空列表**；点旁边的「选择」弹数据源选择器
+   （工程里的图层 / 本地文件——GDB / GeoPackage / SQLite 会把里面的图层全列出来，
+   可多选），选中的图层进列表。列表里可选中后用「删除选中」去掉。
+   **不再问目标坐标系**：每份数据按**自己的坐标系**入库（多份数据可以各带各的
+   CRS，GPKG / SpatiaLite 每张表各存各的 SRS）。
 2. **数据库下拉**：合并本地库（``kind=local``）与服务器库（``kind=server``），
-   显示名复用 :func:`DataManageDock._db_title` / :meth:`_server_title` 的逻辑
-   （避免一处显示规则两份），工具提示展示连接元信息。
-3. **坐标系下拉**：默认是所选图层的 :meth:`QgsVectorLayer.crs` 的 ``authid``；
-   选项里至少含图层 CRS 与一组常用 EPSG（4326 / 4490 / 3857 / 32650 / 32651），
-   用 ``setEditable`` 允许键入任意 EPSG（避免工程里没预设目标 CRS 时不能选）。
+   顺序即调用方给的顺序（数据管理的列表顺序：新的在上），显示名复用
+   :func:`DataManageDock._db_title` / :meth:`_server_title` 的逻辑
+   （避免一处显示规则两份），工具提示展示连接元信息。**默认选中
+   ``default_db``** —— 调用方传「数据管理里当前选中的那个库」，点「导入」时
+   不用再挑一遍（见 ``AppActionsMixin._on_import``）。
+   从**左侧库节点**右键进来时调用方传 ``lock_db=True``：目标库锁定为那个库，
+   不能再切（用户明确要的）；从右侧面板的「导入」按钮进来则可自由选。
 
-不 import :mod:`qgis.core` 之外的 IO / 持久化 / 落盘逻辑——本模块只做"收集三个字段
+不 import :mod:`qgis.core` 之外的 IO / 持久化 / 落盘逻辑——本模块只做"收集图层
 + 校验非空"。落库 + 注册 ``user_relation`` 由 :func:`app.core.domain.import_layer
-.import_vector_layer_to_db` 负责，调用方在 ``accept()`` 之后调。
+.import_vector_layer_to_db` 负责（重名自动改序号也在调用方用
+:func:`~app.core.domain.import_layer.unique_table_name` 算好传进去），
+调用方在 ``accept()`` 之后调。
 
 设计取舍：
 
 - 把 dialog 限制为**收集参数**而非"含导入流程"，是因为不同 db_kind（local /
   server）走不同的 helper，dialog 不知道也不该知道。本 dialog 与
   :class:`AddConnectionDialog` 同型：collect-only，行为在 mixin。
-- 坐标系下拉 ``setEditable(True)`` 而不是只允许列表：用户的目标库 CRS 可能不在
-  预设里（比如投影带 3 度分带的 117E / 120E），硬限会让 dialog 拒服务。
-- 没选矢量图层 / 没选数据库 → 禁用「确定」按钮（早期失败，避免在「空数据」上点
+- 没选图层 / 没选数据库 → 禁用「确定」按钮（早期失败，避免在「空数据」上点
   确认再让 helper 抛错；与 :class:`AddConnectionDialog` 同样友好的 disable 模式）。
 """
 
 from __future__ import annotations
 
-import re
-from typing import Optional
+import os
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QDialogButtonBox,
     QFormLayout,
+    QHBoxLayout,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from app.ui.common.base_dialog import BaseDialog
 
-#: 坐标系下拉预设：图层 CRS + 一组常用 EPSG。工程里若有自定义 CRS 也由调用方
-#: 追加（导入 dialog 拿不到工程对象，CRS 列表在构造期已确定）。
-_COMMON_CRS = (
-    "EPSG:4326",  # WGS84 经纬度（最常见）
-    "EPSG:4490",  # CGCS2000（中国 2000 国家大地坐标系）
-    "EPSG:3857",  # Web 墨卡托（在线瓦片主用）
-    "EPSG:32650",  # WGS84 / UTM zone 50N
-    "EPSG:32651",  # WGS84 / UTM zone 51N
-)
-
-#: authid 形式校验：``字母+数字前缀 : 数字``，例 ``EPSG:4326`` / ``ESRI:102100`` /
-#: ``POSTGIS:4490`` / ``USER:100001``。空串 / 纯数字 / 缺冒号都拒绝。
-_AUTHID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9]*:\d+$")
-
 
 class ImportLayerDialog(BaseDialog):
-    """数据管理「导入」弹窗：选矢量图层 + 选目标库 + 选目标 CRS。"""
+    """数据管理「导入」弹窗：选要导入的图层 + 选目标库。"""
 
     def __init__(
         self,
@@ -67,23 +63,34 @@ class ImportLayerDialog(BaseDialog):
         *,
         vector_layers: list,
         databases: list[dict],
+        default_db: Optional[dict] = None,
+        lock_db: bool = False,
     ) -> None:
+        """
+        Args:
+            parent: 父窗口。
+            vector_layers: 工程里已加载的矢量图层（选择器里可挑；列表本身从空开始）。
+            databases: 可用的目标库（本地 / 服务器）。
+            default_db: 默认选中的目标库。
+            lock_db: ``True`` = 目标库锁定（从左侧库节点右键进来），不能切换。
+        """
         super().__init__(parent, "导入图层到数据库")
         self._vector_layers = list(vector_layers)
         self._databases = list(databases)
-        # 收集图层 CRS 列表（去重保序）：图层下拉变动时刷新坐标系下拉"默认项"
-        self._layer_crs_list: list[str] = []
-        seen: set[str] = set()
-        for lyr in self._vector_layers:
-            try:
-                authid = lyr.crs().authid()
-            except Exception:  # noqa: BLE001
-                continue
-            if authid and authid not in seen:
-                seen.add(authid)
-                self._layer_crs_list.append(authid)
+        #: 目标数据库下拉的默认选中项：调用方传「数据管理里当前选中的那个库」，
+        #: 用户点「导入」时就不用再挑一遍（见 ``AppActionsMixin._on_import``）。
+        self._default_db = default_db
+        #: 目标库是否锁定（左侧库节点右键进来时为 True：用户点的是那个库）
+        self._lock_db = bool(lock_db)
+        #: **强引用**列表里的图层。Qt 的 ``QListWidgetItem.setData`` 只存一个
+        #: QObject 指针，**不持有 Python 包装对象的引用**：局部变量 / 上游列表一释放，
+        #: sip 包装对象就被回收，item.data() 再取出来只剩一个裸 ``QObject``
+        #: （`.name()` → AttributeError）。从本地文件（GDB / gpkg）选进来的图层
+        #: 没有任何别处持有它，用户点「导入」时就死在这里 —— 既不落库也没提示
+        #: （用户报的"选 GDB 图层点导入没反应"）。这里由弹窗自己保活到对话框销毁。
+        self._layer_refs: list = []
         self.setMinimumSize(0, 0)
-        self.resize(440, 220)
+        self.resize(520, 320)
         self._build()
 
     # ------------------------------------------------------------------ UI
@@ -99,21 +106,37 @@ class ImportLayerDialog(BaseDialog):
         form.setHorizontalSpacing(8)
         form.setVerticalSpacing(8)
 
-        # 1. 图层下拉
-        self.layer_combo = QComboBox()
-        if not self._vector_layers:
-            self.layer_combo.addItem("（工程中无矢量图层）", userData=None)
-            self.layer_combo.setEnabled(False)
-        else:
-            # 排序：按 layer.name() 升序（同名保持原顺序——QgsProject.mapLayers 是 dict）
-            ordered = sorted(
-                enumerate(self._vector_layers),
-                key=lambda pair: (pair[1].name() or "", pair[0]),
-            )
-            for _orig_i, lyr in ordered:
-                self.layer_combo.addItem(lyr.name(), userData=lyr)
-        self.layer_combo.currentIndexChanged.connect(self._on_layer_changed)
-        form.addRow("待导入图层：", self.layer_combo)
+        # 1. 待导入图层：**一开始是空列表**；点「选择」挑数据源（工程图层 / 本地文件，
+        #    容器数据源会列出里面的图层、可多选），选中的进列表；可选中后删除
+        self.layer_list = QListWidget()
+        #: QSS 作用域锚点：选中色由主题里 #ImportLayerList 规则加深
+        #: （全局 toolbar_hover 太浅，用户会以为没选上）
+        self.layer_list.setObjectName("ImportLayerList")
+        self.layer_list.setSelectionMode(
+            QAbstractItemView.SelectionMode.ExtendedSelection
+        )
+        self.layer_list.setMinimumHeight(120)
+        self.layer_list.itemSelectionChanged.connect(self._refresh_ok_enabled)
+        layer_row = QHBoxLayout()
+        layer_row.setContentsMargins(0, 0, 0, 0)
+        layer_row.setSpacing(6)
+        layer_row.addWidget(self.layer_list, 1)
+        side = QVBoxLayout()
+        side.setSpacing(4)
+        self.pick_btn = QPushButton("选择")
+        self.pick_btn.setToolTip(
+            "挑要导入的数据：工程里的图层，或电脑上的文件"
+            "（GDB / GeoPackage / SQLite 会把里面的图层全列出来，可按住 Ctrl / Shift 多选）"
+        )
+        self.pick_btn.clicked.connect(self._on_pick_layers)
+        side.addWidget(self.pick_btn)
+        self.remove_btn = QPushButton("删除选中")
+        self.remove_btn.setToolTip("把选中的条目从待导入列表里去掉（不影响任何数据）")
+        self.remove_btn.clicked.connect(self._on_remove_selected)
+        side.addWidget(self.remove_btn)
+        side.addStretch(1)
+        layer_row.addLayout(side)
+        form.addRow("待导入图层：", layer_row)
 
         # 2. 数据库下拉
         self.db_combo = QComboBox()
@@ -128,27 +151,24 @@ class ImportLayerDialog(BaseDialog):
                     self.db_combo.setItemData(
                         self.db_combo.count() - 1, tip, Qt.ItemDataRole.ToolTipRole
                     )
+            # 默认选中调用方指定的那个库（数据管理里当前选中的）：库 dict 经 Qt 的
+            # itemData 出来是**副本**，按身份（本地=路径 / 服务器=类型+主机+库名）认。
+            if self._default_db is not None:
+                want = _db_identity(self._default_db)
+                for i in range(self.db_combo.count()):
+                    data = self.db_combo.itemData(i)
+                    if isinstance(data, dict) and _db_identity(data) == want:
+                        self.db_combo.setCurrentIndex(i)
+                        break
+            if self._lock_db:
+                # 从左侧库节点右键进来：用户点的是那个库，锁死不让切（用户明确要的）
+                self.db_combo.setEnabled(False)
+                self.db_combo.setToolTip("从左侧库节点进入导入：目标库已锁定")
         form.addRow("目标数据库：", self.db_combo)
 
-        # 3. 坐标系下拉
-        self.crs_combo = QComboBox()
-        self.crs_combo.setEditable(True)
-        # 选项：图层 CRS 在前，常用 EPSG 在后（同 authid 去重保序）
-        seen: set[str] = set()
-        for authid in self._layer_crs_list + list(_COMMON_CRS):
-            if authid and authid not in seen:
-                seen.add(authid)
-                self.crs_combo.addItem(authid)
-        # 默认选中第一个图层的 CRS（layer 选中后由 _on_layer_changed 覆盖）
-        if self._vector_layers:
-            current = self.layer_combo.currentData()
-            if current is not None:
-                self._refresh_default_crs(current)
-        form.addRow("目标坐标系：", self.crs_combo)
-
-        # 坐标系说明
+        # 说明
         hint = QLabel(
-            "默认 = 待导入图层的坐标系；下拉为常见 EPSG，可手填任意 EPSG / authid。"
+            "每份数据按自己的坐标系入库；目标库里已有同名图层时自动改名（名称_1、名称_2…）。"
         )
         hint.setObjectName("ImportLayerDialogHint")
         hint.setWordWrap(True)
@@ -169,74 +189,149 @@ class ImportLayerDialog(BaseDialog):
 
     # ------------------------------------------------------------- 事件
 
-    def _on_layer_changed(self, _index: int) -> None:
-        layer = self.layer_combo.currentData()
-        if layer is None:
-            return
-        self._refresh_default_crs(layer)
+    def _on_pick_layers(self) -> None:
+        """「选择」：弹数据源选择器，把选中的图层全部追加进待导入列表。
 
-    def _refresh_default_crs(self, layer) -> None:
-        """把坐标系下拉的当前项设为所选图层 CRS（若在列表中），否则追加。"""
-        try:
-            authid = layer.crs().authid()
-        except Exception:  # noqa: BLE001
-            return
-        if not authid:
-            return
-        idx = self.crs_combo.findText(authid)
-        if idx >= 0:
-            self.crs_combo.setCurrentIndex(idx)
-        else:
-            # 插到列表最前（保持"图层 CRS 优先"的视觉顺序）
-            self.crs_combo.insertItem(0, authid)
-            self.crs_combo.setCurrentIndex(0)
+        - **工程里的图层**：列出工程里的矢量图层；
+        - **本地文件**：挑电脑上的数据（GDB / GeoPackage / SQLite 会把里面的图层全列出来）；
+        - 两种来源都支持 Ctrl / Shift 多选。
+
+        开文件、列子图层是 IO，交给 :mod:`app.core.util.sublayers`；本弹窗只摆界面。
+        """
+        from app.ui.dialogs.create_data_fields_step import ExternalDatasetDialog
+
+        dialog = ExternalDatasetDialog(self, vector_layers=self._vector_layers, multi=True)
+        accepted = dialog.exec()
+        layers, error = dialog.resolve_all() if accepted else ([], "")
+        dialog.deleteLater()
+        if error:
+            # 部分失败也照样把能打开的加进来；打不开的那几个在提示里说清楚
+            QMessageBox.warning(self, "选择数据源", error)
+        for layer in layers:
+            self._add_layer(layer)
+        self._refresh_ok_enabled()
+
+    def _add_layer(self, layer) -> bool:
+        """把图层追加进列表（同名跳过，避免同一层导两遍）。"""
+        for row in range(self.layer_list.count()):
+            existing = self.layer_list.item(row).data(Qt.ItemDataRole.UserRole)
+            try:
+                same = existing is layer or (
+                    existing is not None and existing.name() == layer.name()
+                )
+            except (AttributeError, RuntimeError):
+                # 旧条目里的图层已被回收（见 __init__ 里 _layer_refs 的说明）
+                same = False
+            if same:
+                return False
+        # 列表里带上**来源文件**，用户一眼能看出这个条目是从哪个数据文件选的
+        source_name = _source_file_name(layer)
+        text = f"{layer.name()}（{source_name}）" if source_name else layer.name()
+        item = QListWidgetItem(text)
+        item.setData(Qt.ItemDataRole.UserRole, layer)
+        item.setToolTip(layer.source())
+        self.layer_list.addItem(item)
+        # **保活**：item data 只存 QObject 指针，不持有 Python 包装对象（见 __init__）
+        self._layer_refs.append(layer)
+        item.setSelected(True)
+        return True
+
+    def _on_remove_selected(self) -> None:
+        """「删除选中」：把选中的条目从待导入列表里去掉（只动列表，不动数据）。"""
+        for item in self.layer_list.selectedItems():
+            layer = item.data(Qt.ItemDataRole.UserRole)
+            # 同步放掉强引用，避免关窗前一直占着图层 / 文件句柄
+            for index, ref in enumerate(self._layer_refs):
+                if ref is layer:
+                    del self._layer_refs[index]
+                    break
+            self.layer_list.takeItem(self.layer_list.row(item))
+        self._refresh_ok_enabled()
 
     def _on_accept(self) -> None:
-        layer = self.layer_combo.currentData()
-        db = self.db_combo.currentData()
-        crs = self.crs_combo.currentText().strip()
-        if layer is None or db is None:
-            QMessageBox.warning(self, "导入图层", "请先选择矢量图层与目标数据库")
-            return
-        if not crs:
-            QMessageBox.warning(self, "导入图层", "目标坐标系不能为空")
-            return
-        # authid 形式校验（EPSG:xxxx / ESRI:xxx / POSTGIS:xxxx 都接受，但必须
-        # 形如 ``前缀:数字``）；通过则继续，否则提示。允许空——helper 会再用
-        # ``QgsCoordinateReferenceSystem(authid)`` 兜底校验。
-        if not _AUTHID_RE.match(crs):
-            QMessageBox.warning(
-                self,
-                "导入图层",
-                f"目标坐标系格式不合法：{crs!r}（应形如 EPSG:4326）",
-            )
+        if not self.selected_layers() or self.db_combo.currentData() is None:
+            QMessageBox.warning(self, "导入图层", "请先选择要导入的图层与目标数据库")
             return
         self.accept()
 
     def _refresh_ok_enabled(self) -> None:
-        """空图层 / 空库 → 禁 OK（早期失败）。"""
-        can = (
-            self.layer_combo.currentData() is not None
-            and self.db_combo.currentData() is not None
-        )
+        """没选图层 / 没选库 → 禁 OK（早期失败）。"""
+        can = bool(self.selected_layers()) and self.db_combo.currentData() is not None
         ok = self.ok_btn.button(QDialogButtonBox.StandardButton.Ok)
         if ok is not None:
             ok.setEnabled(can)
 
     # ------------------------------------------------------------- 结果
 
-    def result_payload(
-        self,
-    ) -> tuple[object, dict, str]:
-        """``(layer, db, target_crs_authid)``。"""
-        return (
-            self.layer_combo.currentData(),
-            self.db_combo.currentData(),
-            self.crs_combo.currentText().strip(),
-        )
+    def selected_layers(self) -> list[object]:
+        """列表里**选中**的图层（可能多个）。
+
+        取不到有效图层的条目直接跳过：Qt 的 item data 只存 QObject 指针，万一
+        上游把图层回收了，这里拿到的会是裸 ``QObject`` —— 交给调用方只会在
+        ``layer.name()`` 处崩掉（历史上就是"点导入没反应、也没提示"的来源）。
+        """
+        out: list[object] = []
+        for item in self.layer_list.selectedItems():
+            layer = item.data(Qt.ItemDataRole.UserRole)
+            if layer is None:
+                continue
+            try:
+                layer.name()
+            except (AttributeError, RuntimeError):
+                continue
+            out.append(layer)
+        return out
+
+    def result_payload(self) -> tuple[list[object], dict]:
+        """``(layers, db)`` —— ``layers`` 是待导入列表里选中的全部图层。
+
+        **不再返回目标坐标系**：每份数据按自己的坐标系入库（见模块头）。
+        """
+        return self.selected_layers(), self.db_combo.currentData()
+
+
+def _source_file_name(layer) -> str:
+    """图层的来源文件名（本地库取容器文件名，单文件取文件名）；不是文件来源返回空串。
+
+    只用来在列表里给个提示（"这个条目是从哪个数据文件选的"），所以**只认真实存在的
+    文件 / 目录**：内存图层（source 是 ``Point?crs=…&field=…`` 这种 URI）没有文件可言，
+    不能把一整串 URI 塞进列表（实测会显示成一长串参数）。
+    """
+    try:
+        source = str(layer.source() or "")
+    except Exception:  # noqa: BLE001 —— 图层已销毁
+        return ""
+    container = source.split("|", 1)[0]
+    # SpatiaLite 的 source 是 `dbname='…' table="…" (geom)` 这种，取 dbname
+    marker = "dbname='"
+    if marker in container:
+        container = container.split(marker, 1)[1].split("'", 1)[0]
+    container = container.strip()
+    if not container or not (os.path.isfile(container) or os.path.isdir(container)):
+        return ""
+    name = os.path.basename(container.rstrip("/\\"))
+    try:
+        layer_name = str(layer.name())
+    except RuntimeError:
+        return ""
+    return "" if not name or name == layer_name else name
 
 
 # --------------------------------------------------------------------- helpers
+
+
+def _db_identity(db: dict) -> tuple[str, ...]:
+    """数据库连接的**身份**（用于在 Qt 的 ``itemData`` 副本里认出同一个库）。
+
+    本地库认路径；服务器连接认「类型 + 主机 + 端口 + 库名 + 名称」这一串（它的
+    ``name`` 可能被用户改过，所以不用它单独当身份）。
+    """
+    if str(db.get("kind") or "") == "server":
+        return ("server",) + tuple(
+            str(db.get(key) or "")
+            for key in ("db_type", "host", "port", "database", "name")
+        )
+    return ("local", str(db.get("path") or ""))
 
 
 def _format_db_label(db: dict) -> str:

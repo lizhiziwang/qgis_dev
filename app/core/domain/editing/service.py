@@ -29,14 +29,23 @@ class LayerEditService:
         return bool(ok)
 
     def stop(self, layer: "QgsVectorLayer", save: bool = True) -> bool:
-        """停止编辑。``save=True`` 提交；``False`` 回滚。"""
+        """停止编辑。``save=True`` 提交；``False`` 回滚并结束编辑。
+
+        **返回值的口径是「图层真的离开编辑态了没」**：``commitChanges(stopEditing=True)``
+        在「没有改动要提交」时（回滚之后就是这样）会返回 ``False``，但编辑确实已经结束 ——
+        拿返回码当成功标志会把"停好了"误报成失败。提交失败时图层仍处于编辑态，
+        所以 ``not isEditable()`` 正好同时表达两种结果。
+        """
         if not layer.isEditable():
             return True
         if save:
-            return bool(layer.commitChanges(stopEditing=True))
-        layer.rollBack()
-        # commitChanges(stopEditing=False) 后再 stop
-        return bool(layer.commitChanges(stopEditing=True))
+            layer.commitChanges(stopEditing=True)
+        else:
+            layer.rollBack()
+            if layer.isEditable():
+                # rollBack 只清编辑缓冲、仍在编辑态；再 commit 一次把它关掉
+                layer.commitChanges(stopEditing=True)
+        return not layer.isEditable()
 
     def commit(self, layer: "QgsVectorLayer", stop_editing: bool = False) -> bool:
         if not layer.isEditable():

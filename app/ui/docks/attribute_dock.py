@@ -391,7 +391,41 @@ class PagedAttributeTableModel(QAbstractTableModel):
         # 字段**别名**变化只发 layerModified（实测 setFieldAlias 不发 updatedFields），
         # 且字段名没变 → 不能走 reload_fields。这里只刷新列头文字（见 _on_layer_modified）。
         layer.layerModified.connect(self._on_layer_modified)
+        # 删 / 增要素也要让表跟上：**不接 featureDeleted 的话，编辑时右键「删除」只改了
+        # 编辑缓冲，表格还显示那一行** —— 用户看到的就是"删除没有效果"（用户报的）。
+        layer.featureDeleted.connect(self._on_feature_deleted)
+        layer.featureAdded.connect(self._on_feature_added)
         self._start_stream()
+
+    def _on_feature_deleted(self, fid: int) -> None:
+        """图层里删了一个要素：把表里对应那一行立刻撤掉（撤销删除由 featureAdded 补回）。"""
+        fid = int(fid)
+        self._feature_cache.pop(fid, None)
+        self._extra_fids.discard(fid)
+        row = self._row_of_fid.get(fid)
+        if row is None:
+            return
+        self._remove_rows([row])
+        self.loaded_count = len(self._fids)
+        if self.total_known:
+            self.total_features = max(0, self.total_features - 1)
+        self.state_changed.emit()
+
+    def _on_feature_added(self, fid: int) -> None:
+        """图层里新增了一个要素（含**撤销删除**）→ 全量视图且已加载完时补到末尾。
+
+        带筛选 / 还在流式加载 / 正在按某列排序时不动手：新要素是否命中筛选、该排在哪
+        都得重算，交给用户点「刷新」。这里只兜住"删了又撤销"这个最常见的情形。
+        """
+        if self.subset_active or not self._exhausted or self._sort_column >= 0:
+            return
+        added = self._append_fids([int(fid)])
+        if not added:
+            return
+        self.loaded_count = len(self._fids)
+        if self.total_known:
+            self.total_features += 1
+        self.state_changed.emit()
 
     def _on_fields_updated(self) -> None:
         """图层字段定义变了 → 字段名有变化才重读列（避免 commit 等重复触发白重载）。"""
@@ -1057,7 +1091,13 @@ class PagedAttributeTableWidget(QWidget):
         #: (按钮, 图标 key)：这些图标是**生成时**把主题色烤进画布的，切主题要按新颜色重画
         self._icon_items: list[tuple[QPushButton, str]] = []
         self.editing_service = LayerEditService()
+        # 回滚 = 缓冲里的增删改全部作废：表里必须重扫一遍，否则删掉的行不会回来
+        layer.afterRollBack.connect(self._on_layer_rolled_back)
+        # 编辑态可能从**别的入口**变化（地图工具条开始/停止编辑）：按钮跟着真实状态走
+        layer.editingStarted.connect(self._refresh_edit_buttons)
+        layer.editingStopped.connect(self._refresh_edit_buttons)
         self._setup_ui()
+        self._refresh_edit_buttons()
         ThemeManager.instance().theme_changed.connect(self._on_theme_changed)
 
     def _setup_ui(self) -> None:
@@ -1082,6 +1122,14 @@ class PagedAttributeTableWidget(QWidget):
         self.stop_btn.setIcon(Icons.stop_edit())
         self.stop_btn.setToolTip("停止编辑")
         self.stop_btn.setFixedSize(26, 26)
+        # 删除选中要素：从单元格右键菜单提到工具条（用户报"只在右键里不方便"）。
+        # 与右键「删除」同一条路（图层编辑缓冲 + 撤销命令），可用性由真实
+        # 编辑态 + 选中集推导，见 :meth:`_refresh_delete_button`。
+        self.delete_btn = QPushButton()
+        self.delete_btn.setToolTip("删除选中的要素（需先开始编辑）")
+        self.delete_btn.setFixedSize(26, 26)
+        self._icon_items.append((self.delete_btn, "trash"))
+        self.delete_btn.clicked.connect(self._delete_selected_features)
         self.filter_btn = QPushButton()
         self.filter_btn.setIcon(Icons.filter())
         self.filter_btn.setToolTip("属性筛选")
@@ -1135,6 +1183,7 @@ class PagedAttributeTableWidget(QWidget):
             (self.clear_selection_btn, "clear_selection"),
         ]
         for b in (self.start_btn, self.save_btn, self.stop_btn,
+                  self.delete_btn,
                   self.refresh_btn, self.filter_btn, self.calc_btn,
                   self.columns_btn,
                   self.zoom_selection_btn,
@@ -1468,8 +1517,11 @@ class PagedAttributeTableWidget(QWidget):
         self._refresh_load_state()
 
     def _set_selection_count(self, count: int) -> None:
-        """底部显示"已选中 N 条"（没选中就不显示）。"""
+        """底部显示"已选中 N 条"（没选中就不显示），顺带刷新工具条删除按钮。"""
         self.selection_label.setText(f"已选中 {count} 条" if count else "")
+        # 选中集变化是所有入口（表格点选 / 地图选择 / 全选 / 反选 / 清空）的必经之路；
+        # 传 count 而不是回查图层：此刻图层选中集还没被上层替换（见 _emit_selection）
+        self._refresh_delete_button(count)
 
     def _emit_selection(self, fids) -> None:
         """把新的选中集交给上层，**顺带把底部计数刷了**。
@@ -1796,19 +1848,143 @@ class PagedAttributeTableWidget(QWidget):
         # 编辑会拿 QGIS 写锁，后台流式读锁会阻塞编辑：先取消流式
         if self.model is not None:
             self.model.cancel_stream()
-        ok = self.editing_service.start(self.layer)
-        if ok:
-            self.save_btn.setEnabled(True)
-            self.stop_btn.setEnabled(True)
+        self.editing_service.start(self.layer)
+        self._refresh_edit_buttons()
 
     def _save_edit(self) -> None:
         if self.layer.isEditable():
             self.editing_service.commit(self.layer)
+        self._refresh_edit_buttons()
+
+    def _refresh_edit_buttons(self) -> None:
+        """开始 / 保存 / 停止三个按钮的可用性**由图层真实编辑态推导**。
+
+        以前是「开始编辑时打开、停止编辑末尾关掉」两处各改一次 —— 中途从外部入口
+        （地图工具条）停编、或「不保存」分支提前 return，按钮就跟真实状态对不上，
+        看起来像"停不掉编辑"。改成单一来源后，任何入口停下都能跟上。
+        """
+        layer = self.layer
+        try:
+            editable = bool(layer is not None and layer.isEditable())
+        except RuntimeError:  # 图层已被销毁
+            editable = False
+        self.start_btn.setEnabled(not editable)
+        self.save_btn.setEnabled(editable)
+        self.stop_btn.setEnabled(editable)
+        self._refresh_delete_button()
+
+    def _refresh_delete_button(self, count: int | None = None) -> None:
+        """工具条「删除选中」的可用性 = 图层处于编辑态 **且** 有选中要素。
+
+        单一来源：编辑态从图层真实 ``isEditable()`` 读。选中数优先用调用方报的
+        ``count``（表格 → 图层 的同步是**先发计数、后改图层**，此刻直接问图层
+        拿到的是旧选中集，按钮会慢一拍）；没传时再问图层选中集。
+        """
+        layer = self.layer
+        try:
+            editable = bool(layer is not None and layer.isEditable())
+        except RuntimeError:  # 图层已销毁
+            editable = False
+        if count is None:
+            try:
+                has_selection = bool(layer is not None and layer.selectedFeatureIds())
+            except RuntimeError:
+                has_selection = False
+        else:
+            has_selection = count > 0
+        btn = getattr(self, "delete_btn", None)
+        if btn is not None:
+            btn.setEnabled(editable and has_selection)
+
+    def _delete_selected_features(self) -> None:
+        """删除当前选中的要素（编辑缓冲内，可撤销；保存编辑时才落盘）。
+
+        与单元格右键「删除」同一语义，但一次删掉整个选中集。包在一条编辑命令里，
+        撤销时整批一起回来；``beginEditCommand`` / ``endEditCommand`` 必须成对，
+        否则撤销栈会失效（见项目经验）。
+        """
+        layer = self.layer
+        if layer is None:
+            return
+        try:
+            if not layer.isEditable():
+                return
+            fids = [int(fid) for fid in layer.selectedFeatureIds()]
+        except RuntimeError:  # 图层已销毁
+            return
+        if not fids:
+            self._refresh_delete_button()
+            return
+
+        layer.beginEditCommand(f"删除 {len(fids)} 个要素")
+        try:
+            layer.deleteFeatures(fids)
+        except Exception as exc:  # noqa: BLE001 —— 槽里抛异常会带走进程
+            logger.error("属性表删除选中要素失败：%s", exc, exc_info=True)
+            QMessageBox.warning(
+                self, "删除失败", f"没能删除选中的要素：{exc}"
+            )
+        finally:
+            layer.endEditCommand()
+        self._refresh_delete_button()
 
     def _stop_edit(self) -> None:
-        self.editing_service.stop(self.layer, save=True)
-        self.save_btn.setEnabled(False)
-        self.stop_btn.setEnabled(False)
+        """停止编辑：**有未保存改动时先问是否保存**（删除等编辑只是缓冲，这一步才落盘）。
+
+        与地图工具条的「停止编辑」同一口径：保存 / 不保存 / 取消。
+        「取消」留在编辑态；保存失败也留在编辑态并把原因说出来 —— 不能假装已经停了。
+        **不保存 = 回滚并结束编辑**；表格由 ``afterRollBack`` 的延迟刷新补回被删的行
+        （不能在回滚的信号栈里同步重扫：后台读流会和"结束编辑"抢锁，导致停不干净）。
+        三个按钮的可用性统一由 :meth:`_refresh_edit_buttons` 按真实编辑态刷新。
+        """
+        layer = self.layer
+        if layer is None or not layer.isEditable():
+            self._refresh_edit_buttons()
+            return
+        if layer.isModified():
+            ret = QMessageBox.question(
+                self,
+                "停止编辑",
+                f"图层「{layer.name()}」有未保存的修改，是否保存？",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Save,
+            )
+            if ret == QMessageBox.StandardButton.Cancel:
+                return
+            if ret == QMessageBox.StandardButton.Save:
+                if not self.editing_service.stop(layer, save=True):
+                    QMessageBox.warning(
+                        self,
+                        "保存失败",
+                        f"图层「{layer.name()}」的修改没能保存，仍在编辑状态。\n"
+                        "请检查数据源（是否被别的程序占用 / 有约束冲突）后重试。",
+                    )
+                    self._refresh_edit_buttons()
+                    return
+            else:
+                self.editing_service.stop(layer, save=False)
+        else:
+            self.editing_service.stop(layer, save=True)
+        self._refresh_edit_buttons()
+
+    def _on_layer_rolled_back(self) -> None:
+        """图层回滚：缓冲里的增删改全部作废，表必须重扫（删掉的行要回来）。
+
+        **推迟到下一个事件循环 tick**：这个槽是在 ``rollBack()`` 的信号栈里被调的，
+        当场重启后台读流会和"结束编辑"抢数据源的锁，实测会造成停编停不干净
+        （用户报的"选不保存反而关不掉编辑"）。
+        """
+        QTimer.singleShot(0, self._refresh_after_rollback)
+
+    def _refresh_after_rollback(self) -> None:
+        try:
+            if self.layer is None:  # 收尾阶段图层已销毁
+                return
+            self._refresh_table()
+        except RuntimeError:  # 控件 / 图层已销毁
+            return
 
     def _filter(self) -> None:
         dlg = QueryBuilderDialog(self.layer, parent=self)

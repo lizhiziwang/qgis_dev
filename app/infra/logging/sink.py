@@ -23,9 +23,19 @@ class _RootSink:
     """维护 Python root logger 上的 handlers。"""
 
     _configured: bool = False
+    #: 当前生效的配置（:func:`configure` 时记下）。导入期 `__file__` 推导的
+    #: 默认目录在打包后指向 `_internal/logs`，与真正写入的目录不同；需要
+    #: "日志写到哪"的调用方（如日志面板）必须在**运行时**问这里，而不是在
+    #: 模块导入时算一个常量。
+    _active_config: ClassVar[LogConfig | None] = None
     #: 本类建出来的 handler。**只关这些**——root 上还可能有别人的 handler
     #: （pytest 的 caplog 就是），关掉别人正在用的流会直接破坏调用方。
     _handlers: ClassVar[list[logging.Handler]] = []
+
+    @classmethod
+    def active_config(cls) -> LogConfig:
+        """当前生效的日志配置；尚未装配时按环境变量推导（不落盘）。"""
+        return cls._active_config or LogConfig.from_env()
 
     @classmethod
     def configure(cls, config: LogConfig) -> None:
@@ -80,6 +90,7 @@ class _RootSink:
             root.addHandler(attach_redaction(attach_filter(handler)))
         cls._handlers = [console, all_file, error_file]
 
+        cls._active_config = config
         cls._configured = True
 
     @staticmethod
@@ -120,4 +131,15 @@ class _RootSink:
         cls._handlers = []
         for handler in list(root.handlers):
             root.removeHandler(handler)
+        cls._active_config = None
         cls._configured = False
+
+
+def active_log_config() -> LogConfig:
+    """当前生效的日志配置。
+
+    给"运行时才知道日志写到哪"的调用方用（日志面板读文件、清空日志等）。
+    不要在模块顶层缓存它——打包后导入期与 ``_configure_logging`` 之后的
+    日志目录可能不是同一个（``__file__`` 在 ``_internal/`` 下）。
+    """
+    return _RootSink.active_config()

@@ -282,18 +282,27 @@ class ThemeManager(QObject):
 #: 选中行上露出一块颜色不同的补丁）。
 DOCK_SELECTION_ALPHA = 55
 
+#: 弹窗列表（导入图层的待导入 / 数据源图层列表）的选中底色不透明度。
+#: 比停靠面板重得多：弹窗列表没有悬停色作对照，全局规则给的 ``toolbar_hover``
+#: 又几乎是背景色，用户会以为"根本没选上"（见 :func:`dock_selection_color`）。
+DIALOG_LIST_SELECTION_ALPHA = 110
 
-def dock_selection_color(t: "Theme") -> str:
-    """选中行的**实色**（把强调色按 :data:`DOCK_SELECTION_ALPHA` 叠到窗体底色上）。
+
+def dock_selection_color(t: "Theme", alpha: int = DOCK_SELECTION_ALPHA) -> str:
+    """选中行的**实色**（把强调色按 ``alpha`` 叠到窗体底色上）。
 
     QSS 里**不用** ``rgba(...)``：Qt 对 ``selection-background-color`` 这类调色板
     角色会丢 alpha / 按自己的规则合成，于是"分支区一种深浅、item 区另一种"
     （实测分支区 #98bee9、item 区 #cbdbed）。这里给一个算好的实色，两边必然同色。
     图层树自绘的「标注」胶囊也用同一套算法（见 ``layer_dock._blend_over``）。
+
+    ``alpha`` 默认取 :data:`DOCK_SELECTION_ALPHA`（停靠面板的浅选中态）；弹窗里的
+    列表（如「导入图层」的待导入列表）用更重的 :data:`DIALOG_LIST_SELECTION_ALPHA`
+    —— 弹窗背景更亮、列表没有悬停对照，太浅的选中色会被误认成"没选上"（用户报过）。
     """
     fg = QColor(t.input_focus)
     bg = QColor(t.window_bg)
-    a = max(0, min(255, DOCK_SELECTION_ALPHA)) / 255.0
+    a = max(0, min(255, alpha)) / 255.0
     return QColor(
         round(fg.red() * a + bg.red() * (1.0 - a)),
         round(fg.green() * a + bg.green() * (1.0 - a)),
@@ -988,6 +997,24 @@ def app_qss(t: Theme) -> str:
     QCheckBox, QRadioButton {{ color: {t.menu_text}; }}
     QCheckBox:disabled, QRadioButton:disabled {{ color: {t.text_secondary}; }}
 
+    /* 单选：**显式画圆点**。没有这条规则时，选中态在部分平台 / 主题下只剩一个
+       空圈、看不出"选中了"（用户反映过）。未选 = 空圈，选中 = 强调色圈 + 中心圆点。 */
+    QRadioButton::indicator {{
+        width: 14px;
+        height: 14px;
+        border: 1px solid {t.input_border};
+        border-radius: 7px;
+        background: {t.input_bg};
+    }}
+    QRadioButton::indicator:hover {{ border-color: {t.input_focus}; }}
+    QRadioButton::indicator:checked {{
+        border: 1px solid {t.input_focus};
+        background: qradialgradient(cx:0.5, cy:0.5, radius:0.5, fx:0.5, fy:0.5,
+                    stop:0 {t.input_focus}, stop:0.4 {t.input_focus},
+                    stop:0.45 {t.input_bg}, stop:1 {t.input_bg});
+    }}
+    QRadioButton::indicator:disabled {{ border-color: {t.text_secondary}; }}
+
     /* 勾选框：**显式画 indicator**。只靠平台原生样式的话，选中态在部分环境下会
        退化成"实心方块、看不出勾"（见 :func:`_check_url` 的说明），用户反映
        "勾选的颜色看不清"。这里统一成：未选 = 空框，选中 = 强调色描边 + 现画的
@@ -1064,6 +1091,21 @@ def app_qss(t: Theme) -> str:
     QTreeWidget::item:selected, QTreeView::item:selected,
     QListView::item:selected, QListWidget::item:selected {{
         background-color: {t.toolbar_hover};
+        color: {t.menu_text};
+    }}
+    /* 「导入图层」弹窗里的图层列表（待导入 / 数据源 / GDB 子图层）：
+       全局选中色 toolbar_hover 跟背景几乎同色，用户报"选中了看着像没选"。
+       这里统一用强调色叠底的实色（比停靠面板重，见 DIALOG_LIST_SELECTION_ALPHA），
+       文字保持主题前景色 —— 浅色主题下白字对比不足，深字才清楚。 */
+    QListWidget#ImportLayerList, QListWidget#ExternalLayerList,
+    QListWidget#ExternalSublayerList {{
+        selection-background-color: {dock_selection_color(t, DIALOG_LIST_SELECTION_ALPHA)};
+        selection-color: {t.menu_text};
+    }}
+    QListWidget#ImportLayerList::item:selected,
+    QListWidget#ExternalLayerList::item:selected,
+    QListWidget#ExternalSublayerList::item:selected {{
+        background-color: {dock_selection_color(t, DIALOG_LIST_SELECTION_ALPHA)};
         color: {t.menu_text};
     }}
     /* 「组织列」对话框的字段勾选框：QSS 覆盖 indicator 后原生勾会被顶掉，

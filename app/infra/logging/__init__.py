@@ -80,7 +80,7 @@ from .redaction import (
 from .renderer import log_to_html, render_log_html
 from .session import SessionLog, current_session
 from .session import install as install_session_logging
-from .sink import _RootSink
+from .sink import _RootSink, active_log_config
 from .styles import LogStyle
 
 __all__ = [
@@ -92,6 +92,7 @@ __all__ = [
     "RedactionFilter",
     "SessionLog",
     "_RootSink",
+    "active_log_config",
     "attach_redaction",
     "build_diagnostics_package",
     "build_snapshot",

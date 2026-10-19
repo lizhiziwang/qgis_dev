@@ -8,16 +8,17 @@
     库损坏)→ 抛 :class:`LocalLayerBuildFailedError` 提示 —— 影像只支持
     GeoPackage 内容, 没有本地 XYZ 瓦片回落(该服务已随 xyz 时代整体移除,
     老 spatialite 影像请迁移重落为 .gpkg);
-  - ``spatial``:OGR provider 直开(``路径|layername=表名``)。GDAL(3.11)
-    按**文件名后缀**裁决驱动 —— 新规落库本体直接 ``.gpkg`` 后缀, GPKG
-    驱动直接接管、无别名无第二文件; 仅兼容**老 ``.db`` 后缀**的 gpkg
-    内容库经 :func:`~app.core.util.local_db_util.gpkg_open_path` 映射到同
-    inode 的 ``.gpkg`` 硬链接再开(零拷贝; 别名是**临时的**——只在图层存续
-    期间存在, 图层移除/会话结束即删)。老 spatialite 库原样直读, OGR 失败
-    时才退 spatialite provider(仅老库, GeoPackage 无此回退)。
-    不采用 ``GPKG:`` 驱动前缀 —— Windows 盘符路径(如 ``GPKG:D:/…``)会
-    被 GDAL 截断成盘符(实测 sqlite3_open(D) 失败; 仅相对路径无冒号时前缀
-    可开, 但工程需持久化绝对路径, 故直接落库 ``.gpkg`` 后缀)。
+  - ``spatial``:矢量表按 :func:`open_local_vector_table` 打开 —— **GeoPackage 内容**
+    走 OGR(``路径|layername=表名``, GDAL(3.11) 按文件名后缀裁决驱动: 新规落库本体
+    直接 ``.gpkg`` 后缀, GPKG 驱动直接接管、无别名无第二文件; 仅兼容**老 ``.db``
+    后缀**的 gpkg 内容库经 :func:`~app.core.util.local_db_util.gpkg_open_path` 映射到
+    同 inode 的 ``.gpkg`` 硬链接再开(零拷贝; 别名是**临时的**——只在图层存续期间存在,
+    图层移除/会话结束即删)), **SpatiaLite 内容**走 spatialite provider(OGR 会把 FID 列
+    当普通字段暴露出来, sqlite 库无主键就是 ``rowid`` → 属性表凭空多一列; 见
+    :func:`open_local_vector_table`), provider 打不开才退 OGR。
+    不采用 ``GPKG:`` 驱动前缀 —— Windows 盘符路径(如 ``GPKG:D:/…``)会被 GDAL 截断成
+    盘符(实测 sqlite3_open(D) 失败; 仅相对路径无冒号时前缀可开, 但工程需持久化绝对
+    路径, 故直接落库 ``.gpkg`` 后缀)。
   - ``dict`` 等无几何数据:抛 :class:`LocalLayerUnsupportedCategoryError`
     让上层弹原有 ``QMessageBox.information``(UX 行为保持不变)。
 - 成功返回 :class:`QgsMapLayer` 实例(可直接 :meth:`QgsProject.addMapLayer`);
@@ -36,11 +37,17 @@ from __future__ import annotations
 
 import sqlite3
 from typing import Any, Optional
+from urllib.parse import unquote
 
 from qgis.PyQt.QtCore import QObject
 from qgis.core import QgsDataSourceUri, QgsMapLayer, QgsRasterLayer, QgsVectorLayer
 
-from app.core.util.local_db_util import gpkg_open_path, repair_gpkg_if_needed
+from app.core.util.local_db_util import (
+    gpkg_open_path,
+    local_db_util,
+    repair_gpkg_if_needed,
+    table_geometry_column,
+)
 from app.infra.logging import get_logger
 
 logger = get_logger(__name__)
@@ -169,42 +176,159 @@ class LocalLayerLoader(QObject):
     # ------------------------------------------------------------ 矢量
 
     def _load_vector(self, db: dict, name: str, path: str) -> Optional[QgsVectorLayer]:
-        """矢量层直开:OGR provider, ``路径|layername=表名``。
+        """矢量层直开:交给 :func:`open_local_vector_table`(按库类型选 provider)。
 
-        - 新规库本体为 GeoPackage 且后缀 ``.gpkg`` → 直开(无别名):
-          :func:`~app.core.util.local_db_util.gpkg_open_path` 对 ``.gpkg``
-          原样返回, GPKG 驱动按后缀直接接管(几何 / SRS / 要素全部正常);
-        - 老 ``.db`` 后缀 gpkg 库: 经同 inode 的 ``.gpkg`` 硬链接再开 ——
-          GDAL(3.11)按后缀裁决驱动, .db 会被 SQLite 驱动抢先认领成纯属性表;
-        - 老 spatialite 库: 原样直读; OGR 失败时才退 spatialite provider
-          (仅老库, GeoPackage 没有该回退 —— 那套只认 spatialite)。
-
-        不用 ``GPKG:`` 驱动前缀强制: 实测在 Windows 盘符路径上被截断成
-        盘符(``sqlite3_open(D) failed``)。
+        失败时抛 :class:`LocalLayerEmptyTableError`, 并把库里那张表的
+        provider / OGR 报错一起带出来。
         """
-        is_gpkg = _db_file_is_gpkg(path)
-        open_path = gpkg_open_path(path) if is_gpkg else path
-        layer = QgsVectorLayer(f"{open_path}|layername={name}", name, "ogr")
-        if layer.isValid():
+        layer, err = open_local_vector_table(path, name)
+        if layer is not None:
             return layer
-        ogr_err = layer.error().message() or "无"
-        if not is_gpkg:
-            # 老 spatialite 库的兜底(provider 依赖 mod_spatialite)
-            meta = (db.get("meta") or {}).get(name) or {}
-            geom_col = meta.get("geom_col")
-            if geom_col:
-                uri = QgsDataSourceUri()
-                uri.setDatabase(path)
-                uri.setDataSource(
-                    "", name, str(geom_col), "", str(meta.get("srid") or "")
-                )
-                layer = QgsVectorLayer(uri.uri(), name, "spatialite")
-                if layer.isValid():
-                    return layer
         raise LocalLayerEmptyTableError(
             f"「{name}」无法作为矢量图层打开(OGR 未识别)\n"
-            f"文件: {path}\nOGR 报错: {ogr_err}"
+            f"文件: {path}\n报错: {err or '无'}"
         )
+
+
+# ------------------------------------------------------------------ 打开策略
+
+
+def open_local_vector_table(
+    db_path: str, table: str
+) -> tuple[Optional[QgsVectorLayer], str]:
+    """打开本地库里的一张矢量表, 返回 ``(图层, 失败原因)``; 失败时图层为 ``None``。
+
+    这是**本地库矢量表唯一的打开策略**, 数据管理双击加载与「创建数据 → 写进已有库」
+    的回读都走它 —— 别在别处另抄一份 provider 选择:
+
+    - **GeoPackage 内容**(``.gpkg`` / 老 ``.db`` 后缀): ``gpkg_open_path`` 处理老
+      ``.db`` 的同 inode ``.gpkg`` 别名, 再由 OGR 直开;
+    - **SpatiaLite 内容**(``.db`` / ``.sqlite``): 优先 **spatialite provider**,
+      打不开再退 OGR。
+
+    **为什么 SpatiaLite 要优先 spatialite provider**: OGR 的 SQLite 驱动会把 FID 列
+    暴露成一个普通字段 —— 无主键表就是 SQLite 隐式列 ``rowid``。于是属性表 / 属性识别 /
+    图层属性 / 导出里都会凭空多出一列 ``rowid``(值还只是行号)。GPKG 驱动不报 FID 列
+    (我们的 GPKG 表也没有主键), 所以这毛病只在 sqlite 库上出现 —— 见
+    `QGIS-Developer 的讨论 <https://lists.osgeo.org/pipermail/qgis-developer/2020-May/061172.html>`_
+    ("we expose the FID as a normal column in QGIS. This is a QGIS only behaviour.")。
+    实测两种 provider 的字段 / CRS / 几何类型 / 要素数 / 框选 / 增删改完全一致, 只有
+    spatialite 的字段清单是干净的。
+
+    没有 URI 参数能压掉 OGR 那个伪字段(``key=`` / ``uid=`` 直接导致打不开, SQLite 驱动
+    也不支持 ``FID`` 开库选项), provider 是唯一解。spatialite provider 依赖
+    mod_spatialite, 老库 / 精简包里可能不可用 —— 那才退 OGR(退回时会有 ``rowid``,
+    但至少图层能打开)。
+
+    Args:
+        db_path: 库文件路径。
+        table: 库内表名。
+
+    Returns:
+        ``(QgsVectorLayer, "")`` 成功; ``(None, 原因)`` 失败。
+    """
+    is_gpkg = _db_file_is_gpkg(db_path)
+    attempts: list[tuple[str, str]] = []  # (provider, 报错)
+    if not is_gpkg:
+        layer, err = _open_spatialite(db_path, table)
+        if layer is not None:
+            return _apply_column_aliases(layer, db_path, table), ""
+        attempts.append(("spatialite", err))
+
+    open_path = gpkg_open_path(db_path) if is_gpkg else db_path
+    layer = QgsVectorLayer(f"{open_path}|layername={table}", table, "ogr")
+    if layer.isValid():
+        return _apply_column_aliases(layer, db_path, table), ""
+    attempts.append(("ogr", layer.error().message() or "无"))
+    return None, "; ".join(f"{p} 打不开: {e}" for p, e in attempts)
+
+
+def _apply_column_aliases(layer, db_path: str, table: str):
+    """把库里存的字段别名套到刚打开的图层上（没有别名就原样返回）。
+
+    **别名是本工程自己记的**（``qgis_dev_column_alias``）：GeoPackage 有标准的
+    ``gpkg_data_columns``，OGR 打开时自己就带出别名；SpatiaLite 没有这种目录表，
+    所以建表时写进我们自己的那张表，在这里套回去 —— 不套的话用户"关掉再打开别名就没了"。
+
+    两种格式都尝试套（gpkg 那张表通常不存在，读回空字典、什么都不做）。
+    """
+    try:
+        db = local_db_util(db_path)
+    except (sqlite3.Error, RuntimeError) as exc:
+        logger.info("读字段别名失败（按没有别名处理）：%s（%s）", db_path, exc)
+        return layer
+    try:
+        aliases = db.column_aliases(table)
+    finally:
+        db.conn.close()
+    for column, alias in aliases.items():
+        index = layer.fields().indexOf(column)
+        if index >= 0:
+            layer.setFieldAlias(index, alias)
+    if aliases:
+        logger.info("已套用字段别名 %d 个：%s（%s）", len(aliases), table, db_path)
+    return layer
+
+
+def _open_spatialite(db_path: str, table: str) -> tuple[Optional[QgsVectorLayer], str]:
+    """用 spatialite provider 打开一张表; 返回 ``(图层, 失败原因)``。
+
+    **URI 必须显式给几何列名**(从库里的 ``geometry_columns`` 查, 见
+    :func:`~app.core.util.local_db_util.table_geometry_column`): 留空时 provider 会把
+    整张表当纯属性表读 —— 几何列变成普通字段、CRS 丢失(实测)。SRID / 主键列都由
+    provider 自己从库里读, URI 里不用给(给了反而会被当成 key 列)。
+    """
+    geom_col = table_geometry_column(db_path, table)
+    if not geom_col:
+        return None, "库里没有这张空间表的几何列登记(geometry_columns)"
+    uri = QgsDataSourceUri()
+    uri.setDatabase(db_path)
+    uri.setDataSource("", table, geom_col)
+    layer = QgsVectorLayer(uri.uri(), table, "spatialite")
+    if layer.isValid():
+        return layer, ""
+    return None, layer.error().message() or "无"
+
+
+def layer_source_container(layer) -> str:
+    """图层数据源的**容器路径**(库 / 文件本身), 剥掉子图层与 provider 选项。
+
+    两种数据源形态都要认(见 :func:`open_local_vector_table`):
+
+    - OGR 形态 ``D:/x.gpkg|layername=t`` —— 取 ``|`` 之前那段;
+    - spatialite provider 形态 ``dbname='D:/x.db' table="t" (geom)`` —— 交给
+      :class:`QgsDataSourceUri` 解析(它顺带处理 ``\\`` 转义, 别自己切字符串)。
+
+    加载方挂在图层上的 ``layer.path_c`` 永远优先(见 ``app_actions`` / ``file_browser``):
+    那是加载时确定的容器路径, 不用再解析。
+    """
+    path_c = getattr(layer, "path_c", None)
+    if path_c:
+        return str(path_c)
+    source = str(layer.source() or "")
+    if _looks_like_uri(source):
+        return str(QgsDataSourceUri(source).database() or "")
+    return source.split("|", 1)[0].strip()
+
+
+def layer_source_table(layer) -> Optional[str]:
+    """图层数据源里的**表名**(子图层名); 不是「库里的一张表」则 ``None``。
+
+    栅格 / 内存 / 在线底图这些数据源没有表名概念, 返回 ``None`` —— 调用方按
+    「图层显示名就是表名」兜底(本地库图层加载时就是这么命名的)。
+    """
+    source = str(layer.source() or "")
+    if _looks_like_uri(source):
+        return str(QgsDataSourceUri(source).table() or "") or None
+    if "layername=" not in source:
+        return None
+    raw = source.split("layername=", 1)[1].split("|", 1)[0]
+    return unquote(raw) or None
+
+
+def _looks_like_uri(source: str) -> bool:
+    """数据源串是不是 ``key=value`` 形态的 URI(而非 ``路径|选项`` 形态)。"""
+    return source.startswith("dbname=") or " dbname=" in source
 
 
 # --------------------------------------------------------------------- helpers

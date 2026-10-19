@@ -1,0 +1,17 @@
+{
+  "local": [
+    {
+      "name": "我的数据库",
+      "path": "D:\\zwps\\项目文件\\林业项目\\林草更新\\cs端\\我的数据库.gpkg"
+    },
+    {
+      "name": "xizh",
+      "path": "D:\\zwps\\项目文件\\林业项目\\林草更新\\cs端\\xizh.sqlite"
+    },
+    {
+      "name": "test1",
+      "path": "D:\\zwps\\项目文件\\林业项目\\林草更新\\cs端\\test1.gpkg"
+    }
+  ],
+  "server": []
+}

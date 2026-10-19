@@ -28,6 +28,8 @@ from __future__ import annotations
 
 import hashlib
 import re
+import sqlite3
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -76,6 +78,7 @@ def import_vector_layer_to_db(
     target_crs_authid: str,
     *,
     feedback: Optional[QgsFeedback] = None,
+    table_name: Optional[str] = None,
 ) -> ImportLayerResult:
     """把工程中的 ``layer`` 导入到 ``db`` 指定的目标库，落表 + 注册 ``user_relation``。
 
@@ -109,7 +112,9 @@ def import_vector_layer_to_db(
 
     kind = db.get("kind", "")
     if kind == "local":
-        return _import_to_local(layer, db, target_crs, feedback=feedback)
+        return _import_to_local(
+            layer, db, target_crs, feedback=feedback, table_name=table_name
+        )
     if kind == "server":
         # 服务器库（PostGIS / 达梦 / 人大金仓）尚未在本服务实现：UI 已展示但
         # 行为未接入，给出明确错误，不静默落空。
@@ -119,7 +124,80 @@ def import_vector_layer_to_db(
     raise ImportLayerError(f"未知数据库类型：{kind!r}")
 
 
+def unique_table_name(db_path: str, wanted: str, *, taken: Iterable[str] = ()) -> str:
+    """库里已有（或本批已用）同名的表时，按序号起个不重名的：``名称_1`` / ``名称_2``…
+
+    用户要的是「导入时遇到重名自动按序号改，而不是报错让他改名」。判断范围是
+    **库里所有表**（不只看 ``user_relation`` 注册的）——没注册的表同样会撞
+    ``CREATE TABLE``。
+
+    Args:
+        db_path: 目标本地库路径。
+        wanted: 想要的表名（源图层名）。
+        taken: 本批已经用掉的名字（同一个库里连导几层时互相避让）。
+
+    Returns:
+        可用的表名（``wanted`` 本身没被占用就原样返回）。
+    """
+    base = (str(wanted) or "").strip() or "imported_layer"
+    existing = {str(name).lower() for name in taken}
+    try:
+        con = sqlite3.connect(str(db_path), timeout=5.0)
+    except sqlite3.Error:
+        return base
+    try:
+        existing.update(
+            str(row[0]).lower()
+            for row in con.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        )
+        # 视图名也可能撞（虽然我们只建表，防御一下）
+        existing.update(
+            str(row[0]).lower()
+            for row in con.execute("SELECT name FROM sqlite_master WHERE type='view'")
+        )
+    except sqlite3.Error:
+        pass
+    finally:
+        con.close()
+    if base.lower() not in existing:
+        return base
+    index = 1
+    while f"{base}_{index}".lower() in existing:
+        index += 1
+    return f"{base}_{index}"
+
+
 # ----------------------------------------------------------------- private
+
+
+#: 驱动自己维护的 FID 列名（``fid`` / ``ogc_fid``）：导入时不当普通属性复制
+#: （见 :func:`_provider_id_field_indices`）。``objectid`` 不在内 —— 那是 GDB 里
+#: 用户能看到、往往也想保留的业务标识。
+_PROVIDER_ID_NAMES = frozenset({"fid", "ogc_fid"})
+
+
+def _provider_id_field_indices(layer: QgsVectorLayer) -> set[int]:
+    """数据源**自己维护**的 FID 字段下标（主键 + 整数 + 名字是 fid/ogc_fid）：导入时跳过。
+
+    我们自己建的 gpkg 表带 ``fid INTEGER PRIMARY KEY``（没有它 QGIS 的 OGR provider
+    不暴露删除 / 改值能力，见 ``local_db_util.create_vector_table`` 的说明）。把这种表
+    再导入到别的库时，**不能把 fid 当普通属性复制过去**：目标表里再有一列叫 fid 的
+    普通列，就会挡住它自己的整型主键，结果又是一张不能编辑的表。
+    """
+    indices: set[int] = set()
+    try:
+        primary_keys = set(layer.primaryKeyAttributes())
+        fields = layer.fields()
+    except RuntimeError:  # 图层已销毁
+        return indices
+    for index in primary_keys:
+        try:
+            name = fields.at(index).name().strip().lower()
+        except (IndexError, KeyError):
+            continue
+        if name in _PROVIDER_ID_NAMES:
+            indices.add(index)
+    return indices
 
 
 def _import_to_local(
@@ -128,6 +206,7 @@ def _import_to_local(
     target_crs: QgsCoordinateReferenceSystem,
     *,
     feedback: Optional[QgsFeedback] = None,
+    table_name: Optional[str] = None,
 ) -> ImportLayerResult:
     """本地库：建表 + 写要素 + 注册 ``user_relation``。
 
@@ -161,12 +240,12 @@ def _import_to_local(
             f"{path} 是 {util.kind} 库，不支持矢量图层（需 SpatiaLite / GeoPackage）"
         )
 
-    # 表名清洗：源图层名 → SQL 标识符
-    # 表名沿用源图层名（原名直入，不清洗）——SQLite 标识符支持中文 / 空格 /
+    # 表名：调用方给了就用它（重名时由 :func:`unique_table_name` 算出的序号名），
+    # 否则沿用源图层名（原名直入，不清洗）——SQLite 标识符支持中文 / 空格 /
     # `:` / `.` 等 unicode；只要 :func:`batch_add_vector_data` 内部用
     # ``_quote_ident`` 包裹即可（实测在 gpkg / spatialite 都走通）。空名
     # 兑底成 ``imported_layer`` 防止空表名报错。
-    raw_name = (layer.name() or "").strip()
+    raw_name = (table_name or layer.name() or "").strip()
     table_name = raw_name or "imported_layer"
 
     # 字段清单：从源图层 fields() 直接转 (name, SQLite 类型声明)
@@ -196,6 +275,8 @@ def _import_to_local(
     _check_cancel()
     total_features = layer.featureCount() if layer.featureCount() >= 0 else 0
     rows: list[dict] = []
+    # 驱动自己的 FID 列（我们 gpkg 表上的 ``fid`` 主键）：不复制到目标表
+    skip_fields = _provider_id_field_indices(layer)
     skipped_invalid = 0
     if fb is not None:
         fb.setProgress(int(20))
@@ -222,7 +303,9 @@ def _import_to_local(
             skipped_invalid += 1
             continue
         attributes = {}
-        for fld in layer.fields():
+        for index, fld in enumerate(layer.fields()):
+            if index in skip_fields:  # 驱动自己的 FID 列，不复制
+                continue
             sql_name = _sanitize_column_name(fld.name())
             if not sql_name:
                 continue
@@ -245,18 +328,35 @@ def _import_to_local(
     _check_cancel()
 
     # 建表（register=True 自动写 user_relation）
+    effective_srid = int(srid) if srid else 4326
+    if util.kind == "gpkg":
+        # ``gpkg_contents.srs_id`` 有外键指向 ``gpkg_spatial_ref_sys``：库里没有这个
+        # srid 的行时建表会直接 FOREIGN KEY 失败。4547 这类**非种子坐标系**就会踩到
+        # （实测导入 EPSG:4547 的图层报 "FOREIGN KEY constraint failed"）。
+        # 按需补种，幂等；与创建数据那条路（``create_data/library.py``）同一做法。
+        util.ensure_gpkg_srs(
+            effective_srid,
+            name=target_crs.description(),
+            wkt=target_crs.toWkt(),
+            auth_name=(target_crs.authid().split(":", 1)[0] or "EPSG"),
+        )
     try:
         util.create_vector_table(
             table_name,
             columns=columns,
             geometry_column=geometry_column,
             geometry_type=geometry_type,
-            srid=int(srid) if srid else 4326,
+            srid=effective_srid,
             register=True,
             overwrite=False,
         )
     except Exception as exc:  # noqa: BLE001
         raise ImportLayerError(f"建表失败：{exc}") from exc
+
+    # **字段别名一起落库**：导入的源图层可能带着别名（从 gpkg / GDB 打开的都可能有），
+    # 不写的话"导进去别名就没了"（用户报过）。gpkg 写标准位置 gpkg_data_columns，
+    # SpatiaLite 写本工程自己的别名表；写入失败不拦导入（表和数据已经进去了），只记日志。
+    _store_column_aliases(util, table_name, layer, columns)
 
     if fb is not None:
         fb.setProgress(int(70))
@@ -319,6 +419,33 @@ def _phase_text(progress: int) -> str:
 # --------------------------------------------------------------- helpers
 
 
+def _store_column_aliases(util, table_name: str, layer: QgsVectorLayer, columns) -> None:
+    """把源图层的字段别名写进目标库（列名按 :func:`_build_columns` 同口径清洗）。
+
+    找不到对应列（源字段被清洗成重名而跳过）的别名直接忽略；写失败只记日志 ——
+    别名是锦上添花，不该让一次成功的导入变成失败。
+    """
+    used = {name for name, _ in columns}
+    aliases: dict[str, str] = {}
+    for fld in layer.fields():
+        alias = fld.alias()
+        if not alias:
+            continue
+        sql_name = _sanitize_column_name(fld.name())
+        if sql_name and sql_name in used:
+            aliases[sql_name] = alias
+    if not aliases:
+        return
+    try:
+        if util.kind == "gpkg":
+            for name, alias in aliases.items():
+                util.set_gpkg_column_alias(table_name, name, alias)
+        else:
+            util.set_column_aliases(table_name, aliases)
+    except Exception as exc:  # noqa: BLE001 —— 别名写不进去不影响已导入的数据
+        logger.warning("导入图层 %s 时写字段别名失败：%s", table_name, exc)
+
+
 def _build_columns(layer: QgsVectorLayer) -> list[tuple[str, str]]:
     """源图层字段 → ``(sql_name, sqlite_type)`` 列表，列名按 SQL 标识符清洗。
 
@@ -331,6 +458,10 @@ def _build_columns(layer: QgsVectorLayer) -> list[tuple[str, str]]:
     # :class:`QgsField` 的 ``typeName()`` → SQLite 类型声明
     type_map = {
         "Integer": "INTEGER",  # 整型家族（含 32 / 64 / 无符号）
+        # GDB / FileGDB 的 OID 与长整型字段就叫 ``Integer64``（QMetaType 那边是
+        # ``LongLong``）：不映射的话会落到默认的 TEXT，ID 变成按字典序排的文本
+        "Integer64": "INTEGER",
+        "LongLong": "INTEGER",
         "Real": "REAL",  # 双精度浮点
         "String": "TEXT",  # 变长字符串
         "Date": "TEXT",  # SQLite 无原生 Date，按 ISO 字符串存
@@ -340,7 +471,10 @@ def _build_columns(layer: QgsVectorLayer) -> list[tuple[str, str]]:
     }
     columns: list[tuple[str, str]] = []
     seen: set[str] = set()
-    for fld in layer.fields():
+    skip_fields = _provider_id_field_indices(layer)
+    for index, fld in enumerate(layer.fields()):
+        if index in skip_fields:  # 驱动自己的 FID 列，不当普通属性导入
+            continue
         sql_name = _sanitize_column_name(fld.name())
         if not sql_name or sql_name in seen:
             continue
@@ -350,7 +484,17 @@ def _build_columns(layer: QgsVectorLayer) -> list[tuple[str, str]]:
     return columns
 
 
-_NON_SQL_IDENT = re.compile(r"[^A-Za-z0-9_]")
+#: 列名里要折成下划线的字符：**只折「非词字符」**（空白 / 标点 / 控制字符）。
+#: ``\w`` 在 Python 的 str 模式里是 Unicode 语义，中文也在 ``\w`` 里，所以
+#: 「区县名称」这类列名原样入库 —— SQLite / GPKG 的标识符本来就支持中文，
+#: 与表名同一套策略（见 :func:`_sanitize_table_name` 的说明）。
+#:
+#: 早先这里是 ``[^A-Za-z0-9_]``：中文被整串折成 ``_`` 再被 ``strip("_")`` 清空，
+#: 于是**全中文列名的图层一列都建不出来**（``columns`` 为空）。GeoPackage 目标的
+#: 几何列并进了 ``CREATE TABLE``，看着"能建"、属性却全丢；SpatiaLite 目标的几何列
+#: 是建完表再 ``AddGeometryColumn`` 加的，零列表直接
+#: ``CREATE TABLE "x" ()`` → ``near ")": syntax error``（用户报的就是这条）。
+_NON_SQL_IDENT = re.compile(r"\W+")
 
 
 def _sanitize_table_name(raw: str) -> str:
@@ -369,7 +513,11 @@ def _sanitize_table_name(raw: str) -> str:
 
 
 def _sanitize_column_name(raw: str) -> str:
-    """列名清洗：复用表名规则，保留首字符下划线（QGIS 内部常用 ``_id`` 风格）。"""
+    """列名清洗：折叠空白 / 标点（:data:`_NON_SQL_IDENT`），保留首字符下划线。
+
+    中文、字母、数字、下划线一律保留（正则的 ``\\w`` 是 Unicode 语义），只把
+    空格 / 括号 / 斜杠这类**非词字符**折成 ``_``；折完为空（原名全是标点）才舍弃该列。
+    """
     if not raw:
         return ""
     s = _NON_SQL_IDENT.sub("_", raw.strip())

@@ -201,32 +201,42 @@ class LayerTreeOpsMixin:
 
     # ---------------------------------------------------- 图层树头部工具
 
+    @staticmethod
+    def _normalize_dock_node(node):
+        """把图例项等子项上溯到所在图层节点（组 / 根节点原样返回）。"""
+        from qgis.core import QgsLayerTreeGroup
+
+        try:
+            while (
+                node is not None
+                and node.parent() is not None
+                and not isinstance(node.parent(), QgsLayerTreeGroup)
+            ):
+                node = node.parent()
+        except RuntimeError:  # 节点已被别的入口删除
+            return None
+        return node
+
     def _current_dock_node(self):
         """图层树当前选中节点；图例项自动上溯到所在图层节点。
 
-        返回 None 表示没有选中项。
+        **以真实选中集为准**：``currentNode()`` 只是"当前行"，没选中任何行时
+        也可能指着第一项 —— 拿它当"用户选了什么"会让上移 / 新建组 / 删除
+        默认作用到第一个图层（用户报过删除的问题）。没有选中项返回 ``None``。
+        多选时优先用 ``currentNode()``（若它也在选中集里），否则取第一个选中项。
         """
-        from qgis.core import QgsLayerTreeGroup
-
-        view = self.layer_dock.view
-        node = None
-        try:
-            node = view.currentNode()
-        except Exception:  # noqa: BLE001
-            node = None
-        if node is None:
-            try:
-                index = view.currentIndex()
-                if index.isValid():
-                    node = view.index2node(index)
-            except Exception:  # noqa: BLE001
-                node = None
-        if node is None:
+        selected = self._selected_dock_nodes()
+        if not selected:
             return None
-        # 图例项（symbol 行）的父是图层节点，不是组：上溯到图层节点为止
-        while node.parent() is not None and not isinstance(node.parent(), QgsLayerTreeGroup):
-            node = node.parent()
-        return node
+        view = self.layer_dock.view
+        try:
+            current = self._normalize_dock_node(view.currentNode())
+        except Exception:  # noqa: BLE001
+            current = None
+        for node in selected:
+            if node is current:
+                return node
+        return selected[0]
 
     def _on_header_render_tab(self) -> None:
         """头部「打开图层渲染设置」：弹自建图层属性对话框并跳到「渲染」tab。
@@ -250,18 +260,51 @@ class LayerTreeOpsMixin:
             return
         self._show_render_tab(layer)
 
-    def _on_header_remove(self) -> None:
-        """头部「删除图层/组」：当前选中节点（图层或组）。
+    def _selected_dock_nodes(self) -> list:
+        """图层树里**真正被选中**的节点（Shift / Ctrl 多选的都算）。
 
-        - 选中图层 → 直接走 :meth:`_remove_layer`
-        - 选中组 → 确认后先递归移除组里全部图层，再摘掉组节点本身
-          （含嵌套空子组；空组也能删）
+        不用 ``currentNode()``：它只是"当前行"，并不代表用户选中了什么 ——
+        树里刚插入图层时当前行可能自动落在第一项上，于是"什么都没选"点删除
+        也会删掉第一个图层（用户报的）。``selectedNodes()`` 为空就是真的没选。
+
+        图例项等子项往上归到所在图层节点；结果去重并保持选择顺序。
+        """
+        view = self.layer_dock.view
+        try:
+            nodes = list(view.selectedNodes())
+        except Exception:  # noqa: BLE001 —— 极端版本 / 视图已销毁
+            nodes = []
+        out: list = []
+        seen: set[int] = set()
+        for node in nodes:
+            node = self._normalize_dock_node(node)
+            if node is None or id(node) in seen:
+                continue
+            seen.add(id(node))
+            out.append(node)
+        return out
+
+    def _on_header_remove(self) -> None:
+        """头部「删除图层/组」：删除**所有选中节点**（支持 Shift / Ctrl 多选）。
+
+        - 只选一个图层 → 直接走 :meth:`_remove_layer`
+        - 只选一个组 → 确认后递归移除组里全部图层，再摘掉组节点
+        - 多选（图层 / 组混合）→ **一次确认**后全部删除；选中的组已经包含了
+          里面的图层，所以组内图层 / 嵌套子组不再重复处理
+        - 什么都没选 → 提示，**不再**默认拿第一个图层开刀
         """
         from qgis.core import QgsLayerTreeGroup, QgsLayerTreeLayer
 
-        node = self._current_dock_node()
-        if node is None or node.parent() is None:
-            # parent 为 None 说明拿到的是树根（正常选不中，兜底别把整棵树删了）
+        nodes = []
+        for node in self._selected_dock_nodes():
+            try:
+                if node.parent() is None:  # 树根（正常选不中，兜底别把整棵树删了）
+                    continue
+            except RuntimeError:  # 节点已被别的入口删除
+                continue
+            if isinstance(node, (QgsLayerTreeLayer, QgsLayerTreeGroup)):
+                nodes.append(node)
+        if not nodes:
             self.messageBar.pushMessage(
                 "请先在图层列表中选择要删除的图层或组",
                 level=Qgis.MessageLevel.Warning,
@@ -269,29 +312,85 @@ class LayerTreeOpsMixin:
             )
             return
 
-        if isinstance(node, QgsLayerTreeLayer):
+        if len(nodes) == 1:
+            node = nodes[0]
+            if isinstance(node, QgsLayerTreeLayer):
+                layer = node.layer()
+                if layer is not None:
+                    self._remove_layer(layer, confirm=True)
+                return
+            if isinstance(node, QgsLayerTreeGroup):
+                self._remove_layer_group(node)
+                return
+
+        # 多选：选中的组里已经包含的节点不再单列（否则会被删两遍 / 组删完节点悬空）
+        selected_groups = {
+            id(node) for node in nodes if isinstance(node, QgsLayerTreeGroup)
+        }
+
+        def _inside_selected_group(node) -> bool:
+            parent = node.parent()
+            while parent is not None:
+                if id(parent) in selected_groups:
+                    return True
+                parent = parent.parent()
+            return False
+
+        nodes = [node for node in nodes if not _inside_selected_group(node)]
+        layer_nodes = [
+            node
+            for node in nodes
+            if isinstance(node, QgsLayerTreeLayer) and node.layer() is not None
+        ]
+        group_nodes = [
+            node for node in nodes if isinstance(node, QgsLayerTreeGroup)
+        ]
+        if not layer_nodes and not group_nodes:
+            return
+
+        group_layer_count = sum(len(group.findLayers()) for group in group_nodes)
+        parts: list[str] = []
+        if layer_nodes:
+            parts.append(f"{len(layer_nodes)} 个图层")
+        if group_nodes:
+            parts.append(f"{len(group_nodes)} 个图层组（共 {group_layer_count} 个图层）")
+        ret = QMessageBox.question(
+            self,
+            "删除图层",
+            f"确定删除选中的{'和'.join(parts)}吗？\n\n"
+            "图层组会连同组内全部图层一起删除；此操作不会删除磁盘上的数据文件。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+
+        for node in layer_nodes:
             layer = node.layer()
             if layer is not None:
-                self._remove_layer(layer, confirm=True)
-            return
-
-        if isinstance(node, QgsLayerTreeGroup):
-            self._remove_layer_group(node)
-            return
-
-        # 图例项等其它节点：当作无效选择
+                self._remove_layer(layer, notify=False)
+        for group in group_nodes:
+            self._remove_layer_group(group, confirm=False, notify=False)
+        done: list[str] = []
+        if layer_nodes:
+            done.append(f"{len(layer_nodes)} 个图层")
+        if group_nodes:
+            done.append(f"{len(group_nodes)} 个图层组")
         self.messageBar.pushMessage(
-            "请选择图层或图层组再删除",
-            level=Qgis.MessageLevel.Warning,
+            f"已删除 {'和'.join(done)}",
+            level=Qgis.MessageLevel.Info,
             duration=3,
         )
 
     # ---------------------------------------------------- 组节点删除/移动的引用维护
 
-    def _remove_layer_group(self, group) -> None:
+    def _remove_layer_group(self, group, *, confirm: bool = True, notify: bool = True) -> None:
         """确认后递归删除组里**全部图层**，再摘掉组节点本身（含嵌套空子组）。
 
         供头部「删除图层/组」与组右键菜单「移除组」共用。
+
+        ``confirm=False`` / ``notify=False``：多选批量删除时由调用方**统一确认、
+        统一提示**，避免一组弹一个确认框、一串消息条。
         """
         if group is None or group.parent() is None:
             return  # 树根（正常选不中，兜底别把整棵树删了）
@@ -299,12 +398,12 @@ class LayerTreeOpsMixin:
         # findLayers 默认递归收集所有子图层（嵌套子组下的也算）
         layers = [c.layer() for c in group.findLayers() if c.layer() is not None]
         name = group.name()
-        # 空组没有数据可丢：直接删，不弹确认（用户要求）。
-        if layers:
+        if confirm:
+            text = f"确定删除「{name}」及其 {len(layers)} 个图层吗？" if layers else f"确定删除空图层组「{name}」吗？"
             ret = QMessageBox.question(
                 self,
                 "删除图层组",
-                f"确定删除「{name}」及其 {len(layers)} 个图层吗？",
+                text,
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -314,7 +413,7 @@ class LayerTreeOpsMixin:
         #    gpkg 别名/延迟刷新）。若只摘组节点，bridge 会直接 delete 里面的
         #    图层，正在编辑的图层会留下脏 buffer 与悬空 edit_layer。
         for layer in layers:
-            self._remove_layer(layer)
+            self._remove_layer(layer, notify=notify)
         # 2) 再摘掉组节点本身（空组、嵌套空子组）。原实现只删子图层就返回，
         #    空组永远删不掉、非空组删完还留个空壳——看起来就是「移除失效」。
         #    删节点前先清视图当前项，避免 Qt 持有即将析构节点的持久索引。
@@ -322,7 +421,8 @@ class LayerTreeOpsMixin:
         # 组被删后 _data_group/_ref_group 会悬空，先清引用再摘节点
         self._forget_group_refs(group)
         parent.removeChildNode(group)
-        self.messageBar.pushMessage(f"已删除图层组：{name}", level=Qgis.MessageLevel.Info, duration=3)
+        if notify:
+            self.messageBar.pushMessage(f"已删除图层组：{name}", level=Qgis.MessageLevel.Info, duration=3)
 
     def _clear_view_current(self) -> None:
         """清掉图层树视图的当前项与选中项。

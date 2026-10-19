@@ -34,6 +34,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from app.core.util.local_layer_loader import layer_source_container
 from app.infra.logging import get_logger
 from app.infra.messagebar import FloatingMessageBar
 from app.ui.common.canvas_wheel import CanvasWheelDirectionFilter
@@ -579,8 +580,9 @@ class WindowShellMixin:
                 continue
             if not layer.isValid():
                 continue
-            if u.providerKey == "ogr":
-                # 容器路径（剥 |layername= 等 provider 选项），供"执行SQL"按文件打开
-                layer.path_c = u.uri.split("|", 1)[0]
+            if u.providerKey in ("ogr", "spatialite"):
+                # 容器路径（剥 |layername= / spatialite URI 的 provider 选项），
+                # 供"执行SQL"按文件打开
+                layer.path_c = layer_source_container(layer)
             self._add_layer_to_project(layer)
         event.acceptProposedAction()

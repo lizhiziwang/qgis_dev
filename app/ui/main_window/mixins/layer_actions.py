@@ -537,7 +537,7 @@ class LayerActionsMixin:
                 f"已把 {layer.name()} 移到「{group.name()}」", level=Qgis.MessageLevel.Info, duration=2
             )
 
-    def _remove_layer(self, layer, confirm: bool = False) -> None:
+    def _remove_layer(self, layer, *, confirm: bool = False, notify: bool = True) -> None:
         """移除图层：清引用 + 刷新画布。
 
         ``confirm=True`` 时先弹「是否确定移除该图层」确认框（默认 No）。
@@ -612,7 +612,8 @@ class LayerActionsMixin:
             QTimer.singleShot(0, lambda: self._release_gpkg_alias_retry(alias_candidate, 0))
         # 延迟刷新画布到下一个事件循环 tick，让 layersRemoved 信号链走完
         QTimer.singleShot(0, self._deferred_refresh_after_remove)
-        self.messageBar.pushMessage(f"已移除图层：{layer_name}", level=Qgis.MessageLevel.Info, duration=3)
+        if notify:
+            self.messageBar.pushMessage(f"已移除图层：{layer_name}", level=Qgis.MessageLevel.Info, duration=3)
 
     def _deferred_refresh_after_remove(self) -> None:
         """延迟到事件循环下一拍才刷新画布（避免半移除状态 native 崩溃）。"""

@@ -33,6 +33,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from app.core.util.local_layer_loader import layer_source_container, layer_source_table
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.slider import FlatSlider as QSlider
@@ -485,21 +486,20 @@ def _layer_type_name(layer) -> str:
 def _source_path(layer) -> str:
     """数据源路径（容器路径）。
 
-    ``path_c`` 是本仓库在加载图层时挂上去的容器路径（见 ``file_browser.py`` /
-    ``shell.py``），比 ``source()`` 干净；取不到才退回 ``source()``，并按 ``|``
-    截掉 ``layername=`` 之类的子图层修饰（与 ``execute_sql.py`` 一致）。
+    走 :func:`~app.core.util.local_layer_loader.layer_source_container`：优先加载方
+    挂的 ``layer.path_c``（见 ``file_browser.py`` / ``shell.py``），否则从 ``source()``
+    里剥掉子图层 / provider 选项（OGR 的 ``|layername=`` 或 spatialite provider 的
+    ``dbname='…' table="…" (geom)`` 都认）。
     """
-    raw = getattr(layer, "path_c", None) or layer.source() or ""
-    return str(raw).split("|", 1)[0].strip()
+    return str(layer_source_container(layer)).strip()
 
 
 def _dataset_name(layer) -> str:
-    """数据集名称：优先取数据源里的 ``layername=``，否则取文件名，再否则图层名。"""
-    src = str(layer.source() or "")
-    for part in src.split("|")[1:]:
-        if part.lower().startswith("layername="):
-            return part.split("=", 1)[1]
-    path = src.split("|", 1)[0]
+    """数据集名称：数据源里的子图层名（表名），否则文件名，再否则图层名。"""
+    table = layer_source_table(layer)
+    if table:
+        return table
+    path = _source_path(layer)
     # 内存图层的 source 是 "Polygon?crs=..." 这种，不是路径；带 ? 的一律不当文件名
     if path and "?" not in path and os.path.splitext(path)[1]:
         stem = os.path.splitext(os.path.basename(path))[0]

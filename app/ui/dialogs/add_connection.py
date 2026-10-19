@@ -66,6 +66,10 @@ _SERVER_TYPES = [
     ("sqlserver", "SQL Server", "1433"),
 ]
 
+#: **服务器数据库页签先隐藏**（用户要求：服务器版还没接入）。代码保留，
+#: 把这个开关打开、并让数据管理树的 ``_SHOW_SERVER_DB`` 一起打开即可恢复。
+_SHOW_SERVER_TAB = False
+
 
 def _hint_label(text: str) -> QLabel:
     lab = QLabel(text)
@@ -77,14 +81,22 @@ def _hint_label(text: str) -> QLabel:
 class AddConnectionDialog(BaseDialog):
     """新建数据库连接：本地 sqlite 文件 / 服务器(PostgreSQL·Oracle·SQL Server)。"""
 
-    def __init__(self, parent: QWidget | None = None) -> None:
+    def __init__(self, parent: QWidget | None = None, *, default_kind: str = "local") -> None:
+        """``default_kind`` 决定打开时停在哪个页签（``local`` / ``server``）。
+
+        数据管理里在「服务器数据库」根节点上右键「添加数据库连接」，弹窗就该默认
+        停在服务器页 —— 否则用户还得自己再点一下页签。
+        """
         super().__init__(parent, title="新建连接")
         self.setModal(True)
         self.setMinimumSize(0, 0)  # 表单紧凑布局，不用 BaseDialog 默认 800×600
         self.resize(560, 440)
+        self._default_kind = default_kind
         self._path = ""
         self._catalog: dict | None = None
         self._build_ui()
+        self.tabs.setCurrentIndex(1 if default_kind == "server" else 0)
+        self._refresh_ok_state()
 
     # ============================================================== UI
 
@@ -93,10 +105,11 @@ class AddConnectionDialog(BaseDialog):
         layout.setContentsMargins(12, 10, 12, 12)
         layout.setSpacing(8)
 
-        # 顶部 Tab：本地数据库 / 服务器数据库
+        # 顶部 Tab：本地数据库 / 服务器数据库（服务器页先隐藏，见 _SHOW_SERVER_TAB）
         self.tabs = QTabWidget()
         self.tabs.addTab(self._build_local_page(self.tabs), "本地数据库")
         self.tabs.addTab(self._build_server_page(self.tabs), "服务器数据库")
+        self.tabs.setTabVisible(1, _SHOW_SERVER_TAB)
         self.tabs.currentChanged.connect(self._refresh_ok_state)
         layout.addWidget(self.tabs, 1)
 
@@ -132,6 +145,11 @@ class AddConnectionDialog(BaseDialog):
         browse_btn = QPushButton("浏览…")
         browse_btn.clicked.connect(self._on_browse)
         row.addWidget(browse_btn)
+        # 手上还没有库的时候，在这儿就能建一个（不用先关掉弹窗去别处建）
+        new_btn = QPushButton("新建数据库…")
+        new_btn.setToolTip("建一个新的空 GeoPackage / SQLite 库，建完直接作为连接")
+        new_btn.clicked.connect(self._on_create_database)
+        row.addWidget(new_btn)
         v.addLayout(row)
 
         self.feedback = QLabel("")
@@ -205,6 +223,25 @@ class AddConnectionDialog(BaseDialog):
         path = open_file_dir(self, title="选择 SQLite 数据库文件", filter_=_FILE_FILTER)
         if path:
             self.set_sqlite_file(path)
+
+    def _on_create_database(self) -> None:
+        """「新建数据库…」：开「创建数据」对话框的「本地数据库」页，建完直接选为连接。
+
+        建库仍走 :class:`~app.core.domain.create_data.CreateContainerService`（对话框里
+        点确定才是真正的落盘）；这里只把它建出来的文件路径填进本弹窗，
+        注册到数据管理由本弹窗的「确定」统一完成（**不重复登记**）。
+        """
+        from qgis.PyQt.QtWidgets import QDialog
+
+        from app.ui.dialogs.create_data_dialog import CreateDataDialog
+
+        dialog = CreateDataDialog(self, start_on_container=True)
+        accepted = dialog.exec()
+        outcome = dialog.outcome() if accepted else None
+        dialog.deleteLater()
+        if outcome is None or not outcome.container_path:
+            return
+        self.set_sqlite_file(outcome.container_path)
 
     def set_sqlite_file(self, path: str) -> bool:
         """选择/校验本地库文件；读取注册目录成功则启用确定并返回 True。"""
