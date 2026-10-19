@@ -232,6 +232,23 @@ class CrsComboBox(QComboBox):
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         completer.setMaxVisibleItems(15)
         self.setCompleter(completer)
+        #: 展开列表按最长候选算出来的宽度（算一次就够，字体 / 主题变了重建控件即可）
+        self._popup_width = 0
+        # 收起时字段放不下的长名称，至少能在悬停提示里看全
+        self.currentTextChanged.connect(lambda text: self.setToolTip(text.strip()))
+
+    def showPopup(self) -> None:
+        """展开候选列表时按最长名称加宽，避免长坐标系名被截断。"""
+        view = self.view()
+        if self._popup_width <= 0:
+            width = view.sizeHintForColumn(0)
+            if width > 0:
+                width += view.verticalScrollBar().sizeHint().width() + 16
+                # 按最长名称算出的宽度再收 30%，长名称交给悬停提示兜底
+                self._popup_width = max(int(width * 0.7), self.width())
+        if self._popup_width > 0:
+            view.setMinimumWidth(self._popup_width)
+        super().showPopup()
 
     def set_crs(self, authid: str) -> None:
         """把当前选中项置为 ``authid``；候选里没有时直接写进文本框。"""
