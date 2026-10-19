@@ -116,6 +116,8 @@ class ReprojectDialog(BaseDialog):
         crs_row.setContentsMargins(0, 0, 0, 0)
         crs_row.setSpacing(6)
         self.crs_combo = CrsComboBox()
+        self.crs_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.crs_combo.setMinimumContentsLength(12)
         project_crs = self.project.crs()
         if project_crs.isValid():
             self.crs_combo.set_crs(project_crs.authid() or project_crs.toWkt())
@@ -131,7 +133,7 @@ class ReprojectDialog(BaseDialog):
 
         # 3. 输出图层名
         layout.addWidget(QLabel("输出图层名"))
-        self.output_edit = QLineEdit("重投影结果")
+        self.output_edit = QLineEdit("转换结果")
         layout.addWidget(self.output_edit)
         layout.addSpacing(6)
 
@@ -210,7 +212,7 @@ class ReprojectDialog(BaseDialog):
         job = ReprojectJob(
             input_layer=layer,
             target_crs=target_crs,
-            output_name=self.output_edit.text().strip() or "重投影结果",
+            output_name=self.output_edit.text().strip() or "转换结果",
             output_path=self.output_path_edit.text().strip() or None,
         )
 
