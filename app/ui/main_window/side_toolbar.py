@@ -19,13 +19,13 @@
 工具清单（自上而下，与设计稿一致）::
 
     选择 / 框选 / 漫游 / 缩放 / 全图 / 清除
-    属性 / 条件查询 / 选择屏蔽 / 取消屏蔽 / 分屏 / 定位
+    属性 / 条件查询 / 空间查询 / 选择屏蔽 / 取消屏蔽 / 分屏 / 定位
     线测量 / 面测量 / 范围裁剪
 
 行为约定：
 
 - 项目**已实现**的工具直接接主窗口既有回调（与顶部工具条同一入口）：
-  选择 / 框选 / 漫游 / 缩放 / 全图 / 清除 / 条件查询 / 分屏 / 定位 /
+  选择 / 框选 / 漫游 / 缩放 / 全图 / 清除 / 条件查询 / 空间查询 / 分屏 / 定位 /
   线测量 / 面测量 / 选择屏蔽 / 取消屏蔽 / 范围裁剪；
 - 「属性」就是顶部「通用」tab 里的那个识别工具（``identify`` →
   :class:`~app.ui.tools.find_feature.FindFeatureTool`，点要素在右侧 Dock 显示其
@@ -83,7 +83,7 @@ _TOOL_KEYS = frozenset({
 })
 #: 图标 key 别名：按钮的**高亮 key** 与顶部工具条区分（``side_zoom`` 独立高亮），
 #: 但图标复用 ``zoom_in`` 的那张，外观不变。
-_ICON_ALIAS = {"side_zoom": "zoom_in"}
+_ICON_ALIAS = {"side_zoom": "zoom_in", "spatial_query": "space_query_polygon"}
 #: 会话型工具 key（独立常亮，不受地图工具切换影响；与顶部工具条同 key）。
 #: 「定位」也归这里：点开气泡 → 按钮保持高亮表示"气泡在显示"，
 #: 关闭气泡（再点同按钮或气泡上的 ×）→ 按钮弹起，与分屏会话同一套高亮逻辑。
@@ -137,6 +137,7 @@ class SideToolBar:
             ("清除", "clear_selection", True),
             ("属性", "identify", False),
             ("条件查询", "condition_query", False),
+            ("空间查询", "spatial_query", False),
             ("选择屏蔽", "select_mask", False),
             ("取消屏蔽", "unmask", False),
             ("分屏", "qmap_compare", False),

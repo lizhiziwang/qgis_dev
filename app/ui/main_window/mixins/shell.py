@@ -170,6 +170,7 @@ class WindowShellMixin:
                 "select_mask": self._on_select_mask,
                 "unmask": self._on_unmask,
                 "condition_query": self._on_condition_query,
+                "spatial_query": self._on_spatial_query,
                 "qmap_compare": self._on_qmap_compare,
                 "coord_locate": self._on_coord_locate,
                 "measure_line": self._on_measure_line,
