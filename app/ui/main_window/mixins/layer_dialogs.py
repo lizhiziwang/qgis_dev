@@ -173,7 +173,9 @@ class LayerDialogsMixin:
             return
         spec = dlg.spec()
         if spec is not None:
-            export_with_progress(self, layer, spec)
+            export_with_progress(
+                self, layer, spec, load_after=dlg.load_after_export()
+            )
         else:
             logger.warning("导出图层：表单不合法，未导出")
 

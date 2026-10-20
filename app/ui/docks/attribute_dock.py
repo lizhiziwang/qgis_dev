@@ -49,6 +49,7 @@ from qgis.PyQt.QtWidgets import (
     QDockWidget,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -1301,6 +1302,9 @@ class _DictValueDelegate(QStyledItemDelegate):
         try:
             if self._model.dict_info(index.column()) is None:
                 return
+            # 非编辑态：字典单元格只读，不画箭头（用户要求）
+            if not self._model.layer.isEditable():
+                return
             if not (self._view.hasFocus() and self._view.currentIndex() == index):
                 return
             rect = self._arrow_rect(option.rect)
@@ -1335,6 +1339,7 @@ class _DictValueDelegate(QStyledItemDelegate):
         try:
             if (
                 self._model.dict_info(index.column()) is not None
+                and self._model.layer.isEditable()
                 and self._view.currentIndex() == index
                 and event.button() == Qt.MouseButton.LeftButton
                 and event.type()
@@ -1356,7 +1361,7 @@ class _DictValueDelegate(QStyledItemDelegate):
 
     def _edit_dict(self, index) -> None:
         try:
-            if self._view.isVisible():
+            if self._model.layer.isEditable() and self._view.isVisible():
                 self._view.edit(index)
         except RuntimeError:
             pass
@@ -2652,6 +2657,24 @@ class PagedAttributeTableWidget(QWidget):
             for i, (name, alias) in enumerate(zip(model.field_names, model.header_names))
             if name not in self._hidden_field_names
         ]
+        # 有字典字段时先问：导出显示名称还是库里的原始代码
+        dict_columns = [
+            index for index, _name, _alias in columns
+            if model.dict_info(index + 1) is not None
+        ]
+        dict_names = False
+        if dict_columns:
+            choice, ok = QInputDialog.getItem(
+                self,
+                "导出 CSV",
+                "字典字段导出方式：",
+                ["字典名称（显示值）", "原始代码值"],
+                0,
+                False,
+            )
+            if not ok:
+                return
+            dict_names = choice.startswith("字典名称")
         try:
             handle = open(path, "w", newline="", encoding="utf-8-sig")
             writer = csv.writer(handle)
@@ -2663,6 +2686,7 @@ class PagedAttributeTableWidget(QWidget):
         self._export = {
             "path": path, "rows": rows, "index": 0, "written": 0,
             "columns": columns, "handle": handle, "writer": writer,
+            "dict_names": dict_names,
         }
         self.export_progress.setRange(0, len(rows))
         self.export_progress.setValue(0)
@@ -2684,11 +2708,18 @@ class PagedAttributeTableWidget(QWidget):
                 if feature is None:      # 要素已被删 / 取不到，跳过这一行
                     continue
                 attrs = feature.attributes()
-                state["writer"].writerow([
-                    feature.id(),
-                    *(format_value(attrs[i]) if i < len(attrs) else ""
-                      for i, _, _ in state["columns"]),
-                ])
+                values = []
+                for index, _name, _alias in state["columns"]:
+                    raw = attrs[index] if index < len(attrs) else ""
+                    if state["dict_names"]:
+                        info = model.dict_info(index + 1)
+                        if info is not None:
+                            label = info.name_for(raw)
+                            if label is not None:
+                                values.append(label)
+                                continue
+                    values.append(format_value(raw))
+                state["writer"].writerow([feature.id(), *values])
                 state["written"] += 1
         except Exception:  # noqa: BLE001 —— 取值异常不该把文件留成半截还不给说法
             logger.exception("导出 CSV 时读取出错")

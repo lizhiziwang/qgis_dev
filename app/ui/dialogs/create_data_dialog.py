@@ -40,8 +40,9 @@
   引擎是 OGR，登记不进「数据管理」；
 - 也不该进「单图层数据」页：那是"一个文件一层"的语义，GDB 是库不是文件。
 
-GDB 的创建入口在**文件浏览器右键「新建」**（`file_browser._NEW_VECTOR_FORMATS`，用本机
-真正可写的 ``OpenFileGDB`` 驱动）。`VECTOR_FORMATS` 里的 FileGDB 条目仍然保留：它的
+GDB 的新建图层入口在**数据浏览器对 ``.gdb`` 目录右键「新增图层」**
+（``file_browser._on_browser_add_gdb_layer``，用本机真正可写的 ``OpenFileGDB`` 驱动）。
+``VECTOR_FORMATS`` 里的 FileGDB 条目仍然保留：它的
 ``container=True`` 是 ``_CONTAINER_DRIVERS`` 的来源（``|layername=`` 回读要用），
 ``alt_drivers`` 让本机解析到可写驱动 —— 那条路照旧可用，只是不在本对话框露面。
 

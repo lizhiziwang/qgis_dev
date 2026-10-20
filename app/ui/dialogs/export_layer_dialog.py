@@ -257,7 +257,9 @@ class ExportLayerDialog(BaseDialog):
         self.select_none_btn = QPushButton("全不选")
         self.select_none_btn.setToolTip("取消勾选全部字段")
         self.select_none_btn.clicked.connect(self._select_no_fields)
-        field_tools.addWidget(self.select_all_btn, 1)
+        # 与「条件… / 清除」同一布局：按钮靠右，不拉伸占满整行
+        field_tools.addStretch(1)
+        field_tools.addWidget(self.select_all_btn)
         field_tools.addWidget(self.select_none_btn)
         fields_layout.addLayout(field_tools)
         self.alias_names_check = QCheckBox("为导出名称使用别名")
@@ -266,6 +268,16 @@ class ExportLayerDialog(BaseDialog):
         )
         self.alias_names_check.toggled.connect(self._apply_alias_names)
         fields_layout.addWidget(self.alias_names_check)
+        self.load_after_check = QCheckBox("导出后加载到地图")
+        self.load_after_check.setToolTip("导出完成后把写出的图层加载进当前工程")
+        self.load_after_check.setChecked(True)  # 默认勾选
+        fields_layout.addWidget(self.load_after_check)
+        # Shapefile 字段超限 / 手动选超时的红色提示（平时隐藏）
+        self.field_warning = QLabel()
+        self.field_warning.setWordWrap(True)
+        self.field_warning.setStyleSheet("color: #d93025;")
+        self.field_warning.hide()
+        fields_layout.addWidget(self.field_warning)
 
         # 字典转换：Shapefile 没有承载字典的位置 → 禁用；GDB 写成属性域，
         # GPKG / SQLite 附带字典表（并写字段元数据）。
@@ -344,19 +356,44 @@ class ExportLayerDialog(BaseDialog):
             self.alias_names_check,
         ):
             widget.setEnabled(not is_dxf)
-        # 字典只有 GDB / GPKG / SQLite 能承载
-        supports_dict = fmt.extension in (".gdb", ".gpkg", ".sqlite", ".sqlite3", ".db")
+        # Excel 只写属性表，加载到地图没有意义
+        self.load_after_check.setEnabled(fmt.extension != ".xlsx")
+        if fmt.extension == ".shp":
+            # Shapefile 字段上限：自动勾前 255 个（并给红色提示）
+            self._auto_limit_shapefile_fields()
+        # 字典：GDB / GPKG / SQLite 能落字典表 / 属性域；其它能写属性的格式
+        # （Excel / SHP / GeoJSON / KML）勾选后把代码值转成字典名称。
+        native_dict = fmt.extension in (".gdb", ".gpkg", ".sqlite", ".sqlite3", ".db")
+        value_dict = fmt.extension in (".xlsx", ".shp", ".geojson", ".kml")
+        supports_dict = native_dict or value_dict
         dict_ok = bool(self._dict_field_names) and supports_dict
         self.dict_check.setEnabled(dict_ok)
-        # 有字典、目标格式也能承载时**默认勾选**（用户仍可手动取消）
-        self.dict_check.setChecked(dict_ok)
+        # 默认值：GDB / GPKG / SQLite 有字典时默认勾选（附带字典表 / 属性域）；
+        # Excel / SHP / GeoJSON / KML 是「值转名称」，默认**不勾选**（保留原始代码）。
+        self.dict_check.setChecked(dict_ok and native_dict)
         if not self._dict_field_names:
-            self.dict_check.setText("转换字典（图层没有挂接字典）")
+            label = "导出字典名称" if value_dict else "转换字典"
+            self.dict_check.setText(f"{label}（图层没有挂接字典）")
+            self.dict_check.setToolTip("当前图层没有挂接字典")
         elif not supports_dict:
-            self.dict_check.setText("转换字典（当前格式不支持）")
+            label = "导出字典名称" if value_dict else "转换字典"
+            self.dict_check.setText(f"{label}（当前格式不支持）")
+            self.dict_check.setToolTip("DXF 没有属性表，无法转换字典")
+        elif value_dict:
+            self.dict_check.setText(
+                f"导出字典名称（{len(self._dict_field_names)} 个字段）"
+            )
+            self.dict_check.setToolTip(
+                "勾选：字典字段导出字典名称（显示值）；不勾选：导出原始代码值。"
+                "当前格式不附带字典表。"
+            )
         else:
             self.dict_check.setText(
                 f"转换字典（{len(self._dict_field_names)} 个字段）"
+            )
+            self.dict_check.setToolTip(
+                "把字段挂接的字典一起导出：FileGDB 写成属性域（coded value domain）；"
+                "GeoPackage / SQLite 把字典表写进目标库。"
             )
         self._update_hint()
 
@@ -406,9 +443,58 @@ class ExportLayerDialog(BaseDialog):
             parts.append("只认 WGS 84，投影坐标系图层会自动转换到 EPSG:4326")
         elif fmt.extension == ".xlsx":
             parts.append("Excel 只写属性表，不写几何")
-        if self.dict_check.isChecked():
+        if self.dict_check.isChecked() and fmt.extension in (
+            ".gdb", ".gpkg", ".sqlite", ".sqlite3", ".db"
+        ):
             parts.append("勾选「转换字典」后，GDB 会写入属性域，GeoPackage / SQLite 会附带字典表")
+        elif self.dict_check.isChecked() and fmt.extension in (
+            ".xlsx", ".shp", ".geojson", ".kml"
+        ):
+            parts.append("字典字段将写入字典名称（不勾选则写原始代码值）")
         self.hint.setText("；".join(parts) + "。")
+        self._update_field_warning(fmt, selected)
+
+    def _auto_limit_shapefile_fields(self) -> None:
+        """切到 Shapefile 时字段超过上限：自动只勾前 255 个。"""
+        total = self.field_table.rowCount()
+        if total <= SHAPEFILE_MAX_FIELDS:
+            return
+        self._loading_fields = True
+        try:
+            for row in range(total):
+                item = self.field_table.item(row, 0)
+                if item is not None:
+                    item.setCheckState(
+                        Qt.CheckState.Checked
+                        if row < SHAPEFILE_MAX_FIELDS
+                        else Qt.CheckState.Unchecked
+                    )
+        finally:
+            self._loading_fields = False
+
+    def _update_field_warning(self, fmt: VectorFormat | None, selected: int) -> None:
+        """Shapefile 字段上限的红色提示（其它格式 / 未超限时隐藏）。"""
+        text = ""
+        if fmt is not None and fmt.extension == ".shp":
+            total = self.field_table.rowCount()
+            if selected > SHAPEFILE_MAX_FIELDS:
+                text = (
+                    f"已选 {selected} 个字段，超过 Shapefile 上限 "
+                    f"{SHAPEFILE_MAX_FIELDS} 个；请减少字段，其余字段不会导出。"
+                )
+            elif total > SHAPEFILE_MAX_FIELDS and selected == SHAPEFILE_MAX_FIELDS:
+                text = (
+                    f"Shapefile 最多 {SHAPEFILE_MAX_FIELDS} 个字段，已自动选择"
+                    f"前 {SHAPEFILE_MAX_FIELDS} 个；其余字段不会导出。"
+                )
+        self.field_warning.setText(text)
+        self.field_warning.setVisible(bool(text))
+
+    def load_after_export(self) -> bool:
+        """用户是否勾选了「导出后加载到地图」（Excel 不适用）。"""
+        return bool(
+            self.load_after_check.isEnabled() and self.load_after_check.isChecked()
+        )
 
     # ---------------------------------------------------------- 导出字段表
 
@@ -666,12 +752,82 @@ class ExportLayerDialog(BaseDialog):
         )
 
 
-def export_with_progress(parent: QWidget | None, layer, spec: ExportSpec) -> str | None:
+def load_exported_layer(parent: QWidget | None, target: str, spec: ExportSpec) -> bool:
+    """把刚导出的文件加载进当前工程（「导出后加载到地图」用）。"""
+    from qgis.core import QgsProject, QgsVectorLayer
+
+    ext = str(spec.extension or os.path.splitext(target)[1]).lower()
+    if ext == ".xlsx":
+        return False  # Excel 只有属性表，加载到地图没有意义
+    layer = None
+    error = ""
+    if ext in (".gpkg", ".sqlite", ".sqlite3", ".db"):
+        from app.core.util.local_layer_loader import open_local_vector_table
+
+        layer, error = open_local_vector_table(target, spec.layer_name)
+        if layer is None:
+            # 表名大小写 / 驱动改写导致按名打不开时，退到「库里的第一个图层」
+            from app.core.util.sublayers import list_sublayers, open_sublayer
+
+            try:
+                sublayers = list_sublayers(target)
+            except Exception as exc:  # noqa: BLE001
+                sublayers = []
+                error = f"{error}；{exc}"
+            match = next(
+                (item for item in sublayers if item.name == spec.layer_name),
+                sublayers[0] if sublayers else None,
+            )
+            if match is not None:
+                layer, error = open_sublayer(target, match)
+    elif ext == ".gdb":
+        from app.core.util.sublayers import list_sublayers, open_sublayer
+
+        try:
+            sublayers = list_sublayers(target)
+        except Exception as exc:  # noqa: BLE001
+            sublayers, error = [], str(exc)
+        match = next(
+            (item for item in sublayers if item.name == spec.layer_name),
+            sublayers[0] if sublayers else None,
+        )
+        if match is not None:
+            layer, error = open_sublayer(target, match)
+        else:
+            error = error or "导出文件里没有找到图层"
+    else:
+        name = os.path.splitext(os.path.basename(target))[0]
+        layer = QgsVectorLayer(target, name, "ogr")
+        if not layer.isValid():
+            error = "打不开导出的文件"
+    if layer is None or not layer.isValid():
+        if layer is not None:
+            layer.deleteLater()
+        if parent is not None:
+            QMessageBox.warning(
+                parent,
+                "加载到地图",
+                f"导出成功，但加载到地图失败：\n{target}\n{error}",
+            )
+        return False
+    QgsProject.instance().addMapLayer(layer)
+    logger.info("导出后加载到地图：%s", target)
+    return True
+
+
+def export_with_progress(
+    parent: QWidget | None,
+    layer,
+    spec: ExportSpec,
+    *,
+    load_after: bool = False,
+) -> str | None:
     """带进度提示执行导出（数据管理 / 图层右键「导出」共用）。
 
     写 GDB / 大图层是同步阻塞调用，没有可用的分阶段回调；用不确定进度条 +
     阶段文字，至少让用户看到「正在写入图层 / 字典」而不是界面卡死。
-    成功返回写出的路径；失败弹提示并返回 ``None``。
+    成功返回写出的路径；失败弹提示并返回 ``None``。``load_after`` 为真时
+    导出成功后把结果加载进当前工程。
     """
     progress = QProgressDialog(parent)
     progress.setWindowTitle("导出数据")
@@ -709,12 +865,16 @@ def export_with_progress(parent: QWidget | None, layer, spec: ExportSpec) -> str
         if progress.isVisible():
             progress.close()
         QApplication.processEvents()
+    loaded = False
+    if load_after:
+        loaded = load_exported_layer(parent, target, spec)
     QMessageBox.information(
         parent,
         "导出数据",
-        f"已导出{'（含字典）' if spec.convert_dict else ''}：\n{target}",
+        f"已导出{'（含字典）' if spec.convert_dict else ''}：\n{target}"
+        + ("\n已加载到地图。" if loaded else ""),
     )
     return target
 
 
-__all__ = ["ExportLayerDialog", "export_with_progress"]
+__all__ = ["ExportLayerDialog", "export_with_progress", "load_exported_layer"]

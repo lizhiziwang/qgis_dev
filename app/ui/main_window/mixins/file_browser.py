@@ -1,7 +1,7 @@
 """打开文件与数据浏览器。
 
 本地文件打开、按类别装载图层，以及数据浏览器目录树的双击/右键菜单
-（新建矢量图层、添加 GDB 图层）。
+（添加 GDB 图层）。
 
 由 :class:`~app.ui.main_window.main_window.MainWindow` 多继承组合，方法只依赖
 ``self`` 上的共享状态。
@@ -21,18 +21,6 @@ from app.ui.common.widgets import open_file_dir
 
 logger = get_logger(__name__)
 
-
-#: 浏览器目录右键"新建"子菜单支持的矢量格式：(显示名, 扩展名, OGR 驱动)
-_NEW_VECTOR_FORMATS = (
-    ("Shapefile 文件（点/线/面）", "shp", "ESRI Shapefile"),
-    ("GeoPackage 数据库", "gpkg", "GPKG"),
-    ("File Geodatabase 数据库", "gdb", "OpenFileGDB"),
-    ("GeoJSON 文件", "geojson", "GeoJSON"),
-    ("GML 文件", "gml", "GML"),
-    ("KML 文件", "kml", "KML"),
-    ("SQLite 数据库", "sqlite", "SQLite"),
-    ("CSV 表格", "csv", "CSV"),
-)
 
 #: 「添加数据文件」认的栅格扩展名（按扩展名走 GDAL 栅格 provider）
 _RASTER_EXTS = frozenset({
@@ -720,60 +708,17 @@ class FileBrowserMixin:
             )
             if is_dir:
                 is_gdb = str(dir_path).lower().endswith(".gdb")
-                # .gdb 是数据集目录：只在库里新增图层，不在目录里塞零散文件
+                # .gdb 是数据集目录：只在库里新增图层，不在目录里塞零散文件。
+                # 普通文件夹的「新建」子菜单已按用户要求移除。
                 if is_gdb:
                     act = menu.addAction("新增图层")
                     act.triggered.connect(lambda checked=False: self._on_browser_add_gdb_layer(item))
-                else:
-                    new_menu = menu.addMenu("新建")
-                    for name, ext, driver in _NEW_VECTOR_FORMATS:
-                        act = new_menu.addAction(name)
-                        act.triggered.connect(
-                            lambda checked=False, nm=name, ex=ext, dr=driver: self._on_browser_create_vector(
-                                item, nm, ex, dr
-                            )
-                        )
-                menu.addSeparator()
+                    menu.addSeparator()
         except Exception:  # noqa: BLE001
             pass
         refresh = menu.addAction("刷新")
         refresh.triggered.connect(lambda: item.refresh())
         menu.exec(self.browser_dock.view.viewport().mapToGlobal(pos))
-
-    def _on_browser_create_vector(self, item, name: str, ext: str, driver: str) -> None:
-        """在浏览器目录项下新建空矢量数据文件（"新建"子菜单入口）。"""
-        from qgis.core import (
-            QgsCoordinateReferenceSystem,
-            QgsCoordinateTransformContext,
-            QgsVectorFileWriter,
-            QgsVectorLayer,
-        )
-        from qgis.PyQt.QtWidgets import QFileDialog
-
-        dir_path = getattr(item, "dirPath", None) or item.path()
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            f"新建 {name}",
-            os.path.join(dir_path, f"新建矢量.{ext}"),
-            f"{name} (*.{ext})",
-        )
-        if not path:
-            return
-        crs = self.project.crs()
-        if not crs.isValid():
-            crs = QgsCoordinateReferenceSystem("EPSG:4490")
-        layer = QgsVectorLayer(f"Point?crs={crs.authid()}", "new_layer", "memory")
-        opts = QgsVectorFileWriter.SaveVectorOptions()
-        opts.driverName = driver
-        error, errmsg, _newfile, _saved = QgsVectorFileWriter.writeAsVectorFormatV3(
-            layer, path, QgsCoordinateTransformContext(), opts
-        )
-        if error != QgsVectorFileWriter.WriterError.NoError:
-            self.messageBar.pushCritical("新建图层", f"创建失败：{errmsg}")
-            return
-        item.refresh()
-        self.messageBar.pushSuccess("新建图层", f"已创建 {os.path.basename(path)}")
-        logger.info("新建矢量文件：%s（驱动=%s）", path, driver)
 
     def _on_browser_add_gdb_layer(self, item) -> None:
         """向已存在的 File Geodatabase（.gdb）中新增一个空图层。"""

@@ -182,6 +182,18 @@ def export_vector_layer(
     options.layerName = spec.layer_name.strip() or os.path.splitext(spec.file_name)[0]
     options.fileEncoding = "UTF-8"
     _apply_field_options(options, source, spec, export_map)
+    # 不附带字典表的格式（Excel / SHP / GeoJSON / KML）：勾选「转换字典」时
+    # 把代码值换成字典名称；GDB / GPKG / SQLite 仍走属性域 / 字典表那套。
+    value_converter = None
+    if spec.convert_dict and spec.driver not in (
+        "FileGDB",
+        "OpenFileGDB",
+        "GPKG",
+        "SQLite",
+    ):
+        value_converter = _make_dict_value_converter(layer)
+        if value_converter is not None:
+            options.fieldValueConverter = value_converter
     # 容器已存在 → 只替换同名图层；否则（新文件 / 单文件格式）整份写出。
     # **默认的 CreateOrOverwriteFile 会整库删掉重建**，绝不能用在已有的库上。
     if existed and is_container:
@@ -857,6 +869,48 @@ def sanitize_shapefile_field_name(name: str, used: set[str]) -> str:
         candidate = f"{trimmed or 'F'}{suffix}"
     used.add(candidate.lower())
     return candidate
+
+
+def _make_dict_value_converter(layer):
+    """不附带字典表的格式：把字典字段的代码值转换成显示名称。
+
+    用于 Excel / Shapefile / GeoJSON / KML 这类没有「字典表 / 属性域」落点的格式：
+    ``convert_dict`` 勾选时字段值写字典名称，不勾选保持原始代码。
+    用写入器的 ``FieldValueConverter`` 做，不复制图层。
+    """
+    from qgis.core import QgsField, QgsVectorFileWriter
+    from qgis.PyQt.QtCore import QVariant
+
+    from app.core.util.dict_values import layer_dict_fields
+
+    try:
+        infos = {name: info for name, info in layer_dict_fields(layer)}
+    except Exception:  # noqa: BLE001 —— 读不到字典就不转换
+        return None
+    if not infos:
+        return None
+    fields = layer.fields()
+
+    class _DictValueConverter(QgsVectorFileWriter.FieldValueConverter):
+        def convert(self, field_idx, value):  # noqa: N802 —— Qt 命名
+            try:
+                info = infos.get(fields.at(field_idx).name())
+            except (IndexError, RuntimeError):
+                return value
+            if info is None or value is None:
+                return value
+            name = info.name_for(value)
+            return value if name is None else name
+
+        def fieldDefinition(self, field):  # noqa: N802 —— Qt 命名
+            """字典字段导出成文本列（原名可能是整型代码）。"""
+            if field.name() not in infos:
+                return field
+            copy = QgsField(field)
+            copy.setType(QVariant.String)
+            return copy
+
+    return _DictValueConverter()
 
 
 def _export_name_map(layer: QgsVectorLayer, spec: ExportSpec) -> dict[str, str]:

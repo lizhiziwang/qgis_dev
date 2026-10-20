@@ -1122,10 +1122,11 @@ class AppActionsMixin:
         dialog = ExportLayerDialog(owner, layer=layer, default_dir=default_output_dir())
         accepted = dialog.exec()
         spec = dialog.spec() if accepted else None
+        load_after = dialog.load_after_export()
         dialog.deleteLater()
         if spec is None:
             return
-        export_with_progress(owner, layer, spec)
+        export_with_progress(owner, layer, spec, load_after=load_after)
 
     def _on_dm_delete_layer(self, db: dict, category: str, name: str) -> None:
         """数据管理左树右键「删除图层」：删库内数据表 + 注册信息 + 移出工程图层。
