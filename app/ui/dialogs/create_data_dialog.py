@@ -80,24 +80,8 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-
-from qgis.core import QgsCoordinateReferenceSystem, QgsProject, QgsVectorLayer
-from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
-from qgis.PyQt.QtWidgets import (
-    QComboBox,
-    QCompleter,
-    QFormLayout,
-    QHBoxLayout,
-    QLabel,
-    QLineEdit,
-    QPushButton,
-    QStackedWidget,
-    QTabWidget,
-    QVBoxLayout,
-    QWidget,
-)
 
 from app.core.domain.create_data import (
     CreateContainerService,
@@ -114,6 +98,17 @@ from app.core.domain.create_data import (
     validate_fields,
     with_mzguid,
 )
+from app.core.domain.create_data.dict_tables import (
+    DictPlan,
+    DictTableError,
+    build_dict_table_specs,
+    local_dict_categories,
+    persist_dict_tables,
+    resolve_local_table,
+)
+from app.core.domain.dict_manage import DictService
+from app.core.util.field_meta import DICT_LOCAL_TABLE_PROP
+from app.core.util.local_db_util import local_db_util
 from app.core.util.srs import EPSG_SEP, epsg_entries
 from app.core.util.vector_formats import (
     VectorFormat,
@@ -128,6 +123,21 @@ from app.ui.common.theme import ThemeManager
 from app.ui.common.widgets import open_file_dir
 from app.ui.dialogs.create_data_fields_step import FieldsStepPage
 from app.ui.dialogs.crs_pick_dialog import CrsPickDialog
+from qgis.core import QgsCoordinateReferenceSystem, QgsProject, QgsVectorLayer
+from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
+from qgis.PyQt.QtWidgets import (
+    QComboBox,
+    QCompleter,
+    QFormLayout,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QStackedWidget,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
 
 logger = get_logger(__name__)
 
@@ -889,6 +899,8 @@ class CreateDataDialog(BaseDialog):
                 self.step_stack,
                 vector_layers=self._vector_layers,
                 default_dir=default_output_dir(),
+                # 字典挂接只列当前目标库里的字典表（路径随向导切换现取）
+                target_db_path=self._dict_db_path,
             )
             page.fieldsChanged.connect(self._refresh_hint)
             page.statusMessage.connect(self._on_step_message)
@@ -1183,6 +1195,16 @@ class CreateDataDialog(BaseDialog):
         db = self._selected_local_db()
         return str(db.get("path") or "") if db is not None else self._browsed_db_path
 
+    def _dict_db_path(self) -> str:
+        """字典挂接用的"当前库"路径。
+
+        「接入字典」只允许选**当前库里已有**的字典表。创建数据时只有
+        「往已有库里建图层」这一种形态有库；独立文件（.gpkg / .sqlite 也一样）
+        在创建前还不存在、创建服务又会拒绝已存在的目标文件，所以这里返回空串，
+        由选择器提示先建好图层、之后到「数据管理」里挂接字典。
+        """
+        return self._target_db_path() if self._kind() == "into_db" else ""
+
     def container_spec(self) -> CreateContainerSpec:
         """页签一取值：建空库。"""
         fmt = self._current_db_format()
@@ -1425,9 +1447,24 @@ class CreateDataDialog(BaseDialog):
                 self._outcome = CreateOutcome(kind="container", container_path=path)
             elif kind == "into_db":
                 spec = self.into_db_spec()
+                dict_specs = ()
+                try:
+                    dict_specs = self._build_dict_specs(spec.db_path)
+                except DictTableError as exc:
+                    self._fail(str(exc), self._focus_widget_for(kind))
+                    return None
+                if dict_specs:
+                    spec = replace(spec, dict_tables=dict_specs)
                 layer = CreateLayerInDbService().create(spec)
                 self._outcome = CreateOutcome(kind="into_db", layer=layer, db_path=spec.db_path)
                 self._report_field_persistence(layer, spec.fields, in_db=True)
+                self._apply_local_dict_props(layer, spec.fields, dict_specs)
+                if dict_specs:
+                    send(
+                        "info",
+                        "已保存字典表：" + "、".join(item.table_name for item in dict_specs),
+                        duration=6,
+                    )
             else:
                 spec = self.file_spec()
                 layer = CreateDataService().create(spec)
@@ -1441,12 +1478,92 @@ class CreateDataDialog(BaseDialog):
                         duration=5,
                     )
                 self._report_field_persistence(layer, spec.fields, in_db=False)
+                self._persist_file_dicts(spec, layer)
         except (CreateDataError, CreateLibraryError) as exc:
             # 目标已存在 / 驱动缺失 / 写盘失败 / 库里已有同名图层：都留在窗口里让用户改参数重试
             logger.warning("创建数据失败：%s", exc)
             self._fail(str(exc), self._focus_widget_for(kind))
             return None
         return self._outcome
+
+    def _build_dict_specs(self, db_path: str):
+        """字段表涉及的字典 → 目标库字典表 specs（没有字典需求返回空元组）。
+
+        新口径下字段挂的是**当前库里已有的字典表**（见 :class:`DictPickDialog`）：
+        这类字典的类别不在应用级「字典管理」里，但目标库里有表，必须放行 ——
+        :func:`build_dict_table_specs` 会优先从目标库的同名 / 同类别字典表取行。
+        应用级字典里也没有、目标库里也没有的类别（手填的旧模板）跳过并提示，
+        不让它拦住整个创建流程。
+        """
+        plan = self.fields_page.dict_plan()
+        if not plan.domains and not plan.sources:
+            return ()
+        service = DictService()
+        known_tables = {item.name for item in service.list_categories()}
+        local_tables = local_dict_categories(db_path)
+        valid_domains = set()
+        for category, domain in plan.domains:
+            if category not in known_tables and category not in local_tables:
+                send(
+                    "warning",
+                    f"字典表「{category}」不在当前库、也不在字典管理里，"
+                    f"字段「{domain}」的字典表未落库",
+                    duration=6,
+                )
+                continue
+            valid_domains.add((category, domain))
+        if not valid_domains and not plan.sources:
+            return ()
+        plan = DictPlan(domains=frozenset(valid_domains), sources=plan.sources)
+        return tuple(build_dict_table_specs(db_path, plan, service))
+
+    @staticmethod
+    def _apply_local_dict_props(layer, fields, dict_specs) -> None:
+        """把「字段 → 目标库里实际落成的字典表名」写到图层自定义属性上。"""
+        if layer is None or not dict_specs:
+            return
+        for field in fields:
+            table = resolve_local_table(field, dict_specs)
+            if table:
+                layer.setCustomProperty(DICT_LOCAL_TABLE_PROP + field.name, table)
+
+    def _persist_file_dicts(self, spec, layer) -> None:
+        """独立文件如果是 gpkg / sqlite，也把字典表写进去；其他格式明确提示。"""
+        plan = self.fields_page.dict_plan()
+        if not plan.domains and not plan.sources:
+            return
+        suffix = Path(spec.file_path).suffix.lower()
+        if suffix not in (".gpkg", ".sqlite", ".db"):
+            send(
+                "warning",
+                f"{spec.data_format} 不能保存字典表；字典关联只记录在当前工程里",
+                duration=8,
+            )
+            return
+        try:
+            dict_specs = self._build_dict_specs(spec.file_path)
+            if not dict_specs:
+                return
+            db = local_db_util(spec.file_path)
+            try:
+                if db.kind not in ("gpkg", "spatialite"):
+                    raise DictTableError("目标文件不是可写字典表的数据库")
+                persist_dict_tables(db, dict_specs)
+            finally:
+                db.conn.close()
+            self._apply_local_dict_props(layer, spec.fields, dict_specs)
+            send(
+                "info",
+                "已保存字典表：" + "、".join(item.table_name for item in dict_specs),
+                duration=6,
+            )
+        except Exception as exc:
+            logger.warning("独立文件字典表写入失败：%s", exc, exc_info=True)
+            send(
+                "warning",
+                f"图层已创建，但字典表未能写入（文件可能正被占用）：{exc}",
+                duration=8,
+            )
 
     def _report_field_persistence(
         self, layer: QgsVectorLayer, fields: Sequence[FieldSpec], *, in_db: bool

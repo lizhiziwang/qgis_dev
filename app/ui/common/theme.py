@@ -1166,6 +1166,16 @@ def app_qss(t: Theme) -> str:
         border-bottom: 1px solid {t.border};
         padding: 5px 8px;
     }}
+    /* 表头排序箭头：与属性表同一套位置（字段名右侧），别让它跑到表头上方。
+       给了 QHeaderView QSS 之后 Qt 不再自绘指示器，必须显式给图片和位置。 */
+    QHeaderView::up-arrow, QHeaderView::down-arrow {{
+        width: 9px;
+        height: 9px;
+        subcontrol-position: center right;
+        right: 3px;
+    }}
+    QHeaderView::up-arrow {{ image: url({_arrow_url(t.menu_text, True)}); }}
+    QHeaderView::down-arrow {{ image: url({_arrow_url(t.menu_text, False)}); }}
     QTableCornerButton::section {{
         background-color: {t.menu_bg};
         border: none;

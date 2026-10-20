@@ -46,6 +46,159 @@ class DeleteDataError(RuntimeError):
     """删除本地库数据失败(路径缺失 / 服务器库 / 库格式不支持 / 写库出错)。"""
 
 
+def _quote(name: str) -> str:
+    return '"' + str(name).replace('"', '""') + '"'
+
+
+def _dict_references(util) -> tuple[set[str], set[str]]:
+    """库里**还存在**的空间表字段元数据引用到的 ``(字典类别, 本地字典表名)``。
+
+    表被删除后 ``qgis_dev_field_meta`` 里可能还残留旧行（老版本删图层时没清元
+    数据）；判断字典是否被使用时必须把这些悬空引用排除，否则会误以为字典仍
+    在使用中。
+    """
+    categories: set[str] = set()
+    local_tables: set[str] = set()
+    columns_by_table: dict[str, set[str]] = {}
+    try:
+        rows = util.cursor.execute(
+            "SELECT m.table_name, m.column_name, m.dict_table, m.dict_local_table "
+            "FROM qgis_dev_field_meta m "
+            "WHERE EXISTS ("
+            "  SELECT 1 FROM sqlite_master s "
+            "  WHERE s.type = 'table' AND lower(s.name) = lower(m.table_name)"
+            ")"
+        ).fetchall()
+    except Exception:  # noqa: BLE001 —— 老库没有元数据表
+        return categories, local_tables
+    for table_name, column_name, category, local in rows:
+        table_name = str(table_name or "")
+        column_name = str(column_name or "")
+        columns = columns_by_table.get(table_name)
+        if columns is None:
+            columns = set()
+            try:
+                columns = {
+                    str(row[1]).casefold()
+                    for row in util.cursor.execute(
+                        f"PRAGMA table_info({_quote(table_name)})"
+                    )
+                }
+            except Exception:  # noqa: BLE001
+                pass
+            columns_by_table[table_name] = columns
+        # 字段也被删掉时，这行元数据同样是悬空的
+        if column_name and columns and column_name.casefold() not in columns:
+            continue
+        if category:
+            categories.add(str(category))
+        if local:
+            local_tables.add(str(local))
+    return categories, local_tables
+
+
+def _dict_tables(util) -> list[tuple[str, dict]]:
+    import json
+
+    try:
+        rows = util.cursor.execute(
+            "SELECT table_name, attr FROM user_relation WHERE type = 'dict'"
+        ).fetchall()
+    except Exception:  # noqa: BLE001
+        return []
+    out: list[tuple[str, dict]] = []
+    for table, attr in rows:
+        table = str(table or "")
+        if not table:
+            continue
+        try:
+            data = json.loads(attr) if attr else {}
+        except (TypeError, ValueError):
+            data = {}
+        out.append((table, data if isinstance(data, dict) else {}))
+    return out
+
+
+def unused_dict_tables(db: dict[str, Any]) -> list[str]:
+    """当前库里没有被任何字段引用的字典表（只读检查）。"""
+    if db.get("kind") == "server":
+        return []
+    path = str(db.get("path") or "")
+    if not path or not Path(path).is_file():
+        return []
+    try:
+        util = local_db_util(path)
+    except sqlite3.Error:
+        return []
+    try:
+        categories, local_tables = _dict_references(util)
+        categories_folded = {value.casefold() for value in categories}
+        tables_folded = {value.casefold() for value in local_tables}
+        out: list[str] = []
+        for table, attr in _dict_tables(util):
+            category = str(attr.get("dict_table") or attr.get("category") or table)
+            if (
+                table.casefold() in tables_folded
+                or category.casefold() in categories_folded
+            ):
+                continue
+            out.append(table)
+        return out
+    finally:
+        util.conn.close()
+
+
+def delete_unused_dict_tables(
+    db: dict[str, Any],
+) -> tuple[list[str], list[tuple[str, str]]]:
+    """删除库里没有被任何字段引用的字典表 + 注册行。
+
+    Returns:
+        ``(已删除表名, [(表名, 失败原因), …])``。
+    """
+    if db.get("kind") == "server":
+        raise DeleteDataError("服务器库删除尚未实现，请选用本地库")
+    path = str(db.get("path") or "")
+    if not path or not Path(path).is_file():
+        raise DeleteDataError("本地库文件不存在")
+    try:
+        util = local_db_util(path)
+    except sqlite3.Error as exc:
+        raise DeleteDataError(f"打开本地库失败：{exc}") from exc
+    deleted: list[str] = []
+    failures: list[tuple[str, str]] = []
+    try:
+        categories, local_tables = _dict_references(util)
+        categories_folded = {value.casefold() for value in categories}
+        tables_folded = {value.casefold() for value in local_tables}
+        for table, attr in _dict_tables(util):
+            category = str(attr.get("dict_table") or attr.get("category") or table)
+            if (
+                table.casefold() in tables_folded
+                or category.casefold() in categories_folded
+            ):
+                continue
+            try:
+                util.cursor.execute(f"DROP TABLE IF EXISTS {_quote(table)}")
+                util.cursor.execute(
+                    "DELETE FROM user_relation WHERE table_name = ? AND type = 'dict'",
+                    (table,),
+                )
+                deleted.append(table)
+            except Exception as exc:  # noqa: BLE001 —— 单表失败不影响其它表
+                failures.append((table, str(exc)))
+                logger.warning("删除未使用字典表 %s 失败：%s", table, exc)
+        util.conn.commit()
+    except Exception as exc:  # noqa: BLE001
+        with suppress(Exception):
+            util.conn.rollback()
+        raise DeleteDataError(f"删除未使用字典失败：{exc}") from exc
+    finally:
+        util.conn.close()
+    logger.info("已删除未使用字典表：%s", deleted)
+    return deleted, failures
+
+
 def delete_registered_data(db: dict[str, Any], category: str, name: str) -> None:
     """删掉 ``db`` 里注册名为 ``name`` 的数据表 + 其 ``user_relation`` 注册行。
 
@@ -165,6 +318,13 @@ def _delete_with_util(util: local_db_util, category: str, name: str) -> None:
         util.cursor.execute(
             "DELETE FROM user_relation WHERE table_name = ?", (name,)
         )
+    # 表没了，它上面的字段元数据 / 别名也不该留着（否则字典会被误判为仍在使用）
+    for sql in (
+        "DELETE FROM qgis_dev_field_meta WHERE table_name = ?",
+        "DELETE FROM qgis_dev_column_alias WHERE table_name = ?",
+    ):
+        with suppress(Exception):
+            util.cursor.execute(sql, (name,))
 
 
 def _geometry_column(util: local_db_util, table: str) -> str:

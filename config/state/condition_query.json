@@ -1,0 +1,13 @@
+{
+  "schemes": [
+    {
+      "name": "方案1",
+      "expression": "\"前期\" = '建筑'",
+      "layer": {
+        "id": "yt_shp_c2eda227_ea2b_4a38_9427_71d317a2e943",
+        "name": "yt.shp",
+        "source": "E:/2026/project/image-cd/data/xizh/result/yt.shp"
+      }
+    }
+  ]
+}

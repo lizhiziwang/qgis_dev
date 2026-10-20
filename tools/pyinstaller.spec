@@ -154,6 +154,9 @@ hiddenimports = [
     # processing 插件（运行时加载，PyInstaller 分析不到它的 import）需要：
     f"{_PYQT_PREFIX}.uic",  # processing/gui 用 qgis.PyQt.uic 加载 .ui
     "psycopg2",             # processing/algs/gdal/GdalUtils 顶层 import
+    "xlwt",                 # 字段结构 / 本地字典导出 .xls
+    "xlrd",                 # 本地字典导入 .xls
+    "openpyxl",             # 本地字典导入 .xlsx
 ]
 
 try:
@@ -163,6 +166,11 @@ try:
     # 动态导入（算法库、工具注册、流程模板等），纯依赖分析易漏——麒麟真机已见
     # 打包后启动报 ``No module named 'app.bootstrap'``。collect_submodules 兜底。
     hiddenimports += collect_submodules("app")
+    for _pkg in ("xlwt", "xlrd", "openpyxl"):
+        try:
+            hiddenimports += collect_submodules(_pkg)
+        except Exception:
+            pass
 
     for pkg in ("setuptools",):
         try:

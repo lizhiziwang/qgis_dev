@@ -25,6 +25,7 @@ Dock 内容顶部带一条 QGIS 风格的头部工具条（只发信号，行为
 
 from __future__ import annotations
 
+import os
 from contextlib import suppress
 
 from qgis.core import (
@@ -43,6 +44,7 @@ from qgis.PyQt.QtGui import (
     QLinearGradient,
     QPainter,
     QPen,
+    QPixmap,
 )
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
@@ -52,6 +54,7 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QStyle,
     QStyledItemDelegate,
+    QStyleOptionViewItem,
     QToolButton,
     QToolTip,
     QVBoxLayout,
@@ -110,6 +113,35 @@ _PILL_FADE = 12.0  # 胶囊左缘「透明 → 行底色」的渐变宽度（长
 _ROW_MIN_HEIGHT = 22
 
 
+#: 数据源丢失时替换图层图标的红色感叹号（只建一次）
+_MISSING_ICON: QIcon | None = None
+
+
+def _missing_icon() -> QIcon:
+    """图层图标位置上的红色感叹号：白描边 + 红色本体，深浅主题都看得清。"""
+    global _MISSING_ICON
+    if _MISSING_ICON is not None:
+        return _MISSING_ICON
+    pix = QPixmap(16, 16)
+    pix.fill(Qt.GlobalColor.transparent)
+    painter = QPainter(pix)
+    try:
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        font = painter.font()
+        font.setBold(True)
+        font.setPointSizeF(12.0)
+        painter.setFont(font)
+        rect = pix.rect()
+        painter.setPen(QPen(QColor("#ffffff"), 2.4))
+        painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), "!")
+        painter.setPen(QPen(QColor("#d93025")))
+        painter.drawText(rect, int(Qt.AlignmentFlag.AlignCenter), "!")
+    finally:
+        painter.end()
+    _MISSING_ICON = QIcon(pix)
+    return _MISSING_ICON
+
+
 def _blend_over(fg: QColor, alpha: int, bg: QColor) -> QColor:
     """把 ``fg`` 以 ``alpha``（0-255）不透明度叠在 ``bg`` 上，返回**不透明**的结果色。
 
@@ -145,6 +177,8 @@ class _LabelRadioDelegate(QStyledItemDelegate):
     """
 
     toggle_requested = pyqtSignal(object, bool)  # (QgsVectorLayer, 期望状态)
+    #: 点击名称前的红色感叹号：请主窗口重设该图层数据源
+    source_repair_requested = pyqtSignal(object)  # QgsMapLayer
 
     def __init__(self, view: QgsLayerTreeView, parent=None) -> None:
         super().__init__(parent if parent is not None else view)
@@ -162,15 +196,20 @@ class _LabelRadioDelegate(QStyledItemDelegate):
     # ------------------------------------------------------------- 内部
 
     def initStyleOption(self, option, index) -> None:  # noqa: N802 —— Qt 命名
-        """选中行**不要焦点框**。
+        """选中行不要焦点框；数据源丢失时把图层图标换成红色感叹号。
 
-        Qt 会给"当前项"额外描一圈方框（看着就是"选中行有黑色边框"）。QSS 里给
-        ``::item:selected`` 写 ``outline: none`` 在本构建上**不生效**（实测），
-        只能在委托里把 ``State_HasFocus`` 摘掉 —— 与
-        :class:`app.ui.common.widgets.CenteredCheckDelegate` 同一套做法。
+        图标槽本身就是「勾选框之后、名称之前」，换掉图标后名称由视图正常
+        紧贴排布，和 ArcMap 的数据源丢失标记一致。
         """
         super().initStyleOption(option, index)
         option.state &= ~QStyle.StateFlag.State_HasFocus
+        try:
+            layer = self._node_layer(index)
+            if layer is not None and self._source_missing(layer):
+                option.icon = _missing_icon()
+                option.features |= QStyleOptionViewItem.ViewItemFeature.HasDecoration
+        except Exception:  # noqa: BLE001 —— 绘制 / 尺寸计算里不能抛异常
+            pass
 
     def _measure_caption(self) -> None:
         """按当前视图字体重量「标注」二字宽度（绘制与命中判定共用）。"""
@@ -189,6 +228,61 @@ class _LabelRadioDelegate(QStyledItemDelegate):
             return None
         layer_getter = getattr(node, "layer", None)
         return layer_getter() if callable(layer_getter) else None
+
+    @staticmethod
+    def _source_missing(layer) -> bool:
+        """图层的数据源是不是丢了（文件/库被删/挪走）。"""
+        if layer is None:
+            return False
+        try:
+            provider = str(layer.providerType() or "")
+            if provider in (
+                "memory",
+                "virtual",
+                "postgres",
+                "oracle",
+                "mssql",
+                "wfs",
+                "wms",
+                "wmts",
+                "arcgisfeatureserver",
+                "arcgismapserver",
+            ):
+                return False
+            if not layer.isValid():
+                return True
+            source = str(layer.source() or "")
+        except Exception:  # noqa: BLE001
+            return False
+        if not source:
+            return False
+        # 远程服务 / 虚拟数据源不是本地文件，不用判存在性
+        lowered = source.lower()
+        if "://" in lowered or lowered.startswith(("url=", "type=", "crs=")):
+            return False
+        if "host=" in lowered or "service=" in lowered:
+            return False
+        try:
+            from app.core.util.local_layer_loader import layer_source_container
+
+            container = str(layer_source_container(layer) or "")
+        except Exception:  # noqa: BLE001
+            container = source.split("|", 1)[0]
+        if not container:
+            return False
+        if "://" in container.lower() or container.lower().startswith("url="):
+            return False
+        if not os.path.isabs(container):
+            base = str(QgsProject.instance().homePath() or os.getcwd())
+            container = os.path.join(base, container)
+        return not os.path.exists(container)
+
+    def _badge_rect(self, option, layer=None):
+        """红色感叹号的点击区域：可视勾选框之后、名称之前的那块图标槽。"""
+        size = 18.0
+        left = float(option.rect.left()) + 20.0
+        top = float(option.rect.center().y()) - size / 2.0
+        return QRectF(left, top, size, size)
 
     def _toggle_left(self, row_rect) -> float:
         """开关整块的左边界：贴行右端；行太窄时贴住行左端，绝不往左越界。
@@ -359,6 +453,13 @@ class _LabelRadioDelegate(QStyledItemDelegate):
         try:
             layer = self._node_layer(index)
             if layer is not None and event is not None and event.type() == QEvent.Type.ToolTip:
+                if self._source_missing(layer):
+                    QToolTip.showText(
+                        event.globalPos(),
+                        "数据源不存在。\n点击图层名称前的红色感叹号重设数据源。",
+                        view,
+                    )
+                    return True
                 QToolTip.showText(event.globalPos(), layer.name(), view)
                 return True
         except Exception:  # noqa: BLE001
@@ -388,6 +489,12 @@ class _LabelRadioDelegate(QStyledItemDelegate):
                 QEvent.Type.MouseButtonDblClick,
             ):
                 layer = self._node_layer(index)
+                if layer is not None and self._source_missing(layer):
+                    badge_rect = self._badge_rect(option, layer).adjusted(-3, -3, 3, 3)
+                    if badge_rect.contains(event.position()):
+                        if event.type() == QEvent.Type.MouseButtonRelease:
+                            self.source_repair_requested.emit(layer)
+                        return True
                 if (
                     isinstance(layer, QgsVectorLayer)
                     and self.trailing_rect(option.rect)
@@ -424,6 +531,8 @@ class LayerDock(QDockWidget):
     attribute_table_requested = pyqtSignal(object)
     layer_clicked = pyqtSignal(object)
     label_toggle_requested = pyqtSignal(object, bool)  # (QgsVectorLayer, 期望的标注开关)
+    #: 图层数据源丢失，用户点了名称前的红色感叹号：请宿主重设数据源
+    source_repair_requested = pyqtSignal(object)  # QgsMapLayer
     render_tab_requested = pyqtSignal()
     add_layer_requested = pyqtSignal()
     add_group_requested = pyqtSignal()
@@ -468,6 +577,9 @@ class LayerDock(QDockWidget):
         self.label_delegate = _LabelRadioDelegate(self.view)
         self.view.setItemDelegate(self.label_delegate)
         self.label_delegate.toggle_requested.connect(self.label_toggle_requested.emit)
+        self.label_delegate.source_repair_requested.connect(
+            self.source_repair_requested.emit
+        )
 
         self._build_header()
 

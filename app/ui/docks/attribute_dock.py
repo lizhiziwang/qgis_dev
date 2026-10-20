@@ -36,9 +36,10 @@ from qgis.core import (
     QgsVectorLayer,
 )
 from qgis.PyQt.QtCore import (QAbstractTableModel, QEvent, QItemSelection, QItemSelectionModel,
-                              QModelIndex, QObject, Qt, QTimer, QVariant, pyqtSignal)
-from qgis.PyQt.QtGui import QBrush, QColor, QKeySequence
+                              QModelIndex, QObject, QPoint, Qt, QTimer, QVariant, pyqtSignal)
+from qgis.PyQt.QtGui import QBrush, QColor, QKeySequence, QStandardItem, QStandardItemModel
 from qgis.PyQt.QtWidgets import (
+    QAbstractItemDelegate,
     QAbstractItemView,
     QComboBox,
     QDialog,
@@ -51,12 +52,15 @@ from qgis.PyQt.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSizePolicy,
+    QStyledItemDelegate,
     QTableView,
+    QTreeView,
     QVBoxLayout,
     QWidget,
 )
 
 from app.core.domain.editing import LayerEditService
+from app.core.util.dict_values import FieldDict, layer_dict_fields
 from app.infra.logging import get_logger
 from app.ui.common import tool_icons
 from app.ui.common.feature_highlight import FeatureHighlighter
@@ -351,6 +355,10 @@ class PagedAttributeTableModel(QAbstractTableModel):
         #: 编辑态下**禁止改值**的列（字段下标 +1，列 0 是 ID 列）：全局唯一标识
         #: 与数据源自增/自维护的主键。与属性录入弹窗同一口径，见 feature_attrs。
         self._readonly_cols = self._compute_readonly_cols()
+        #: 字段下标 → 字典域（值与 code→name 映射）。属性表显示 / 编辑用；
+        #: 没挂字典的字段不在里面。见 :mod:`app.core.util.dict_values`。
+        self._dict_fields: dict[int, FieldDict] = {}
+        self._load_dict_fields()
         #: 结果 **fid 列表**（内存主驻留物；要素按需取，见 ``feature_at``）
         self._fids: List[int] = []
         #: fid → 行号（选中集同步要按 fid 反查行，线性找在 2M 行上不可用）
@@ -399,6 +407,22 @@ class PagedAttributeTableModel(QAbstractTableModel):
         layer.featureDeleted.connect(self._on_feature_deleted)
         layer.featureAdded.connect(self._on_feature_added)
         self._start_stream()
+
+    def _load_dict_fields(self) -> None:
+        """重建「字段下标 → 字典域」表（打开 / 字段变更时调用）。"""
+        fields = self.layer.fields()
+        mapping: dict[int, FieldDict] = {}
+        for name, info in layer_dict_fields(self.layer):
+            index = fields.indexOf(name)
+            if index >= 0:
+                mapping[index] = info
+        self._dict_fields = mapping
+
+    def dict_info(self, column: int) -> FieldDict | None:
+        """第 ``column`` 列（含 ID 列偏移）挂接的字典；没挂返回 ``None``。"""
+        if column <= 0:
+            return None
+        return self._dict_fields.get(column - 1)
 
     def _on_feature_deleted(self, fid: int) -> None:
         """图层里删了一个要素：把表里对应那一行立刻撤掉（撤销删除由 featureAdded 补回）。"""
@@ -670,6 +694,7 @@ class PagedAttributeTableModel(QAbstractTableModel):
             field_alias(self.layer.fields().at(i)) or name for i, name in enumerate(self.field_names)
         ]
         self._readonly_cols = self._compute_readonly_cols()
+        self._load_dict_fields()
         self._feature_cache.clear()
         self.beginResetModel()
         self.endResetModel()
@@ -901,7 +926,15 @@ class PagedAttributeTableModel(QAbstractTableModel):
                 return None
             field_idx = index.column() - 1
             if field_idx < len(feature.fields()):
-                return feature.attribute(field_idx)
+                value = feature.attribute(field_idx)
+                if role == Qt.ItemDataRole.DisplayRole:
+                    info = self._dict_fields.get(field_idx)
+                    if info is not None:
+                        name = info.name_for(value)
+                        if name is not None:
+                            return name
+                # EditRole 保留原始 code：编辑框/委托按 code 回填并写回 code
+                return value
         return None
 
     def _band_brush_value(self) -> QBrush:
@@ -968,16 +1001,17 @@ class PagedAttributeTableModel(QAbstractTableModel):
         if col >= len(feature.fields()):
             return False
         field: QgsField = self.layer.fields().at(col)
-        if field.type() == QVariant.Int:
-            try:
-                value = int(value)
-            except (ValueError, TypeError):
-                return False
-        elif field.type() == QVariant.Double:
-            try:
-                value = float(value)
-            except (ValueError, TypeError):
-                return False
+        if value is not None:
+            if field.type() == QVariant.Int:
+                try:
+                    value = int(value)
+                except (ValueError, TypeError):
+                    return False
+            elif field.type() == QVariant.Double:
+                try:
+                    value = float(value)
+                except (ValueError, TypeError):
+                    return False
         success = self.layer.changeAttributeValue(fid, col, value)
         if success:
             # 缓存里的旧要素失效：弹出，下次渲染按需重取新值
@@ -985,6 +1019,248 @@ class PagedAttributeTableModel(QAbstractTableModel):
             self.dataChanged.emit(index, index, [role])
             return True
         return False
+
+
+_DICT_CODE_ROLE = int(Qt.ItemDataRole.UserRole) + 1
+_DICT_EMPTY_ROLE = _DICT_CODE_ROLE + 1
+
+
+class _DictTreeView(QTreeView):
+    """字典下拉树：禁用键盘 type-ahead 搜索。
+
+    QAbstractItemView 的 ``keyboardSearch`` 会逐项扫模型；字典有 2 万条时输入
+    一个字符就会长时间卡住。这里字典只能鼠标 / 方向键选择。
+    """
+
+    def keyboardSearch(self, search: str) -> None:  # noqa: N802 —— Qt 命名
+        return
+
+
+class _DictTreeCombo(QComboBox):
+    """属性表字典编辑器：下拉是一棵「字典域 → 字典值」树。
+
+    QComboBox 自带的下拉只支持平铺项，子项无法成为 ``currentIndex``；这里
+    自己接管树节点的点击：选中叶子后记录 code、把显示文本写进只读编辑框，
+    再通过 ``valuePicked`` 通知委托提交/关闭编辑器。
+    """
+
+    valuePicked = pyqtSignal()
+
+    def __init__(self, parent, info: FieldDict, current_code) -> None:
+        super().__init__(parent)
+        self._info = info
+        self._code = ""
+        self._cleared = False
+        self._picking = False
+        self._items: dict[str, QStandardItem] = {}
+        self.setEditable(True)
+        self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        # 不挂补全器：树模型 + 大字典时，输入字符会触发 combo 的键盘搜索/
+        # 补全，实测会把界面卡死。字典只能选，不允许手输。
+        self.setCompleter(None)
+        if self.lineEdit() is not None:
+            self.lineEdit().setReadOnly(True)
+            self.lineEdit().setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            self.lineEdit().setAttribute(
+                Qt.WidgetAttribute.WA_TransparentForMouseEvents, True
+            )
+        self.setMaxVisibleItems(24)
+        self.setMinimumWidth(360)
+
+        view = _DictTreeView(self)
+        view.setHeaderHidden(True)
+        view.setRootIsDecorated(True)
+        view.setUniformRowHeights(True)
+        view.setExpandsOnDoubleClick(False)
+        view.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        view.setMinimumWidth(360)
+        # 用 pressed 而不是 clicked：QComboBox 的下拉容器可能先隐藏弹窗，
+        # 导致 clicked 来不及发出，表现为"选了但没写回"。
+        view.pressed.connect(self._on_tree_clicked)
+        view.activated.connect(self._on_tree_clicked)
+        self.setView(view)
+
+        model = QStandardItemModel(self)
+        # 「空值」放在树最上面：字典字段允许不填任何值
+        empty = QStandardItem("（空值 / 不填）")
+        empty.setData(True, _DICT_EMPTY_ROLE)
+        empty.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+        model.appendRow(empty)
+        root = QStandardItem(f"({info.domain})")
+        root.setFlags(Qt.ItemFlag.ItemIsEnabled)
+        root.setData(None, _DICT_CODE_ROLE)
+        font = root.font()
+        font.setBold(True)
+        root.setFont(font)
+        model.appendRow(root)
+        for _depth, value in info.as_tree():
+            item = QStandardItem(f"({value.code}){value.name}")
+            item.setData(value.code, _DICT_CODE_ROLE)
+            item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+            parent_item = self._items.get(value.parent_code, root)
+            parent_item.appendRow(item)
+            self._items[value.code] = item
+        self.setModel(model)
+        self._root = root
+        self._empty_item = empty
+        view.expandAll()
+        self.set_value(current_code)
+
+    def set_value(self, code) -> None:
+        self._picking = False
+        value = "" if code is None else str(code)
+        if not value:
+            self._code = ""
+            self._cleared = True
+            self.setEditText("（空值 / 不填）")
+            self.view().setCurrentIndex(self._empty_item.index())
+            return
+        self._code = value
+        self._cleared = False
+        item = self._items.get(value)
+        if item is not None:
+            self.setEditText(item.text())
+            self.view().setCurrentIndex(item.index())
+        else:
+            self.setEditText(f"（当前值）{value}")
+            self.view().setCurrentIndex(self._root.index())
+
+    def selected_code(self) -> str:
+        return self._code
+
+    def keyPressEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        """字典只能选：屏蔽可打印字符，避免 combo 在大字典上做键盘搜索卡死。"""
+        allowed = {
+            Qt.Key.Key_Up,
+            Qt.Key.Key_Down,
+            Qt.Key.Key_Left,
+            Qt.Key.Key_Right,
+            Qt.Key.Key_Home,
+            Qt.Key.Key_End,
+            Qt.Key.Key_PageUp,
+            Qt.Key.Key_PageDown,
+            Qt.Key.Key_Return,
+            Qt.Key.Key_Enter,
+            Qt.Key.Key_Escape,
+            Qt.Key.Key_Tab,
+            Qt.Key.Key_Backtab,
+        }
+        if event.key() in allowed:
+            super().keyPressEvent(event)
+        else:
+            event.ignore()
+
+    def is_cleared(self) -> bool:
+        return self._cleared
+
+    def _on_tree_clicked(self, index) -> None:
+        if self._picking:
+            return
+        if index.data(_DICT_EMPTY_ROLE):
+            self._picking = True
+            self._code = ""
+            self._cleared = True
+            self.setEditText("（空值 / 不填）")
+            self.hidePopup()
+            self.valuePicked.emit()
+            return
+        code = index.data(_DICT_CODE_ROLE)
+        if code is None:  # 点到域标题：只是折叠/展开
+            return
+        self._picking = True
+        self._code = str(code)
+        self._cleared = False
+        self.setEditText(index.data(Qt.ItemDataRole.DisplayRole))
+        self.hidePopup()
+        self.valuePicked.emit()
+
+    def showPopup(self) -> None:  # noqa: N802 —— Qt 命名
+        self._picking = False
+        self.view().expandAll()
+        item = self._items.get(self._code) if not self._cleared else self._empty_item
+        if item is not None:
+            self.view().setCurrentIndex(item.index())
+        super().showPopup()
+        try:
+            popup = self.view().window()
+            popup.setMinimumWidth(max(360, self.width()))
+            # 比整屏还高的下拉很难用：限制高度，行多了走滚动条
+            popup.setMinimumHeight(160)
+            popup.setMaximumHeight(200)
+            self.view().setMinimumHeight(158)
+            self.view().setMaximumHeight(198)
+            self.view().setVerticalScrollBarPolicy(
+                Qt.ScrollBarPolicy.ScrollBarAsNeeded
+            )
+            # 属性表高度有限：下方放不下且上方放得下时，翻到单元格上方弹出
+            anchor = self.parentWidget()
+            if anchor is not None and anchor.height() > 0:
+                table_top = anchor.mapToGlobal(QPoint(0, 0)).y()
+                table_bottom = table_top + anchor.height()
+                cell_top = self.mapToGlobal(QPoint(0, 0)).y()
+                popup_h = popup.height()
+                if (
+                    cell_top + self.height() + popup_h > table_bottom
+                    and cell_top - popup_h >= table_top
+                ):
+                    popup.move(popup.x(), cell_top - popup_h)
+        except RuntimeError:
+            pass
+
+
+class _DictValueDelegate(QStyledItemDelegate):
+    """挂了字典的单元格：编辑时用「字典域 → 全部值」树形下拉。
+
+    选中后写回原始 code；显示仍由 model 的 DisplayRole 映射成名称
+    （见 :meth:`PagedAttributeTableModel.data`）。
+    """
+
+    def __init__(self, parent, model: "PagedAttributeTableModel") -> None:
+        super().__init__(parent)
+        self._model = model
+
+    def createEditor(self, parent, option, index):  # noqa: N802 —— Qt 命名
+        info = self._model.dict_info(index.column())
+        if info is None:
+            return super().createEditor(parent, option, index)
+        current = index.model().data(index, Qt.ItemDataRole.EditRole)
+        editor = _DictTreeCombo(parent, info, current)
+        editor.valuePicked.connect(lambda: self._commit_editor(editor))
+
+        def _open_popup() -> None:
+            # 编辑器可能在下一个事件循环前就被销毁（用户马上点走/切行）
+            try:
+                if editor.isVisible():
+                    editor.showPopup()
+            except RuntimeError:
+                pass
+
+        # 双击单元格直接弹出树，不用再点一次箭头
+        QTimer.singleShot(0, _open_popup)
+        return editor
+
+    def _commit_editor(self, editor) -> None:
+        self.commitData.emit(editor)
+        self.closeEditor.emit(
+            editor, QAbstractItemDelegate.EndEditHint.NoHint
+        )
+
+    def setEditorData(self, editor, index):  # noqa: N802 —— Qt 命名
+        if not isinstance(editor, _DictTreeCombo):
+            return super().setEditorData(editor, index)
+        value = index.model().data(index, Qt.ItemDataRole.EditRole)
+        editor.set_value(value)
+
+    def setModelData(self, editor, model, index):  # noqa: N802 —— Qt 命名
+        if not isinstance(editor, _DictTreeCombo):
+            return super().setModelData(editor, model, index)
+        if editor.is_cleared():
+            model.setData(index, None, Qt.ItemDataRole.EditRole)
+            return
+        code = editor.selected_code()
+        if not code:
+            return
+        model.setData(index, code, Qt.ItemDataRole.EditRole)
 
 
 class _AttributeTableView(QTableView):
@@ -1267,6 +1543,9 @@ class PagedAttributeTableWidget(QWidget):
 
         self.model = PagedAttributeTableModel(self.layer, self.page_size, filter_str=self.filter_str, show_ids=self.show_ids)
         self.table_view.setModel(self.model)
+        # 挂了字典的字段：显示映射成名称、编辑时按字典域下拉取值
+        self._dict_delegate = _DictValueDelegate(self.table_view, self.model)
+        self.table_view.setItemDelegate(self._dict_delegate)
         if self._preset_ids:
             # 让下拉如实反映"当前只看指定子集"
             idx = self.mode_combo.findData("preset")
@@ -2241,6 +2520,9 @@ class PagedAttributeTableWidget(QWidget):
         if fv is None or self.model is None:
             return
         fv.setModel(self.model)
+        delegate = getattr(self, "_dict_delegate", None)
+        if delegate is not None:
+            fv.setItemDelegate(delegate)
         sel_model = self.table_view.selectionModel()
         if sel_model is not None:
             fv.setSelectionModel(sel_model)
@@ -2810,7 +3092,8 @@ class AttributeDock(QDockWidget):
         GeoJSON 等无空间索引的 OGR 数据源按 fid 取要素可能从头扫描整个文件；
         属性表渲染已经缓存了可视窗口的要素，双击定位 / 闪烁直接复用，避免第二次扫描。
         """
-        model = self.model
+        content = getattr(self, "content_widget", None)
+        model = getattr(content, "model", None) if content is not None else None
         getter = getattr(model, "feature_by_fid", None) if model is not None else None
         if callable(getter):
             try:

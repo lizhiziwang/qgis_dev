@@ -26,6 +26,7 @@ try:
         GpkgGeomError,
         decompress_blob,
         encode_geometry,
+        wkb_geometry_kind,
         wrap_to_multi,
     )
 except ImportError:
@@ -33,6 +34,7 @@ except ImportError:
         GpkgGeomError,
         decompress_blob,
         encode_geometry,
+        wkb_geometry_kind,
         wrap_to_multi,
     )
 
@@ -1372,7 +1374,9 @@ class local_db_util:
 
         return tn
 
-    def batch_add_vector_data(self, table_name: str, data: list[dict]) -> int:
+    def batch_add_vector_data(
+        self, table_name: str, data: list[dict], *, feedback=None
+    ) -> int:
         """批量把要素数据插入到指定的矢量(空间)表。
 
         每行接受两种形态(自动识别):
@@ -1473,6 +1477,11 @@ class local_db_util:
         inserted = 0
         try:
             for i, row in enumerate(data):
+                if feedback is not None and i and i % 200 == 0:
+                    # 写入阶段占 70% → 92%，让导入进度条真正动起来
+                    if feedback.isCanceled():
+                        raise RuntimeError("用户取消")
+                    feedback.setProgress(int(70 + 22 * i / max(1, len(data))))
                 if not isinstance(row, dict):
                     raise ValueError(f"第 {i} 行不是 dict: {row!r}")
                 # 识别 ArcGIS 要素包装 或 扁平字典
@@ -1517,25 +1526,45 @@ class local_db_util:
                             placeholders.append("?")
                             params.append(blob)
                     else:
-                        wkt = _to_wkt(geom_val)
-                        if wkt:
-                            # ST_GeomFromText 解析失败会静默返回 NULL(丢数据),先预校验
-                            bad = self.cursor.execute(
-                                "SELECT ST_GeomFromText(?, ?) IS NULL", (wkt, srid)
-                            ).fetchone()[0]
-                            if bad:
+                        # WKB 直入：导入链路给的就是 QgsGeometry.asWkb()，省掉
+                        # "WKT 文本 → ST_GeomFromText 解析" 这一大块 CPU。
+                        if isinstance(geom_val, (bytes, bytearray)):
+                            wkb = bytes(geom_val)
+                            kind = wkb_geometry_kind(wkb)
+                            if kind is None:
                                 raise ValueError(
-                                    f"第 {i} 行的几何无法解析为 WKT: {wkt[:60]!r}"
+                                    f"第 {i} 行的几何不是可写入的 WKB（{wkb[:5]!r}）"
                                 )
-                            kind = _wkt_kind(wkt)
                             _check_kind(kind)
                             insert_cols.append(geom_col)
-                            if col_type in _MULTI_GEOM_TYPES and kind in _SINGLE_GEOM_TYPES:
-                                # 多部件列只收多部件;单部件自动 ST_Multi 归一
-                                geo_expr_sql = "ST_Multi(ST_GeomFromText(?, ?))"
+                            if (
+                                col_type in _MULTI_GEOM_TYPES
+                                and kind in _SINGLE_GEOM_TYPES
+                            ):
+                                geo_expr_sql = "ST_Multi(GeomFromWKB(?, ?))"
                             else:
-                                geo_expr_sql = "ST_GeomFromText(?, ?)"
-                            params.extend((wkt, srid))
+                                geo_expr_sql = "GeomFromWKB(?, ?)"
+                            params.extend((wkb, srid))
+                        else:
+                            wkt = _to_wkt(geom_val)
+                            if wkt:
+                                # ST_GeomFromText 解析失败会静默返回 NULL(丢数据),先预校验
+                                bad = self.cursor.execute(
+                                    "SELECT ST_GeomFromText(?, ?) IS NULL", (wkt, srid)
+                                ).fetchone()[0]
+                                if bad:
+                                    raise ValueError(
+                                        f"第 {i} 行的几何无法解析为 WKT: {wkt[:60]!r}"
+                                    )
+                                kind = _wkt_kind(wkt)
+                                _check_kind(kind)
+                                insert_cols.append(geom_col)
+                                if col_type in _MULTI_GEOM_TYPES and kind in _SINGLE_GEOM_TYPES:
+                                    # 多部件列只收多部件;单部件自动 ST_Multi 归一
+                                    geo_expr_sql = "ST_Multi(ST_GeomFromText(?, ?))"
+                                else:
+                                    geo_expr_sql = "ST_GeomFromText(?, ?)"
+                                params.extend((wkt, srid))
                 if not insert_cols:
                     raise ValueError(
                         f"第 {i} 行没有任何可写入 {tn!r} 的列"
@@ -1551,6 +1580,8 @@ class local_db_util:
                 self.cursor.execute(sql, params)
                 inserted += 1
             self.conn.commit()
+            if feedback is not None:
+                feedback.setProgress(int(92))
         except Exception as exc:
             self.conn.rollback()
             if isinstance(exc, (ValueError, RuntimeError)):

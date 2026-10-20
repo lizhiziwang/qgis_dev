@@ -71,13 +71,9 @@ def field_alias(field: "QgsField") -> str:
         alias = field.alias() or ""
     except Exception:  # noqa: BLE001
         return ""
-    if not alias:
-        return ""
-    try:
-        repaired = alias.encode("latin-1").decode("utf-8")
-    except (UnicodeEncodeError, UnicodeDecodeError):
-        return alias
-    return repaired or alias
+    from app.core.util.text_encoding import repair_mojibake
+
+    return repair_mojibake(alias)
 
 
 def _field_kind(field: "QgsField") -> str | None:

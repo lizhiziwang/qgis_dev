@@ -28,8 +28,11 @@
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import shutil
+import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -78,6 +81,11 @@ class ExportSpec:
     #: Shapefile 超过 :data:`SHAPEFILE_MAX_FIELDS` 个字段时，调用方必须给出一个
     #: ≤255 的子集（空元组 = 只导几何、不写属性）。
     field_names: tuple[str, ...] | None = None
+    #: 是否把字段挂接的字典一起导出：
+    #: - FileGDB → 写成 GDB 的**属性域**（coded value domain）并挂到字段上；
+    #: - GeoPackage / SQLite → 在目标库里附带字典表，并写字段元数据；
+    #: - Shapefile 不支持，调用方应禁用这个选项。
+    convert_dict: bool = False
 
     @property
     def file_path(self) -> str:
@@ -119,12 +127,19 @@ def existing_target_description(spec: ExportSpec) -> str:
     return ""
 
 
-def export_vector_layer(layer: QgsVectorLayer, spec: ExportSpec) -> str:
+def export_vector_layer(
+    layer: QgsVectorLayer,
+    spec: ExportSpec,
+    *,
+    progress=None,
+) -> str:
     """把 ``layer`` 导出到 ``spec`` 指定的目标，返回写出的文件路径。
 
     Args:
         layer: 要导出的图层（可以是本地库里的表 —— 打开它的地方自己负责）。
         spec: 导出参数。
+        progress: 可选进度回调 ``callable(str)``；写图层 / 写字典阶段各报一次
+            文字（GDB 大图层导出可能要几十秒，界面靠它显示“正在做什么”）。
 
     Returns:
         实际写出的文件（或 ``.gdb`` 目录）路径。
@@ -138,7 +153,7 @@ def export_vector_layer(layer: QgsVectorLayer, spec: ExportSpec) -> str:
     if is_container and not spec.layer_name.strip():
         raise ExportLayerError("导出到库/地理数据库时，图层名不能为空")
 
-    source = _prepare_source(layer, spec)
+    source, name_map = _prepare_source(layer, spec)
     target = spec.file_path
     existed = os.path.exists(target)
 
@@ -158,20 +173,29 @@ def export_vector_layer(layer: QgsVectorLayer, spec: ExportSpec) -> str:
             QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteLayer
         )
 
+    # GDB 读出来的中文别名可能是「UTF-8 被当成 Latin-1」的乱码；属性表显示时
+    # 会修（``feature_attrs.field_alias``），导出写盘时也必须修，否则目标里
+    # 的字段中文还是乱码。写完后把原图层的别名还原，避免悄悄改用户图层。
+    alias_restore = _repair_source_aliases(source)
+    if progress is not None:
+        progress("正在写入图层…")
     try:
-        error, errmsg, _new, _saved = QgsVectorFileWriter.writeAsVectorFormatV3(
-            source, target, QgsCoordinateTransformContext(), options
-        )
-    except OSError as exc:
-        if not existed:
-            _cleanup(target)
-        raise ExportLayerError(f"导出失败：{target}\n{exc}") from exc
+        try:
+            error, errmsg, _new, _saved = QgsVectorFileWriter.writeAsVectorFormatV3(
+                source, target, QgsCoordinateTransformContext(), options
+            )
+        except OSError as exc:
+            if not existed:
+                _cleanup(target)
+            raise ExportLayerError(f"导出失败：{target}\n{exc}") from exc
 
-    if error != QgsVectorFileWriter.WriterError.NoError:
-        # 只清理**本次新建**的半成品；覆盖既有文件时删掉会把用户原数据毁掉
-        if not existed:
-            _cleanup(target)
-        raise ExportLayerError(f"导出失败：{errmsg or '未知原因'}")
+        if error != QgsVectorFileWriter.WriterError.NoError:
+            # 只清理**本次新建**的半成品；覆盖既有文件时删掉会把用户原数据毁掉
+            if not existed:
+                _cleanup(target)
+            raise ExportLayerError(f"导出失败：{errmsg or '未知原因'}")
+    finally:
+        _restore_aliases(source, alias_restore)
 
     logger.info(
         "已导出图层 %s → %s（%s · %s）",
@@ -180,7 +204,342 @@ def export_vector_layer(layer: QgsVectorLayer, spec: ExportSpec) -> str:
         spec.driver,
         spec.expression or "全部要素",
     )
+    if spec.convert_dict:
+        if progress is not None:
+            progress("正在写入字典…")
+        try:
+            _export_dictionaries(layer, spec, target, name_map)
+        except Exception as exc:  # noqa: BLE001 —— 数据已写成功，字典失败不毁结果
+            logger.warning("导出字典失败（图层数据已写出）：%s", exc, exc_info=True)
+    if progress is not None:
+        progress("导出完成")
     return target
+
+
+# --------------------------------------------------------------------- 字典导出
+
+
+def _export_dictionaries(layer, spec: ExportSpec, target: str, name_map=None) -> None:
+    """按格式把字段挂接的字典导出（GDB 写属性域，GPKG/SQLite 写字典表）。"""
+    mapping = name_map or {}
+    fields = [
+        (mapping.get(name, name), info)
+        for name, info in _dict_fields_for_export(layer, spec)
+    ]
+    if not fields:
+        logger.warning("导出字典：图层没有挂接字典的字段，已跳过")
+        return
+    ext = str(spec.extension or os.path.splitext(spec.file_name)[1]).lower()
+    if ext == ".gdb":
+        _export_gdb_domains(fields, spec, target)
+    elif ext in (".gpkg", ".sqlite", ".sqlite3", ".db"):
+        _export_dict_tables(layer, fields, spec, target)
+    else:
+        logger.info("导出字典：%s 不支持携带字典，已跳过", ext or spec.driver)
+
+
+def _dict_fields_for_export(layer, spec: ExportSpec):
+    """图层里挂了字典、且本次确实要导出的字段：``[(字段名, FieldDict), ...]``。"""
+    from app.core.util.dict_values import layer_dict_fields
+
+    wanted = set(spec.field_names) if spec.field_names is not None else None
+    return [
+        (name, info)
+        for name, info in layer_dict_fields(layer)
+        if wanted is None or name in wanted
+    ]
+
+
+def _domain_token(info) -> str:
+    """GDB 属性域名：``dict_<字典表>_<域>``，只保留词字符。"""
+    raw = f"{info.table}_{info.domain}"
+    token = re.sub(r"[^\w]+", "_", str(raw), flags=re.UNICODE).strip("_")
+    return ("dict_" + token)[:60] or "dict_domain"
+
+
+def _export_gdb_domains(fields, spec: ExportSpec, target: str) -> None:
+    """FileGDB：把字典域写成 coded value domain 并挂到对应字段上。"""
+    try:
+        from osgeo import ogr
+    except ImportError as exc:  # pragma: no cover —— QGIS 自带 GDAL 绑定
+        raise ExportLayerError("本机没有 GDAL Python 绑定，无法写入 GDB 属性域") from exc
+
+    driver = ogr.GetDriverByName(spec.driver or "OpenFileGDB")
+    if driver is None:
+        driver = ogr.GetDriverByName("OpenFileGDB")
+    ds = driver.Open(target, 1) if driver is not None else None
+    if ds is None:
+        raise ExportLayerError(f"打不开导出后的 GDB：{target}")
+    try:
+        layer = ds.GetLayerByName(spec.layer_name.strip())
+        if layer is None:
+            layer = ds.GetLayer(0)
+        if layer is None:
+            raise ExportLayerError("GDB 里找不到刚导出的图层")
+        existing = set(ds.GetFieldDomainNames() or ())
+        used_names: set[str] = set()
+        #: (字典表, 字典域) → 已创建的 GDB 属性域名（多个字段共用同一字典时复用）
+        domain_names: dict[tuple[str, str], str] = {}
+        for field_name, info in fields:
+            index = layer.GetLayerDefn().GetFieldIndex(field_name)
+            if index < 0:
+                logger.warning("GDB 属性域：图层里没有字段 %s，已跳过", field_name)
+                continue
+            key = (info.table, info.domain)
+            name = domain_names.get(key, "")
+            if not name:
+                enum: dict = {}
+                field_type = layer.GetLayerDefn().GetFieldDefn(index).GetType()
+                for value in info.values:
+                    if not value.code:
+                        continue
+                    if field_type in (ogr.OFTInteger, ogr.OFTInteger64):
+                        try:
+                            enum[int(value.code)] = value.name
+                        except (TypeError, ValueError):
+                            logger.warning(
+                                "字典域 %s 的代码 %r 不是整数，无法挂到整型字段 %s",
+                                info.domain,
+                                value.code,
+                                field_name,
+                            )
+                    else:
+                        enum[str(value.code)] = value.name
+                if not enum:
+                    continue
+                name = _domain_token(info)
+                if name in used_names:
+                    suffix = 2
+                    while f"{name}_{suffix}" in used_names:
+                        suffix += 1
+                    name = f"{name}_{suffix}"
+                used_names.add(name)
+                domain = ogr.CreateCodedFieldDomain(
+                    name,
+                    f"{info.table} / {info.domain}",
+                    field_type,
+                    ogr.OFSTNone,
+                    enum,
+                )
+                if name in existing:
+                    ds.UpdateFieldDomain(domain)
+                else:
+                    added = ds.AddFieldDomain(domain)
+                    if not added:
+                        logger.warning("GDB 属性域 %s 写入失败", name)
+                        continue
+                    existing.add(name)
+                domain_names[key] = name
+            original = layer.GetLayerDefn().GetFieldDefn(index)
+            new_defn = ogr.FieldDefn(original.GetName(), original.GetType())
+            with_meta = (
+                ("SetWidth", original.GetWidth()),
+                ("SetPrecision", original.GetPrecision()),
+                ("SetSubType", original.GetSubType()),
+            )
+            for method, value in with_meta:
+                try:
+                    getattr(new_defn, method)(value)
+                except (AttributeError, TypeError):
+                    pass
+            new_defn.SetDomainName(name)
+            if layer.AlterFieldDefn(index, new_defn, ogr.ALTER_DOMAIN_FLAG) != ogr.OGRERR_NONE:
+                logger.warning("GDB 字段 %s 挂接属性域 %s 失败", field_name, name)
+        logger.info("已把 %d 个字典域写入 GDB 属性域：%s", len(used_names), target)
+    finally:
+        ds = None
+
+
+def _local_dict_source_table(layer, info) -> str:
+    """图层所在库里 ``info.table`` 对应的字典表名（没有返回空串）。"""
+    from app.core.util.local_layer_loader import layer_source_container
+
+    container = ""
+    try:
+        container = str(layer_source_container(layer) or "")
+    except Exception:  # noqa: BLE001
+        return ""
+    if not container or not os.path.isfile(container):
+        return ""
+    try:
+        conn = sqlite3.connect(container, timeout=5.0)
+    except sqlite3.Error:
+        return ""
+    try:
+        if info.local_table:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+                (info.local_table,),
+            ).fetchone()
+            if row is not None:
+                return info.local_table
+        try:
+            rows = conn.execute(
+                "SELECT table_name, attr FROM user_relation WHERE type = 'dict'"
+            ).fetchall()
+        except sqlite3.Error:
+            return ""
+        import json
+
+        for table, attr in rows:
+            table = str(table or "")
+            if table == info.table:
+                return table
+            try:
+                data = json.loads(attr) if attr else {}
+            except (TypeError, ValueError):
+                data = {}
+            if isinstance(data, dict) and str(data.get("dict_table") or "") == info.table:
+                return table
+        return ""
+    finally:
+        conn.close()
+
+
+def _export_dict_tables(layer, fields, spec: ExportSpec, target: str) -> None:
+    """GPKG / SQLite：把字典表写进目标库，并写字段元数据（打开后能显示名称）。"""
+    from app.core.domain.create_data.dict_tables import (
+        DICT_COLUMNS,
+        DICT_INSERT_COLUMNS,
+        DICT_SCHEMA_VERSION,
+        DictPlan,
+        DictSource,
+        DictTableSpec,
+        build_dict_table_specs,
+        persist_dict_tables,
+    )
+    from app.core.domain.dict_manage import DictService
+    from app.core.util.field_meta import FieldMeta, upsert_field_meta
+    from app.core.util.local_db_util import local_db_util
+
+    service = DictService()
+    try:
+        known = {item.name for item in service.list_categories()}
+    except Exception:  # noqa: BLE001
+        known = set()
+    domains: set[tuple[str, str]] = set()
+    sources: list[DictSource] = []
+    direct: list[tuple[str, object]] = []
+    for field_name, info in fields:
+        source_table = _local_dict_source_table(layer, info)
+        if source_table:
+            from app.core.util.local_layer_loader import layer_source_container
+
+            container = str(layer_source_container(layer) or "")
+            sources.append(
+                DictSource(
+                    db_path=container,
+                    table=source_table,
+                    category=info.table,
+                    domain=info.domain,
+                )
+            )
+        elif info.table in known:
+            domains.add((info.table, info.domain))
+        else:
+            # 直接从 GDB / GPKG 的 OGR 属性域来的字段：没有本地字典表、
+            # 也不在应用级字典里，按读到的取值直接生成字典表。
+            direct.append((field_name, info))
+    plan = DictPlan(domains=frozenset(domains), sources=tuple(sources))
+    specs = list(build_dict_table_specs(target, plan, service))
+    if direct:
+        from app.core.domain.import_layer import unique_table_name
+
+        taken = {item.table_name for item in specs}
+        done: set[tuple[str, str]] = set()
+        for _field_name, info in direct:
+            key = (info.table, info.domain)
+            if key in done or not info.values:
+                continue
+            done.add(key)
+            table = unique_table_name(
+                target, info.table or info.domain, taken=taken
+            )
+            taken.add(table)
+            rows = tuple(
+                (info.domain, value.code, value.name, value.parent_code, index)
+                for index, value in enumerate(info.values)
+            )
+            specs.append(
+                DictTableSpec(
+                    table_name=table,
+                    columns=DICT_COLUMNS,
+                    rows=rows,
+                    attr=json.dumps(
+                        {
+                            "schema": DICT_SCHEMA_VERSION,
+                            "dict_table": table,
+                            "domains": [info.domain],
+                        },
+                        ensure_ascii=False,
+                    ),
+                    upsert_key=("domain", "code"),
+                    insert_columns=DICT_INSERT_COLUMNS,
+                    category=info.table,
+                    domains=(info.domain,),
+                )
+            )
+    if not specs:
+        logger.warning("导出字典：没有可写入目标库的字典表")
+        return
+    layer_name = spec.layer_name.strip() or os.path.splitext(spec.file_name)[0]
+    db = local_db_util(target)
+    try:
+        persist_dict_tables(db, specs)
+        # OGR 写出的 SQLite 可能把表名 / 列名改成小写：字段元数据必须按
+        # **目标里的真实名字**写，否则重新打开图层时匹配不上。
+        actual_layer = layer_name
+        actual_cols: dict[str, str] = {}
+        try:
+            row = db.cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND lower(name) = lower(?)",
+                (layer_name,),
+            ).fetchone()
+            if row is not None:
+                actual_layer = str(row[0])
+            quoted = '"' + actual_layer.replace('"', '""') + '"'
+            for info_row in db.cursor.execute(f"PRAGMA table_info({quoted})"):
+                actual_cols[str(info_row[1]).casefold()] = str(info_row[1])
+        except Exception:  # noqa: BLE001 —— 取不到就按原名写
+            pass
+        # 导出的图层本身也登记成 spatial，这样把目标库加进「数据管理」时
+        # 图层和字典都能看到（OGR 写出的库没有 user_relation 注册行）。
+        try:
+            exists = db.cursor.execute(
+                "SELECT 1 FROM user_relation WHERE table_name = ? AND type = 'spatial'",
+                (actual_layer,),
+            ).fetchone()
+            if exists is None:
+                db.add_domain_table(actual_layer, "spatial")
+        except Exception:  # noqa: BLE001 —— 注册失败不影响已写出的数据
+            logger.warning("导出字典后登记图层失败：%s", actual_layer, exc_info=True)
+        for field_name, info in fields:
+            match = next(
+                (
+                    item
+                    for item in specs
+                    if item.category == info.table and info.domain in item.domains
+                ),
+                None,
+            )
+            if match is None:
+                continue
+            column_name = actual_cols.get(field_name.casefold(), field_name)
+            upsert_field_meta(
+                db.conn,
+                actual_layer,
+                column_name,
+                FieldMeta(
+                    dict_table=match.category,
+                    dict_domain=info.domain,
+                    dict_local_table=match.table_name,
+                ),
+            )
+        db.conn.commit()
+    finally:
+        db.conn.close()
+    logger.info("已把 %d 张字典表写入 %s", len(specs), target)
 
 
 def shapefile_field_names(fields) -> dict[str, str]:
@@ -335,12 +694,47 @@ def _copy_to_memory(
     return memory
 
 
-def _prepare_source(layer: QgsVectorLayer, spec: ExportSpec) -> QgsVectorLayer:
+def _repair_source_aliases(source) -> list[tuple[int, str]]:
+    """把「UTF-8 被当成 Latin-1」的字段别名修好（返回原值供还原）。"""
+    from app.core.util.text_encoding import repair_mojibake
+
+    restore: list[tuple[int, str]] = []
+    try:
+        fields = source.fields()
+    except RuntimeError:
+        return restore
+    for index in range(fields.count()):
+        raw = fields.at(index).alias() or ""
+        fixed = repair_mojibake(raw)
+        if fixed == raw:
+            continue
+        restore.append((index, raw))
+        source.setFieldAlias(index, fixed)
+    return restore
+
+
+def _restore_aliases(source, restore: list[tuple[int, str]]) -> None:
+    """把导出前临时修过的别名还原（图层对象可能是工程里的原件）。"""
+    if not restore:
+        return
+    try:
+        for index, raw in restore:
+            source.setFieldAlias(index, raw)
+    except RuntimeError:
+        pass
+
+
+def _prepare_source(
+    layer: QgsVectorLayer, spec: ExportSpec
+) -> tuple[QgsVectorLayer, dict[str, str]]:
     """要写给 OGR 的那份图层：按需筛要素 / 选字段 / 改 Shapefile 字段名。
 
-    除 Shapefile 的字段名改写外，都不复制图层（零拷贝）；需要复制时走
-    :func:`_copy_to_memory`。
+    返回 ``(写入用图层, 原字段名 → 导出字段名)``。除 Shapefile 的字段名改写外，
+    只有**字段名本身是 Latin-1 误读的乱码**时才复制图层（见
+    :func:`app.core.util.text_encoding.repair_mojibake`）；其余情况零拷贝。
     """
+    from app.core.util.text_encoding import repair_mojibake
+
     expression = (spec.expression or "").strip()
     features = None
     if expression:
@@ -364,11 +758,29 @@ def _prepare_source(layer: QgsVectorLayer, spec: ExportSpec) -> QgsVectorLayer:
                 f"{len(fields)} 个。请减少导出字段，或改用 FileGDB / GeoPackage。"
             )
         names = shapefile_field_names(fields)
-        return _shapefile_copy(layer, features, names, fields)
+        return _shapefile_copy(layer, features, names, fields), names
 
-    if features is None and spec.field_names is None:
-        return layer
-    return _copy_to_memory(layer, features, fields, {})
+    # GDB 的字段**名字**也可能是「UTF-8 被当成 Latin-1」的乱码（属性表用
+    # 别名显示时看着正常，导出到别的库就露馅）。只修看起来确实是这种乱码的
+    # 名字，普通 Latin-1 名字（Café）不会被误改。
+    renamed: dict[str, str] = {}
+    used: set[str] = set()
+    for field in fields:
+        original = field.name()
+        fixed = repair_mojibake(original)
+        if fixed != original and fixed:
+            candidate = fixed
+            suffix = 2
+            while candidate.casefold() in used:
+                candidate = f"{fixed}_{suffix}"
+                suffix += 1
+            renamed[original] = candidate
+            used.add(candidate.casefold())
+        else:
+            used.add(original.casefold())
+    if features is None and spec.field_names is None and not renamed:
+        return layer, {}
+    return _copy_to_memory(layer, features, fields, renamed), renamed
 
 
 def _wkb_name(layer: QgsVectorLayer) -> str:

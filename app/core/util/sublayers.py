@@ -12,12 +12,13 @@ sqlite 都能列全），拿不到时退回 ``dataProvider().subLayers()`` 那�
 本地库打开策略：``.sqlite`` 要优先 spatialite provider，否则会凭空多出一列 ``rowid``），
 其它格式按列出来的 uri 直接开。
 
-**过滤掉本工程自己的记账表**（``user_relation`` / ``metadata``）：它们是库里的普通表，
-OGR 会把它们当图层列出来，但它们不是用户的数据，混在候选里只会让人困惑。
+**过滤掉本工程自己的记账表 / 系统表，以及库里登记为 dict 的字典表**：它们是库里的
+普通表，OGR 会把它们当图层列出来，但它们不是用户的数据，混在候选里只会让人困惑。
 """
 
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -29,8 +30,24 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 
-#: 本工程自己的记账表，不算「数据源里的图层」
-_OWN_TABLES = frozenset({"user_relation", "metadata", "qgis_dev_column_alias"})
+#: 本工程自己的记账 / 系统表，不算「数据源里的图层」
+_OWN_TABLES = frozenset(
+    {
+        "user_relation",
+        "metadata",
+        "qgis_dev_column_alias",
+        "qgis_dev_field_meta",
+        "sqlite_sequence",
+        "gpkg_contents",
+        "gpkg_geometry_columns",
+        "gpkg_spatial_ref_sys",
+        "gpkg_data_columns",
+        "gpkg_extensions",
+        "gpkg_ogr_contents",
+        "geometry_columns",
+        "spatial_ref_sys",
+    }
+)
 
 #: 走 :func:`open_local_vector_table` 的后缀（本地库：要按内容挑 provider）
 _LOCAL_DB_SUFFIXES = frozenset({".gpkg", ".sqlite", ".sqlite3", ".db"})
@@ -109,10 +126,32 @@ def list_sublayers(path: str) -> list[Sublayer]:
     return sorted(found, key=lambda item: item.name)
 
 
+def hidden_tables(path: str) -> set[str]:
+    """列图层时要隐藏的表：本工程记账表 + 库里登记为 dict 的字典表。"""
+    hidden = set(_OWN_TABLES)
+    if Path(path).suffix.lower() not in _LOCAL_DB_SUFFIXES:
+        return hidden
+    try:
+        conn = sqlite3.connect(path, timeout=5.0)
+    except sqlite3.Error:
+        return hidden
+    try:
+        rows = conn.execute(
+            "SELECT table_name FROM user_relation WHERE type = 'dict'"
+        ).fetchall()
+        hidden.update(str(row[0]) for row in rows if row and row[0])
+    except sqlite3.Error:
+        pass
+    finally:
+        conn.close()
+    return hidden
+
+
 def _query_sublayers(path: str) -> list[Sublayer]:
     """走 ``QgsProviderRegistry.querySublayers``（现代做法）。"""
     from qgis.core import QgsProviderRegistry, QgsWkbTypes
 
+    hidden = hidden_tables(path)
     try:
         metadata = QgsProviderRegistry.instance().providerMetadata("ogr")
     except Exception as exc:  # noqa: BLE001 —— 裁剪过的安装包可能没有 OGR 元数据
@@ -128,7 +167,7 @@ def _query_sublayers(path: str) -> list[Sublayer]:
     found: list[Sublayer] = []
     for detail in details:
         name = str(detail.name() or "")
-        if not name or name in _OWN_TABLES:
+        if not name or name in hidden:
             continue
         geometry = QgsWkbTypes.geometryType(detail.wkbType())
         kind = _kind_from_geometry_type(geometry)
@@ -148,9 +187,10 @@ def _data_provider_sublayers(path: str) -> list[Sublayer]:
     if provider is None:
         return []
     found: list[Sublayer] = []
+    hidden = hidden_tables(path)
     for row in provider.subLayers():
         parts = row.split(_SUBLAYER_SEP)
-        if len(parts) < 2 or not parts[1] or parts[1] in _OWN_TABLES:
+        if len(parts) < 2 or not parts[1] or parts[1] in hidden:
             continue
         geom_text = parts[3] if len(parts) > 3 else ""
         found.append(
@@ -192,6 +232,7 @@ __all__ = [
     "VECTOR_FILE_FILTER",
     "Sublayer",
     "geometry_kind_of_layer",
+    "hidden_tables",
     "list_sublayers",
     "open_sublayer",
 ]

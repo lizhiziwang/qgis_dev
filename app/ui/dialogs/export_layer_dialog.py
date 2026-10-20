@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QComboBox,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -44,6 +45,7 @@ from app.core.domain.export_layer import (
     existing_target_description,
     shapefile_field_names,
 )
+from app.core.util.dict_values import layer_dict_field_names
 from app.core.util.vector_formats import VECTOR_FORMATS, VectorFormat, resolve_format
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
@@ -116,11 +118,13 @@ class ExportLayerDialog(BaseDialog):
         #: 图层字段超过 :data:`SHAPEFILE_MAX_FIELDS` 时切到 Shapefile 会默认裁到前
         #: 255 个（用户可点「选择字段…」改），否则 ArcMap 打不开（用户报过）。
         self._shapefile_fields: list[str] | None = None
+        #: 挂了字典的字段名（GDB 写属性域 / GPKG、SQLite 附带字典表用）
+        self._dict_field_names = layer_dict_field_names(layer)
         self._formats = _export_formats()
         if not self._formats:
             logger.warning("导出：本机没有可用的矢量写驱动")
         self.setMinimumSize(0, 0)
-        self.resize(620, 320)
+        self.resize(620, 380)
         self._build()
         self._apply_format_defaults()
 
@@ -189,6 +193,15 @@ class ExportLayerDialog(BaseDialog):
         field_row.addWidget(self.field_btn)
         form.addRow("导出字段", field_row)
 
+        # 字典转换：Shapefile 没有承载字典的位置 → 禁用；GDB 写成属性域，
+        # GPKG / SQLite 附带字典表（并写字段元数据）。
+        self.dict_check = QCheckBox("转换字典")
+        self.dict_check.setToolTip(
+            "把字段挂接的字典一起导出：FileGDB 写成属性域（coded value domain）；"
+            "GeoPackage / SQLite 把字典表写进目标库。Shapefile 不支持。"
+        )
+        form.addRow("字典", self.dict_check)
+
         condition_row = QHBoxLayout()
         condition_row.setContentsMargins(0, 0, 0, 0)
         condition_row.setSpacing(6)
@@ -254,11 +267,28 @@ class ExportLayerDialog(BaseDialog):
         if is_shapefile:
             self._ensure_shapefile_fields()
         self._update_field_label(is_shapefile)
-        self.hint.setText(
+        # 字典转换：只对挂了字典的图层、且目标格式能承载字典时可用
+        supports_dict = fmt.extension != ".shp"
+        dict_ok = bool(self._dict_field_names) and supports_dict
+        self.dict_check.setEnabled(dict_ok)
+        # 有字典、目标格式也能承载时**默认勾选**（用户仍可手动取消）
+        self.dict_check.setChecked(dict_ok)
+        if not self._dict_field_names:
+            self.dict_check.setText("转换字典（图层没有挂接字典）")
+        elif not supports_dict:
+            self.dict_check.setText("转换字典（Shapefile 不支持）")
+        else:
+            self.dict_check.setText(
+                f"转换字典（{len(self._dict_field_names)} 个字段）"
+            )
+        hint = (
             "导出后可直接用本软件打开；带条件的导出只写符合条件的要素（图层本身的筛选不受影响）。"
             if is_container
             else self._shapefile_hint()
         )
+        if dict_ok:
+            hint += " 勾选「转换字典」后，GDB 会写入属性域，GeoPackage / SQLite 会附带字典表。"
+        self.hint.setText(hint)
 
     def _shapefile_field_list(self) -> list[str]:
         """本次要写进 Shapefile 的字段名；``None`` 状态 = 全部字段。"""
@@ -473,6 +503,7 @@ class ExportLayerDialog(BaseDialog):
             layer_name=self.layer_name_edit.text().strip() or os.path.splitext(os.path.basename(target))[0],
             expression=self._expression,
             field_names=field_names,
+            convert_dict=bool(self.dict_check.isChecked()),
         )
 
 

@@ -47,8 +47,9 @@ _TOOL_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
         "数据",
         [
             ("在线底图", "online_basemap"),
+            ("字典管理", "dict_manage"),
+            ("创建数据", "create_data"),
             ("数据管理", "data_manage"),
-            ("新增数据", "create_data"),
             ("离线下载", "offline_download"),
         ],
     ),
@@ -103,6 +104,8 @@ class ToolBar:
             - quality (质检 dialog)
             - analyse (分析)
             - swipe (卷帘对比)
+            - data_manage (数据管理 Dock)
+            - dict_manage (字典管理 dialog)
             - refresh
             - test
         """

@@ -10,7 +10,9 @@
 from __future__ import annotations
 
 import os
+from contextlib import suppress
 
+from qgis.core import Qgis
 from qgis.PyQt.QtWidgets import QMessageBox
 
 from app.infra.logging import get_logger
@@ -36,6 +38,34 @@ _RASTER_EXTS = frozenset({
     ".tif", ".tiff", ".img", ".jpg", ".jpeg", ".png", ".bmp", ".gif",
     ".dem", ".asc", ".vrt", ".jp2", ".ecw", ".hdf", ".nc", ".mrf",
 })
+
+#: 重设数据源时按「原图层的数据源类型」给的过滤器（同类型文件）
+_RASTER_FILE_FILTER = (
+    "栅格数据 (*.tif *.tiff *.img *.jpg *.jpeg *.png *.bmp *.gif "
+    "*.dem *.asc *.vrt *.jp2 *.ecw *.hdf *.nc *.mrf)"
+)
+
+_VECTOR_FILE_FILTERS: dict[str, str] = {
+    ".shp": "Shapefile (*.shp)",
+    ".geojson": "GeoJSON (*.geojson *.json)",
+    ".json": "GeoJSON (*.geojson *.json)",
+    ".kml": "KML (*.kml)",
+    ".gml": "GML (*.gml)",
+    ".gpkg": "GeoPackage (*.gpkg)",
+    ".sqlite": "SQLite 数据库 (*.sqlite *.sqlite3 *.db)",
+    ".sqlite3": "SQLite 数据库 (*.sqlite *.sqlite3 *.db)",
+    ".db": "SQLite 数据库 (*.sqlite *.sqlite3 *.db)",
+    ".csv": "CSV 表格 (*.csv)",
+    ".tab": "MapInfo TAB (*.tab)",
+    ".mif": "MapInfo MIF (*.mif)",
+    ".fgb": "FlatGeobuf (*.fgb)",
+    ".gpx": "GPX (*.gpx)",
+}
+
+_VECTOR_ANY_FILTER = (
+    "矢量数据 (*.shp *.geojson *.json *.gpkg *.gml *.kml *.sqlite *.sqlite3 "
+    "*.db *.csv *.tab *.mif *.fgb *.gpx)"
+)
 
 #: 已知的矢量扩展名。**不在这里、也不在栅格表里的**扩展名（比如 .txt/.dat）：
 #: 先试矢量、再试栅格，都不成才报错
@@ -101,6 +131,257 @@ class FileBrowserMixin:
         )
         if path:
             self.load_file(path)
+
+    def _on_repair_layer_source(self, layer) -> None:
+        """图层列表红色感叹号：给一个数据源丢失的图层重设数据源。
+
+        支持：
+        - 单文件矢量 / 栅格（shp、tif…）；
+        - 容器数据源（GDB / GeoPackage / SQLite）——先选里面的具体图层；
+        - 保留原图层对象（名称 / 样式 / 树中位置都不变），只替换数据源。
+        """
+        from qgis.core import (
+            QgsRasterLayer,
+            QgsVectorLayer,
+        )
+
+        if layer is None:
+            return
+        is_vector = isinstance(layer, QgsVectorLayer)
+        is_raster = isinstance(layer, QgsRasterLayer)
+        if not (is_vector or is_raster):
+            return
+
+        # 当前数据源的类型 / 后缀：重设时只让用户选同类型的文件
+        from app.core.util.local_layer_loader import layer_source_container
+
+        try:
+            container = str(layer_source_container(layer) or "")
+        except Exception:  # noqa: BLE001
+            container = str(layer.source() or "")
+        if not container:
+            container = str(layer.source() or "")
+        old_ext = os.path.splitext(container.split("|", 1)[0])[1].lower()
+        old_is_gdb = os.path.isdir(container) or old_ext == ".gdb"
+
+        is_dir = False
+        if is_raster:
+            title = "选择新的栅格数据源（仅同类型栅格）"
+            filter_ = _RASTER_FILE_FILTER
+        elif old_is_gdb:
+            is_dir = True
+            title = "选择新的 GDB 数据库（仅 .gdb 文件夹）"
+            filter_ = ""
+        elif old_ext in _VECTOR_FILE_FILTERS:
+            title = f"选择新的数据源（仅 {old_ext} 文件）"
+            filter_ = _VECTOR_FILE_FILTERS[old_ext]
+        else:
+            title = "选择新的矢量数据源（仅矢量文件）"
+            filter_ = _VECTOR_ANY_FILTER
+
+        path = open_file_dir(
+            self,
+            is_dir=is_dir,
+            title=title,
+            filter_=filter_,
+        )
+        if not path:
+            return
+
+        if old_is_gdb and (
+            not os.path.isdir(path) or not path.lower().endswith(".gdb")
+        ):
+            QMessageBox.warning(self, "重设数据源", "请选择 .gdb 文件夹。")
+            return
+
+        ext = os.path.splitext(path)[1].lower()
+        # 单文件格式严格同后缀；容器（gpkg / sqlite / db）用子图层选择器再选具体层
+        if (
+            is_vector
+            and not old_is_gdb
+            and old_ext
+            and old_ext not in _CONTAINER_VECTOR_EXTS
+            and ext != old_ext
+        ):
+            QMessageBox.warning(
+                self, "重设数据源", f"请选择同类型文件（{old_ext}）。"
+            )
+            return
+        if is_raster:
+            # 栅格不走 setDataSource：没有地理参考的 PNG / JPG 在 setDataSource 时
+            # 会报 "Unable to compute a transformation..."，而和「添加图层」一样
+            # 直接新建 QgsRasterLayer 是能正常打开的。用新图层替换旧图层对象，
+            # 保留名称 / 样式 / 树中位置。
+            from qgis.core import QgsRasterLayer
+
+            new_layer = QgsRasterLayer(path, layer.name())
+            if not new_layer.isValid():
+                QMessageBox.warning(
+                    self, "重设数据源", f"栅格数据源打不开：\n{path}"
+                )
+                return
+            try:
+                self._replace_layer_object(layer, new_layer)
+            except Exception as exc:  # noqa: BLE001 —— 槽内异常不能冒出去
+                logger.exception("重设栅格数据源失败")
+                QMessageBox.warning(
+                    self, "重设数据源", f"替换图层失败：{exc}"
+                )
+            return
+        source = ""
+        provider = ""
+        if is_vector and (os.path.isdir(path) or ext in _CONTAINER_VECTOR_EXTS):
+            from app.core.util.sublayers import open_sublayer
+            from app.ui.dialogs.sublayer_pick_dialog import SublayerPickDialog
+
+            dialog = SublayerPickDialog(self, path=path, title="选择新的数据源图层")
+            accepted = dialog.exec()
+            selected = dialog.selected_sublayers() if accepted else []
+            dialog.deleteLater()
+            if not selected:
+                return
+            new_layer, error = open_sublayer(path, selected[0])
+            if new_layer is None:
+                QMessageBox.warning(self, "重设数据源", f"打不开新数据源：\n{error}")
+                return
+            source = str(new_layer.source() or "")
+            provider = str(new_layer.providerType() or "")
+            new_layer.deleteLater()
+        elif is_raster or ext in _RASTER_EXTS:
+            if not is_raster:
+                QMessageBox.warning(
+                    self, "重设数据源", "当前是矢量图层，不能改成栅格数据源。"
+                )
+                return
+            probe = QgsRasterLayer(path, layer.name(), "gdal")
+            if not probe.isValid():
+                QMessageBox.warning(
+                    self, "重设数据源", f"栅格数据源打不开：\n{path}"
+                )
+                return
+            source = str(probe.source() or path)
+            provider = str(probe.providerType() or "gdal")
+            probe.deleteLater()
+        else:
+            if not is_vector:
+                QMessageBox.warning(
+                    self, "重设数据源", "当前是栅格图层，不能改成矢量数据源。"
+                )
+                return
+            probe = QgsVectorLayer(path, layer.name(), "ogr")
+            if not probe.isValid():
+                QMessageBox.warning(
+                    self, "重设数据源", f"矢量数据源打不开：\n{path}"
+                )
+                return
+            source = str(probe.source() or path)
+            provider = str(probe.providerType() or "ogr")
+            probe.deleteLater()
+
+        try:
+            ok = layer.setDataSource(source, layer.name(), provider)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("重设图层数据源失败：%s", exc, exc_info=True)
+            ok = False
+        if not ok:
+            QMessageBox.warning(
+                self, "重设数据源", f"设置数据源失败：\n{source}"
+            )
+            return
+        with suppress(Exception):
+            layer.dataProvider().reloadData()
+        layer.triggerRepaint()
+        with suppress(Exception):
+            self.canvas.refreshAllLayers()
+        with suppress(Exception):
+            self.layer_dock.view.viewport().update()
+        logger.info("已重设图层数据源：%s → %s", layer.name(), source)
+        self.messageBar.pushMessage(
+            f"已重设「{layer.name()}」的数据源",
+            level=Qgis.MessageLevel.Success,
+            duration=5,
+        )
+
+    def _replace_layer_object(self, old_layer, new_layer) -> None:
+        """用新图层对象替换旧图层：保留名称、样式、可见性与图层树位置。
+
+        栅格（尤其没有地理参考的 PNG / JPG）在 ``setDataSource`` 时会被 GDAL
+        的坐标变换检查拦下；直接换成新建的 ``QgsRasterLayer`` 才是和「添加图层」
+        一致的打开方式。
+        """
+        from qgis.core import QgsMapLayerStyle, QgsProject
+
+        project = QgsProject.instance()
+        root = project.layerTreeRoot()
+        node = root.findLayer(old_layer.id())
+        parent = node.parent() if node is not None else root
+        index = parent.children().index(node) if node is not None else 0
+        name = old_layer.name()
+        # 可见性是**图层树节点**上的属性，QgsMapLayer 本身没有 isVisible()
+        visible = True
+        if node is not None:
+            with suppress(Exception):
+                visible = bool(node.itemVisibilityChecked())
+        old_crs = None
+        try:
+            old_crs = old_layer.crs()
+        except RuntimeError:
+            old_crs = None
+        style_xml = ""
+        try:
+            manager = old_layer.styleManager()
+            current = manager.currentStyle() if manager is not None else ""
+            if current:
+                style_xml = manager.style(current).xmlData()
+        except Exception:  # noqa: BLE001 —— 样式取不到不影响重设
+            logger.debug("重设数据源：取旧图层样式失败", exc_info=True)
+        custom = {}
+        try:
+            custom = dict(old_layer.customProperties())
+        except Exception:  # noqa: BLE001
+            custom = {}
+        project.removeMapLayer(old_layer.id())
+        new_layer.setName(name)
+        try:
+            if (
+                old_crs is not None
+                and old_crs.isValid()
+                and not new_layer.crs().isValid()
+            ):
+                new_layer.setCrs(old_crs)
+        except Exception:  # noqa: BLE001
+            pass
+        if custom:
+            with suppress(Exception):
+                new_layer.setCustomProperties(custom)
+        if style_xml:
+            with suppress(Exception):
+                manager = new_layer.styleManager()
+                manager.addStyle("repaired", QgsMapLayerStyle(style_xml))
+                manager.setCurrentStyle("repaired")
+        project.addMapLayer(new_layer, False)
+        tree_node = parent.insertLayer(index, new_layer)
+        with suppress(Exception):
+            tree_node.setItemVisibilityChecked(visible)
+        # 旧图层对象已销毁：主窗口里指向它的引用要切到新对象
+        with suppress(Exception):
+            if getattr(self, "_selected_layer", None) is old_layer:
+                self._selected_layer = new_layer
+        with suppress(Exception):
+            if getattr(self, "edit_layer", None) is old_layer:
+                self.edit_layer = new_layer
+        with suppress(Exception):
+            tree_node.setSelected(True)
+        with suppress(Exception):
+            self.canvas.refreshAllLayers()
+        with suppress(Exception):
+            self.layer_dock.view.viewport().update()
+        logger.info("已重设图层数据源：%s → %s", name, new_layer.source())
+        self.messageBar.pushMessage(
+            f"已重设「{name}」的数据源",
+            level=Qgis.MessageLevel.Success,
+            duration=5,
+        )
 
     def load_file(self, file_path: str) -> None:
         """加载到项目：矢量（shp/gpkg/geojson/…）、栅格（tif/img/…）、或 GDB 目录。

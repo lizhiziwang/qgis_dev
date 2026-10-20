@@ -1,6 +1,6 @@
 # 编辑设置（「编辑设置」弹窗里的项；删掉本文件即全部回到默认）
 edit_settings:
-  sel_filter_on: false
+  sel_filter_on: true
   sel_filter_pos: 顶部居中
   len_method: 高斯投影长度
   area_method: 高斯投影面积

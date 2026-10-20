@@ -19,4 +19,9 @@ tests/
 
 qgis_dev.egg-info/
 
+# 字典管理的应用级共享库（运行时生成，不入库）
+config/state/dicts.db
+config/state/dicts.db-wal
+config/state/dicts.db-shm
+
 .pi/

@@ -68,8 +68,15 @@ _ILLEGAL_FIELD_CHARS = re.compile(r"[^\w]")
 _LEADING_DIGIT = re.compile(r"^[0-9]")
 
 #: 字典信息存放的图层自定义属性前缀（``create_data/dict_table/<字段名>`` 等）
-_DICT_TABLE_PROP = "create_data/dict_table/"
-_DICT_DOMAIN_PROP = "create_data/dict_domain/"
+from app.core.util.field_meta import (
+    DICT_DOMAIN_PROP as _DICT_DOMAIN_PROP,
+)
+from app.core.util.field_meta import (
+    DICT_LOCAL_TABLE_PROP as _DICT_LOCAL_TABLE_PROP,
+)
+from app.core.util.field_meta import (
+    DICT_TABLE_PROP as _DICT_TABLE_PROP,
+)
 
 
 @dataclass(frozen=True)
@@ -401,6 +408,8 @@ def fields_from_layer(layer: QgsVectorLayer) -> list[FieldSpec]:
     """
     from qgis.core import QgsFieldConstraints
 
+    from app.core.util.text_encoding import repair_mojibake
+
     specs: list[FieldSpec] = []
     layer_fields = layer.fields()
     for i in range(layer_fields.size()):
@@ -412,7 +421,7 @@ def fields_from_layer(layer: QgsVectorLayer) -> list[FieldSpec]:
         specs.append(
             FieldSpec(
                 name=fld.name(),
-                alias=fld.alias(),
+                alias=repair_mojibake(fld.alias()),
                 # 带字典信息的按「字典」还原：库里就是个文本列，类型是从自定义属性认回来的，
                 # 不然「复制字段结构」过来会把字典字段悄悄降级成普通文本
                 type_key="dict" if dict_table else _QGS_TYPE_NAMES.get(fld.typeName().lower(), "text"),

@@ -40,7 +40,17 @@ import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from app.core.domain.create_data.dict_tables import (
+    DictTableSpec,
+    persist_dict_tables,
+    resolve_local_table,
+)
 from app.core.domain.create_data.fields import FieldSpec, sqlite_type
+from app.core.util.field_meta import (
+    FieldMeta,
+    ensure_field_meta_table,
+    upsert_field_meta,
+)
 from app.core.util.local_db_util import local_db_util
 from app.infra.logging import get_logger
 
@@ -111,6 +121,9 @@ class CreateLayerInDbSpec:
     #: **必须是 tuple**：spec 要能按 ``==`` 比（对话框的「应用」防重复创建），
     #: list 会让 frozen dataclass 不可哈希（见 :class:`FieldSpec` 的说明）。
     fields: tuple[FieldSpec, ...] = ()
+    #: 要一并写进目标库的字典表（每个字典表一张，多个域用 domain 列共存）。
+    #: 建图层成功后、回读图层之前写入，避免 OGR 占着库时拿不到写锁。
+    dict_tables: tuple[DictTableSpec, ...] = ()
 
 
 class CreateContainerService:
@@ -226,7 +239,7 @@ class CreateLayerInDbService:
                         f"「{os.path.basename(spec.db_path)}」里已有同名图层「{layer_name}」，请换个图层名"
                     ) from exc
                 raise CreateLibraryError(f"建图层失败：{exc}") from exc
-            except Exception as exc:  # noqa: BLE001 —— SpatiaLite 缺扩展等
+            except Exception as exc:  # SpatiaLite 缺扩展等
                 raise CreateLibraryError(f"建图层失败：{exc}") from exc
             # 字段别名要落库：gpkg 有标准位置（``gpkg_data_columns``，QGIS 读得回来）；
             # SpatiaLite 没有，写进本工程自己的别名表（``qgis_dev_column_alias``），
@@ -238,6 +251,29 @@ class CreateLayerInDbService:
                         db.set_gpkg_column_alias(layer_name, name, alias)
                 elif aliases:
                     db.set_column_aliases(layer_name, aliases)
+            # 字典关联 / 隐藏字段：没有标准落点，写进本工程的 qgis_dev_field_meta；
+            # 打开图层时 local_layer_loader 会再套回自定义属性（见 field_meta 模块）。
+            if spec.fields:
+                ensure_field_meta_table(db.conn)
+                for field in spec.fields:
+                    meta = FieldMeta(
+                        dict_table=field.dict_table,
+                        dict_domain=field.dict_domain,
+                        dict_local_table=resolve_local_table(field, spec.dict_tables),
+                        visible=field.visible,
+                    )
+                    if not meta.is_default:
+                        upsert_field_meta(db.conn, layer_name, field.name, meta)
+                db.conn.commit()
+            # 字典表与图层表写同一个库：放在回读 QgsVectorLayer 之前，写锁还在
+            # 我们手里；写入失败把原因说清楚（此时图层表已建好，不悄悄吞掉）。
+            if spec.dict_tables:
+                try:
+                    persist_dict_tables(db, spec.dict_tables)
+                except Exception as exc:  # 字典写入失败统一转错误
+                    raise CreateLibraryError(
+                        f"图层已建在库里，但字典表写入失败：{exc}"
+                    ) from exc
         finally:
             db.conn.close()
 
