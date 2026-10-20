@@ -10,14 +10,16 @@
 
 from __future__ import annotations
 
+import base64
 import os
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlencode
 
-from qgis.PyQt.QtCore import Qt, QTimer
-from qgis.PyQt.QtGui import QTextCursor
+from qgis.PyQt.QtCore import Qt, QTimer, QUrl
+from qgis.PyQt.QtGui import QDesktopServices, QTextCursor
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QComboBox,
@@ -44,6 +46,9 @@ from app.ui.common.project_report import snapshot_text
 from app.ui.common.widgets import open_file_dir
 
 logger = get_logger(__name__)
+
+#: 问题反馈页面（当前用户信息以 base64 编码放在 query 里，见 :meth:`LogDock._on_feedback`）
+FEEDBACK_URL = "http://182.108.40.116:9003/cs-feedback/"
 
 _LEVEL_TAG_RE = re.compile(r">([A-Z]+)</")
 
@@ -121,6 +126,10 @@ class LogDock(QDockWidget):
         )
         export.clicked.connect(self._on_export_diagnostics)
         h.addWidget(export)
+        feedback = QPushButton("反馈")
+        feedback.setToolTip("在浏览器中打开问题反馈页面（自动带上当前登录用户信息）。")
+        feedback.clicked.connect(self._on_feedback)
+        h.addWidget(feedback)
         h.addSpacing(10)
         self.auto_btn = QPushButton("自动滚动")
         self.auto_btn.setCheckable(True)
@@ -260,6 +269,61 @@ class LogDock(QDockWidget):
             f"共 {len(package.entries)} 个文件、{size_kb:.0f} KB，凭据已打码。"
             f"\n请把它发给技术支持。",
         )
+
+    def _on_feedback(self) -> None:
+        """打开浏览器反馈页面，query 里带上 base64 编码的当前用户 id / 用户名。
+
+        用户信息取自本次登录会话（主窗口的 ``_auth_result``，见
+        :meth:`ChromeMixin._apply_user_info_to_titlebar`）：``user_id`` 是
+        ``currentUserByToken`` 返回的 ``userId``，``user_name`` 优先姓名、退而账号。
+        没登录（如非启动路径构造窗口）时两个参数为空串，页面仍可正常打开。
+
+        base64 结果可能含 ``+`` / ``/`` / ``=``，必须再 URL 编码一次，
+        否则 ``+`` 到服务端会被解成空格、base64 就坏了。
+        """
+        user_id, user_name = self._feedback_identity()
+        if not user_id and not user_name:
+            logger.warning("打开反馈页面时没有当前登录用户信息")
+        query = urlencode(
+            {
+                "user_id": _b64(user_id),
+                "user_name": _b64(user_name),
+            }
+        )
+        url = f"{FEEDBACK_URL}?{query}"
+        if not QDesktopServices.openUrl(QUrl(url)):
+            logger.error("打开反馈页面失败 url=%s", url)
+            QMessageBox.warning(self, "反馈", f"无法打开浏览器，请手动访问：\n{url}")
+
+    def _feedback_identity(self) -> tuple[str, str]:
+        """当前登录用户的 ``(user_id, user_name)``；没有会话时返回两个空串。
+
+        用户对象挂在主窗口的 ``_auth_result.user`` 上（:class:`CurrentUser`），
+        ``userId`` 不在具名字段里，只能从 ``raw`` 取——服务端各环境字段名
+        略有差异，这里按常见别名依次找。
+        """
+        parent = self.parent()
+        result = getattr(parent, "_auth_result", None) if parent is not None else None
+        if result is None:
+            return "", ""
+        user = getattr(result, "user", None)
+        fallback_name = (getattr(result, "username", "") or "").strip()
+        if user is None:
+            return "", fallback_name
+        raw = user.raw if isinstance(user.raw, dict) else {}
+        user_id = ""
+        for key in ("userId", "user_id", "userGuid", "id"):
+            value = raw.get(key)
+            if value:
+                user_id = str(value).strip()
+                break
+        user_name = (user.name or user.account or fallback_name).strip()
+        return user_id, user_name
+
+
+def _b64(text: str) -> str:
+    """UTF-8 文本 → 标准 base64 字符串（空串仍是空串）。"""
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
 def add_log_dock(parent) -> LogDock:
