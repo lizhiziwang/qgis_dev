@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from qgis.core import Qgis, QgsCoordinateTransform, QgsRectangle
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import QPoint
+from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtWidgets import QMessageBox
 
 from app.infra.edit_settings import EditSettingsManager
@@ -20,7 +20,8 @@ logger = get_logger(__name__)
 
 from app.ui.dialogs.selection_set import SelectionSetDialog
 from app.ui.docks.feature_info_dock import FeatureInfoDock
-from app.ui.tools.find_feature import FindFeatureTool
+from app.ui.docks.i_query_dock import IQueryDock
+from app.ui.tools.i_query import IQueryTool
 from app.ui.tools.measure import MeasureAreaTool, MeasureLengthTool
 from app.ui.tools.select_feature import (
     PointSelectTool,
@@ -79,6 +80,7 @@ class MapToolsMixin:
             "PointSelectTool": "select_point",
             "RectSelectTool": "select_box",
             "FindFeatureTool": "identify",
+            "IQueryTool": "identify",
             "SwipeTool": "swipe",
             "MeasureLengthTool": "measure_line",
             "MeasureAreaTool": "measure_area",
@@ -482,13 +484,8 @@ class MapToolsMixin:
         return renderer
 
     def _on_identify(self) -> None:
-
-        self._find_feature_tool = FindFeatureTool(self.canvas, parent=self)
-        self.canvas.setMapTool(self._find_feature_tool)
-        self.tool_bar_builder.set_active("identify")
-        # 侧栏也有「属性」按钮（同一个工具）：setMapTool 到新工具时 mapToolSet
-        # 会同步，但同工具重复激活不发信号，这里显式校正一次
-        self.side_toolbar.set_active("identify")
+        """「属性」入口：内部改用 ArcMap 风格的 I 查询工具。"""
+        self._start_i_query()
 
     def show_feature_info(self, result, highlight=None) -> None:
         """点击识别后把要素详情显示到右侧 Dock（懒创建，内容就地刷新）。"""
@@ -496,6 +493,84 @@ class MapToolsMixin:
             self._feature_info_dock = FeatureInfoDock(self)
             self.place_right_dock(self._feature_info_dock)
         self._feature_info_dock.show_feature(result, highlight=highlight)
+
+    # ------------------------------------------------------------ I 查询
+
+    def _ensure_i_query_dock(self):
+        """懒创建 ArcMap 风格的「I查询」面板，**默认浮动在主窗口上方**，不占右侧停靠区。"""
+        dock = getattr(self, "_i_query_dock", None)
+        if dock is None:
+            dock = IQueryDock(self)
+            self._i_query_dock = dock
+            dock.result_selected.connect(self._on_i_query_result_selected)
+            dock.feature_activated.connect(self._on_i_query_feature_activated)
+            dock.source_changed.connect(self._on_i_query_source_changed)
+            dock.closed.connect(self._on_i_query_closed)
+            # 先隐藏再挂到主窗口，避免出现"先在右边闪一下再浮起来"
+            dock.hide()
+            self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
+            dock.setFloating(True)
+            self._position_i_query_dock(dock)
+        return dock
+
+    def _position_i_query_dock(self, dock) -> None:
+        """把浮动的「I查询」面板摆到主窗口上方居中（只做首次默认位置）。"""
+        dock.resize(376, 560)  # 在 396 基础上再缩窄 20px
+        frame = self.frameGeometry()
+        x = frame.left() + max(0, (frame.width() - dock.width()) // 2)
+        y = frame.top() + 72
+        dock.move(x, y)
+
+    def _start_i_query(self) -> None:
+        """激活 I 查询工具（顶部 / 侧边「属性」共用）。"""
+        dock = self._ensure_i_query_dock()
+        previous = getattr(self, "_i_query_tool", None)
+        tool = IQueryTool(self.canvas, parent=self, dock=dock)
+        # 重新激活工具时保留上次点击位置：切换识别来源仍能原地重查
+        if previous is not None and not sip.isdeleted(previous):
+            tool.last_point = previous.last_point
+        self._i_query_tool = tool
+        self.canvas.setMapTool(tool)
+        # 面板已打开且还留着上次的结果：重新激活工具时把高亮补回来
+        if dock.isVisible() and dock.result is not None:
+            try:
+                tool.highlight_result(dock.result)
+            except RuntimeError:
+                pass
+        self.tool_bar_builder.set_active("identify")
+        # 同工具重复激活不发 mapToolSet，这里显式校正一次高亮
+        self.side_toolbar.set_active("identify")
+
+    def _on_i_query_result_selected(self, result) -> None:
+        """结果树切换 → 同步地图高亮。"""
+        tool = getattr(self, "_i_query_tool", None)
+        if tool is None or sip.isdeleted(tool):
+            return
+        # 切换结果时先停掉上一次的闪烁，避免洋红框还停在前一条要素上
+        tool.clear_flash()
+        if result is None:
+            tool.clear_highlight()
+        else:
+            tool.highlight_result(result)
+
+    def _on_i_query_feature_activated(self, result) -> None:
+        """双击结果树里的要素 → 定位并闪烁。"""
+        tool = getattr(self, "_i_query_tool", None)
+        if tool is not None and not sip.isdeleted(tool):
+            tool.locate_and_flash(result)
+
+    def _on_i_query_source_changed(self) -> None:
+        """切换「识别来源」→ 在最后点击位置重新识别。"""
+        tool = getattr(self, "_i_query_tool", None)
+        if tool is not None and not sip.isdeleted(tool):
+            tool.reidentify()
+
+    def _on_i_query_closed(self) -> None:
+        """关闭结果面板时收掉地图高亮与闪烁。"""
+        tool = getattr(self, "_i_query_tool", None)
+        if tool is not None and not sip.isdeleted(tool):
+            tool.clear_highlight()
+            tool.clear_flash()
 
     def _on_zoom_in(self) -> None:
         self.canvas.setMapTool(self._zoom_in_tool)

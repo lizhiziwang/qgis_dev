@@ -114,10 +114,12 @@ class FeatureIdentifyService:
         x: float,
         y: float,
         mode: Optional["QgsMapToolIdentify.IdentifyMode"] = None,
+        layers: Optional[List["QgsMapLayer"]] = None,
     ) -> List[IdentifyResult]:
         """点击画布坐标 ``(x, y)`` 识别要素。
 
         ``mode`` 默认 ``TopDownAll``（所有图层里所有可识别要素）。
+        ``layers`` 非空时只在这些图层里识别（I 查询的「所有图层 / 指定图层」）。
         """
         from qgis.gui import QgsMapToolIdentify
         from qgis.core import QgsRasterLayer
@@ -127,7 +129,10 @@ class FeatureIdentifyService:
         tool = QgsMapToolIdentify(canvas)
         # QGIS 4.x 的 identify(x, y, mode) 要求 int 坐标 + IdentifyMode 枚举，
         # 传 float / int 都会 TypeError（int 在 Qt6 绑定不再自动转枚举）
-        results = tool.identify(int(x), int(y), mode)
+        if layers:
+            results = tool.identify(int(x), int(y), list(layers), mode)
+        else:
+            results = tool.identify(int(x), int(y), mode)
         # ArcGIS MapServer 栅格层：QGIS 的 identifyRaster 只带回要素几何（可高亮），
         # 属性全空 —— 对这类图层先做一次服务端 REST identify 富化（属性 + 几何），
         # 富化成功就顶替原始栅格结果；失败则回退到默认栅格像元分支。
