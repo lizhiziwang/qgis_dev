@@ -27,11 +27,10 @@
 - 项目**已实现**的工具直接接主窗口既有回调（与顶部工具条同一入口）：
   选择 / 框选 / 漫游 / 缩放 / 全图 / 清除 / 条件查询 / 分屏 / 定位 /
   线测量 / 面测量 / 选择屏蔽 / 取消屏蔽 / 范围裁剪；
-- 「属性」就是顶部「通用」tab 里的那个识别工具（``identify`` →
-  :class:`~app.ui.tools.find_feature.FindFeatureTool`，点要素在右侧 Dock 显示其
-  全部属性），只是多给一个离地图更近的入口。**原先的「一键查询」占位按钮已删除**
-  —— 它本来就是同一个识别工具的重复入口；两边按钮共用 ``identify`` key，单选
-  高亮由 ``MainWindow._on_map_tool_set`` 统一同步；
+- 「属性」与顶部「查询」组的「属性」是同一个入口（``identify``），内部调用
+  :class:`~app.ui.tools.i_query.IQueryTool`：点要素后弹出 ArcMap 风格的
+  「I查询」浮动面板，按图层列出全部命中要素；两边按钮共用 ``identify`` key，
+  单选高亮由 ``MainWindow._on_map_tool_set`` 统一同步；
 - 「缩放」用 :class:`~app.ui.tools.pan_zoom.ZoomClickTool`：**左键单击放大、
   按住 Shift 单击缩小**（以点击点为缩放中心），与顶部工具条上独立的「放大 /
   缩小」按钮（拉框缩放）不是同一个入口；
