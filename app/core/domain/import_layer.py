@@ -278,6 +278,32 @@ def _import_to_local(
     # 驱动自己的 FID 列（我们 gpkg 表上的 ``fid`` 主键）：不复制到目标表
     skip_fields = _provider_id_field_indices(layer)
     skipped_invalid = 0
+    # **字段对象只取一次**：``layer.fields()`` 每次都要跨 C++ 边界创建包装对象，
+    # 逐要素逐字段调用是导入大图层时最没必要的开销之一；属性也按**下标**取，
+    # 比按字段名查找快。
+    fields = layer.fields()
+    field_plan = [
+        (index, _sanitize_column_name(fields.at(index).name()))
+        for index in range(fields.count())
+        if index not in skip_fields
+    ]
+    field_plan = [(index, name) for index, name in field_plan if name]
+    # 2D 的基本几何直接走 WKB：GPKG 侧只需补 BLOB 头，SpatiaLite 侧用
+    # ``GeomFromWKB``。此前是 ``asWkt()`` → Python 逐字符解析 WKT → 再编码，
+    # 实测占大图层导入的绝大部分时间（见 _import_to_local 的进度分段）。
+    # Z/M / 曲线几何保持 WKT 旧路径，行为不变。
+    wkb_type = layer.wkbType()
+    use_wkb = bool(
+        not QgsWkbTypes.hasZ(wkb_type)
+        and not QgsWkbTypes.hasM(wkb_type)
+        and int(QgsWkbTypes.geometryType(wkb_type))
+        in (
+            int(QgsWkbTypes.GeometryType.PointGeometry),
+            int(QgsWkbTypes.GeometryType.LineGeometry),
+            int(QgsWkbTypes.GeometryType.PolygonGeometry),
+        )
+        and not QgsWkbTypes.isCurvedType(wkb_type)
+    )
     if fb is not None:
         fb.setProgress(int(20))
     for i, f in enumerate(layer.getFeatures(), start=1):
@@ -303,24 +329,22 @@ def _import_to_local(
             skipped_invalid += 1
             continue
         attributes = {}
-        for index, fld in enumerate(layer.fields()):
-            if index in skip_fields:  # 驱动自己的 FID 列，不复制
-                continue
-            sql_name = _sanitize_column_name(fld.name())
-            if not sql_name:
-                continue
+        for index, sql_name in field_plan:
             try:
-                v = f.attribute(fld.name())
+                attributes[sql_name] = f.attribute(index)
             except Exception:  # noqa: BLE001
                 continue
-            attributes[sql_name] = v
+        try:
+            geometry_value = bytes(geom.asWkb()) if use_wkb else geom.asWkt()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("几何序列化失败（feature %s）：%s", f.id(), exc)
+            skipped_invalid += 1
+            continue
         rows.append(
             {
                 "attributes": attributes,
-                # WKT 字符串走 _to_wkt() / encode_wkt() 内部会剩掉 SRID=
-                # 前缀·直接用；不要包 {"wkt": ...} dict（该 dict 不是 ArcGIS
-                # JSON 形态 · _esri_geometry_to_wkt 会返 None）
-                "geometry": geom.asWkt(),
+                # 注释同旧实现：不要包 {"wkt": ...} dict（ArcGIS JSON 形态不认）
+                "geometry": geometry_value,
             }
         )
     if fb is not None:
@@ -365,14 +389,16 @@ def _import_to_local(
     inserted = 0
     if rows:
         try:
-            inserted = util.batch_add_vector_data(table_name, rows)
+            inserted = util.batch_add_vector_data(
+                table_name, rows, feedback=fb
+            )
         except Exception as exc:  # noqa: BLE001
             # 失败回滚：删刚建的表 + 删 user_relation 行（建表 register=True 已写）
             _try_drop_table(util, table_name, geometry_column)
             _try_unregister_user_relation(util, table_name)
             raise ImportLayerError(f"写入要素失败：{exc}") from exc
     if fb is not None:
-        fb.setProgress(int(100))
+        fb.setProgress(int(93))
 
     if skipped_invalid:
         logger.warning(
@@ -381,11 +407,59 @@ def _import_to_local(
             skipped_invalid,
         )
 
+    # GDB 的字段自带属性域（coded value domain）：落成库内字典表 + 字段元数据，
+    # 属性表打开后就能按域描述显示、编辑时下拉取值。失败不拦导入。
+    _persist_source_domains(util, layer, table_name, columns)
+    if fb is not None:
+        fb.setProgress(int(100))
+
     return ImportLayerResult(
         ok=True,
         table_name=table_name,
         inserted=inserted,
     )
+
+
+def _persist_source_domains(util, layer, table_name: str, columns) -> None:
+    """把源图层的属性域 / 源库字典表合并进目标库，并写字段元数据。
+
+    已有同域字典表就补缺 / 更新，没有才新建（见
+    :mod:`app.core.domain.import_dicts`）。失败只记日志，不毁已导入的数据。
+    """
+    try:
+        from app.core.domain.import_dicts import (
+            merge_import_dicts,
+            source_dict_bindings,
+        )
+    except Exception:  # noqa: BLE001
+        return
+    try:
+        bindings = source_dict_bindings(layer)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("读取源图层字典 / 属性域失败：%s", exc, exc_info=True)
+        return
+    if not bindings:
+        return
+    used = {name for name, _type in columns}
+    sql_by_source: dict[str, str] = {}
+    for field in layer.fields():
+        sql_name = _sanitize_column_name(field.name())
+        if sql_name in used:
+            sql_by_source[field.name()] = sql_name
+    try:
+        count = merge_import_dicts(util, table_name, bindings, sql_by_source)
+        logger.info(
+            "导入图层 %s：合并 %d 张字典表（%d 个字段）",
+            table_name,
+            count,
+            len(bindings),
+        )
+    except Exception as exc:  # noqa: BLE001 —— 字典失败不毁已导入的数据
+        try:
+            util.conn.rollback()
+        except Exception:  # noqa: BLE001
+            pass
+        logger.warning("导入字典表失败：%s", exc, exc_info=True)
 
 
 def _phase_text(progress: int) -> str:
@@ -398,11 +472,14 @@ def _phase_text(progress: int) -> str:
     - 11-19 → 扫描要素
     - 20-59 → 转换要素坐标
     - 60-69 → 建表
-    - 70-99 → 写入
+    - 70-92 → 写入要素到数据库
+    - 93-99 → 写入字典表 / 收尾
     - 100 → 完成
     """
     if progress >= 100:
         return "完成"
+    if progress >= 93:
+        return "写入字典表 / 收尾…"
     if progress >= 70:
         return "写入要素到数据库…"
     if progress >= 60:
@@ -425,10 +502,12 @@ def _store_column_aliases(util, table_name: str, layer: QgsVectorLayer, columns)
     找不到对应列（源字段被清洗成重名而跳过）的别名直接忽略；写失败只记日志 ——
     别名是锦上添花，不该让一次成功的导入变成失败。
     """
+    from app.core.util.text_encoding import repair_mojibake
+
     used = {name for name, _ in columns}
     aliases: dict[str, str] = {}
     for fld in layer.fields():
-        alias = fld.alias()
+        alias = repair_mojibake(fld.alias())
         if not alias:
             continue
         sql_name = _sanitize_column_name(fld.name())

@@ -232,13 +232,17 @@ def open_local_vector_table(
     if not is_gpkg:
         layer, err = _open_spatialite(db_path, table)
         if layer is not None:
-            return _apply_column_aliases(layer, db_path, table), ""
+            return _apply_field_meta(
+                _apply_column_aliases(layer, db_path, table), db_path, table
+            ), ""
         attempts.append(("spatialite", err))
 
     open_path = gpkg_open_path(db_path) if is_gpkg else db_path
     layer = QgsVectorLayer(f"{open_path}|layername={table}", table, "ogr")
     if layer.isValid():
-        return _apply_column_aliases(layer, db_path, table), ""
+        return _apply_field_meta(
+            _apply_column_aliases(layer, db_path, table), db_path, table
+        ), ""
     attempts.append(("ogr", layer.error().message() or "无"))
     return None, "; ".join(f"{p} 打不开: {e}" for p, e in attempts)
 
@@ -264,9 +268,58 @@ def _apply_column_aliases(layer, db_path: str, table: str):
     for column, alias in aliases.items():
         index = layer.fields().indexOf(column)
         if index >= 0:
-            layer.setFieldAlias(index, alias)
+            from app.core.util.text_encoding import repair_mojibake
+
+            layer.setFieldAlias(index, repair_mojibake(alias))
     if aliases:
         logger.info("已套用字段别名 %d 个：%s（%s）", len(aliases), table, db_path)
+    return layer
+
+
+def _apply_field_meta(layer, db_path: str, table: str):
+    """把库里存的「字典关联 / 可见性」套到刚打开的图层上。
+
+    这些是工程自己的元数据（``qgis_dev_field_meta``），没有标准落点；不套的话
+    数据管理重新打开的图层会丢掉创建时选的字典和隐藏字段。
+    """
+    from qgis.core import QgsEditorWidgetSetup
+
+    from app.core.util.field_meta import (
+        DICT_DOMAIN_PROP,
+        DICT_LOCAL_TABLE_PROP,
+        DICT_TABLE_PROP,
+        read_field_meta,
+    )
+
+    try:
+        db = local_db_util(db_path)
+    except Exception as exc:  # noqa: BLE001 —— 读不到就按没有元数据处理
+        logger.info("读字段元数据失败（按无处理）：%s（%s）", db_path, exc)
+        return layer
+    try:
+        metas = read_field_meta(db.conn, table)
+    finally:
+        db.conn.close()
+    if not metas:
+        return layer
+    fields = layer.fields()
+    folded = {name.casefold(): meta for name, meta in metas.items()}
+    for index in range(fields.size()):
+        name = fields.at(index).name()
+        # SQLite 驱动可能把列名改成小写，元数据键是原始大小写：大小写不敏感匹配
+        meta = metas.get(name) or folded.get(name.casefold())
+        if meta is None:
+            continue
+        if meta.dict_table:
+            layer.setCustomProperty(DICT_TABLE_PROP + name, meta.dict_table)
+        if meta.dict_domain:
+            layer.setCustomProperty(DICT_DOMAIN_PROP + name, meta.dict_domain)
+        if meta.dict_local_table:
+            layer.setCustomProperty(
+                DICT_LOCAL_TABLE_PROP + name, meta.dict_local_table
+            )
+        if not meta.visible:
+            layer.setEditorWidgetSetup(index, QgsEditorWidgetSetup("Hidden", {}))
     return layer
 
 

@@ -9,8 +9,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import threading
+from contextlib import suppress
 from pathlib import Path
 
 from qgis.core import (
@@ -34,7 +36,7 @@ from app.core.domain.import_layer import (
     ImportLayerError,
     import_vector_layer_to_db,
 )
-from app.core.util.local_db_util import _CATEGORY_LABEL, describe_local_db
+from app.core.util.local_db_util import _CATEGORY_LABEL, describe_local_db, local_db_util
 from app.core.util.local_layer_loader import (
     LocalLayerError,
     LocalLayerUnsupportedCategoryError,
@@ -47,13 +49,14 @@ from app.server.cli import main as server_main
 from app.ui.dialogs.add_connection import AddConnectionDialog
 from app.ui.dialogs.check_viewer import CheckViewerDialog
 from app.ui.dialogs.create_data_dialog import CreateDataDialog, default_output_dir
+from app.ui.dialogs.dict_manage import DictManageDialog
 from app.ui.dialogs.import_layer_dialog import ImportLayerDialog
 from app.ui.dialogs.offline_download import OfflineDownloadDialog
 from app.ui.dialogs.qmap_compare import QMapCompareDialog
 from app.ui.dialogs.query_builder import QueryBuilderDialog
 from app.ui.dialogs.swipe_compare import SwipeCompareDialog
 from app.ui.docks.attribute_dock import AttributeDock
-from app.ui.docks.data_manage_dock import DataManageDock
+from app.ui.docks.data_manage_dock import DataManageDialog
 from app.ui.docks.log_dock import LogDock
 from app.ui.docks.quality_dock import QualityDock
 from app.ui.docks.tools_dock import ToolsDock
@@ -73,6 +76,24 @@ _DATA_MANAGE_STATE = "data_manage"
 
 class AppActionsMixin:
     """AppActionsMixin：见模块 docstring。"""
+
+    def _dm_notify(self, text, level=Qgis.MessageLevel.Info, duration: int = 6, **_kwargs) -> None:
+        """数据管理相关提示：窗口可见时用弹窗，避免被独立窗口挡住。
+
+        数据管理不是 dock，主窗口底部的浮动提示条会被它的窗口盖住，所以从
+        数据管理触发的成功 / 失败 / 警告都改成以数据管理窗口为父的弹窗。
+        数据管理没打开时仍走原来的浮动条（例如主工具条触发的创建数据）。
+        """
+        owner = getattr(self, "_data_manage_dialog", None)
+        if owner is not None and owner.isVisible():
+            if level == Qgis.MessageLevel.Critical:
+                QMessageBox.critical(owner, "数据管理", str(text))
+            elif level == Qgis.MessageLevel.Warning:
+                QMessageBox.warning(owner, "数据管理", str(text))
+            else:
+                QMessageBox.information(owner, "数据管理", str(text))
+            return
+        self.messageBar.pushMessage(str(text), level=level, duration=duration)
 
     def _on_condition_query(self) -> None:
         """条件查询：对当前选中 / 编辑的矢量图层打开 SQL 条件查询构建器。
@@ -114,6 +135,220 @@ class AppActionsMixin:
         dock.show()
         dock.raise_()
 
+    def _on_dict_manage(self) -> None:
+        """通用 → 数据 →「字典管理」：打开业务字典维护对话框（非模态单实例）。
+
+        字典是**应用级共享数据**（``<config>/state/dicts.db``，不随工程走）：
+        导入一次，换工程仍可用。对话框内所有读写都经
+        :class:`app.core.domain.dict_manage.DictService`，这里只管把窗口拉起来。
+
+        用 ``show()`` 而不是 ``exec()``：与「数据管理」一致，最小化时能缩成
+        画布底部小条（模态弹窗最小化后小条点不到，等于无法恢复）。
+
+        槽里任何异常都必须在这里收住：PyQt6 里未捕获异常会直接把进程带走。
+        """
+        try:
+            dialog = getattr(self, "_dict_manage_dialog", None)
+            if dialog is None:
+                dialog = DictManageDialog(self)
+                self._dict_manage_dialog = dialog
+            if dialog.isMinimized():
+                dialog.showNormal()
+            else:
+                dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+        except Exception as exc:  # 槽异常 = 进程崩溃，必须兜底
+            logger.exception("打开字典管理失败")
+            self.messageBar.pushMessage(
+                f"打开字典管理失败：{exc}",
+                level=Qgis.MessageLevel.Critical,
+                duration=6,
+            )
+
+    def _on_dm_before_table_change(self, db: dict, category: str, name: str) -> bool:
+        """字段结构变更前：处理并移出工程里引用该表的已打开图层。
+
+        有未保存编辑的图层先让用户选「保存 / 放弃 / 取消」；取消则整个字段修改
+        中止。移除后不自动加回（表结构已变，用户可在数据管理里重新加载）。
+        """
+        path = str(db.get("path") or "")
+        if not path:
+            return True
+        layers = self._layers_backed_by(path, name)
+        if not layers:
+            return True
+        for layer in layers:
+            try:
+                dirty = layer.isEditable() and layer.isModified()
+            except RuntimeError:
+                continue
+            if not dirty:
+                continue
+            ret = QMessageBox.question(
+                self,
+                "修改字段结构",
+                f"图层「{layer.name()}」有未保存的编辑。修改表结构前需要先处理：\n\n"
+                "「保存」= 提交这些编辑\n"
+                "「放弃」= 丢弃这些编辑\n"
+                "「取消」= 不改字段结构",
+                QMessageBox.StandardButton.Save
+                | QMessageBox.StandardButton.Discard
+                | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if ret == QMessageBox.StandardButton.Cancel:
+                return False
+            if ret == QMessageBox.StandardButton.Save:
+                if not layer.commitChanges():
+                    QMessageBox.warning(
+                        self,
+                        "修改字段结构",
+                        "保存图层编辑失败：\n" + "\n".join(layer.commitErrors()),
+                    )
+                    return False
+            else:
+                layer.rollback()
+        for layer in layers:
+            try:
+                self._remove_layer(layer, notify=False)
+            except Exception:  # 已销毁的图层跳过
+                logger.warning("移除打开图层失败：%s", name, exc_info=True)
+        return True
+
+    def _on_dm_rename_table(
+        self, db: dict, category: str, old: str, new: str
+    ) -> tuple[bool, str]:
+        """数据管理叶子「编辑名称」：改名库内表，并同步已打开图层的名称 / 数据源。"""
+        path = str(db.get("path") or "")
+        if not path:
+            return False, "库路径为空"
+        snapshots: list[tuple[str, bool]] = []
+        if category == "spatial":
+            layers = self._layers_backed_by(path, old)
+            for layer in layers:
+                try:
+                    dirty = layer.isEditable() and layer.isModified()
+                except RuntimeError:
+                    continue
+                if not dirty:
+                    continue
+                ret = QMessageBox.question(
+                    self,
+                    "编辑名称",
+                    f"图层「{layer.name()}」有未保存的编辑。重命名前需要先处理：\n\n"
+                    "「保存」= 提交这些编辑\n"
+                    "「放弃」= 丢弃这些编辑\n"
+                    "「取消」= 不改表名",
+                    QMessageBox.StandardButton.Save
+                    | QMessageBox.StandardButton.Discard
+                    | QMessageBox.StandardButton.Cancel,
+                    QMessageBox.StandardButton.Cancel,
+                )
+                if ret == QMessageBox.StandardButton.Cancel:
+                    return False, "操作已取消"
+                if ret == QMessageBox.StandardButton.Save:
+                    if not layer.commitChanges():
+                        return False, "保存图层编辑失败：\n" + "\n".join(
+                            layer.commitErrors()
+                        )
+                else:
+                    layer.rollback()
+            for layer in layers:
+                style_xml = ""
+                visible = True
+                try:
+                    manager = layer.styleManager()
+                    current = manager.currentStyle() if manager is not None else ""
+                    if current:
+                        style_xml = manager.style(current).xmlData()
+                except Exception:  # 样式取不到不影响改名
+                    logger.debug("取图层样式失败：%s", old, exc_info=True)
+                with suppress(Exception):
+                    visible = layer.isVisible()
+                snapshots.append((style_xml, visible))
+                self._remove_layer(layer, notify=False)
+
+        from app.core.domain.local_table_edit import LocalTableError, rename_local_table
+
+        try:
+            rename_local_table(path, old, new)
+        except LocalTableError as exc:
+            # 改名失败：按原名把图层加回去
+            for style_xml, visible in snapshots:
+                self._reopen_layer_after_rename(path, old, style_xml, visible)
+            return False, str(exc)
+        for style_xml, visible in snapshots:
+            self._reopen_layer_after_rename(path, new, style_xml, visible)
+        if category == "dict":
+            self._sync_renamed_dict_props(path, old, new)
+        if category == "spatial" and snapshots:
+            self._dm_notify(
+                f"已重命名图层表「{old}」→「{new}」，工程里的图层已同步更新",
+                level=Qgis.MessageLevel.Info,
+                duration=4,
+            )
+        return True, ""
+
+    def _sync_renamed_dict_props(self, path: str, old: str, new: str) -> None:
+        """字典表重命名后，同步工程里已打开图层上的字典属性名。
+
+        ``rename_local_table`` 已把库里的字段元数据改成新表名；内存里的图层
+        还揣着旧的 ``create_data/dict_*`` 属性，不更新的话属性编辑表单仍按
+        旧名字找字典。
+        """
+        from app.core.util.field_meta import (
+            DICT_LOCAL_TABLE_PROP,
+            DICT_TABLE_PROP,
+        )
+
+        for layer in self.project.mapLayers().values():
+            try:
+                container = layer_source_container(layer)
+            except RuntimeError:
+                continue
+            if not self._same_db_path(container, path):
+                continue
+            for field in layer.fields():
+                name = field.name()
+                table_prop = layer.customProperty(DICT_TABLE_PROP + name)
+                local_prop = layer.customProperty(DICT_LOCAL_TABLE_PROP + name)
+                if table_prop != old and local_prop != old:
+                    continue
+                # 本地字典的名字统一成新表名（与 rename_local_table 写回的
+                # 字段元数据保持一致）
+                layer.setCustomProperty(DICT_TABLE_PROP + name, new)
+                layer.setCustomProperty(DICT_LOCAL_TABLE_PROP + name, new)
+
+    def _reopen_layer_after_rename(
+        self, path: str, table: str, style_xml: str, visible: bool
+    ) -> None:
+        """表改名后重新打开并挂回工程（保留原样式与可见性）。"""
+        from app.core.util.local_layer_loader import open_local_vector_table
+        from qgis.core import QgsMapLayerStyle
+
+        layer, error = open_local_vector_table(path, table)
+        if layer is None:
+            self._dm_notify(
+                f"图层「{table}」重新加载失败：{error}",
+                level=Qgis.MessageLevel.Warning,
+                duration=6,
+            )
+            return
+        layer.setName(table)
+        if style_xml:
+            try:
+                manager = layer.styleManager()
+                manager.addStyle("default", QgsMapLayerStyle(style_xml))
+                manager.setCurrentStyle("default")
+            except Exception:  # 样式恢复失败不影响改名
+                logger.warning("恢复图层样式失败：%s", table, exc_info=True)
+        self.project.addMapLayer(layer)
+        with suppress(Exception):
+            node = self.tree_root.findLayer(layer)
+            if node is not None:
+                node.setItemVisibilityChecked(visible)
+
     def _on_offline_download(self) -> None:
         """打开「下载离线图层」弹窗（懒建单实例，保留勾选与进度状态）。"""
 
@@ -140,7 +375,7 @@ class AppActionsMixin:
         self._analyse_dock.raise_()
 
     def _on_data_manage(self) -> None:
-        """数据管理：懒建底部 Dock（本地数据库注册目录分级展示）。
+        """数据管理：打开与「创建数据」同风格的对话框（不再是底部 Dock）。
 
         「+ 新建连接」打开选库弹窗（本地数据库 Tab，见
         :mod:`app.ui.dialogs.add_connection`），成功后把新连接追加进左树并
@@ -148,9 +383,9 @@ class AppActionsMixin:
         导入 / 删除 / 刷新）都接到本类的 ``_on_*`` 实现上。
         """
 
-        dock = getattr(self, "_data_manage_dock", None)
-        if dock is None:
-            dock = DataManageDock(
+        dialog = getattr(self, "_data_manage_dialog", None)
+        if dialog is None:
+            dialog = DataManageDialog(
                 self,
                 on_add_connection=self._on_dm_add_connection,
                 on_remove_connection=self._on_dm_remove_connection,
@@ -162,16 +397,24 @@ class AppActionsMixin:
                 on_create_data=self._on_create_data,
                 on_import=self._on_import,
                 on_refresh=self._on_refresh,
+                on_before_table_change=self._on_dm_before_table_change,
+                on_rename_table=self._on_dm_rename_table,
+                on_dict_domains_deleted=self._on_dm_dict_domains_deleted,
+                on_remove_unused_dicts=self._on_dm_remove_unused_dicts,
             )
-            self._data_manage_dock = dock
-            self.place_bottom_dock(dock)
-            # 连接清单是**系统级**配置（不属于某个工程）：建 Dock 时从状态文件读回，
-            # 之后一有变动就落盘 —— 用户要的是「绑定好之后即使当前工程没保存，
-            # 下次打开也还在」（见 app.infra.fs.state）。先读后连，免得读回来又存一遍。
-            dock.restore_state(load_state(_DATA_MANAGE_STATE))
-            dock.databasesChanged.connect(self._save_data_manage_state)
-        dock.show()
-        dock.raise_()
+            self._data_manage_dialog = dialog
+            # 其它入口仍按面板接口使用 _data_manage_dock（创建数据后联动 / 登记库等）
+            self._data_manage_dock = dialog.panel
+            self._data_manage_dock.restore_state(load_state(_DATA_MANAGE_STATE))
+            self._data_manage_dock.databasesChanged.connect(
+                self._save_data_manage_state
+            )
+        if dialog.isMinimized():
+            dialog.showNormal()
+        else:
+            dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
 
     def _save_data_manage_state(self) -> None:
         """把数据管理里登记的连接写进系统级状态文件（加库 / 改库时调，失败只记日志）。"""
@@ -215,7 +458,7 @@ class AppActionsMixin:
             return
         dock = getattr(self, "_data_manage_dock", None)
         if dock is not None and dock.remove_connection(db):
-            self.messageBar.pushMessage(
+            self._dm_notify(
                 f"已移除连接：{name}", level=Qgis.MessageLevel.Info, duration=3
             )
 
@@ -223,7 +466,7 @@ class AppActionsMixin:
         """创建数据：弹窗收集参数 → 落盘 → 按三类结果分别收尾。
 
         两个入口共用：数据管理 Dock 的「创建数据」按钮与主工具条「数据」组的
-        「新增数据」（``tool_bar`` 的 ``create_data`` key）。落盘都是领域服务的事
+        「创建数据」（``tool_bar`` 的 ``create_data`` key）。落盘都是领域服务的事
         （对话框在 ``accept()`` / ``apply_now()`` 里调），这里只管把结果放进
         工程 / 数据管理：
 
@@ -286,7 +529,7 @@ class AppActionsMixin:
         # SpatiaLite 的 URI 数据源（见 layer_source_container）。
         layer.path_c = layer_source_container(layer)
         self.project.addMapLayer(layer)
-        self.messageBar.pushMessage(
+        self._dm_notify(
             f"已创建数据「{layer.name()}」并加入工程：{layer.source()}",
             level=Qgis.MessageLevel.Success,
             duration=4,
@@ -312,7 +555,7 @@ class AppActionsMixin:
             dock = getattr(self, "_data_manage_dock", None)
         if dock is not None:
             self._register_local_db(dock, path)
-        self.messageBar.pushMessage(
+        self._dm_notify(
             f"已创建空库：{path}",
             level=Qgis.MessageLevel.Success,
             duration=4,
@@ -354,7 +597,7 @@ class AppActionsMixin:
             catalog = describe_local_db(path)
         except Exception as exc:  # noqa: BLE001 —— 登记失败不该盖住「已创建」这件事
             get_logger(__name__).warning("登记本地库到数据管理失败：%s（%s）", path, exc)
-            self.messageBar.pushMessage(
+            self._dm_notify(
                 f"已创建，但没能登记到「数据管理」：{exc}",
                 level=Qgis.MessageLevel.Warning,
                 duration=6,
@@ -402,7 +645,7 @@ class AppActionsMixin:
         # **工程里没有图层也照样能进**：弹窗里可以用「选择」从本地文件挑。
         # 只有「一个库都没有」才是真的导不进去。
         if not databases:
-            self.messageBar.pushMessage(
+            self._dm_notify(
                 "导入失败：请先在「数据管理」Dock 添加本地数据库",
                 level=Qgis.MessageLevel.Warning,
                 duration=3,
@@ -439,7 +682,7 @@ class AppActionsMixin:
                 continue
             valid_layers.append(layer)
         if stale:
-            self.messageBar.pushMessage(
+            self._dm_notify(
                 f"{stale} 个待导入图层已失效（数据源可能已被关闭），已跳过",
                 level=Qgis.MessageLevel.Warning,
                 duration=6,
@@ -473,15 +716,23 @@ class AppActionsMixin:
 
         # **一次可导入多个图层**（每层一张新表）：进度按"第几层 / 共几层"推进
         feedback = QgsFeedback()
+        # 父窗口必须是**发起导入的那个窗口**：从「数据管理」对话框里进来时，
+        # 若把进度挂在 MainWindow 上，它会弹到数据管理窗口下面（用户只看到
+        # "点导入没反应"）。数据管理是独立顶层窗口，用 activeWindow 兜底。
+        owner = getattr(self, "_data_manage_dialog", None)
+        if owner is None or not owner.isVisible() or owner.isMinimized():
+            owner = QApplication.activeWindow() or self
         progress = QProgressDialog(
             "准备导入…",
             "取消",
             0,
             100,
-            self,
+            owner,
         )
         progress.setWindowTitle("导入图层到数据库")
         progress.setWindowModality(Qt.WindowModality.WindowModal)
+        # 独立顶层窗口 + 置顶：即使父窗口不是活动窗口也不会被盖住
+        progress.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
         progress.setMinimumDuration(0)  # 弹窗立即出现
         progress.setValue(0)
         # 取消按钮 → feedback.cancel()；service 会尽快跳出 + 回滚
@@ -555,14 +806,14 @@ class AppActionsMixin:
                 )
                 for layer, table, count in imported
             )
-            self.messageBar.pushMessage(
+            self._dm_notify(
                 f"已导入 {len(imported)} 个图层：{brief}",
                 level=Qgis.MessageLevel.Success,
                 duration=6,
             )
         if failures:
             detail = "；".join(f"「{name}」：{why}" for name, why in failures)
-            self.messageBar.pushMessage(
+            self._dm_notify(
                 f"{len(failures)} 个图层没导进去：{detail}",
                 level=Qgis.MessageLevel.Critical,
                 duration=8,
@@ -588,7 +839,7 @@ class AppActionsMixin:
         n_server = len(getattr(dock, "_server_connections", []))
         total = n_local + n_server
         if total == 0:
-            self.messageBar.pushMessage(
+            self._dm_notify(
                 "无可刷新的数据库连接——请先添加本地库或服务器连接",
                 level=Qgis.MessageLevel.Warning,
                 duration=3,
@@ -598,14 +849,14 @@ class AppActionsMixin:
             refreshed = dock.refresh_all()
         except Exception as exc:  # noqa: BLE001
             get_logger(__name__).error("刷新数据库失败：%s", exc, exc_info=True)
-            self.messageBar.pushMessage(
+            self._dm_notify(
                 f"刷新失败：{exc}",
                 level=Qgis.MessageLevel.Critical,
                 duration=5,
             )
             return
         get_logger(__name__).info("刷新 %d 个数据库连接", refreshed)
-        self.messageBar.pushMessage(
+        self._dm_notify(
             f"已刷新 {refreshed} 个数据库连接（{n_local} 本地 + {n_server} 服务器）",
             level=Qgis.MessageLevel.Success,
             duration=3,
@@ -661,7 +912,7 @@ class AppActionsMixin:
             layer.path_c = path  # 容器路径, 供"执行SQL"按文件打开
             self._add_layer_to_project(layer)
             self._zoom_to_layer(layer)
-            self.messageBar.pushMessage(
+            self._dm_notify(
                 f"已加载{kind_zh}：{name}",
                 level=Qgis.MessageLevel.Success,
                 duration=3,
@@ -681,7 +932,7 @@ class AppActionsMixin:
 
         path = str(db.get("path") or "")
         if not path or db.get("kind") != "local":
-            self.messageBar.pushMessage(
+            self._dm_notify(
                 "导入数据：只支持本地库（GeoPackage / SpatiaLite）",
                 level=Qgis.MessageLevel.Warning,
                 duration=4,
@@ -701,7 +952,7 @@ class AppActionsMixin:
         # （库那边也会按列类型拒掉）。类型从目标图层本身读。
         target_layer, target_error = open_local_vector_table(path, name)
         if target_layer is None:
-            self.messageBar.pushMessage(
+            self._dm_notify(
                 f"导入失败：打不开目标图层「{name}」\n{target_error}",
                 level=Qgis.MessageLevel.Warning,
                 duration=5,
@@ -721,7 +972,7 @@ class AppActionsMixin:
         dialog.deleteLater()
         if error:
             # 部分失败：能打开的照常导入，打不开的在消息条里说清楚（别静默少几份）
-            self.messageBar.pushMessage(error, level=Qgis.MessageLevel.Warning, duration=6)
+            self._dm_notify(error, level=Qgis.MessageLevel.Warning, duration=6)
         if not sources:
             return
 
@@ -754,13 +1005,13 @@ class AppActionsMixin:
             result = import_features_into_table(sources, path, name, replace=replace)
         except AppendLayerError as exc:
             logger.warning("导入数据失败：%s", exc)
-            self.messageBar.pushMessage(
+            self._dm_notify(
                 f"导入失败：{exc}", level=Qgis.MessageLevel.Critical, duration=8
             )
             return
         except Exception as exc:  # noqa: BLE001 —— 任何意外都要让用户看到，不能静默
             logger.error("导入数据异常：%s", exc, exc_info=True)
-            self.messageBar.pushMessage(
+            self._dm_notify(
                 f"导入失败（{type(exc).__name__}）：{exc}",
                 level=Qgis.MessageLevel.Critical,
                 duration=8,
@@ -782,7 +1033,7 @@ class AppActionsMixin:
         if result.failed_sources:
             failed = "；".join(f"{src}：{why}" for src, why in result.failed_sources)
             note += f"；这些数据源没导入：{failed}"
-        self.messageBar.pushMessage(note, level=Qgis.MessageLevel.Info, duration=8)
+        self._dm_notify(note, level=Qgis.MessageLevel.Info, duration=8)
         # 行数变了：让 Dock 重扫这个库，左树 / 右表的计数跟着更新
         dock = getattr(self, "_data_manage_dock", None)
         if dock is not None:
@@ -797,48 +1048,73 @@ class AppActionsMixin:
         from app.ui.dialogs.export_layer_dialog import ExportLayerDialog
 
         path = str(db.get("path") or "")
+        # 导出结果 / 进度都要挂在「数据管理」窗口上：主窗口的浮动提示条在
+        # 非 Dock 的数据管理对话框下面，用户看不到。
+        owner = getattr(self, "_data_manage_dialog", None)
+        if owner is None or not owner.isVisible() or owner.isMinimized():
+            owner = QApplication.activeWindow() or self
         if not path or db.get("kind") != "local":
-            self.messageBar.pushMessage(
-                "导出数据：只支持本地库（GeoPackage / SpatiaLite）",
-                level=Qgis.MessageLevel.Warning,
-                duration=4,
+            QMessageBox.warning(
+                owner, "导出数据", "只支持本地库（GeoPackage / SpatiaLite）"
             )
             return
         layer, error = open_local_vector_table(path, name)
         if layer is None:
-            self.messageBar.pushMessage(
-                f"导出失败：打不开「{name}」\n{error}",
-                level=Qgis.MessageLevel.Warning,
-                duration=5,
+            QMessageBox.warning(
+                owner, "导出数据", f"导出失败：打不开「{name}」\n{error}"
             )
             return
-        dialog = ExportLayerDialog(self, layer=layer, default_dir=default_output_dir())
+        dialog = ExportLayerDialog(owner, layer=layer, default_dir=default_output_dir())
         accepted = dialog.exec()
         spec = dialog.spec() if accepted else None
         dialog.deleteLater()
         if spec is None:
             return
+        from qgis.PyQt.QtWidgets import QProgressDialog
+
+        # 写 GDB / 大图层是同步阻塞调用，没有可用的分阶段回调；用不确定进度条
+        # + 阶段文字，至少让用户看到「正在写入图层 / 字典」而不是界面卡死。
+        progress = QProgressDialog(owner)
+        progress.setWindowTitle("导出数据")
+        progress.setLabelText("正在准备导出…")
+        progress.setRange(0, 0)  # 不确定进度（转圈）
+        progress.setCancelButton(None)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+        progress.setMinimumDuration(0)
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+        progress.show()
+        QApplication.processEvents()
+
+        def _show_stage(text: str) -> None:
+            progress.setLabelText(text)
+            QApplication.processEvents()
+
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            target = export_vector_layer(layer, spec)
+            target = export_vector_layer(layer, spec, progress=_show_stage)
         except ExportLayerError as exc:
             logger.warning("导出数据失败：%s", exc)
-            self.messageBar.pushMessage(
-                f"导出失败：{exc}", level=Qgis.MessageLevel.Critical, duration=6
-            )
+            progress.close()
+            QMessageBox.warning(owner, "导出数据", f"导出失败：{exc}")
             return
         except Exception as exc:  # noqa: BLE001 —— 任何意外都要让用户看到，不能静默
             logger.error("导出数据异常：%s", exc, exc_info=True)
-            self.messageBar.pushMessage(
-                f"导出失败（{type(exc).__name__}）：{exc}",
-                level=Qgis.MessageLevel.Critical,
-                duration=8,
+            progress.close()
+            QMessageBox.warning(
+                owner, "导出数据", f"导出失败（{type(exc).__name__}）：{exc}"
             )
             return
         finally:
             QApplication.restoreOverrideCursor()
-        self.messageBar.pushMessage(
-            f"已导出：{target}", level=Qgis.MessageLevel.Info, duration=6
+            if progress.isVisible():
+                progress.close()
+            QApplication.processEvents()
+        QMessageBox.information(
+            owner,
+            "导出数据",
+            f"已导出{'（含字典）' if spec.convert_dict else ''}：\n{target}",
         )
 
     def _on_dm_delete_layer(self, db: dict, category: str, name: str) -> None:
@@ -868,12 +1144,24 @@ class AppActionsMixin:
             )
             return
 
+        dict_category = ""
+        affected_fields = 0
+        if category == "dict":
+            dict_category, affected_fields = self._dict_delete_info(path, name)
+        message = (
+            f"确定删除{label}「{name}」吗？\n\n"
+            "将删除库内数据表与注册信息，并把工程中已打开的对应图层移出地图。\n"
+            "此操作不可恢复。"
+        )
+        if category == "dict" and affected_fields:
+            message += (
+                f"\n\n当前库中有 {affected_fields} 个字段挂接了该字典表；"
+                "删除后会同时清除这些字段的字典表和字典域（否则图层会读不到字典）。"
+            )
         ret = QMessageBox.question(
             self,
             "删除图层",
-            f"确定删除{label}「{name}」吗？\n\n"
-            "将删除库内数据表与注册信息，并把工程中已打开的对应图层移出地图。\n"
-            "此操作不可恢复。",
+            message,
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
@@ -890,12 +1178,17 @@ class AppActionsMixin:
             delete_registered_data(db, category, name)
         except DeleteDataError as exc:
             get_logger(__name__).error("删除数据失败：%s", exc, exc_info=True)
-            self.messageBar.pushMessage(
+            self._dm_notify(
                 f"删除失败：{exc}",
                 level=Qgis.MessageLevel.Critical,
                 duration=5,
             )
             return
+        if category == "dict":
+            cleared = self._clear_dict_links(path, dict_category, name)
+            get_logger(__name__).info(
+                "删除本地字典表后清除了 %d 个字段的字典挂接：%s", cleared, name
+            )
         # 3) 左树摘掉该注册项（含类别计数 / 行数），右表跟着重画
         dock = getattr(self, "_data_manage_dock", None)
         if dock is not None:
@@ -904,7 +1197,7 @@ class AppActionsMixin:
         get_logger(__name__).info(
             "已删除本地库数据：%s → %s(%s)%s", path, name, category, suffix
         )
-        self.messageBar.pushMessage(
+        self._dm_notify(
             f"已删除{label}「{name}」{suffix}",
             level=Qgis.MessageLevel.Success,
             duration=4,
@@ -947,7 +1240,7 @@ class AppActionsMixin:
             if name
         ]
         if not targets:
-            self.messageBar.pushMessage(
+            self._dm_notify(
                 "这个库里没有已注册的图层",
                 level=Qgis.MessageLevel.Info,
                 duration=3,
@@ -960,6 +1253,7 @@ class AppActionsMixin:
             "移除全部图层",
             f"确定移除本地库「{name}」里的全部 {len(targets)} 个图层吗？\n\n"
             "将删除库内数据表与注册信息，并把工程中已打开的对应图层移出地图。\n"
+            "库内字段上的字典表和字典域也会一并清除。\n"
             "此操作不可恢复。",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -983,7 +1277,7 @@ class AppActionsMixin:
             deleted, failures = delete_all_registered_data(source)
         except DeleteDataError as exc:
             logger.error("移除全部图层失败：%s", exc, exc_info=True)
-            self.messageBar.pushMessage(
+            self._dm_notify(
                 f"移除全部图层失败：{exc}",
                 level=Qgis.MessageLevel.Critical,
                 duration=8,
@@ -991,13 +1285,14 @@ class AppActionsMixin:
             return
         except Exception as exc:  # noqa: BLE001 —— 槽里抛异常会带走进程
             logger.error("移除全部图层异常：%s", exc, exc_info=True)
-            self.messageBar.pushMessage(
+            self._dm_notify(
                 f"移除全部图层失败（{type(exc).__name__}）：{exc}",
                 level=Qgis.MessageLevel.Critical,
                 duration=8,
             )
             return
 
+        self._clear_dict_links(path, all_rows=True)
         # 3) 重扫该库：左树 / 右表的清单与计数跟着更新（失败的表也重扫回来）
         if dock is not None and live is not None:
             dock.refresh_database(live)
@@ -1005,7 +1300,7 @@ class AppActionsMixin:
         layer_suffix = f"，并移出工程 {removed_layers} 个图层" if removed_layers else ""
         if failures:
             detail = "；".join(f"「{table}」：{why}" for _c, table, why in failures)
-            self.messageBar.pushMessage(
+            self._dm_notify(
                 f"已移除 {deleted} 个图层{layer_suffix}；"
                 f"{len(failures)} 个没删掉：{detail}",
                 level=Qgis.MessageLevel.Warning,
@@ -1015,11 +1310,157 @@ class AppActionsMixin:
         logger.info(
             "已移除本地库 %s 的全部 %d 个图层%s", path, deleted, layer_suffix
         )
-        self.messageBar.pushMessage(
+        self._dm_notify(
             f"已移除「{name}」的全部 {deleted} 个图层{layer_suffix}",
             level=Qgis.MessageLevel.Success,
             duration=5,
         )
+
+    @staticmethod
+    def _dict_delete_info(path: str, name: str) -> tuple[str, int]:
+        """删除本地字典表前：它的字典表类别 + 当前库里挂接它的字段数。"""
+        category = name
+        affected = 0
+        try:
+            db = local_db_util(path)
+            try:
+                row = db.cursor.execute(
+                    "SELECT attr FROM user_relation WHERE table_name = ? AND type = 'dict'",
+                    (name,),
+                ).fetchone()
+                if row and row[0]:
+                    try:
+                        data = json.loads(row[0])
+                    except (TypeError, ValueError):
+                        data = {}
+                    category = str((data or {}).get("dict_table") or name)
+                row = db.cursor.execute(
+                    "SELECT COUNT(*) FROM qgis_dev_field_meta "
+                    "WHERE dict_table = ? OR dict_local_table = ?",
+                    (category, name),
+                ).fetchone()
+                affected = int(row[0]) if row else 0
+            finally:
+                db.conn.close()
+        except Exception:  # noqa: BLE001 —— 老库没有元数据表 / 读不到按 0 处理
+            pass
+        return category, affected
+
+    @staticmethod
+    def _clear_dict_links(
+        path: str, category: str = "", name: str = "", *, all_rows: bool = False
+    ) -> int:
+        """删除本地字典表后清空字段上的字典关联。"""
+        from app.core.util.field_meta import clear_dict_links
+
+        try:
+            db = local_db_util(path)
+            try:
+                count = clear_dict_links(
+                    db.conn,
+                    category=category,
+                    local_table=name,
+                    all_rows=all_rows,
+                )
+                db.conn.commit()
+                return count
+            finally:
+                db.conn.close()
+        except Exception:  # noqa: BLE001
+            get_logger(__name__).warning("清除字段字典关联失败：%s", name, exc_info=True)
+            return 0
+
+    def _on_dm_remove_unused_dicts(self, db: dict) -> None:
+        """字典分组右键「移除未使用字典」：确认后删除没人引用的字典表。"""
+        from app.core.domain.delete_data import (
+            DeleteDataError,
+            delete_unused_dict_tables,
+            unused_dict_tables,
+        )
+
+        owner = getattr(self, "_data_manage_dialog", None) or self
+        path = str(db.get("path") or "")
+        try:
+            unused = unused_dict_tables(db)
+        except Exception as exc:  # noqa: BLE001
+            logger.error("检查未使用字典失败：%s", exc, exc_info=True)
+            QMessageBox.warning(owner, "移除未使用字典", f"检查失败：{exc}")
+            return
+        if not unused:
+            QMessageBox.information(
+                owner, "移除未使用字典", "当前库里没有未使用的字典表。"
+            )
+            return
+        preview = "、".join(unused[:12])
+        if len(unused) > 12:
+            preview += f" 等 {len(unused)} 张"
+        ret = QMessageBox.question(
+            owner,
+            "移除未使用字典",
+            f"发现 {len(unused)} 张没有被任何字段引用的字典表：\n{preview}\n\n"
+            "确定移除？此操作不可恢复。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            deleted, failures = delete_unused_dict_tables(db)
+        except DeleteDataError as exc:
+            QMessageBox.warning(owner, "移除未使用字典", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001
+            logger.error("移除未使用字典失败：%s", exc, exc_info=True)
+            QMessageBox.warning(owner, "移除未使用字典", f"删除失败：{exc}")
+            return
+        dock = getattr(self, "_data_manage_dock", None)
+        if dock is not None and path:
+            live = self._dock_db_entry(dock, path)
+            if live is not None:
+                dock.refresh_database(live)
+        note = f"已移除 {len(deleted)} 张未使用字典表"
+        if failures:
+            note += "；失败：" + "；".join(f"{name}：{why}" for name, why in failures)
+            QMessageBox.warning(owner, "移除未使用字典", note)
+        else:
+            QMessageBox.information(owner, "移除未使用字典", note)
+
+    def _on_dm_dict_domains_deleted(
+        self, db: dict, category: str, table: str, domains: list[str]
+    ) -> None:
+        """本地字典表删掉某个字典域后：清工程里已打开图层的字典挂接属性。
+
+        库里 ``qgis_dev_field_meta`` 已由字典表详情页清空；工程里已经打开的
+        图层还揣着 ``create_data/dict_*`` 自定义属性，不擦掉的话属性编辑表单
+        仍会去找已经删掉的域。
+        """
+        from app.core.util.field_meta import (
+            DICT_DOMAIN_PROP,
+            DICT_LOCAL_TABLE_PROP,
+            DICT_TABLE_PROP,
+        )
+
+        path = str(db.get("path") or "")
+        wanted = set(domains)
+        if not path or not wanted:
+            return
+        for layer in self.project.mapLayers().values():
+            try:
+                container = layer_source_container(layer)
+            except RuntimeError:  # C++ 对象已销毁
+                continue
+            if not self._same_db_path(container, path):
+                continue
+            if (layer_source_table(layer) or layer.name()) != table:
+                continue
+            for field in layer.fields():
+                name = field.name()
+                if layer.customProperty(DICT_TABLE_PROP + name) != category:
+                    continue
+                if layer.customProperty(DICT_DOMAIN_PROP + name) not in wanted:
+                    continue
+                for prop in (DICT_TABLE_PROP, DICT_DOMAIN_PROP, DICT_LOCAL_TABLE_PROP):
+                    layer.removeCustomProperty(prop + name)
 
     def _layers_backed_by(self, db_path: str, table: str) -> list:
         """工程里数据源指向「``db_path`` 库中的 ``table``」的图层（删除时一并移出）。
@@ -1101,7 +1542,9 @@ class AppActionsMixin:
         if session is not None and session.is_active:
             session.stop()
             self._set_qmap_compare_active(False)
-            self.messageBar.pushMessage("已停止地图对比", level=Qgis.MessageLevel.Info, duration=3)
+            self.messageBar.pushMessage(
+                "已停止地图对比", level=Qgis.MessageLevel.Info, duration=3
+            )
             return
         if not self.project.mapLayers():
             QMessageBox.information(self, "提示", "请先加载至少一个图层")
@@ -1146,7 +1589,9 @@ class AppActionsMixin:
 
 
             # threading.Thread(target=server_main, daemon=True).start()
-            self.messageBar.pushMessage("测试消息！", level=Qgis.MessageLevel.Info, duration=3)
+            self.messageBar.pushMessage(
+                "测试消息！", level=Qgis.MessageLevel.Info, duration=3
+            )
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self, "失败", str(e))
 

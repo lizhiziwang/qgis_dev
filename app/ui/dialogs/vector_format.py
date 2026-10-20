@@ -311,8 +311,15 @@ class VectorFormatDialog(BaseDialog):
 
     def _query_vector_sublayers(self, path: str) -> list:
         """列出文件里的矢量要素类（SQLite / GPKG 等可包含多个图层）。"""
+        from app.core.util.sublayers import hidden_tables
+
         details = QgsProviderRegistry.instance().querySublayers(path)
-        return [d for d in details if d.type() == Qgis.LayerType.Vector]
+        hidden = hidden_tables(path)
+        return [
+            d
+            for d in details
+            if d.type() == Qgis.LayerType.Vector and d.name() not in hidden
+        ]
 
     def _create_sublayers(self, path: str, details: list) -> list:
         """按要素类 URI 创建图层对象；无法枚举时退回直接打开文件。"""

@@ -62,6 +62,7 @@ class WindowChromeMixin:
             "qmap_compare": self._on_qmap_compare,
             "online_basemap": self._on_online_basemap,
             "data_manage": self._on_data_manage,
+            "dict_manage": self._on_dict_manage,
             "create_data": self._on_create_data,
             "offline_download": self._on_offline_download,
             "zoom_full": self._on_zoom_full,

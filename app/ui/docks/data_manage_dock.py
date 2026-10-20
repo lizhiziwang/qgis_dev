@@ -1,9 +1,9 @@
-"""数据管理 Dock(页面下方).
+"""数据管理面板（放在 DataManageDialog 对话框里，不再使用底部 Dock）。
 
 按需求 HTML 的元素结构映射为原生 Qt 组件(不用 QTextBrowser 渲染):
 
-- ``section.dialog / .dialog-title`` -> :class:`QDockWidget` 自身标题栏(含
-  右上角关闭按钮, 对应 HTML 的关闭键)
+- ``section.dialog / .dialog-title`` -> :class:`~app.ui.common.base_dialog.BaseDialog` 的标题栏
+  (含右上角关闭按钮, 对应 HTML 的关闭键)
 - ``.dialog-body > .dm-split``        -> :class:`QSplitter`(水平两栏)
 - ``.dm-tree``                        -> 左栏: 树头「数据库连接」+ QTreeWidget
   + 「新建连接」按钮(本地库 / 服务器连接均可入树); 树固定**两个根节点**
@@ -69,10 +69,13 @@ from qgis.PyQt.QtWidgets import (
     QDockWidget,
     QHBoxLayout,
     QHeaderView,
+    QInputDialog,
     QLabel,
     QMenu,
+    QMessageBox,
     QPushButton,
     QSplitter,
+    QStackedWidget,
     QTableWidget,
     QTableWidgetItem,
     QTreeWidget,
@@ -89,8 +92,9 @@ from app.core.util.local_db_util import (
 )
 from app.infra.logging import get_logger
 from app.ui.common import tool_icons
+from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.theme import ThemeManager
-from app.ui.common.widgets import reveal_in_file_manager
+from app.ui.common.widgets import reveal_in_file_manager, save_file
 from app.ui.dialogs.add_connection import AddConnectionDialog
 
 logger = get_logger(__name__)
@@ -120,8 +124,8 @@ _COUNT_FONT_DELTA = 1.5
 _SHOW_SERVER_DB = False
 
 
-class DataManageDock(QDockWidget):
-    """数据管理面板(底部 Dock): 左数据库树 + 右数据表. """
+class DataManageDock(QWidget):
+    """数据管理面板（对话框内）: 左数据库树 + 右数据表 / 详情编辑. """
 
     #: 登记的连接清单变了（加库 / 整体替换）。调用方据此**立刻**把它落盘到系统级状态
     #: 文件里 —— 用户要的是「绑定好之后即使当前工程没保存，下次打开也还在」
@@ -142,8 +146,12 @@ class DataManageDock(QDockWidget):
         on_remove_all_layers: Callable[[dict], None] | None = None,
         on_import_data: Callable[[dict, str, str], None] | None = None,
         on_export_layer: Callable[[dict, str, str], None] | None = None,
+        on_before_table_change: Callable[[dict, str, str], bool] | None = None,
+        on_rename_table: Callable[[dict, str, str, str], tuple[bool, str]] | None = None,
+        on_dict_domains_deleted: Callable[[dict, str, str, list[str]], None] | None = None,
+        on_remove_unused_dicts: Callable[[dict], None] | None = None,
     ) -> None:
-        super().__init__("数据管理", parent)
+        super().__init__(parent)
         #: QSS 作用域锚点(见 app.ui.common.theme.window_qss 的 #DataManageDock 规则)
         self.setObjectName("DataManageDock")
         #: 动作回调占位(未提供时点击只记日志)
@@ -167,6 +175,16 @@ class DataManageDock(QDockWidget):
         self._on_import_data = on_import_data
         #: 右键图层「导出数据」: (连接 dict, category, 表名)
         self._on_export_layer = on_export_layer
+        #: 字段结构变更前回调（MainWindow 负责把引用该表的已打开图层移出工程）
+        self._on_before_table_change = on_before_table_change
+        #: 表重命名回调（MainWindow 负责同步已打开图层的名称 / 数据源）
+        self._on_rename_table = on_rename_table
+        #: 字典域被整域删除：MainWindow 据此清掉已打开图层上的字典挂接属性
+        self._on_dict_domains_deleted = on_dict_domains_deleted
+        #: 字典分组右键「移除未使用字典」：MainWindow 负责确认 + 删表
+        self._on_remove_unused_dicts = on_remove_unused_dicts
+        #: 当前右栏详情（库 dict / category / 表名）；无则显示数据表列表
+        self._current_detail: tuple[dict, str, str] | None = None
         #: 当前联动展示的库(双击行定位用)
         self._current_db: dict | None = None
         #: 当前选中的类别过滤(类别分组节点点击时设; refresh_all 重画用)
@@ -175,12 +193,6 @@ class DataManageDock(QDockWidget):
         self._fitting = False
         #: 服务器连接清单(kind=server, 挂在「服务器数据库」分组下)
         self._server_connections: list[dict] = []
-        self.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
-        self.setFeatures(
-            QDockWidget.DockWidgetFeature.DockWidgetClosable
-            | QDockWidget.DockWidgetFeature.DockWidgetMovable
-            | QDockWidget.DockWidgetFeature.DockWidgetFloatable
-        )
         self._build_ui()
         self._databases: list[dict] = []
         self._rebuild_tree()
@@ -190,23 +202,20 @@ class DataManageDock(QDockWidget):
     # ------------------------------------------------------------ UI
 
     def _build_ui(self) -> None:
-        root = QWidget(self)
-        v = QVBoxLayout(root)
+        v = QVBoxLayout(self)
         v.setContentsMargins(4, 4, 4, 4)
         v.setSpacing(2)
 
-        self.split = QSplitter(Qt.Orientation.Horizontal, root)
+        self.split = QSplitter(Qt.Orientation.Horizontal, self)
         self.split.addWidget(self._build_tree_pane(self.split))
         self.split.addWidget(self._build_panel_pane(self.split))
         self.split.setStretchFactor(0, 0)
         self.split.setStretchFactor(1, 1)
-        self.split.setSizes([240, 640])
+        self.split.setSizes([240, 760])
         v.addWidget(self.split, 1)
 
-        footer = self._build_footer(root)
+        footer = self._build_footer(self)
         v.addWidget(footer)
-
-        self.setWidget(root)
 
     def _build_tree_pane(self, parent: QWidget) -> QWidget:
         """左栏: 数据库连接树(.dm-tree).
@@ -263,9 +272,13 @@ class DataManageDock(QDockWidget):
         return pane
 
     def _build_panel_pane(self, parent: QWidget) -> QWidget:
-        """右栏: 选中库的数据表(.dm-panel)."""
+        """右栏: 数据表列表 / 选中叶子后的详情编辑页（QStackedWidget）。"""
         pane = QWidget(parent)
-        lay = QVBoxLayout(pane)
+        outer = QVBoxLayout(pane)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        list_page = QWidget(pane)
+        lay = QVBoxLayout(list_page)
         lay.setContentsMargins(4, 0, 0, 0)
         lay.setSpacing(4)
 
@@ -282,7 +295,10 @@ class DataManageDock(QDockWidget):
         self.create_btn = QPushButton("创建数据")
         self.import_btn = QPushButton("导入")
         self.refresh_btn = QPushButton("刷新")
-        for btn in (self.create_btn, self.import_btn, self.refresh_btn):
+        self.add_dict_btn = QPushButton("添加字典表")
+        self.add_dict_btn.clicked.connect(self._on_add_dict_table_clicked)
+        self.add_dict_btn.setVisible(False)
+        for btn in (self.create_btn, self.import_btn, self.refresh_btn, self.add_dict_btn):
             btn.setCursor(Qt.CursorShape.PointingHandCursor)
             hd_row.addWidget(btn)
         self.create_btn.clicked.connect(self._on_create_data_clicked)
@@ -310,6 +326,20 @@ class DataManageDock(QDockWidget):
         # 表格尺寸变化(窗口/分隔条拖动) → 延迟横向撑满
         self.table.installEventFilter(self)
         lay.addWidget(self.table, 1)
+
+        from app.ui.docks.table_detail import TableDetailPage
+
+        self.detail_page = TableDetailPage(pane)
+        self.detail_page.set_before_change(self._before_table_change)
+        self.detail_page.dictionary.dictDomainsDeleted.connect(
+            self._on_dict_domains_deleted_signal
+        )
+        self.detail_page.backRequested.connect(self._show_list_page)
+        self.detail_page.dataChanged.connect(self._on_detail_data_changed)
+        self.stack = QStackedWidget(pane)
+        self.stack.addWidget(list_page)
+        self.stack.addWidget(self.detail_page)
+        outer.addWidget(self.stack, 1)
         return pane
 
     def _build_footer(self, parent: QWidget) -> QWidget:
@@ -319,7 +349,7 @@ class DataManageDock(QDockWidget):
         h.setContentsMargins(0, 2, 0, 0)
         h.addStretch(1)
         close_btn = QPushButton("关闭")
-        close_btn.clicked.connect(self.close)
+        close_btn.clicked.connect(lambda: self.window().close())
         h.addWidget(close_btn)
         return foot
 
@@ -364,6 +394,14 @@ class DataManageDock(QDockWidget):
             # 服务器连接也属于「登记好的连接」，一并落盘（凭据由调用方决定存不存）
             self.databasesChanged.emit()
             return
+        path = str(conn.get("path") or "")
+        if path:
+            with suppress(Exception):
+                from app.core.domain.create_data.dict_tables import (
+                    normalize_local_dict_names,
+                )
+
+                normalize_local_dict_names(path)
         self._databases.insert(0, conn)
         self._rebuild_tree()
         # 本地根固定在第 0 个顶层节点; 刚加入的就是其**第一个**子节点（新的在上）
@@ -395,6 +433,14 @@ class DataManageDock(QDockWidget):
                 "数据管理[刷新缓存]: 重扫本地库 %s 失败: %s", path, exc
             )
             return False
+        # 老库把本地字典的逻辑名记成"复制来源的系统类别"；统一成库内表名，
+        # 这样字段列表 / 挂接框里不会出现两个名字（重命名也会同步字段）。
+        with suppress(Exception):
+            from app.core.domain.create_data.dict_tables import (
+                normalize_local_dict_names,
+            )
+
+            normalize_local_dict_names(str(path))
         db["categories"] = catalog["categories"]
         db["counts"] = catalog["counts"]
         db["meta"] = catalog["meta"]
@@ -423,6 +469,11 @@ class DataManageDock(QDockWidget):
             self._refresh_db_cache(live)
             self._show_database(live)
             self._rebuild_tree_for(live)
+            detail = self._current_detail
+            if detail is not None and self._same_db(detail[0], live):
+                self._show_detail(live, detail[1], detail[2])
+            else:
+                self._show_list_page()
         elif kind == "server" and db in self._server_connections:
             self._show_server_connection(db)
 
@@ -457,6 +508,12 @@ class DataManageDock(QDockWidget):
         # 左树里「类别分组 → 图层叶子」和分组标题的计数都是重扫前的快照，
         # 库内容变了必须整体重建（见 _rebuild_tree_for）
         self._rebuild_tree_for()
+        detail = self._current_detail
+        live_detail = self._cache_db(detail[0]) if detail is not None else None
+        if detail is not None and live_detail is not None:
+            self._show_detail(live_detail, detail[1], detail[2])
+        else:
+            self._show_list_page()
         return n
 
     def _rebuild_tree_for(self, db: dict | None = None) -> None:
@@ -612,6 +669,12 @@ class DataManageDock(QDockWidget):
             except Exception as exc:  # noqa: BLE001
                 logger.warning("数据管理[恢复]: 读取本地库失败, 跳过: %s (%s)", path, exc)
                 continue
+            with suppress(Exception):
+                from app.core.domain.create_data.dict_tables import (
+                    normalize_local_dict_names,
+                )
+
+                normalize_local_dict_names(path)
             databases.append(
                 {
                     "kind": "local",
@@ -731,7 +794,8 @@ class DataManageDock(QDockWidget):
         counts: dict = db.get("counts") or {}
         for cat in _CATEGORY_ORDER:
             names = list(cats.get(cat) or [])
-            if not names:
+            # 字典分组即使为空也显示：用户要在里面「添加字典表」
+            if not names and cat != "dict":
                 continue
             group = QTreeWidgetItem(top)
             group.setText(0, f"{_CATEGORY_LABEL[cat]} ({len(names)})")
@@ -858,6 +922,9 @@ class DataManageDock(QDockWidget):
         """
         self._current_db = db
         self._current_category = category
+        add_dict = getattr(self, "add_dict_btn", None)
+        if add_dict is not None:
+            add_dict.setVisible(db is not None and category == "dict")
         if db is None:
             self.sel_name.setText("未连接本地数据库")
             self.sel_name.setToolTip("")
@@ -947,6 +1014,7 @@ class DataManageDock(QDockWidget):
         scope = payload.get("scope")
         if scope:
             # 根节点(本地数据库 / 服务器数据库): 只显示根名, 数据区清空
+            self._show_list_page()
             self._current_db = None
             self._current_category = None
             self.table.setRowCount(0)
@@ -957,8 +1025,9 @@ class DataManageDock(QDockWidget):
             return
         db = payload.get("db")
         if "name" in payload and isinstance(payload.get("name"), str) and db:
-            # 表名叶子: 联动所属库的该类别, 并高亮表格对应行
+            # 表名叶子: 联动所属库的该类别, 并高亮表格对应行；矢量/字典叶子进详情页
             self._show_database(db, category=payload["cat"])
+            self._show_detail(db, payload["cat"], payload["name"])
             tag = f"{payload['cat']}\x00{payload['name']}"
             for r in range(self.table.rowCount()):
                 it = self.table.item(r, 0)
@@ -968,14 +1037,68 @@ class DataManageDock(QDockWidget):
             return
         if "cat" in payload and db:
             # 类别分组节点: 只显示该类数据
+            self._show_list_page()
             self._show_database(db, category=payload["cat"])
             return
         if isinstance(db, dict):
             # 数据库节点(本地连接 / 服务器分组/连接): 本地显示全部, 服务器显示摘要
+            self._show_list_page()
             if db.get("kind") == "server":
                 self._show_server_connection(db)
                 return
             self._show_database(db)
+
+    # ------------------------------------------------------------ 右栏详情页
+
+    def _show_list_page(self) -> None:
+        self._current_detail = None
+        stack = getattr(self, "stack", None)
+        if stack is not None:
+            stack.setCurrentIndex(0)
+
+    def _show_detail(self, db: dict, category: str, name: str) -> None:
+        if category not in ("spatial", "dict"):
+            self._show_list_page()
+            return
+        live = self._cache_db(db) or db
+        self._current_detail = (live, category, name)
+        self.detail_page.show_table(live, category, name)
+        self.stack.setCurrentWidget(self.detail_page)
+
+    def _before_table_change(self, db: dict, category: str, name: str) -> bool:
+        callback = self._on_before_table_change
+        if callback is None:
+            return True
+        try:
+            return bool(callback(db, category, name))
+        except Exception:  # noqa: BLE001 —— 回调失败按「不允许改」处理
+            logger.exception("字段结构变更前回调失败")
+            return False
+
+    def _on_dict_domains_deleted_signal(
+        self, db: dict, category: str, table: str, domains: object
+    ) -> None:
+        """字典域整域删除 → 交回调处理（清已打开图层上的属性）。"""
+        callback = self._on_dict_domains_deleted
+        if callback is None:
+            return
+        try:
+            callback(db, category, table, list(domains or []))
+        except Exception:  # noqa: BLE001 —— 槽内异常会 native 崩溃
+            logger.exception("字典域删除后的回调失败")
+
+    def _on_detail_data_changed(self, category: str, name: str) -> None:
+        detail = self._current_detail
+        if detail is None:
+            return
+        db, _cat, _table = detail
+        live = self._cache_db(db)
+        if live is None:
+            return
+        self._refresh_db_cache(live)
+        self._show_database(live, category=category)
+        self._rebuild_tree_for(live)
+        self._show_detail(live, category, name)
 
     # ------------------------------------------------------------ 右键菜单
 
@@ -1027,6 +1150,23 @@ class DataManageDock(QDockWidget):
                     lambda _checked=False, s=scope: self._on_add_connection_clicked(s),
                 )
             )
+        elif kind == "dict" and db is not None:
+            head.append(
+                (
+                    "添加字典表",
+                    "plus_circle",
+                    lambda: self._add_dict_table(db),
+                )
+            )
+            has_dicts = bool((db.get("categories") or {}).get("dict"))
+            head.append(
+                (
+                    "移除未使用字典",
+                    "trash",
+                    lambda: self._request_remove_unused_dicts(db),
+                    has_dicts,
+                )
+            )
         elif kind == "leaf" and db is not None:
             # 注册数据叶子: 加到地图 / 删这张表 / 导入数据 / 导出数据
             name = str(payload.get("name") or "")
@@ -1041,6 +1181,25 @@ class DataManageDock(QDockWidget):
                             "加到地图上展示", self._on_add_layer, db, cat, name
                         ),
                     )
+                )
+            if cat == "spatial":
+                head.append(
+                    (
+                        "导出字段结构(XLS)",
+                        "export_csv",
+                        lambda: self._export_field_structure(db, name),
+                    )
+                )
+                head.append(
+                    (
+                        "检查字段结构",
+                        "quality",
+                        lambda: self._check_field_structure(db, name),
+                    )
+                )
+            if cat in ("spatial", "dict"):
+                head.append(
+                    ("编辑名称", "edit_settings", lambda: self._rename_leaf(db, cat, name))
                 )
             head.append(
                 ("删除图层", "trash", lambda: self._request_delete(db, cat, name))
@@ -1082,8 +1241,11 @@ class DataManageDock(QDockWidget):
                 )
 
         menu = QMenu(self)
-        for label, icon_key, slot in head:
+        for entry in head:
+            label, icon_key, slot = entry[:3]
+            enabled = bool(entry[3]) if len(entry) > 3 else True
             act = QAction(tool_icons.icon(icon_key, theme.menu_text), label, menu)
+            act.setEnabled(enabled)
             act.triggered.connect(slot)
             menu.addAction(act)
         if head:
@@ -1106,6 +1268,173 @@ class DataManageDock(QDockWidget):
             self._on_delete_layer(db, category, name)
         except Exception as exc:  # 槽内异常会 native 崩溃
             logger.error("数据管理[删除图层]回调异常: %s", exc, exc_info=True)
+
+    def _rename_leaf(self, db: dict, category: str, name: str) -> None:
+        """叶子右键「编辑名称」：改库内表名，并让已打开图层 / 详情页跟上。"""
+        new_name, ok = QInputDialog.getText(
+            self, "编辑名称", "请输入新的表名：", text=name
+        )
+        if not ok:
+            return
+        new_name = str(new_name).strip()
+        if not new_name or new_name == name:
+            return
+        live = self._cache_db(db) or db
+        if self._on_rename_table is not None:
+            try:
+                ok, error = self._on_rename_table(live, category, name, new_name)
+            except Exception as exc:  # noqa: BLE001 —— 槽内异常会 native 崩溃
+                logger.error("数据管理[编辑名称]回调异常: %s", exc, exc_info=True)
+                ok, error = False, str(exc)
+        else:
+            from app.core.domain.local_table_edit import (
+                LocalTableError,
+                rename_local_table,
+            )
+
+            try:
+                rename_local_table(str(live.get("path") or ""), name, new_name)
+                ok, error = True, ""
+            except LocalTableError as exc:
+                ok, error = False, str(exc)
+        if not ok:
+            QMessageBox.warning(self, "编辑名称", error or "重命名失败")
+            return
+        self._current_detail = None
+        self.refresh_database(live)
+        self._show_detail(live, category, new_name)
+        self._select_leaf(live, category, new_name)
+
+    def _select_leaf(self, db: dict, category: str, name: str) -> None:
+        """重建树后把刚改名的叶子重新选中。"""
+        stack = [
+            self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount())
+        ]
+        while stack:
+            item = stack.pop()
+            payload = item.data(0, _ROLE)
+            if (
+                isinstance(payload, dict)
+                and payload.get("cat") == category
+                and payload.get("name") == name
+                and self._same_db(payload.get("db"), db)
+            ):
+                self.tree.setCurrentItem(item)
+                self.tree.scrollToItem(item)
+                return
+            stack.extend(item.child(i) for i in range(item.childCount()))
+
+    def _on_add_dict_table_clicked(self) -> None:
+        db = self._current_db
+        if db is not None and self._current_category == "dict":
+            self._add_dict_table(db)
+
+    def _add_dict_table(self, db: dict) -> None:
+        """在当前本地库新建字典表（可复制应用级字典表的整表内容）。"""
+        live = self._cache_db(db) or db
+        path = str(live.get("path") or "")
+        if not path:
+            QMessageBox.warning(self, "添加字典表", "缺少库文件路径")
+            return
+        from app.core.domain.create_data.dict_tables import (
+            DictTableError,
+            create_local_dict_table,
+        )
+        from app.core.domain.dict_manage import DictService
+        from app.core.domain.import_layer import unique_table_name
+        from app.ui.dialogs.add_local_dict import AddLocalDictDialog
+
+        try:
+            service = DictService()
+            categories = [item.name for item in service.list_categories()]
+        except Exception:  # noqa: BLE001 —— 字典管理读不到时只允许建空表
+            service = None
+            categories = []
+        suggested = unique_table_name(path, "字典表")
+        dialog = AddLocalDictDialog(
+            self, suggested_name=suggested, categories=categories
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            dialog.deleteLater()
+            return
+        name = dialog.table_name()
+        source = dialog.source_category()
+        dialog.deleteLater()
+        try:
+            count = create_local_dict_table(
+                path, name, source_category=source, dict_service=service
+            )
+        except DictTableError as exc:
+            QMessageBox.warning(self, "添加字典表", str(exc))
+            return
+        self.refresh_database(live)
+        self._select_leaf(live, "dict", name)
+        self._show_detail(live, "dict", name)
+        QMessageBox.information(
+            self,
+            "添加字典表",
+            f"已创建字典表「{name}」" + (f"，复制 {count} 条字典项" if count else "（空表）"),
+        )
+
+    def _export_field_structure(self, db: dict, name: str) -> None:
+        """叶子右键「导出字段结构(XLS)」：导出 9 列模板格式的 .xls。"""
+        live = self._cache_db(db) or db
+        path = str(live.get("path") or "")
+        target = save_file(
+            self,
+            title="导出字段结构",
+            init_path=str(Path.home() / f"{name}_字段结构.xls"),
+            filter_="Excel 97-2003 工作簿 (*.xls);;所有文件 (*)",
+        )
+        if not target:
+            return
+        from app.core.domain.field_structure import (
+            FieldStructureError,
+            export_field_structure_xls,
+        )
+
+        try:
+            written, count = export_field_structure_xls(target, path, name)
+        except FieldStructureError as exc:
+            QMessageBox.warning(self, "导出字段结构", str(exc))
+            return
+        QMessageBox.information(
+            self,
+            "导出字段结构",
+            f"已导出 {count} 个字段到：\n{written}",
+        )
+
+    def _check_field_structure(self, db: dict, name: str) -> None:
+        """叶子右键「检查字段结构」：检查字段规范 / 字典缺失 / 字典值是否匹配。"""
+        live = self._cache_db(db) or db
+        path = str(live.get("path") or "")
+        from app.core.domain.dict_manage import DictService
+        from app.core.domain.field_structure import check_field_structure
+
+        try:
+            issues = check_field_structure(path, name, dict_service=DictService())
+        except Exception as exc:  # noqa: BLE001 —— 槽内异常会 native 崩溃
+            logger.error("字段结构检查失败：%s", exc, exc_info=True)
+            QMessageBox.warning(self, "检查字段结构", f"检查失败：{exc}")
+            return
+        if not issues:
+            QMessageBox.information(self, "检查字段结构", "字段结构检查通过")
+            return
+        from app.ui.dialogs.field_check_dialog import FieldCheckDialog
+
+        dialog = FieldCheckDialog(self, name, issues)
+        dialog.exec()
+        dialog.deleteLater()
+
+    def _request_remove_unused_dicts(self, db: dict) -> None:
+        """字典分组右键「移除未使用字典」：交回调（确认 + 删表由 MainWindow 做）。"""
+        if self._on_remove_unused_dicts is None:
+            logger.debug("数据管理[移除未使用字典]: 未接回调, %s", db.get("name"))
+            return
+        try:
+            self._on_remove_unused_dicts(db)
+        except Exception as exc:  # noqa: BLE001 —— 槽内异常会 native 崩溃
+            logger.error("数据管理[移除未使用字典]回调异常: %s", exc, exc_info=True)
 
     def _request_remove_all_layers(self, db: dict) -> None:
         """菜单「移除全部图层」: 交回调(MainWindow 确认后批量删库内表 + 工程图层)。
@@ -1354,4 +1683,19 @@ class DataManageDock(QDockWidget):
         logger.debug("数据管理[%s]: 功能待接入", label)
 
 
-__all__ = ["DataManageDock"]
+class DataManageDialog(BaseDialog):
+    """数据管理对话框（替代原来的底部 Dock，操作方式与「创建数据」一致）。"""
+
+    def __init__(self, parent=None, **kwargs) -> None:
+        # 非模态对话框：最小化走 BaseDialog 的「画布底部小条」（与属性录入一致）
+        super().__init__(parent, title="数据管理", show_min_button=True)
+        self.setMinimumSize(0, 0)
+        self.resize(1280, 820)
+        self.panel = DataManageDock(self, **kwargs)
+        layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.addWidget(self.panel, 1)
+        self.setLayout(layout)
+
+
+__all__ = ["DataManageDialog", "DataManageDock"]

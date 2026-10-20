@@ -23,9 +23,41 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING
 
+from app.core.domain.create_data import (
+    FIELD_TYPES,
+    MAX_FIELD_LENGTH,
+    MAX_FIELD_PRECISION,
+    TEMPLATE_EXTENSION,
+    TEMPLATE_FILTER,
+    TEMPLATE_READ_FILTER,
+    FieldSpec,
+    FieldTemplateError,
+    fields_from_layer,
+    read_template,
+    to_int,
+    write_template,
+    xlsx_available,
+)
+from app.core.domain.create_data.dict_tables import (
+    DictPlan,
+    DictSource,
+    source_dict_tables,
+)
+from app.core.util.sublayers import (
+    VECTOR_FILE_FILTER,
+    Sublayer,
+    geometry_kind_of_layer,
+    list_sublayers,
+    open_sublayer,
+)
+from app.infra.logging import get_logger
+from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.widgets import CenteredCheckDelegate, open_file_dir, save_file
+from app.ui.dialogs.dict_pick_dialog import DictPickDialog
 from qgis.PyQt.QtCore import Qt, pyqtSignal
 from qgis.PyQt.QtGui import QBrush
 from qgis.PyQt.QtWidgets import (
@@ -48,32 +80,6 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-
-from app.core.domain.create_data import (
-    FIELD_TYPES,
-    MAX_FIELD_LENGTH,
-    MAX_FIELD_PRECISION,
-    TEMPLATE_EXTENSION,
-    TEMPLATE_FILTER,
-    TEMPLATE_READ_FILTER,
-    FieldSpec,
-    FieldTemplateError,
-    fields_from_layer,
-    read_template,
-    to_int,
-    write_template,
-    xlsx_available,
-)
-from app.core.util.sublayers import (
-    VECTOR_FILE_FILTER,
-    Sublayer,
-    geometry_kind_of_layer,
-    list_sublayers,
-    open_sublayer,
-)
-from app.infra.logging import get_logger
-from app.ui.common.base_dialog import BaseDialog
-from app.ui.common.widgets import CenteredCheckDelegate, open_file_dir, save_file
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -118,6 +124,9 @@ _TEXT_COLUMNS: tuple[int, ...] = (
     _COL_DICT_DOMAIN,
 )
 
+#: 「字段真实顺序」存在字段名单元格上；表头排序只改显示，不改新建图层的字段顺序
+_ROLE_ORDER = int(Qt.ItemDataRole.UserRole) + 30
+
 #: 勾选列（是否可为空 / 是否可见）
 _CHECK_COLUMNS: tuple[int, ...] = (_COL_NULLABLE, _COL_VISIBLE)
 
@@ -144,7 +153,10 @@ _ALIAS_MIN_WIDTH = 150
 _EMPTY_TEXT = '暂无字段，可通过"导入"或双击下方表格添加'
 
 #: 底部操作提示（逐字照抄原型）
-_HINT_TEXT = "双击单元格编辑 · 回车/失焦确认 · 方向键切换 · Delete 删除选中行 · 右键菜单删除"
+_HINT_TEXT = (
+    "双击单元格编辑 · 双击「字典表 / 字典域」选择字典 · 回车/失焦确认 · "
+    "方向键切换 · Delete 删除选中行 · 右键菜单删除"
+)
 
 #: 几何类别的中文名（按类型筛数据源的提示用）
 _KIND_LABELS: dict[str, str] = {"point": "点", "line": "线", "polygon": "面"}
@@ -154,9 +166,9 @@ class _FieldsTable(QTableWidget):
     """字段表：只多一件事 —— Delete 键删行（其余导航 / 编辑交给 QTableWidget 原生行为）。"""
 
     #: 用户按了 Delete
-    deletePressed = pyqtSignal()
+    deletePressed = pyqtSignal()  # noqa: N815 —— Qt 信号命名
 
-    def keyPressEvent(self, event) -> None:  # noqa: N802 —— Qt 虚函数
+    def keyPressEvent(self, event) -> None:
         if event.key() == Qt.Key.Key_Delete:
             self.deletePressed.emit()
             return
@@ -167,9 +179,9 @@ class FieldsStepPage(QWidget):
     """第二步整页：字段结构表格 + 工具条 + 结构来源。"""
 
     #: 字段表内容变了（对话框据此刷新底部提示）
-    fieldsChanged = pyqtSignal()
+    fieldsChanged = pyqtSignal()  # noqa: N815
     #: 要显示给用户的一句话（对话框负责展示；本页不自己弹窗/发消息条）
-    statusMessage = pyqtSignal(str)
+    statusMessage = pyqtSignal(str)  # noqa: N815
 
     def __init__(
         self,
@@ -177,6 +189,7 @@ class FieldsStepPage(QWidget):
         *,
         vector_layers: Sequence[object] = (),
         default_dir: str = "",
+        target_db_path: Callable[[], str] | None = None,
     ) -> None:
         """
         Args:
@@ -184,6 +197,9 @@ class FieldsStepPage(QWidget):
             vector_layers: 工程里已加载的矢量图层（「结构来源 → 外部数据集」用；
                 由对话框从主窗口注入，本页不自己去问 ``QgsProject``）。
             default_dir: 「生成空模板文件」保存对话框的起始目录。
+            target_db_path: 当前创建目标（库文件 / 待建文件）路径的取值函数。
+                字典挂接只列**该库里的字典表**，所以每次打开选择器现取一遍
+                （用户在向导里切目标库后不用重建本页）。
         """
         super().__init__(parent)
         #: 空表时表格里那一行是占位行（不是字段）—— ``fields()`` 要把它跳过
@@ -192,6 +208,9 @@ class FieldsStepPage(QWidget):
         self._loading = False
         self._vector_layers = list(vector_layers)
         self._default_dir = default_dir
+        self._target_db_path = target_db_path
+        #: 外部数据集源库里匹配到的 dict 表（创建时一并落进目标库）
+        self._source_dicts: list[DictSource] = []
         self._build()
 
     # --------------------------------------------------------------- 构建
@@ -252,8 +271,7 @@ class FieldsStepPage(QWidget):
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table.setEditTriggers(
-            QAbstractItemView.EditTrigger.DoubleClicked
-            | QAbstractItemView.EditTrigger.EditKeyPressed
+            QAbstractItemView.EditTrigger.EditKeyPressed
         )
         self.table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._on_context_menu)
@@ -268,6 +286,13 @@ class FieldsStepPage(QWidget):
         header.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         header.setMinimumSectionSize(32)
         header.setStretchLastSection(False)
+        # 点击表头临时排序（只改显示；fields() 仍按隐藏的真实顺序返回）
+        header.setSortIndicatorShown(True)
+        header.setSectionsClickable(True)
+        header.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
+        header.sectionClicked.connect(self._on_header_sort)
+        self._sort_column = -1
+        self._sort_ascending = True
         for column, width in _COLUMN_WIDTHS.items():
             self.table.setColumnWidth(column, width)
         header.setSectionResizeMode(_COL_ALIAS, QHeaderView.ResizeMode.Stretch)
@@ -319,10 +344,103 @@ class FieldsStepPage(QWidget):
     # --------------------------------------------------------------- 取值 / 回填
 
     def fields(self) -> list[FieldSpec]:
-        """当前表格里的字段结构（空表返回空表）。"""
+        """当前表格里的字段结构（空表返回空表）。
+
+        表头排序只改**显示顺序**；这里按隐藏的「真实顺序」返回，保证新建图层的
+        字段顺序不受临时排序影响。
+        """
         if self._placeholder:
             return []
-        return [self._spec_at(row) for row in range(self.table.rowCount())]
+        entries = [
+            (self._order_at(row), self._spec_at(row))
+            for row in range(self.table.rowCount())
+        ]
+        entries.sort(key=lambda pair: pair[0])
+        return [spec for _order, spec in entries]
+
+    def _order_at(self, row: int) -> int:
+        item = self.table.item(row, _COL_NAME)
+        if item is None:
+            return row
+        value = item.data(_ROLE_ORDER)
+        return int(value) if value is not None else row
+
+    def _on_header_sort(self, column: int) -> None:
+        """表头点击：按该列临时排序（只改显示，fields() 的真实顺序不变）。"""
+        if self._placeholder or column < 0 or column >= len(_HEADERS):
+            return
+        if column == _COL_MARK:
+            return
+        if self._sort_column == column:
+            self._sort_ascending = not self._sort_ascending
+        else:
+            self._sort_column = column
+            self._sort_ascending = True
+        entries = [
+            (self._order_at(row), self._spec_at(row))
+            for row in range(self.table.rowCount())
+        ]
+        entries.sort(
+            key=lambda pair: self._sort_spec_key(pair[1], column),
+            reverse=not self._sort_ascending,
+        )
+        self._loading = True
+        try:
+            self.table.clearSpans()
+            self.table.setRowCount(0)
+            self.table.setRowCount(len(entries))
+            for row, (order, spec) in enumerate(entries):
+                self._fill_row(row, spec, order=order)
+        finally:
+            self._loading = False
+        self.table.horizontalHeader().setSortIndicator(
+            column,
+            Qt.SortOrder.AscendingOrder
+            if self._sort_ascending
+            else Qt.SortOrder.DescendingOrder,
+        )
+        self._refresh_marks()
+        self._apply_filter()
+
+    @staticmethod
+    def _sort_spec_key(spec: FieldSpec, column: int):
+        if column == _COL_NAME:
+            return spec.name.casefold()
+        if column == _COL_ALIAS:
+            return spec.alias.casefold()
+        if column == _COL_TYPE:
+            return next(
+                (item.label for item in FIELD_TYPES if item.key == spec.type_key),
+                spec.type_key,
+            ).casefold()
+        if column == _COL_LENGTH:
+            return spec.length
+        if column == _COL_PRECISION:
+            return spec.precision
+        if column == _COL_DICT_TABLE:
+            return spec.dict_table.casefold()
+        if column == _COL_DICT_DOMAIN:
+            return spec.dict_domain.casefold()
+        if column == _COL_NULLABLE:
+            return spec.nullable
+        if column == _COL_VISIBLE:
+            return spec.visible
+        return ""
+
+    def dict_plan(self) -> DictPlan:
+        """字段表涉及的字典需求：应用级 ``(字典表, 字典域)`` + 外部源库 dict 表。"""
+        fields = self.fields()
+        domains = frozenset(
+            (field.dict_table.strip(), field.dict_domain.strip())
+            for field in fields
+            if field.dict_table.strip() and field.dict_domain.strip()
+        )
+        sources = tuple(
+            source
+            for source in self._source_dicts
+            if (source.category.strip(), source.domain.strip()) in domains
+        )
+        return DictPlan(domains=domains, sources=sources)
 
     def set_fields(self, fields: Sequence[FieldSpec]) -> None:
         """整表替换（导入 / 删除 / 清空都走这里）。"""
@@ -337,9 +455,15 @@ class FieldsStepPage(QWidget):
             else:
                 self.table.setRowCount(len(fields))
                 for row, spec in enumerate(fields):
-                    self._fill_row(row, spec)
+                    self._fill_row(row, spec, order=row)
         finally:
             self._loading = False
+        # 结构变了：回到真实顺序（临时排序只影响查看）
+        self._sort_column = -1
+        self._sort_ascending = True
+        self.table.horizontalHeader().setSortIndicator(
+            -1, Qt.SortOrder.AscendingOrder
+        )
         self._apply_filter()
         self.fieldsChanged.emit()
 
@@ -357,7 +481,7 @@ class FieldsStepPage(QWidget):
         self.table.setItem(0, _COL_MARK, item)
         self.table.setSpan(0, _COL_MARK, 1, len(_HEADERS))
 
-    def _fill_row(self, row: int, spec: FieldSpec) -> None:
+    def _fill_row(self, row: int, spec: FieldSpec, *, order: int | None = None) -> None:
         """把一条 :class:`FieldSpec` 填进第 ``row`` 行。"""
         mark = QTableWidgetItem("")
         mark.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
@@ -371,7 +495,15 @@ class FieldsStepPage(QWidget):
             (_COL_DICT_TABLE, spec.dict_table),
             (_COL_DICT_DOMAIN, spec.dict_domain),
         ):
-            self.table.setItem(row, column, QTableWidgetItem(text))
+            item = QTableWidgetItem(text)
+            if column in (_COL_DICT_TABLE, _COL_DICT_DOMAIN):
+                # 字典两列只能经选择器写入，别让 F2 / 编辑框乱填
+                item.setFlags(
+                    Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                )
+            if column == _COL_NAME:
+                item.setData(_ROLE_ORDER, row if order is None else order)
+            self.table.setItem(row, column, item)
 
         combo = QComboBox()
         for field_type in FIELD_TYPES:
@@ -449,6 +581,17 @@ class FieldsStepPage(QWidget):
                     precision_item.setText(str(filled.precision) if filled.precision else "")
             finally:
                 self._loading = previous
+        # 类型改成非「字典」时，字典关联一并清掉，避免留下对不上的元数据
+        if spec.type_key != "dict":
+            previous = self._loading
+            self._loading = True
+            try:
+                for column in (_COL_DICT_TABLE, _COL_DICT_DOMAIN):
+                    item = self.table.item(row, column)
+                    if item is not None:
+                        item.setText("")
+            finally:
+                self._loading = previous
         self.fieldsChanged.emit()
 
     def _append_field(self) -> None:
@@ -472,9 +615,107 @@ class FieldsStepPage(QWidget):
         self.table.editItem(item)
 
     def _on_double_clicked(self, index) -> None:
-        """双击空表那行 = 加一个字段（原型：「双击下方表格添加」）。"""
+        """双击：空表行 = 加字段；字典列 = 选择字典；其余文本列 = 内联编辑。"""
         if self._placeholder:
             self._append_field()
+            return
+        row, column = index.row(), index.column()
+        if column in (_COL_DICT_TABLE, _COL_DICT_DOMAIN):
+            self._pick_dict(row)
+            return
+        if column in _CHECK_COLUMNS:
+            item = self.table.item(row, column)
+            if item is not None:
+                item.setCheckState(
+                    Qt.CheckState.Unchecked
+                    if item.checkState() == Qt.CheckState.Checked
+                    else Qt.CheckState.Checked
+                )
+            return
+        item = self.table.item(row, column)
+        if item is not None and column in _TEXT_COLUMNS:
+            self.table.editItem(item)
+
+    def _target_path(self) -> str:
+        """当前创建目标库 / 文件的路径（没有可挂字典的库时返回空串）。"""
+        if self._target_db_path is None:
+            return ""
+        try:
+            return str(self._target_db_path() or "")
+        except Exception:  # noqa: BLE001 —— 取路径失败按"没有库"处理
+            return ""
+
+    def _pick_dict(self, row: int) -> None:
+        """打开字典选择器；确定后同时回填「字典表 / 字典域」并把类型切成字典。
+
+        选择器**只列目标库里的字典表**（见 :class:`DictPickDialog`）；当前库
+        还没有字典时，可以在选择器里现场创建 / 从系统字典或外部文件导入。
+        """
+        table_item = self.table.item(row, _COL_DICT_TABLE)
+        domain_item = self.table.item(row, _COL_DICT_DOMAIN)
+        name_item = self.table.item(row, _COL_NAME)
+        alias_item = self.table.item(row, _COL_ALIAS)
+        current_table = table_item.text().strip() if table_item is not None else ""
+        current_domain = domain_item.text().strip() if domain_item is not None else ""
+        dialog = DictPickDialog(
+            self,
+            category=current_table,
+            domain=current_domain,
+            field_name=name_item.text().strip() if name_item is not None else "",
+            field_alias=alias_item.text().strip() if alias_item is not None else "",
+            local_db_path=self._target_path(),
+        )
+        accepted = dialog.exec()
+        selected = dialog.selected() if accepted else None
+        dialog.deleteLater()
+        if not accepted:
+            return
+        if selected is None:
+            self._set_dict_cells(row, "", "")
+            self.statusMessage.emit("已清空该字段的字典关联")
+            return
+        category, domain = selected
+        self._set_dict_cells(row, category, domain)
+        self.statusMessage.emit(f"已选择字典：{category} / {domain}")
+
+    def _clear_dict(self, row: int) -> None:
+        self._set_dict_cells(row, "", "")
+        self.statusMessage.emit("已清空该字段的字典关联")
+
+    def _set_dict_cells(self, row: int, category: str, domain: str) -> None:
+        """程序化回填字典两列（期间不触发 itemChanged 的重复校验）。"""
+        previous = self._loading
+        self._loading = True
+        try:
+            for column, text in (
+                (_COL_DICT_TABLE, category),
+                (_COL_DICT_DOMAIN, domain),
+            ):
+                item = self.table.item(row, column)
+                if item is not None:
+                    item.setText(text)
+            if not category and not domain:
+                combo = self.table.cellWidget(row, _COL_TYPE)
+                if isinstance(combo, QComboBox) and combo.currentData() == "dict":
+                    text_index = combo.findData("text")
+                    if text_index >= 0:
+                        combo.setCurrentIndex(text_index)
+            if category and domain:
+                combo = self.table.cellWidget(row, _COL_TYPE)
+                if isinstance(combo, QComboBox):
+                    index = combo.findData("dict")
+                    if index >= 0:
+                        combo.setCurrentIndex(index)
+                length_item = self.table.item(row, _COL_LENGTH)
+                if length_item is not None and not length_item.text().strip():
+                    length_item.setText("20")
+                precision_item = self.table.item(row, _COL_PRECISION)
+                if precision_item is not None and not precision_item.text().strip():
+                    precision_item.setText("0")
+        finally:
+            self._loading = previous
+        self._refresh_marks()
+        self.fieldsChanged.emit()
 
     def _on_context_menu(self, pos) -> None:
         """右键菜单（原型：右键菜单删除）。"""
@@ -486,6 +727,9 @@ class FieldsStepPage(QWidget):
             menu.addAction("在前面插入一行", lambda: self._insert_row(row))
             menu.addAction("在后面插入一行", lambda: self._insert_row(row + 1))
             menu.addSeparator()
+            menu.addAction("选择字典…", lambda: self._pick_dict(row))
+            menu.addAction("清空字典", lambda: self._clear_dict(row))
+            menu.addSeparator()
             menu.addAction("删除本行", lambda: self._delete_rows({row}))
             menu.addAction("删除选中字段", self.delete_selected)
             menu.addSeparator()
@@ -495,9 +739,24 @@ class FieldsStepPage(QWidget):
         menu.deleteLater()
 
     def _insert_row(self, row: int) -> None:
-        """在第 ``row`` 行前插一个空字段。"""
-        fields = self.fields()
-        index = max(0, min(row, len(fields)))
+        """在第 ``row`` 行前插一个空字段（排序状态下按真实顺序定位）。"""
+        entries = sorted(
+            (self._order_at(index), self._spec_at(index))
+            for index in range(self.table.rowCount())
+        )
+        fields = [spec for _order, spec in entries]
+        if 0 <= row < self.table.rowCount():
+            target_order = self._order_at(row)
+            index = next(
+                (
+                    position
+                    for position, (order, _spec) in enumerate(entries)
+                    if order == target_order
+                ),
+                len(fields),
+            )
+        else:
+            index = len(fields)
         fields.insert(index, FieldSpec(name="", type_key="text", length=50, precision=0))
         self.set_fields(fields)
         self._reveal_row(index)
@@ -514,9 +773,20 @@ class FieldsStepPage(QWidget):
         self._delete_rows(rows)
 
     def _delete_rows(self, rows: set[int]) -> None:
-        kept = [spec for index, spec in enumerate(self.fields()) if index not in rows]
+        delete_orders = {
+            self._order_at(row)
+            for row in rows
+            if 0 <= row < self.table.rowCount()
+        }
+        entries = sorted(
+            (self._order_at(index), self._spec_at(index))
+            for index in range(self.table.rowCount())
+        )
+        kept = [
+            spec for order, spec in entries if order not in delete_orders
+        ]
         self.set_fields(kept)
-        self.statusMessage.emit(f"已删除 {len(rows)} 行字段")
+        self.statusMessage.emit(f"已删除 {len(delete_orders)} 行字段")
 
     def _refresh_marks(self) -> None:
         """把「选中标记」列画成当前选中行（原型第 0 列就是这个作用）。
@@ -600,6 +870,7 @@ class FieldsStepPage(QWidget):
             self.statusMessage.emit(str(exc))
             return
         self.set_fields(fields)
+        self._source_dicts.clear()
         self.statusMessage.emit(f"已从模板导入 {len(fields)} 个字段：{path}")
 
     def _import_from_dataset(self) -> None:
@@ -615,8 +886,16 @@ class FieldsStepPage(QWidget):
         if layer is None:
             return
         fields = fields_from_layer(layer)
+        self._source_dicts = source_dict_tables(layer, fields)
         self.set_fields(fields)
-        self.statusMessage.emit(f"已从「{layer.name()}」复制 {len(fields)} 个字段的结构")
+        extra = (
+            f"，并识别到 {len(self._source_dicts)} 个源库字典表"
+            if self._source_dicts
+            else ""
+        )
+        self.statusMessage.emit(
+            f"已从「{layer.name()}」复制 {len(fields)} 个字段的结构{extra}"
+        )
 
     def _on_generate_template(self) -> None:
         """「生成空模板文件」：导出一份只有表头的 .xlsx（用户填完再导入回来）。"""

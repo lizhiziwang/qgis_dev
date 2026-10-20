@@ -387,6 +387,8 @@ class WindowShellMixin:
         self.layer_dock.layer_clicked.connect(self._on_layer_clicked_in_dock)
         # 行尾「标注」开关（圆点 + 标注二字）：开关该图层标注（独立开关，不互斥）
         self.layer_dock.label_toggle_requested.connect(self._on_layer_label_toggle)
+        # 图层数据源丢失：点名称前的红色感叹号重设数据源
+        self.layer_dock.source_repair_requested.connect(self._on_repair_layer_source)
         # 头部工具条：渲染设置（自建对话框 → 渲染 tab）/ 添加图层组 / 删除 / 全部展开 / 全部折叠 / 上移 / 下移
         self.layer_dock.render_tab_requested.connect(self._on_header_render_tab)
         self.layer_dock.add_layer_requested.connect(self._on_add_layer)

@@ -489,12 +489,51 @@ def encode_wkt(wkt: str, srs_id: int) -> tuple[bytes, str]:
 # ----------------------------------------------------------------------
 
 
+def wkb_geometry_kind(wkb: bytes) -> str | None:
+    """从 WKB 字节头读出规范几何类型名（``POINT`` / ``MULTIPOLYGON``…）。
+
+    识别 ISO WKB 的 Z / M / ZM 类型码（1001 / 2001 / 3001）与 EWKB 的
+    Z/M 标志位；认不出（曲线 / GeometryCollection / 坏数据）返回 ``None``。
+    """
+    if not isinstance(wkb, (bytes, bytearray)) or len(wkb) < 5:
+        return None
+    order = bytes(wkb[:1])
+    if order not in (b"\x00", b"\x01"):
+        return None
+    code = struct.unpack_from(">I" if order == b"\x00" else "<I", bytes(wkb), 1)[0]
+    code &= 0x0FFFFFFF  # EWKB 的 Z/M/SRID 标志位
+    if code >= 1000:
+        code %= 1000  # ISO WKB: 1000+Z / 2000+M / 3000+ZM
+    return _CODE_TO_GEOM.get(code)
+
+
+def encode_wkb(wkb: bytes, srs_id: int) -> tuple[bytes, str]:
+    """WKB 字节 → ``(GPKG BLOB, 规范类型名)``。
+
+    导入大图层时比 "QgsGeometry → WKT 文本 → 再解析" 快一个数量级：
+    坐标只在 QGIS 里序列化一次，这里只补 GPKG 头与 envelope。
+    """
+    if not isinstance(wkb, (bytes, bytearray)) or len(wkb) < 5:
+        raise GpkgGeomError("空 / 非法 WKB")
+    kind = wkb_geometry_kind(wkb)
+    if kind is None:
+        raise GpkgGeomError(f"不支持的 WKB 几何类型: {bytes(wkb[:5])!r}")
+    data = bytes(wkb)
+    if data[:1] == b"\x00":
+        # 大端 WKB：envelope 解析器只认小端，宁可不带 envelope（flags=0x01）
+        # 也不能写错坐标范围（GPKG 读取方会按错误包络建索引）。
+        return b"GP" + b"\x00" + b"\x01" + struct.pack("<i", int(srs_id)) + data, kind
+    return _blob(srs_id, data), kind
+
+
 def encode_geometry(value: Any, srs_id: int) -> tuple[bytes, str] | None:
-    """把行内几何值统一编码: str 按 WKT, dict 按 ArcGIS JSON;None 原样返回。"""
+    """把行内几何值统一编码: str 按 WKT, dict 按 ArcGIS JSON, bytes 按 WKB。"""
     if value is None:
         return None
     if isinstance(value, str):
         return encode_wkt(value, srs_id)
+    if isinstance(value, (bytes, bytearray)):
+        return encode_wkb(bytes(value), srs_id)
     if isinstance(value, dict):
         return encode_esri_json(value, srs_id)
     raise GpkgGeomError(f"几何值类型不支持: {type(value).__name__}")
