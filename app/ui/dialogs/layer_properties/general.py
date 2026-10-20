@@ -13,14 +13,13 @@ from __future__ import annotations
 
 import os
 
-from qgis.core import QgsRasterLayer, QgsVectorLayer
+from qgis.core import QgsProject, QgsRasterLayer, QgsVectorLayer
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
-    QDialogButtonBox,
     QFileDialog,
     QFormLayout,
     QGroupBox,
@@ -29,14 +28,16 @@ from qgis.PyQt.QtWidgets import (
     QLineEdit,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
 
 from app.core.util.local_layer_loader import layer_source_container, layer_source_table
 from app.infra.logging import get_logger
-from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.slider import FlatSlider as QSlider
+from app.ui.dialogs.create_data_dialog import CrsComboBox
+from app.ui.dialogs.crs_pick_dialog import CrsPickDialog
 from app.ui.dialogs.layer_properties.base import LayerPropertyTab
 
 logger = get_logger(__name__)
@@ -52,53 +53,13 @@ _SOURCE_FILTER = (
 )
 
 
-class CrsSelectDialog(BaseDialog):
-    """坐标系选择小对话框。
-
-    不用 QGIS 原生的 ``QgsProjectionSelectionDialog``（自带一套不跟随本应用主题
-    的窗口 chrome），而是把已验证可用的 ``QgsProjectionSelectionWidget``
-    （``app/ui/dialogs/reproject.py`` 在用）包进 :class:`BaseDialog`，这样无边框
-    标题栏和配色都跟应用一致。
-    """
-
-    def __init__(self, crs=None, parent=None) -> None:
-        super().__init__(parent, "选择坐标系统")
-        self.setMinimumSize(0, 0)
-        self.resize(520, 360)
-
-        from qgis.gui import QgsProjectionSelectionWidget
-
-        layout = QVBoxLayout()
-        self.crs_widget = QgsProjectionSelectionWidget()
-        if crs is not None and crs.isValid():
-            self.crs_widget.setCrs(crs)
-        layout.addWidget(self.crs_widget)
-        layout.addStretch(1)
-
-        bb = QDialogButtonBox(
-            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
-            Qt.Orientation.Horizontal,
-        )
-        bb.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
-        bb.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
-        bb.accepted.connect(self.accept)
-        bb.rejected.connect(self.reject)
-        layout.addWidget(bb)
-        self.setLayout(layout)
-
-    def selected_crs(self):
-        return self.crs_widget.crs()
-
-
 class GeneralTab(LayerPropertyTab):
     """图层属性「常规」页。"""
 
     def __init__(self, layer=None, parent=None) -> None:
         super().__init__(parent)
         self._layer = layer
-        #: 「设置坐标系统」暂存值（None = 用户没改），apply 时才写回图层
-        self._pending_crs = None
-        #: 「设置数据源」暂存值 (uri, provider)，同上
+        #: 「设置数据源」暂存值 (uri, provider)，apply 时才写回图层
         self._pending_source = None
         self._build()
         if layer is not None:
@@ -183,10 +144,17 @@ class GeneralTab(LayerPropertyTab):
 
         crs_row = QHBoxLayout()
         crs_row.setSpacing(6)
-        self.crs_edit = QLineEdit(summary)
-        self.crs_edit.setReadOnly(True)
-        crs_row.addWidget(self.crs_edit, 1)
-        self.crs_btn = QPushButton("设置坐标系统", summary)
+        self.crs_combo = CrsComboBox(summary)
+        # 候选文本很长，按固定字符数取宽度：既不会按最长项撑爆整列，也不至于太短
+        self.crs_combo.setMinimumContentsLength(32)
+        self.crs_combo.setMinimumWidth(260)
+        self.crs_combo.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.crs_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        crs_row.addWidget(self.crs_combo, 1)
+        self.crs_btn = QPushButton("选择…", summary)
+        self.crs_btn.setToolTip("按基准 / 分带挑选，或沿用某个图层、某份数据的空间参考")
         self.crs_btn.clicked.connect(self._on_set_crs)
         crs_row.addWidget(self.crs_btn)
         form.addRow("坐标系统", crs_row)
@@ -261,7 +229,6 @@ class GeneralTab(LayerPropertyTab):
         self._layer = layer
         if layer is None:
             return
-        self._pending_crs = None
         self._pending_source = None
 
         self.name_edit.setText(layer.name())
@@ -294,12 +261,10 @@ class GeneralTab(LayerPropertyTab):
 
     def _show_crs(self, crs) -> None:
         if crs is None or not crs.isValid():
-            self.crs_edit.setText("—")
-            self.crs_edit.setToolTip("")
+            self.crs_combo.setEditText("")
+            self.crs_combo.setToolTip("")
             return
-        text = crs.description() or crs.authid() or "—"
-        self.crs_edit.setText(text)
-        self.crs_edit.setToolTip(crs.authid())
+        self.crs_combo.set_crs(crs.authid() or crs.toWkt())
 
     def _show_extent(self, layer) -> None:
         ext = layer.extent()
@@ -346,20 +311,30 @@ class GeneralTab(LayerPropertyTab):
         self.opacity_label.setText(f"{value}%")
 
     def _on_set_crs(self) -> None:
-        """选新坐标系：只暂存 + 回显，真正写回在 :meth:`apply`。"""
+        """打开坐标系选择弹窗，确定后写回下拉框；真正的写回图层在 :meth:`apply`。"""
         if self._layer is None:
             return
         try:
-            current = self._pending_crs if self._pending_crs is not None else self._layer.crs()
-            dlg = CrsSelectDialog(current, self)
+            current = self.crs_combo.authid() or self.crs_combo.currentText().strip()
+            layer_crs = self._layer.crs()
+            if not current and layer_crs.isValid():
+                current = layer_crs.authid() or layer_crs.toWkt()
+            dlg = CrsPickDialog(
+                self,
+                current=current,
+                layers=[
+                    layer
+                    for layer in QgsProject.instance().mapLayers().values()
+                    if isinstance(layer, QgsVectorLayer)
+                ],
+            )
             if dlg.exec() != QDialog.DialogCode.Accepted:
+                dlg.deleteLater()
                 return
-            crs = dlg.selected_crs()
-            if crs is None or not crs.isValid():
-                QMessageBox.warning(self, "图层属性", "未选择有效的坐标系统")
-                return
-            self._pending_crs = crs
-            self._show_crs(crs)
+            value = dlg.crs_value()
+            dlg.deleteLater()
+            if value:
+                self.crs_combo.set_crs(value)
         except Exception as exc:  # noqa: BLE001
             # 槽里未捕获的异常在本环境会直接原生崩溃（见仓库备忘录），必须兜住
             logger.error("选择坐标系失败: %s", exc, exc_info=True)
@@ -454,9 +429,17 @@ class GeneralTab(LayerPropertyTab):
         layer.setMaximumScale(max_scale)
         layer.setMinimumScale(min_scale)
 
-        if self._pending_crs is not None:
-            layer.setCrs(self._pending_crs)
-            self._pending_crs = None
+        if self.crs_combo.currentText().strip():
+            crs = self.crs_combo.crs()
+            if not crs.isValid():
+                QMessageBox.warning(
+                    self,
+                    "图层属性",
+                    "坐标系统无效：请输入 EPSG 代码（如 4490）或从下拉候选里选一项",
+                )
+                return False
+            if crs != layer.crs():
+                layer.setCrs(crs)
 
         if hasattr(layer, "setOpacity"):
             layer.setOpacity(self.opacity_slider.value() / 100.0)

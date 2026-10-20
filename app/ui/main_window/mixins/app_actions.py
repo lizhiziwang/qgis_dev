@@ -19,7 +19,9 @@ from qgis.core import (
     Qgis,
     QgsProject,
     QgsRasterLayer,
+    QgsVectorLayer,
 )
+from qgis.PyQt import sip
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QApplication,
@@ -48,12 +50,13 @@ from app.infra.logging import get_logger
 from app.server.cli import main as server_main
 from app.ui.dialogs.add_connection import AddConnectionDialog
 from app.ui.dialogs.check_viewer import CheckViewerDialog
+from app.ui.dialogs.condition_query import ConditionQueryDialog
 from app.ui.dialogs.create_data_dialog import CreateDataDialog, default_output_dir
 from app.ui.dialogs.dict_manage import DictManageDialog
 from app.ui.dialogs.import_layer_dialog import ImportLayerDialog
 from app.ui.dialogs.offline_download import OfflineDownloadDialog
 from app.ui.dialogs.qmap_compare import QMapCompareDialog
-from app.ui.dialogs.query_builder import QueryBuilderDialog
+from app.ui.dialogs.spatial_query import SpatialQueryDialog
 from app.ui.dialogs.swipe_compare import SwipeCompareDialog
 from app.ui.docks.attribute_dock import AttributeDock
 from app.ui.docks.data_manage_dock import DataManageDialog
@@ -96,24 +99,74 @@ class AppActionsMixin:
         self.messageBar.pushMessage(str(text), level=level, duration=duration)
 
     def _on_condition_query(self) -> None:
-        """条件查询：对当前选中 / 编辑的矢量图层打开 SQL 条件查询构建器。
+        """条件查询：按属性条件把命中的要素加入选择集。
 
-        未选中图层时提示先选层（与属性表「筛选」同一对话框，见
-        :class:`app.ui.dialogs.query_builder.QueryBuilderDialog`）。
+        与属性表的「筛选」（:class:`~app.ui.dialogs.query_builder.QueryBuilderDialog`）
+        不同：这里**不改图层的定义查询**，只把满足条件的要素按「新建 / 增加 / 移除」
+        三种方式写进 QGIS 的选择集。图层下拉列出工程里所有矢量图层，默认选中
+        主窗口当前图层。面板**非模态**：打开后仍可操作主窗口（图层列表 / 画布）。
         """
-        from qgis.core import QgsVectorLayer
-
-        layer = self._selected_layer or self.edit_layer
-        if layer is None or not isinstance(layer, QgsVectorLayer):
+        layers = [
+            layer
+            for layer in self.project.mapLayers().values()
+            if isinstance(layer, QgsVectorLayer)
+        ]
+        if not layers:
             self.messageBar.pushMessage(
-                "请先在图层列表选择要查询的矢量图层",
+                "当前工程没有可查询的矢量图层",
                 level=Qgis.MessageLevel.Warning,
                 duration=3,
             )
             return
 
-        dlg = QueryBuilderDialog(layer, parent=self)
-        dlg.exec()
+        dlg = getattr(self, "_condition_query_dialog", None)
+        current = self._selected_layer or self.edit_layer
+        if dlg is None or sip.isdeleted(dlg):
+            dlg = ConditionQueryDialog(layers, current_layer=current, parent=self)
+            self._condition_query_dialog = dlg
+        else:
+            dlg.set_layers(layers, current_layer=current)
+        if dlg.isMinimized():
+            dlg.showNormal()
+        else:
+            dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+
+    def _on_spatial_query(self) -> None:
+        """空间查询：按位置从源图层选目标图层要素，写进 QGIS 的选择集。
+
+        与 :class:`~app.ui.dialogs.space_query.SpaceQueryDialog`（在地图上画几何
+        再查询）不同，这里直接拿源图层要素（全部或选中的）作参照，界面见
+        :class:`~app.ui.dialogs.spatial_query.SpatialQueryDialog`。面板非模态，
+        查询后仍可操作主窗口。
+        """
+        layers = [
+            layer
+            for layer in self.project.mapLayers().values()
+            if isinstance(layer, QgsVectorLayer) and layer.isSpatial()
+        ]
+        if not layers:
+            self.messageBar.pushMessage(
+                "当前工程没有可做空间查询的矢量图层",
+                level=Qgis.MessageLevel.Warning,
+                duration=3,
+            )
+            return
+
+        dlg = getattr(self, "_spatial_query_dialog", None)
+        current = self._selected_layer or self.edit_layer
+        if dlg is None or sip.isdeleted(dlg):
+            dlg = SpatialQueryDialog(layers, current_layer=current, parent=self)
+            self._spatial_query_dialog = dlg
+        else:
+            dlg.set_layers(layers, current_layer=current)
+        if dlg.isMinimized():
+            dlg.showNormal()
+        else:
+            dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _on_quality(self) -> None:
 

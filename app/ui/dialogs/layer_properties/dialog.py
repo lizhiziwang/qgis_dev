@@ -23,6 +23,7 @@ from qgis.PyQt.QtWidgets import (
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.dialogs.layer_properties.base import PlaceholderTab
+from app.ui.dialogs.layer_properties.condition import ConditionTab
 from app.ui.dialogs.layer_properties.fields import FieldsTab
 from app.ui.dialogs.layer_properties.general import GeneralTab
 from app.ui.dialogs.layer_properties.labeling import LabelingTab
@@ -32,16 +33,16 @@ from app.ui.dialogs.layer_properties.selection import SelectionTab
 logger = get_logger(__name__)
 
 #: 只对矢量图层有意义的页（栅格图层下禁用）
-_VECTOR_ONLY = frozenset({"字段", "选择", "标注", "渲染"})
+_VECTOR_ONLY = frozenset({"条件", "字段", "选择", "标注", "渲染"})
 
 
 class LayerPropertiesDialog(BaseDialog):
-    """图层属性对话框（常规 / 字段 / 选择 / 标注 / 渲染页）。"""
+    """图层属性对话框（常规 / 条件 / 字段 / 选择 / 标注 / 渲染页）。"""
 
     #: (标签名, 页类)；页类为 None → 占位页。
-    #: 「条件」页已按产品要求撤下（原先是个 "内容待补充" 的占位页），要恢复就加回一行。
     _TAB_SPECS = (
         ("常规", GeneralTab),
+        ("条件", ConditionTab),
         ("字段", FieldsTab),
         ("选择", SelectionTab),
         ("标注", LabelingTab),

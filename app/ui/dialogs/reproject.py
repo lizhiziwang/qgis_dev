@@ -4,8 +4,7 @@ from __future__ import annotations
 
 import os
 
-from qgis.core import QgsApplication, QgsCoordinateReferenceSystem, QgsMapLayer, QgsProject
-from qgis.gui import QgsProjectionSelectionWidget
+from qgis.core import QgsApplication, QgsMapLayer, QgsProject
 from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QTimer
 from qgis.PyQt.QtWidgets import (
@@ -26,6 +25,8 @@ from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.ui.common.algo_desc import make_description_browser
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.dialogs.create_data_dialog import CrsComboBox
+from app.ui.dialogs.crs_pick_dialog import CrsPickDialog
 
 logger = get_logger(__name__)
 
@@ -109,20 +110,30 @@ class ReprojectDialog(BaseDialog):
         layout.addWidget(self.input_combo)
         layout.addSpacing(6)
 
-        # 2. 目标坐标系（与 QGIS 原生重投影对话框一致用 CRS 选择控件）
+        # 2. 目标坐标系（与「创建数据」一致：可搜索下拉 + 坐标系选择弹窗）
         layout.addWidget(QLabel("目标坐标系"))
-        self.crs_widget = QgsProjectionSelectionWidget()
-        default_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+        crs_row = QHBoxLayout()
+        crs_row.setContentsMargins(0, 0, 0, 0)
+        crs_row.setSpacing(6)
+        self.crs_combo = CrsComboBox()
+        self.crs_combo.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        self.crs_combo.setMinimumContentsLength(12)
         project_crs = self.project.crs()
         if project_crs.isValid():
-            default_crs = project_crs
-        self.crs_widget.setCrs(default_crs)
-        layout.addWidget(self.crs_widget)
+            self.crs_combo.set_crs(project_crs.authid() or project_crs.toWkt())
+        else:
+            self.crs_combo.set_crs("EPSG:4326")
+        crs_row.addWidget(self.crs_combo, 1)
+        pick_btn = QPushButton("选择")
+        pick_btn.setToolTip("按基准 / 分带挑选，或沿用某个图层、某份数据的空间参考")
+        pick_btn.clicked.connect(self._on_pick_crs)
+        crs_row.addWidget(pick_btn)
+        layout.addLayout(crs_row)
         layout.addSpacing(6)
 
         # 3. 输出图层名
         layout.addWidget(QLabel("输出图层名"))
-        self.output_edit = QLineEdit("重投影结果")
+        self.output_edit = QLineEdit("转换结果")
         layout.addWidget(self.output_edit)
         layout.addSpacing(6)
 
@@ -152,6 +163,24 @@ class ReprojectDialog(BaseDialog):
         if path:
             self.output_path_edit.setText(path)
 
+    def _on_pick_crs(self) -> None:
+        """「选择」按钮：开坐标系选择弹窗，确定后把结果写回下拉框。"""
+        combo = self.crs_combo
+        dialog = CrsPickDialog(
+            self,
+            current=combo.authid() or combo.currentText().strip(),
+            layers=[
+                layer
+                for layer in self.project.mapLayers().values()
+                if layer.type() == QgsMapLayer.VectorLayer
+            ],
+        )
+        accepted = dialog.exec()
+        value = dialog.crs_value() if accepted else ""
+        dialog.deleteLater()
+        if value:
+            combo.set_crs(value)
+
     def _populate_layers(self) -> None:
         """把工程里的矢量图层填充进下拉框（图层对象存 itemData）。"""
         self.input_combo.clear()
@@ -175,7 +204,7 @@ class ReprojectDialog(BaseDialog):
         if layer is None:
             send("warning", "请先在工程中加载一个矢量图层", duration=3)
             return
-        target_crs = self.crs_widget.crs()
+        target_crs = self.crs_combo.crs()
         if not target_crs.isValid():
             send("warning", "请选择有效的目标坐标系", duration=3)
             return
@@ -183,7 +212,7 @@ class ReprojectDialog(BaseDialog):
         job = ReprojectJob(
             input_layer=layer,
             target_crs=target_crs,
-            output_name=self.output_edit.text().strip() or "重投影结果",
+            output_name=self.output_edit.text().strip() or "转换结果",
             output_path=self.output_path_edit.text().strip() or None,
         )
 

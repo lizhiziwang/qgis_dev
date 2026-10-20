@@ -74,12 +74,12 @@ def _make_shortest_path_dialog(parent):
 
 def _make_reproject_dialog(parent):
 
-    return ReprojectDialog(parent, title="重投影")
+    return ReprojectDialog(parent, title="坐标转换")
 
 
 def _make_vector_format_dialog(parent):
 
-    return VectorFormatDialog(parent, title="矢量格式转换")
+    return VectorFormatDialog(parent, title="格式转换")
 
 
 def _make_imagery_tile_dialog(parent):
@@ -164,7 +164,6 @@ _GDAL_ALGORITHMS: list[tuple[str, list[tuple[str, str]]]] = [
             ("Grid IDW（最近邻搜索）", "gdal:gridinversedistancenearestneighbor"),
             ("Grid 线性插值", "gdal:gridlinear"),
             ("Grid 最近邻", "gdal:gridnearestneighbor"),
-            ("格式转换", "gdal:convertformat"),
         ],
     ),
     (
@@ -261,8 +260,8 @@ _TOOL_GROUPS: list = [
             ("最小外包矩形", "native:orientedminimumboundingbox"),
             ("叠加分析", "overlay"),
             ("最短路径分析", "native:shortestpathpointtopoint"),
-            ("重投影", "native:reprojectlayer"),
-            ("矢量格式转换", "vector:convert"),
+            ("坐标转换", "native:reprojectlayer"),
+            ("格式转换", "vector:convert"),
         ],
     ),
     (
