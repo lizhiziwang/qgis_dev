@@ -19,6 +19,7 @@ dependencies = [
     # GIS 数据
     "gdal>=3.6",
     "rasterio>=1.3",
+    "numpy>=1.24",
     "networkx>=3.0",
     "scipy>=1.10",
     # 服务

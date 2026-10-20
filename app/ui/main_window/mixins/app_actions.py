@@ -124,7 +124,9 @@ class AppActionsMixin:
     def _on_analyse(self) -> None:
         # 复用单个"分析工具"dock，避免每次点"分析"都新建一个
         if getattr(self, "_analyse_dock", None) is None:
-            self._analyse_dock = ToolsDock(self)
+            self._analyse_dock = ToolsDock(
+                self, deep_learning_toggle=self._on_deep_learning
+            )
             self.place_right_dock(self._analyse_dock)
         self._analyse_dock.show()
         self._analyse_dock.raise_()
@@ -620,6 +622,190 @@ class AppActionsMixin:
             get_logger(__name__).error("打开流程编辑器失败：%s", exc, exc_info=True)
             if hasattr(self, "messageBar"):
                 self.messageBar.pushWarning("流程编辑器", f"打开失败：{exc}")
+
+    def _open_annotation_page(self) -> None:
+        """打开影像标注工作区（懒建单实例，嵌入主窗口中央区）。"""
+        try:
+            if self._annotation_page is None:
+                from app.ui.deep_learning.annotation_page import AnnotationPage
+
+                page = AnnotationPage(self)
+                page.close_requested.connect(self._close_annotation_page)
+                self._central_stack.addWidget(page)
+                self._annotation_page = page
+            self._annotation_page_open = True
+            index = getattr(self, "_deep_learning_tab_index", -1)
+            if index >= 0 and self._tab_bar.currentIndex() != index:
+                self._tab_bar.setCurrentIndex(index)
+            self._show_annotation_page()
+        except Exception as exc:  # noqa: BLE001
+            # 槽内异常会 native 崩溃，务必兜住（见 qgis-ui-integration-gotchas）
+            get_logger(__name__).error("打开标注页面失败：%s", exc, exc_info=True)
+            if hasattr(self, "messageBar"):
+                self.messageBar.pushWarning("标注", f"打开失败：{exc}")
+
+    def _show_annotation_page(self) -> None:
+        """把标注页设为中央区当前页，并保证日志面板可见（用户要能看到刷新）。"""
+        page = self._annotation_page
+        if page is None:
+            return
+        self._central_stack.setCurrentWidget(page)
+        self._annotation_page_visible = True
+        self._training_page_visible = False
+        self._inference_page_visible = False
+        self._last_deep_learning_page = "annotation"
+        self._set_annotation_shortcuts_blocked(True)
+        self._show_log_dock()
+        page.activate()
+
+    def _close_annotation_page(self) -> None:
+        """关闭标注页：确认未保存内容后切回地图（页面实例与状态保留）。"""
+        page = self._annotation_page
+        if page is None or not page.confirm_leave():
+            return
+        self._annotation_page_open = False
+        self._annotation_page_visible = False
+        if self._last_deep_learning_page == "annotation":
+            self._last_deep_learning_page = ""
+        if not self._training_page_visible and not self._inference_page_visible:
+            self._set_annotation_shortcuts_blocked(False)
+        general = getattr(self, "_general_tab_index", -1)
+        if general >= 0 and self._tab_bar.currentIndex() != general:
+            self._tab_bar.setCurrentIndex(general)
+        else:
+            self._central_stack.setCurrentWidget(self._map_page)
+            self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _open_training_page(self) -> None:
+        """打开模型训练工作区（懒建单实例，嵌入主窗口中央区）。"""
+        try:
+            if self._training_page is None:
+                from app.ui.deep_learning.training_page import TrainingPage
+
+                page = TrainingPage(self)
+                page.close_requested.connect(self._close_training_page)
+                self._central_stack.addWidget(page)
+                self._training_page = page
+            self._training_page_open = True
+            index = getattr(self, "_deep_learning_tab_index", -1)
+            if index >= 0 and self._tab_bar.currentIndex() != index:
+                self._tab_bar.setCurrentIndex(index)
+            annotation = getattr(self, "_annotation_page", None)
+            if annotation is not None:
+                self._training_page.set_dataset_hint(annotation.dataset_hint_dir())
+            self._show_training_page()
+        except Exception as exc:  # noqa: BLE001
+            # 槽内异常会 native 崩溃，务必兜住（见 qgis-ui-integration-gotchas）
+            get_logger(__name__).error("打开训练页面失败：%s", exc, exc_info=True)
+            if hasattr(self, "messageBar"):
+                self.messageBar.pushWarning("训练", f"打开失败：{exc}")
+
+    def _show_training_page(self) -> None:
+        """把训练页设为中央区当前页，并保证日志面板可见。"""
+        page = self._training_page
+        if page is None:
+            return
+        self._central_stack.setCurrentWidget(page)
+        self._training_page_visible = True
+        self._annotation_page_visible = False
+        self._inference_page_visible = False
+        self._last_deep_learning_page = "training"
+        self._set_annotation_shortcuts_blocked(True)
+        self._show_log_dock()
+        page.activate()
+
+    def _close_training_page(self) -> None:
+        """关闭训练页：确认仍在运行的训练后切回地图（页面实例保留）。"""
+        page = self._training_page
+        if page is None or not page.confirm_leave():
+            return
+        self._training_page_open = False
+        self._training_page_visible = False
+        if self._last_deep_learning_page == "training":
+            self._last_deep_learning_page = ""
+        if not self._annotation_page_visible and not self._inference_page_visible:
+            self._set_annotation_shortcuts_blocked(False)
+        general = getattr(self, "_general_tab_index", -1)
+        if general >= 0 and self._tab_bar.currentIndex() != general:
+            self._tab_bar.setCurrentIndex(general)
+        else:
+            self._central_stack.setCurrentWidget(self._map_page)
+            self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _open_inference_page(self) -> None:
+        """打开模型推理工作区（懒建单实例，嵌入主窗口中央区）。"""
+        try:
+            if self._inference_page is None:
+                from app.ui.deep_learning.inference_page import InferencePage
+
+                page = InferencePage(self)
+                page.close_requested.connect(self._close_inference_page)
+                self._central_stack.addWidget(page)
+                self._inference_page = page
+            self._inference_page_open = True
+            index = getattr(self, "_deep_learning_tab_index", -1)
+            if index >= 0 and self._tab_bar.currentIndex() != index:
+                self._tab_bar.setCurrentIndex(index)
+            self._apply_training_checkpoint_hint()
+            self._show_inference_page()
+        except Exception as exc:  # noqa: BLE001
+            # 槽内异常会 native 崩溃，务必兜住（见 qgis-ui-integration-gotchas）
+            get_logger(__name__).error("打开推理页面失败：%s", exc, exc_info=True)
+            if hasattr(self, "messageBar"):
+                self.messageBar.pushWarning("推理", f"打开失败：{exc}")
+
+    def _apply_training_checkpoint_hint(self) -> None:
+        """把训练页最近一次 run 的 best.pt / last.pt 带入推理页。
+
+        只在新出现的 run 上覆盖选择：用户手动换过模型后，重复打开页面不会被
+        拉回旧 run；训练完成后 run_dir 变化才会再次自动带入。
+        """
+        training = getattr(self, "_training_page", None)
+        run_dir = getattr(training, "run_dir", None)
+        if run_dir is None:
+            return
+        page = getattr(self, "_inference_page", None)
+        if page is None:
+            return
+        from app.core.inference.runs import checkpoint_in
+
+        hint = checkpoint_in(run_dir)
+        if not hint or hint == getattr(self, "_inference_applied_hint", ""):
+            return
+        page.set_checkpoint_hint(hint)
+        self._inference_applied_hint = hint
+
+    def _show_inference_page(self) -> None:
+        """把推理页设为中央区当前页，并保证日志面板可见。"""
+        page = self._inference_page
+        if page is None:
+            return
+        self._central_stack.setCurrentWidget(page)
+        self._inference_page_visible = True
+        self._annotation_page_visible = False
+        self._training_page_visible = False
+        self._last_deep_learning_page = "inference"
+        self._set_annotation_shortcuts_blocked(True)
+        self._show_log_dock()
+        page.activate()
+
+    def _close_inference_page(self) -> None:
+        """关闭推理页：确认仍在运行的推理后切回地图（页面实例保留）。"""
+        page = self._inference_page
+        if page is None or not page.confirm_leave():
+            return
+        self._inference_page_open = False
+        self._inference_page_visible = False
+        if self._last_deep_learning_page == "inference":
+            self._last_deep_learning_page = ""
+        if not self._annotation_page_visible and not self._training_page_visible:
+            self._set_annotation_shortcuts_blocked(False)
+        general = getattr(self, "_general_tab_index", -1)
+        if general >= 0 and self._tab_bar.currentIndex() != general:
+            self._tab_bar.setCurrentIndex(general)
+        else:
+            self._central_stack.setCurrentWidget(self._map_page)
+            self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
 
     def _attribute_docks(self) -> dict:
         """图层 id → 该图层的属性表面板（同一图层复用同一个，不同图层各开一个）。"""

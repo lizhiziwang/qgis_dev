@@ -68,6 +68,8 @@ class LogDock(QDockWidget):
         # 自动刷新：dock 可见且日志文件有新写入时才重载（用 mtime 去抖）。
         # 手动「刷新日志」也会更新 _last_mtime，避免下一次定时 tick 重复重载。
         self._last_mtime = self._file_mtime()
+        #: 隐藏期间有新日志时置位，重新显示时补一次刷新（见 `_auto_reload`）
+        self._pending_reload = False
         self._timer = QTimer(self)
         self._timer.setInterval(2000)
         self._timer.timeout.connect(self._auto_reload)
@@ -186,14 +188,24 @@ class LogDock(QDockWidget):
             return 0.0
 
     def _auto_reload(self) -> None:
-        """定时 tick：dock 不可见或日志未变化时跳过，避免无谓重绘。"""
-        if not self.isVisible():
-            return
+        """定时 tick：日志未变化时跳过；不可见时只记下变更，显示时补刷。"""
         mtime = self._file_mtime()
         if mtime == self._last_mtime:
             return
         self._last_mtime = mtime
+        if not self.isVisible():
+            # 隐藏时不重绘（例如主窗口切到「深度学习」页签），但必须记住有更新，
+            # 否则重新显示后 mtime 已经相等，面板会一直停在旧内容。
+            self._pending_reload = True
+            return
+        self._pending_reload = False
         self._load_log_file(self.param)
+
+    def showEvent(self, event) -> None:  # noqa: N802 —— Qt 事件名
+        super().showEvent(event)
+        if self._pending_reload:
+            self._pending_reload = False
+            self._load_log_file(self.param)
 
     def _on_search(self) -> None:
         self.param["level"] = self.level_combo.currentText()
@@ -216,6 +228,7 @@ class LogDock(QDockWidget):
     def _on_refresh(self) -> None:
         self._load_log_file(self.param)
         self._last_mtime = self._file_mtime()
+        self._pending_reload = False
 
     def _on_save(self) -> None:
 

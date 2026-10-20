@@ -1,0 +1,166 @@
+# 深度学习标注（SAM）配置
+# ---------------------------------------------------------------------------
+# 「深度学习 → 标注」窗口的 SAM 交互式/自动分割依赖外部 Python 环境运行
+# （QGIS 自带 Python 不含 torch）。本文件只描述默认值；权重路径在窗口右侧
+# 「选择权重…」里选定后会写入 QSettings 覆盖这里的 checkpoint。
+#
+# 路径均支持 ${VAR} / ${VAR:-默认值} 环境变量展开。
+# ---------------------------------------------------------------------------
+
+# 运行 segment_anything / sam2 的外部 Python（需 torch / torchvision / opencv）
+python: ${SAM_PYTHON:-D:/zsh/app/miniconda3/envs/autolabel/python.exe}
+
+# Meta SAM 官方源码目录（可留空：用 pip 安装 segment-anything 时不需要；
+# 填了则加入外部 Python 的 sys.path，便于直接用源码运行）
+sam_src: ${SAM_SRC:-D:/zsh/app/sam_src/segment-anything-main}
+
+# 权重文件；留空时启动模型会提示选择。文件名可自动推断模型类型：
+#   sam_vit_h_4b8939.pth → vit_h (约 2.4 GB)
+#   sam_vit_l_0b3195.pth → vit_l (约 1.2 GB)
+#   sam_vit_b_01ec64.pth → vit_b (约 375 MB)
+# SAM2 / SAM2.1 的 sam2*.pt 会自动识别系列与 hydra 配置。
+checkpoint: ${SAM_CHECKPOINT:-}
+
+# 模型管理目录（「SAM 设置 → 模型管理」下载/删除模型的位置）
+# 留空 = 用户配置目录/models/sam（Windows: %APPDATA%\qgis_dev\models\sam）
+models_dir: ${SAM_MODELS_DIR:-}
+
+# 「SAM 设置」里选中的注册表模型 id（一般由设置页写入 QSettings，不用手改）
+model_id: ""
+# SAM2 的 hydra 配置；选注册表模型时自动带出，手填权重可留空自动推断
+sam2_config: ""
+
+# auto：按 checkpoint 文件名推断；也可显式填 vit_h / vit_l / vit_b（仅 SAM1）
+model_type: auto
+
+# auto / cuda / cpu；auto 优先 CUDA，不可用时回退 CPU
+device: auto
+
+# SAM 图像特征缓存：同一图像 + 同一模型再次打开时跳过编码器
+cache:
+  enabled: true
+  # 留空 = 用户配置目录/cache/sam
+  dir: ${SAM_CACHE_DIR:-}
+  # 上限（MB）；0 = 不限制
+  max_mb: 2048
+  # 关闭标注窗口时自动清空缓存（默认保留，便于下次启动复用）
+  clear_on_close: false
+
+sam:
+  load_timeout_s: 180
+  set_image_timeout_s: 60
+  predict_timeout_s: 120
+  auto_timeout_s: 900
+  # 单行 JSON 上限（候选 mask 只回传文件路径，正常情况下远小于此值）
+  max_line_bytes: 8388608
+
+annotation:
+  # 工作分辨率上限（长边）。超过时预览/掩膜按比例降采样，JSON 记录 scale。
+  max_side: 4096
+  # 撤销栈上限
+  undo_limit: 40
+  # 宫格切片（导入影像时可在对话框里临时修改）
+  grid:
+    # 每块边长（像素）
+    tile_size: 512
+    # 相邻块重叠度（块边长的百分比）
+    overlap_percent: 10
+    # 影像长边超过该值时，导入对话框默认勾选「切分为宫格」
+    auto_threshold: 2000
+  # 标签调色板（十六进制，按顺序取未用色）
+  palette:
+    - "#e6194b"
+    - "#3cb44b"
+    - "#ffe119"
+    - "#4363d8"
+    - "#f58231"
+    - "#911eb4"
+    - "#46f0f0"
+    - "#f032e6"
+    - "#bcf60c"
+    - "#fabebe"
+    - "#008080"
+    - "#e6beff"
+    - "#9a6324"
+    - "#fffac8"
+    - "#800000"
+    - "#aaffc3"
+
+auto:
+  # SAM AutomaticMaskGenerator 参数
+  points_per_side: 24
+  pred_iou_thresh: 0.86
+  stability_score_thresh: 0.92
+  min_mask_region_area: 0
+  # 返回给界面的候选上限（按面积/得分排序后截断）
+  max_candidates: 200
+  # 自动分割前 sidecar 内部降采样长边（结果最近邻升回工作分辨率）
+  max_side: 2048
+
+# ---------------------------------------------------------------------------
+# 训练工作区（用标注页产出的影像 + 掩膜训练模型）
+# ---------------------------------------------------------------------------
+training:
+  # 训练子进程使用的 Python；留空 = 沿用上面 sam.python
+  python: ${TRAIN_PYTHON:-}
+  # 默认扫描目录（留空时由界面自动带出标注页当前输出目录）
+  dataset_dir: ${TRAIN_DATASET_DIR:-}
+  # 训练产物根目录；留空 = <标注成果目录>/training_runs
+  output_dir: ${TRAIN_OUTPUT_DIR:-}
+  # objects = 对象提取（二值分割）；landcover = 地物分类（多类分割）；
+  # instances = 对象提取（实例分割）
+  task: objects
+  # 模型 id 见 app/core/training/trainlib/catalog.py
+  model: unet
+  encoder: resnet34
+  # 语义分割损失：dice_ce / ce
+  loss: dice_ce
+  epochs: 30
+  batch_size: 4
+  lr: 0.0001
+  # 训练 / 验证统一缩放到的边长
+  tile_size: 512
+  # 验证集比例（0-90）
+  val_percent: 20
+  # 连续多少轮验证指标不提升就提前结束；0 = 不早停
+  early_stop: 8
+  seed: 42
+  # auto / cuda / cpu
+  device: auto
+  # 加载预训练骨干（InternImage 兼容实现没有官方权重，会忽略）
+  pretrained: true
+  augment: true
+  # 实例分割：连通域最小面积（像素）
+  min_instance_area: 16
+  # 继续训练：上一次的 best.pt / last.pt；结构必须一致
+  init_checkpoint: ${TRAIN_INIT_CHECKPOINT:-}
+
+# ---------------------------------------------------------------------------
+# 推理工作区（用训练产出的 checkpoint 对新影像做滑动窗口推理）
+# ---------------------------------------------------------------------------
+inference:
+  # 推理子进程使用的 Python；留空 = 沿用上面 training.python / sam.python
+  python: ${INFER_PYTHON:-}
+  # 训练 run 根目录；留空 = 沿用 training.output_dir
+  model_dir: ${INFER_MODEL_DIR:-}
+  # 上次使用的影像
+  image: ${INFER_IMAGE:-}
+  # 输出目录；留空 = <checkpoint 所在 run>/predictions
+  output_dir: ${INFER_OUTPUT_DIR:-}
+  # 窗口边长；0 = 跟随 checkpoint 的 tile_size（实例分割强制跟随）
+  window_size: 0
+  # 相邻窗口重叠百分比（0-50）
+  overlap_percent: 25
+  # 选中波段同时为 0 的像元视为 NoData（遥感影像常见黑色填充边界），不参与推理
+  zero_as_nodata: true
+  batch_size: 4
+  # auto / cuda / cpu
+  device: auto
+  # R/G/B 波段；[0, 0, 0] = 按影像自动（≥3 波段取 1/2/3）
+  bands: [0, 0, 0]
+  # 实例分割：保留分数阈值
+  score_threshold: 0.5
+  # 实例分割：连通域最小像素数
+  min_instance_pixels: 16
+  # 界面预览缩略图长边上限
+  preview_max_side: 4096

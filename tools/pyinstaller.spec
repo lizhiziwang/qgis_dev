@@ -58,6 +58,14 @@ if IS_WIN:
 
     datas = [
         (str(QGIS_PYTHON / "qgis"), "qgis"),
+        # SAM sidecar 由外部 Python 直接执行（不进 PYZ），必须作为数据文件落盘
+        (str(PROJECT_ROOT / "app" / "core" / "ai" / "sam_sidecar.py"), "app/core/ai"),
+        # 训练 sidecar + trainlib 同样由外部 Python 执行，必须整目录落盘
+        (str(PROJECT_ROOT / "app" / "core" / "training" / "train_sidecar.py"), "app/core/training"),
+        (str(PROJECT_ROOT / "app" / "core" / "training" / "trainlib"), "app/core/training/trainlib"),
+        # 推理 sidecar + inferlib（复用训练 trainlib）
+        (str(PROJECT_ROOT / "app" / "core" / "inference" / "infer_sidecar.py"), "app/core/inference"),
+        (str(PROJECT_ROOT / "app" / "core" / "inference" / "inferlib"), "app/core/inference/inferlib"),
         # 下面这些"可整体替换/用户可见"的东西**不**放 datas（那会落到 _internal/），
         # 改由 build_windows.ps1 的 STAGE 4 复制，让根目录干净：
         #   config/ resource/                     -> dist/app/（用户可改）
@@ -103,6 +111,14 @@ else:
         (str(_qgis_pkg), "qgis"),
         (str(PROJECT_ROOT / "resource"), "resource"),
         (str(PROJECT_ROOT / "config"), "config"),
+        # SAM sidecar 由外部 Python 直接执行（不进 PYZ），必须作为数据文件落盘
+        (str(PROJECT_ROOT / "app" / "core" / "ai" / "sam_sidecar.py"), "app/core/ai"),
+        # 训练 sidecar + trainlib 同样由外部 Python 执行，必须整目录落盘
+        (str(PROJECT_ROOT / "app" / "core" / "training" / "train_sidecar.py"), "app/core/training"),
+        (str(PROJECT_ROOT / "app" / "core" / "training" / "trainlib"), "app/core/training/trainlib"),
+        # 推理 sidecar + inferlib（复用训练 trainlib）
+        (str(PROJECT_ROOT / "app" / "core" / "inference" / "infer_sidecar.py"), "app/core/inference"),
+        (str(PROJECT_ROOT / "app" / "core" / "inference" / "inferlib"), "app/core/inference/inferlib"),
     ]
     binaries = []
 
@@ -249,11 +265,17 @@ _EXE_NAME = "app" if IS_WIN else "qgis_dev"
 #
 # 不直接把 png 交给 PyInstaller：它会用 Pillow 盲转（尺寸档位不可控）。这里显式
 # 生成 16/24/32/48/64（Pillow 自动跳过大于源图尺寸的档位），并把 ico 放进 build/
-# （gitignore），随 png 一起更新。生成失败则回退 PyInstaller 默认图标。
+# （gitignore），随 png 一起更新。
+#
+# 生成失败必须**中止构建**，不能回退默认图标：默认图标也是“打包成功”，现场只会
+# 看到任务栏 / 资源管理器里还是个 Python 默认图标，很难联想到是构建期 Pillow 缺失。
+# 以前这里静默回退，结果就是“exe 图标没生效”。
 # --------------------------------------------------------------------------- #
 _APP_ICON_PNG = PROJECT_ROOT / "resource" / "png" / "app_icon.png"
 _app_icon = None
-if IS_WIN and _APP_ICON_PNG.is_file():
+if IS_WIN:
+    if not _APP_ICON_PNG.is_file():
+        raise SystemExit(f"[icon] 应用图标不存在：{_APP_ICON_PNG}")
     try:
         from PIL import Image as _Image
 
@@ -274,9 +296,12 @@ if IS_WIN and _APP_ICON_PNG.is_file():
             _sizes = sorted(_ico.info.get("sizes", []))
         _app_icon = str(_ico_path)
         print(f"[icon] exe 图标 {_APP_ICON_PNG.name} -> {_ico_path.name} 尺寸 {_sizes}")
-    except Exception as _iph:  # noqa: BLE001
-        print(f"[icon] 生成 .ico 失败，回退 PyInstaller 默认图标: {_iph}")
-        _app_icon = None
+    except Exception as _iph:
+        raise SystemExit(
+            f"[icon] 从 {_APP_ICON_PNG} 生成 .ico 失败：{_iph}\n"
+            "       构建已中止——继续打包只会得到 PyInstaller 默认图标的 exe。\n"
+            "       请确认构建环境已安装 Pillow（pip install pillow）。"
+        ) from _iph
 
 
 exe = EXE(

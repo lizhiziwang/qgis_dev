@@ -31,6 +31,7 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QShortcut,
     QSizePolicy,
+    QStackedWidget,
     QWidget,
 )
 
@@ -112,11 +113,17 @@ class WindowShellMixin:
         return canvas
 
     def _build_central_widget(self) -> None:
-        central = QWidget(self)
-        self.setCentralWidget(central)
+        # 中央区是 QStackedWidget：第 0 页是地图（画布 + 覆盖层），第 1 页是
+        # 懒建的标注工作区。覆盖层挂在 _map_page 而不是 stack 上，切到标注页时
+        # 随整页隐藏，不会浮在标注界面上。
+        self._central_stack = QStackedWidget(self)
+        self.setCentralWidget(self._central_stack)
+
+        self._map_page = QWidget(self._central_stack)
+        self._map_page.setObjectName("MapPage")
         # 横向布局：地图画布占满中央区域（左侧竖排工具条不再占一列，改为悬浮
         # 盖在画布左上角，见 :meth:`_attach_side_toolbar_overlay`）
-        layout = QHBoxLayout(central)
+        layout = QHBoxLayout(self._map_page)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
@@ -177,6 +184,7 @@ class WindowShellMixin:
             },
         )
         layout.addWidget(self.canvas)
+        self._central_stack.addWidget(self._map_page)
         # 竖排工具条悬浮在地图画布左上角（left 4px / top 3px）
         self._attach_side_toolbar_overlay()
         # 定位气泡悬浮在地图画布右上角；侧栏「定位」按钮点亮时弹出

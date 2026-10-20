@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from qgis.core import QgsApplication
 from qgis.PyQt.QtCore import QSize, Qt
 from qgis.PyQt.QtWidgets import (
@@ -286,6 +288,8 @@ class ToolsDock(QDockWidget):
     :param dialog_factories: code → 对话框工厂；``None`` 时用 :data:`_DIALOG_FACTORIES`
     :param destroy_on_close: ``True`` 时对话框关闭（确认 / 取消 / 标题栏关闭）即销毁
         实例，下次点击重新创建；``False``（默认）时缓存实例，关闭后复用
+    :param deep_learning_toggle: 非 ``None`` 时在面板头部显示「深度学习」开关按钮，
+        点击调用该回调（进入 / 退出纯净地图模式，由主窗口实现）
     """
 
     def __init__(
@@ -298,9 +302,12 @@ class ToolsDock(QDockWidget):
         tips: dict | None = None,
         dialog_factories: dict | None = None,
         destroy_on_close: bool = False,
+        deep_learning_toggle: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(title, parent)
         self.topParent = parent
+        #: 「深度学习」按钮回调；``None`` 时不显示该按钮（如质检面板）
+        self._deep_learning_toggle = deep_learning_toggle
         #: 本 dock 的分组树（专题面板可传入自己的分组）
         self._groups: list = _TOOL_GROUPS if groups is None else groups
         #: 一次性动作 / tooltip / 对话框工厂（按引用持有，便于测试替换模块级字典）
@@ -344,6 +351,16 @@ class ToolsDock(QDockWidget):
         self.btn_collapse.setToolTip("折叠所有分组")
         self.btn_collapse.clicked.connect(self._collapse_all)
         header.addWidget(self.btn_collapse)
+
+        # 「深度学习」模式开关：进入后由主窗口隐藏其它地图控件（再次点击恢复）
+        self.btn_deep_learning: QToolButton | None = None
+        if self._deep_learning_toggle is not None:
+            self.btn_deep_learning = QToolButton()
+            self.btn_deep_learning.setText("深度学习")
+            self.btn_deep_learning.setToolTip("隐藏地图与所有面板（再次点击恢复）")
+            self.btn_deep_learning.setCheckable(True)
+            self.btn_deep_learning.clicked.connect(self._on_deep_learning_clicked)
+            header.addWidget(self.btn_deep_learning)
 
         layout.addLayout(header)
 
@@ -398,6 +415,17 @@ class ToolsDock(QDockWidget):
             group.setExpanded(False)
 
     # ------------------------------------------------------------ 交互
+
+    def _on_deep_learning_clicked(self) -> None:
+        """「深度学习」按钮：交给主窗口切换纯净地图模式。"""
+        if self._deep_learning_toggle is not None:
+            self._deep_learning_toggle()
+
+    def set_deep_learning_active(self, active: bool) -> None:
+        """同步按钮按下状态（模式由主窗口持有，重复进入 / 外部退出时保持一致）。"""
+        btn = getattr(self, "btn_deep_learning", None)
+        if btn is not None:
+            btn.setChecked(bool(active))
 
     def _expand_all(self) -> None:
         self.tree.expandAll()

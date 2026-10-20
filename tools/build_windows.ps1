@@ -166,6 +166,43 @@ if ($missingFiles.Count -gt 0) {
     exit 1
 }
 
+# exe 图标校验：spec 生成 .ico 后由 PyInstaller 嵌进资源段。这里用与资源管理器
+# 相同的 shell API 把图标读回来，和源图缩到同尺寸后比平均色差——若 exe 仍是
+# PyInstaller 默认图标（Pillow 缺失 / 资源写入失败），色差会非常大，直接中止，
+# 避免再出现“打包成功但图标没生效”。
+$iconPng = Join-Path $ProjectRoot "resource/png/app_icon.png"
+$exePath = Join-Path $DistPath "app.exe"
+if (Test-Path $iconPng) {
+    try {
+        Add-Type -AssemblyName System.Drawing
+        $exeIcon = [System.Drawing.Icon]::ExtractAssociatedIcon($exePath)
+        $exeBmp = $exeIcon.ToBitmap()
+        $srcImg = [System.Drawing.Image]::FromFile($iconPng)
+        $srcBmp = New-Object System.Drawing.Bitmap($exeBmp.Width, $exeBmp.Height)
+        $gfx = [System.Drawing.Graphics]::FromImage($srcBmp)
+        $gfx.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $gfx.DrawImage($srcImg, 0, 0, $srcBmp.Width, $srcBmp.Height)
+        $gfx.Dispose()
+        $total = 0.0
+        for ($y = 0; $y -lt $exeBmp.Height; $y++) {
+            for ($x = 0; $x -lt $exeBmp.Width; $x++) {
+                $a = $exeBmp.GetPixel($x, $y)
+                $b = $srcBmp.GetPixel($x, $y)
+                $total += [math]::Abs($a.R - $b.R) + [math]::Abs($a.G - $b.G) + [math]::Abs($a.B - $b.B)
+            }
+        }
+        $avgDiff = $total / ($exeBmp.Width * $exeBmp.Height * 3)
+        $exeBmp.Dispose(); $exeIcon.Dispose(); $srcBmp.Dispose(); $srcImg.Dispose()
+        if ($avgDiff -gt 15) {
+            Write-Host ("ERROR: app.exe 内嵌图标与 resource/png/app_icon.png 不符（平均色差 {0:N1}）" -f $avgDiff) -ForegroundColor Red
+            exit 1
+        }
+        Write-Host ("OK: exe 图标已生效（平均色差 {0:N1}）" -f $avgDiff) -ForegroundColor Green
+    } catch {
+        Write-Host "WARN: 无法校验 exe 图标（$($_.Exception.Message)）" -ForegroundColor Yellow
+    }
+}
+
 # 原生保护生效性校验：启用保护时产物里必须存在 .pyd
 if ($env:QGIS_PROTECT_MANIFEST) {
     $nativeCount = (Get-ChildItem -Path (Join-Path $DistPath "_internal/app") -Recurse -Filter *.pyd -ErrorAction SilentlyContinue | Measure-Object).Count

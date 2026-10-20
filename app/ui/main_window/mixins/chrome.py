@@ -1,13 +1,15 @@
 """顶部 chrome、状态栏与主题。
 
 标题栏/模式切换、主题 QSS 应用、用户信息、状态栏与图层加载指示，
-以及顶部各工具条（通用/编辑/文件/查看/质检）与 Tab 切换器。
+以及顶部各工具条（通用/编辑/文件/查看/质检/深度学习）与 Tab 切换器。
 
 由 :class:`~app.ui.main_window.main_window.MainWindow` 多继承组合，方法只依赖
 ``self`` 上的共享状态。
 """
 
 from __future__ import annotations
+
+from contextlib import suppress
 
 from qgis.core import Qgis
 from qgis.gui import (
@@ -21,7 +23,7 @@ from qgis.PyQt.QtGui import (
     QKeySequence,
     QShortcut,
 )
-from qgis.PyQt.QtWidgets import QApplication, QDialog, QDockWidget, QToolBar
+from qgis.PyQt.QtWidgets import QApplication, QDialog, QDockWidget, QMessageBox, QToolBar
 
 from app.infra.logging import get_logger
 from app.infra.shortcuts import DEFAULT_SHORTCUTS, effective_sequences, load_overrides
@@ -123,9 +125,16 @@ class WindowChromeMixin:
         self._file_toolbar = self._build_file_toolbar()
         self._view_toolbar = self._build_view_toolbar()
         self._quality_toolbar = self._build_quality_toolbar()
+        self._deep_learning_toolbar = self._build_deep_learning_toolbar()
 
         #: tab 索引 → 该 tab 下应显示的工具条列表（切换时互斥显示）
         self._tab_toolbars: dict[int, list] = {}
+        #: 「深度学习」tab 索引（切走该 tab 时自动退出纯净地图模式）
+        self._deep_learning_tab_index = -1
+        #: 「通用」tab 索引（标注页关闭后回到普通地图工作区）
+        self._general_tab_index = -1
+        #: 纯净地图模式是否激活（由 tab 切换驱动）
+        self._deep_learning_active = False
         for label, toolbars in (
             ("文件", [self._file_toolbar]),
             ("查看", [self._view_toolbar]),
@@ -135,8 +144,16 @@ class WindowChromeMixin:
             ]),
             ("通用", [self.tool_bar]),
             ("质检", [self._quality_toolbar]),
+            # 「深度学习」tab 本身即模式开关：切到该 tab 清空地图组件，切走即恢复，
+            # 见 _on_tab_changed / _set_deep_learning_active；工具条只放业务入口
+            ("深度学习", [self._deep_learning_toolbar]),
         ):
-            self._tab_toolbars[tab_bar.addTab(label)] = toolbars
+            index = tab_bar.addTab(label)
+            self._tab_toolbars[index] = toolbars
+            if label == "深度学习":
+                self._deep_learning_tab_index = index
+            elif label == "通用":
+                self._general_tab_index = index
             for tb in toolbars:
                 tb.setStyleSheet(toolbar_qss(ThemeManager.instance().current()))
 
@@ -250,10 +267,52 @@ class WindowChromeMixin:
         typing = isinstance(
             widget, (QLineEdit, QTextEdit, QPlainTextEdit, QAbstractSpinBox)
         )
+        # 标注 / 训练页当前时同样禁用：S/T 是窗口级快捷键，会和页面内快捷键抢
+        blocked = bool(
+            getattr(self, "_annotation_page_visible", False)
+            or getattr(self, "_training_page_visible", False)
+            or getattr(self, "_inference_page_visible", False)
+        )
         for attr in ("_snap_shortcut", "_trace_shortcut", "_imagery_shortcut"):
             shortcut = getattr(self, attr, None)
             if shortcut is not None:
-                shortcut.setEnabled(not typing)
+                shortcut.setEnabled(not typing and not blocked)
+
+    def _set_annotation_shortcuts_blocked(self, blocked: bool) -> None:
+        """标注页当前时禁用主窗口同键 action。
+
+        只把页面 action 改成 ``WidgetWithChildrenShortcut`` 不够：同一按键同时命中
+        主窗口的 ``WindowShortcut`` 时 Qt 判为 ambiguous，**两个都不触发**。这里
+        记录进入前的 enabled 状态，离开页面时原样恢复。
+        """
+        targets = getattr(self, "_shortcut_targets", {})
+        keys = (
+            "new_project",
+            "save_project",
+            "save_project_as",
+            "open_project",
+            "open_file",
+            "undo",
+            "redo",
+        )
+        if blocked:
+            if not getattr(self, "_annotation_shortcut_state", None):
+                self._annotation_shortcut_state = {
+                    key: targets[key].isEnabled()
+                    for key in keys
+                    if targets.get(key) is not None
+                }
+            for key in keys:
+                target = targets.get(key)
+                if target is not None:
+                    target.setEnabled(False)
+        else:
+            for key, enabled in getattr(self, "_annotation_shortcut_state", {}).items():
+                target = targets.get(key)
+                if target is not None:
+                    target.setEnabled(enabled)
+            self._annotation_shortcut_state = {}
+        self._sync_toggle_shortcuts()
 
     def _init_shortcuts(self) -> None:
         """登记全系统快捷键并套用用户自定义值（启动时调一次）。
@@ -407,19 +466,188 @@ class WindowChromeMixin:
         self.addToolBar(tb)
         return tb
 
+    def _build_deep_learning_toolbar(self) -> QToolBar:
+        """「深度学习」tab 工具条：标注 / 训练 / 推理三个业务入口。"""
+        tb = QToolBar("深度学习", self)
+        tb.setObjectName("DeepLearningTabToolbar")
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+
+        for text, tip in (
+            ("标注", "对样本数据进行标注"),
+            ("训练", "训练深度学习模型"),
+            ("推理", "用训练好的模型对新影像做预测"),
+        ):
+            act = QAction(text, self)
+            act.setToolTip(tip)
+            # triggered 会带 bool 参数，用默认参数把按钮文案绑进去
+            act.triggered.connect(
+                lambda _checked=False, name=text: self._on_deep_learning_tool(name)
+            )
+            tb.addAction(act)
+
+        self.addToolBar(tb)
+        return tb
+
+    def _on_deep_learning_tool(self, name: str) -> None:
+        """「标注 / 训练 / 推理」入口：打开对应的中央区工作页面。"""
+        if name == "标注":
+            opener = getattr(self, "_open_annotation_page", None)
+            if opener is not None:
+                opener()
+                return
+            QMessageBox.warning(self, "深度学习", "标注窗口不可用（缺少入口方法）")
+            return
+        if name == "训练":
+            opener = getattr(self, "_open_training_page", None)
+            if opener is not None:
+                opener()
+                return
+            QMessageBox.warning(self, "深度学习", "训练窗口不可用（缺少入口方法）")
+            return
+        if name == "推理":
+            opener = getattr(self, "_open_inference_page", None)
+            if opener is not None:
+                opener()
+                return
+            QMessageBox.warning(self, "深度学习", "推理窗口不可用（缺少入口方法）")
+            return
+        QMessageBox.information(self, "深度学习", f"「{name}」功能正在开发中")
+
     def _on_tab_changed(self, index: int) -> None:
         """tab 切换：只显示当前 tab 对应的工具条，其余隐藏（模拟"换工具栏"）。
+
+        「深度学习」tab 本身即纯净地图模式开关：切到它 → 隐藏地图画布、停靠面板
+        与悬浮侧栏；切到任何其它 tab → 原样恢复（见 :meth:`_set_deep_learning_active`）。
 
         工具条显隐后由 ``QMainWindow`` 自己发 ``LayoutRequest`` 重算中央区，正常情况
         画布顶边依次为 213 / 89 / 159 / 89（编辑 / 文件 / 通用 / 查看），**不要**手动
         ``layout.activate()`` 插队——那只会在下面这种布局停摆的场景里帮倒忙。
         """
+        self._set_deep_learning_active(
+            index == getattr(self, "_deep_learning_tab_index", -1)
+        )
+        deep = index == getattr(self, "_deep_learning_tab_index", -1)
+        if deep:
+            # 回到「深度学习」页签：恢复最后活动的工作区（标注 / 训练 / 推理）
+            if (
+                getattr(self, "_last_deep_learning_page", "") == "training"
+                and getattr(self, "_training_page_open", False)
+            ):
+                self._show_training_page()
+            elif (
+                getattr(self, "_last_deep_learning_page", "") == "inference"
+                and getattr(self, "_inference_page_open", False)
+            ):
+                self._show_inference_page()
+            elif getattr(self, "_annotation_page_open", False):
+                self._show_annotation_page()
+        elif getattr(self, "_central_stack", None) is not None:
+            # 离开工作区：切回地图页，页面实例保留（下次进入可恢复）
+            self._central_stack.setCurrentWidget(self._map_page)
+            self._annotation_page_visible = False
+            self._training_page_visible = False
+            self._inference_page_visible = False
+            self._set_annotation_shortcuts_blocked(False)
+            self.canvas.show()
         for idx, toolbars in self._tab_toolbars.items():
             visible = idx == index
             for tb in toolbars:
                 tb.setVisible(visible)
         # 兜底：布局一旦停摆（见 :meth:`heal_stalled_layout`），这里是用户最先看出来的地方
         self.heal_stalled_layout()
+
+    # ================================================= 深度学习模式
+
+    def _on_deep_learning(self) -> None:
+        """「分析工具」面板的「深度学习」按钮：切到「深度学习」tab 即进入模式。
+
+        模式完全由 tab 驱动（见 :meth:`_on_tab_changed`）：切到「深度学习」tab
+        隐藏地图画布、全部停靠面板与悬浮侧栏，切到任何其它 tab 原样恢复。
+        面板按钮在进入模式时会随面板一起隐藏，退出统一走「点其它 tab」。
+        """
+        index = getattr(self, "_deep_learning_tab_index", -1)
+        if index >= 0:
+            self._tab_bar.setCurrentIndex(index)
+
+    def _set_deep_learning_active(self, active: bool) -> None:
+        """按 tab 切换结果进入 / 退出纯净地图模式（幂等），并同步面板按钮状态。"""
+        active = bool(active)
+        if active != getattr(self, "_deep_learning_active", False):
+            self._deep_learning_active = active
+            if active:
+                self._enter_deep_learning_mode()
+            else:
+                self._leave_deep_learning_mode()
+        dock = getattr(self, "_analyse_dock", None)
+        if dock is not None:
+            dock.set_deep_learning_active(active)
+
+    def _enter_deep_learning_mode(self) -> None:
+        """记录并隐藏所有可见停靠面板、地图画布与悬浮竖排工具条。
+
+        「日志信息」面板例外：它是排查标注 / SAM 问题的唯一入口，且 LogDock
+        在不可见时会暂停自动刷新（见 ``LogDock._auto_reload``）。切到「深度学习」
+        页签后紧接着就会打开标注窗口，把日志面板一起藏掉会让用户以为日志不再刷新。
+        """
+        log_dock = getattr(self, "log_dock", None)
+        page = getattr(self, "_annotation_page", None)
+        training = getattr(self, "_training_page", None)
+        self._deep_learning_hidden_docks = [
+            dock
+            for dock in self.findChildren(QDockWidget)
+            if dock.isVisible()
+            and dock is not log_dock
+            # 标注 / 训练页自己的 Dock 属于页面内部布局，不是主窗口的地图组件，
+            # 不能一起隐藏
+            and not (page is not None and page.isAncestorOf(dock))
+            and not (training is not None and training.isAncestorOf(dock))
+        ]
+        for dock in self._deep_learning_hidden_docks:
+            dock.hide()
+        canvas = getattr(self, "canvas", None)
+        self._deep_learning_canvas_visible = canvas is not None and canvas.isVisible()
+        if canvas is not None:
+            canvas.hide()
+        side = getattr(self, "side_toolbar", None)
+        side_widget = getattr(side, "widget", None)
+        self._deep_learning_side_visible = (
+            side_widget is not None and side_widget.isVisible()
+        )
+        if side_widget is not None:
+            side_widget.hide()
+        # 定位气泡浮在中央区上，不属于画布隐藏链，必须单独收起
+        overlay = getattr(self, "_coord_locate_overlay", None)
+        self._deep_learning_coord_visible = bool(
+            overlay is not None and overlay.isVisible()
+        )
+        if overlay is not None:
+            overlay.hide()
+
+    def _leave_deep_learning_mode(self) -> None:
+        """恢复进入模式时可见的停靠面板、地图画布与悬浮竖排工具条。
+
+        ``show()`` 后按进入时的 z-order 依次 ``raise_()``：叠放（tabify）的面板里，
+        原先在最前的那个（用户当时选中的标签页）保持不变，不会跳回默认页签。
+        """
+        for dock in getattr(self, "_deep_learning_hidden_docks", []):
+            # 面板在模式存续期间被销毁时忽略
+            with suppress(RuntimeError):
+                dock.show()
+                dock.raise_()
+        self._deep_learning_hidden_docks = []
+        canvas = getattr(self, "canvas", None)
+        if canvas is not None and getattr(self, "_deep_learning_canvas_visible", False):
+            with suppress(RuntimeError):
+                canvas.show()
+        side = getattr(self, "side_toolbar", None)
+        side_widget = getattr(side, "widget", None)
+        if side_widget is not None and getattr(self, "_deep_learning_side_visible", False):
+            side_widget.show()
+            self._keep_side_toolbar_on_top()
+        overlay = getattr(self, "_coord_locate_overlay", None)
+        if overlay is not None and getattr(self, "_deep_learning_coord_visible", False):
+            with suppress(RuntimeError):
+                overlay.show()
 
     # ================================================= dock 布局停摆的自愈
 
@@ -549,7 +777,7 @@ class WindowChromeMixin:
         """按当前主题重绘窗体 chrome（菜单栏/状态栏/Dock）、主工具条和画布底色。"""
         theme = ThemeManager.instance().current()
         self.setStyleSheet(window_qss(theme))
-        # 5 个 tab 的工具条统一走 Ribbon 风格 QSS（构建后 / 切主题时都刷一遍）
+        # 所有 tab 的工具条统一走 Ribbon 风格 QSS（构建后 / 切主题时都刷一遍）
         tab_toolbars = getattr(self, "_tab_toolbars", None)
         if tab_toolbars:
             for toolbars in tab_toolbars.values():

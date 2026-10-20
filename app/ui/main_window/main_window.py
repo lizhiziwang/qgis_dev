@@ -172,6 +172,28 @@ class MainWindow(
         self._layer_clipboard: Optional[list] = None
         #: 流程节点编辑器窗口（懒建单实例，见 _open_flow_editor）
         self._flow_editor_window = None
+        #: 影像标注工作区页面（懒建单实例，嵌入中央 QStackedWidget）
+        self._annotation_page = None
+        #: 标注页是否处于「打开」状态（用户没按 Ctrl+W / 关闭）
+        self._annotation_page_open = False
+        #: 标注页是否是中央区当前页（用于主窗口快捷键屏蔽）
+        self._annotation_page_visible = False
+        #: 标注页激活前主窗口冲突 action 的 enabled 状态
+        self._annotation_shortcut_state: dict = {}
+        #: 训练工作区页面（懒建单实例，嵌入中央 QStackedWidget）
+        self._training_page = None
+        #: 训练页是否处于「打开」状态（用户没按 Ctrl+W / 关闭）
+        self._training_page_open = False
+        #: 训练页是否是中央区当前页（用于主窗口快捷键屏蔽）
+        self._training_page_visible = False
+        #: 推理工作区页面（懒建单实例，嵌入中央 QStackedWidget）
+        self._inference_page = None
+        #: 推理页是否处于「打开」状态（用户没按 Ctrl+W / 关闭）
+        self._inference_page_open = False
+        #: 推理页是否是中央区当前页（用于主窗口快捷键屏蔽）
+        self._inference_page_visible = False
+        #: 深度学习页签下最后活动的工作区（"annotation" / "training" / "inference"）
+        self._last_deep_learning_page = ""
         #: 离线下载弹窗（懒建单实例，保留用户勾选/进度状态）
         self._offline_download_dialog = None
         #: 「选择集」面板（懒建单实例，保留窗口位置，见 MapToolsMixin._on_box_select_complete）
@@ -227,6 +249,41 @@ class MainWindow(
         if not self._confirm_save_project_on_close():
             event.ignore()
             return
+        # 标注页先确认未保存的标注内容；取消则放弃整个关闭流程。
+        # 放在主窗口两次确认之后：避免用户取消主窗口关闭时标注页已被清理。
+        page = getattr(self, "_annotation_page", None)
+        if page is not None:
+            try:
+                # 页面已被用户 Ctrl+W 关闭过时不再重复确认（confirm_leave 已跑过）
+                if not page.shutdown(confirm=self._annotation_page_open):
+                    event.ignore()
+                    return
+            except Exception:
+                logger.exception("关闭标注页面失败")
+                event.ignore()
+                return
+        # 训练页确认仍在运行的训练进程：用户取消则放弃整个关闭流程
+        training = getattr(self, "_training_page", None)
+        if training is not None:
+            try:
+                if not training.shutdown(confirm=self._training_page_open):
+                    event.ignore()
+                    return
+            except Exception:
+                logger.exception("关闭训练页面失败")
+                event.ignore()
+                return
+        # 推理页：确认 / 终止仍在运行的推理子进程
+        inference = getattr(self, "_inference_page", None)
+        if inference is not None:
+            try:
+                if not inference.shutdown(confirm=self._inference_page_open):
+                    event.ignore()
+                    return
+            except Exception:
+                logger.exception("关闭推理页面失败")
+                event.ignore()
+                return
         try:
             # ZoomTileGuard 先停：冻结期间若直接关窗，worker 线程还在跑离屏渲染，
             # 关窗口会触发 QPainter/QImage 析构，可能撞上 native 崩溃。
