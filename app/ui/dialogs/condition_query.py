@@ -10,7 +10,10 @@
 
 界面元素与原型一致：选择查询图层 / 选择方式、字段信息（字段筛选）、操作按钮、
 唯一值（获取唯一值）、条件编辑框，以及底部的查询方案（存储 / 删除 / 清除 /
-查询）。「域字段」「显示代码」暂时隐藏（实现保留，后续需要时再放开）。条件语法
+查询）。
+
+「域字段」勾选后只列挂接了字典 / 属性域的字段；「显示代码」勾选后唯一值显示为
+``字典名称(代码)``，未勾选只显示字典名称（没有字典时显示原始代码）。条件语法
 按 QGIS 表达式（``QgsExpression``）解析，字段引用统一插成 ``"字段名"``。
 
 面板以**非模态**方式打开（``setModal(False)`` + ``show()``），查询后可以直接回到
@@ -50,6 +53,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from app.core.util.dict_values import layer_dict_field_names, load_field_dict
 from app.infra.fs.state import load_state, save_state
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
@@ -67,9 +71,6 @@ _STATE_NAME = "condition_query"
 
 #: 唯一值最多取多少个（防止超大图层把弹窗卡住；列表末尾会提示已截断）
 _UNIQUE_LIMIT = 5000
-
-#: 本工程「字典字段」存放的自定义属性前缀（见 create_data/fields.py）
-_DICT_TABLE_PROP = "create_data/dict_table/"
 
 #: 条件框下方的常驻提示
 _HINT = "查询命中的要素会加入选择集，不会改动图层自身的属性过滤。"
@@ -129,14 +130,6 @@ def _domain_labels(field: "QgsField") -> dict[str, str] | None:
     return labels or None
 
 
-def _has_dict_table(layer: "QgsVectorLayer", field_name: str) -> bool:
-    """本工程「创建数据」登记的字典字段（只标记为域字段，标签暂未接入）。"""
-    try:
-        return bool(layer.customProperty(_DICT_TABLE_PROP + field_name, ""))
-    except Exception:  # noqa: BLE001 —— 图层对象已销毁
-        return False
-
-
 def _literal(value: object) -> str:
     """唯一值 → 表达式字面量（字符串加单引号并转义）。"""
     value = unwrap(value)
@@ -170,14 +163,19 @@ class ConditionQueryDialog(BaseDialog):
         self.setWindowTitle("条件查询")
         # 非模态：查询后用户还要回主窗口点图层列表 / 画布，不能挡住输入
         self.setModal(False)
-        self.setMinimumSize(700, 620)
-        self.resize(780, 700)
+        # 紧凑尺寸：用户反馈原 780×700 太占地方，查询面板只占屏幕一角就够用
+        self.setMinimumSize(500, 460)
+        self.resize(600, 520)
         self._layers = list(layers)
         self._current_layer = self._find_layer(current_layer)
         self._field_entries: list[_FieldEntry] = []
         self._active_field = ""
         self._unique_values: list[object] = []
         self._schemes: list[dict[str, Any]] = []
+        #: 字段 → ``{代码: 字典名称}``（本地字典 / GDB 属性域 / ValueMap 都走这里）
+        self._labels_cache: dict[str, dict[str, str]] = {}
+        #: (图层 id, 域字段名集合)：字段筛选每敲一个字都重建列表，别每次都重读数据源
+        self._domain_names_cache: tuple[str, set[str]] | None = None
         self._init_ui()
         self._init_signals()
         self._load_schemes()
@@ -189,14 +187,17 @@ class ConditionQueryDialog(BaseDialog):
 
     def _init_ui(self) -> None:
         main = QVBoxLayout()
-        main.setContentsMargins(10, 8, 10, 8)
-        main.setSpacing(8)
+        main.setContentsMargins(8, 6, 8, 6)
+        main.setSpacing(6)
 
         # 查询图层 / 选择方式
         layer_group = QGroupBox()
         layer_grid = QGridLayout(layer_group)
+        layer_grid.setContentsMargins(8, 4, 8, 4)
+        layer_grid.setHorizontalSpacing(6)
+        layer_grid.setVerticalSpacing(4)
         self.layer_combo = QComboBox()
-        self.layer_combo.setMinimumWidth(320)
+        self.layer_combo.setMinimumWidth(260)
         self.method_combo = QComboBox()
         for label, action in SELECT_METHODS:
             self.method_combo.addItem(label, action)
@@ -210,13 +211,16 @@ class ConditionQueryDialog(BaseDialog):
         # 字段信息
         field_group = QGroupBox("字段信息")
         field_layout = QVBoxLayout(field_group)
+        field_layout.setContentsMargins(8, 4, 8, 4)
+        field_layout.setSpacing(4)
         field_tools = QHBoxLayout()
+        field_tools.setSpacing(6)
         self.field_filter_btn = QPushButton("显示字段筛选")
         self.field_filter_btn.setCheckable(True)
         self.field_filter_btn.setToolTip("按关键字筛选下面的字段列表")
         self.domain_check = QCheckBox("域字段")
-        self.domain_check.setChecked(True)
-        self.domain_check.hide()  # 暂不开放：实现保留，后续需要时去掉 hide()
+        self.domain_check.setChecked(False)
+        self.domain_check.setToolTip("勾选后只显示挂接了字典 / 属性域的字段")
         field_tools.addWidget(self.field_filter_btn)
         field_tools.addStretch(1)
         field_tools.addWidget(self.domain_check)
@@ -226,18 +230,22 @@ class ConditionQueryDialog(BaseDialog):
         self.field_filter_edit.hide()
         field_layout.addWidget(self.field_filter_edit)
         self.field_list = QListWidget()
-        self.field_list.setMinimumHeight(110)
+        self.field_list.setMinimumHeight(90)
         field_layout.addWidget(self.field_list)
-        main.addWidget(field_group, 1)
+        main.addWidget(field_group, 2)
 
         # 操作 / 唯一值
         middle = QHBoxLayout()
+        middle.setSpacing(6)
         op_group = QGroupBox("操作")
         op_grid = QGridLayout(op_group)
+        op_grid.setContentsMargins(8, 4, 8, 4)
+        op_grid.setHorizontalSpacing(4)
+        op_grid.setVerticalSpacing(3)
         for index, (label, insert, back) in enumerate(_OPERATORS):
             row, column = divmod(index, 4)
             button = QPushButton(label)
-            button.setMinimumHeight(28)
+            button.setMinimumHeight(22)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             if label == "?":
                 button.setToolTip("单字符通配符（QGIS LIKE 里写作 _）")
@@ -245,44 +253,54 @@ class ConditionQueryDialog(BaseDialog):
                 lambda _checked=False, text=insert, offset=back: self._insert_text(text, offset)
             )
             op_grid.addWidget(button, row, column)
-        op_group.setMinimumWidth(340)
+        op_group.setMinimumWidth(260)
         middle.addWidget(op_group, 1)
 
         unique_group = QGroupBox("唯一值")
         unique_layout = QVBoxLayout(unique_group)
+        unique_layout.setContentsMargins(8, 4, 8, 4)
+        unique_layout.setSpacing(4)
         unique_tools = QHBoxLayout()
+        unique_tools.setSpacing(6)
         self.show_code_check = QCheckBox("显示代码")
         self.show_code_check.setChecked(False)
         self.show_code_check.setEnabled(False)
-        self.show_code_check.hide()  # 暂不开放：实现保留，后续需要时去掉 hide()
+        self.show_code_check.setToolTip(
+            "勾选后字典值显示为「名称(代码)」，未勾选只显示名称；"
+            "双击写入条件的始终是原始代码"
+        )
         self.get_unique_btn = QPushButton("获取唯一值")
         unique_tools.addWidget(self.show_code_check)
         unique_tools.addWidget(self.get_unique_btn)
         unique_tools.addStretch(1)
         unique_layout.addLayout(unique_tools)
         self.unique_list = QListWidget()
-        self.unique_list.setMinimumHeight(110)
+        self.unique_list.setMinimumHeight(64)
         unique_layout.addWidget(self.unique_list)
         middle.addWidget(unique_group, 1)
-        main.addLayout(middle, 1)
+        main.addLayout(middle, 2)
 
         # 条件
         condition_group = QGroupBox("条件")
         condition_layout = QVBoxLayout(condition_group)
+        condition_layout.setContentsMargins(8, 4, 8, 4)
+        condition_layout.setSpacing(4)
         self.condition_edit = QTextEdit()
         self.condition_edit.setPlaceholderText('示例："核实完成状态" = \'已核实\'')
-        self.condition_edit.setMinimumHeight(90)
+        self.condition_edit.setMinimumHeight(40)
+        self.condition_edit.setMaximumHeight(50)
         condition_layout.addWidget(self.condition_edit)
         self.result_label = QLabel(_HINT)
         self.result_label.setObjectName("PropHint")
         self.result_label.setWordWrap(True)
         condition_layout.addWidget(self.result_label)
-        main.addWidget(condition_group, 1)
+        main.addWidget(condition_group, 0)
 
         # 底部：查询方案 + 操作按钮
         footer = QHBoxLayout()
+        footer.setSpacing(6)
         self.scheme_combo = QComboBox()
-        self.scheme_combo.setMinimumWidth(180)
+        self.scheme_combo.setMinimumWidth(160)
         footer.addWidget(self.scheme_combo)
         self.save_btn = QPushButton("存储")
         self.delete_btn = QPushButton("删除")
@@ -307,7 +325,7 @@ class ConditionQueryDialog(BaseDialog):
         self.field_list.itemClicked.connect(self._on_field_clicked)
         self.unique_list.itemClicked.connect(self._on_unique_clicked)
         self.get_unique_btn.clicked.connect(self._refresh_unique_values)
-        self.show_code_check.toggled.connect(lambda _checked: self._render_unique_values())
+        self.show_code_check.toggled.connect(self._on_show_code_toggled)
         self.scheme_combo.currentIndexChanged.connect(self._on_scheme_changed)
         self.save_btn.clicked.connect(self._on_save_scheme)
         self.delete_btn.clicked.connect(self._on_delete_scheme)
@@ -361,67 +379,112 @@ class ConditionQueryDialog(BaseDialog):
     def _on_layer_changed(self, _index: int = -1) -> None:
         """切换图层：重建字段列表 / 唯一值，清掉上一条结果提示。"""
         self._active_field = ""
+        self._labels_cache.clear()
+        self._domain_names_cache = None
         self._update_domain_check()
         self._refresh_fields()
         self.result_label.setText(_HINT)
 
+    def _domain_field_names(self, layer: "QgsVectorLayer") -> set[str]:
+        """当前图层里挂接了字典 / 属性域（含 ValueMap）的字段名。"""
+        layer_id = layer.id()
+        if (
+            self._domain_names_cache is not None
+            and self._domain_names_cache[0] == layer_id
+        ):
+            return self._domain_names_cache[1]
+        names: set[str] = set()
+        try:
+            names.update(layer_dict_field_names(layer))
+        except Exception:  # noqa: BLE001 —— 读不到就按没有
+            pass
+        for field in layer.fields():
+            if _domain_labels(field) is not None:
+                names.add(field.name())
+        self._domain_names_cache = (layer_id, names)
+        return names
+
     def _update_domain_check(self) -> None:
-        """有域字段时「域字段」勾选才有效（无域字段的图层置灰）。"""
+        """有域字段时「域字段」勾选才有效；默认不勾选（显示全部字段）。"""
         layer = self.current_layer()
-        has_domain = False
-        if layer is not None:
-            has_domain = any(
-                _domain_labels(field) is not None or _has_dict_table(layer, field.name())
-                for field in layer.fields()
-            )
+        has_domain = bool(layer is not None and self._domain_field_names(layer))
         self.domain_check.blockSignals(True)
         self.domain_check.setEnabled(has_domain)
-        self.domain_check.setToolTip(
-            "勾选时字段列表包含域字段；取消勾选只看普通字段"
-            if has_domain
-            else "当前图层没有域字段"
-        )
         if not has_domain:
-            self.domain_check.setChecked(True)
+            self.domain_check.setChecked(False)
+        self.domain_check.setToolTip(
+            "勾选后只显示挂接了字典 / 属性域的字段；取消勾选显示全部字段"
+            if has_domain
+            else "当前图层没有域字段（显示全部字段）"
+        )
         self.domain_check.blockSignals(False)
 
     def _on_field_filter_toggled(self, checked: bool) -> None:
         self.field_filter_edit.setVisible(checked)
         self._refresh_fields()
 
+    def _labels_for(self, name: str) -> dict[str, str]:
+        """字段的「代码 → 名称」映射：本地字典 / GDB 属性域 / ValueMap 都支持。"""
+        if name in self._labels_cache:
+            return self._labels_cache[name]
+        labels: dict[str, str] = {}
+        layer = self.current_layer()
+        if layer is not None:
+            field = layer.fields().field(name)
+            labels = _domain_labels(field) or {}
+            if not labels:
+                try:
+                    info = load_field_dict(layer, name)
+                except Exception:  # noqa: BLE001
+                    info = None
+                if info is not None:
+                    labels = {
+                        str(value.code): str(value.name)
+                        for value in info.values
+                        if value.code
+                    }
+        self._labels_cache[name] = labels
+        return labels
+
     def _refresh_fields(self) -> None:
-        """按「域字段」与关键字筛选重建字段列表，并尽量保留当前激活字段。"""
+        """按「域字段」与关键字筛选重建字段列表，并尽量保留当前激活字段。
+
+        **勾选「域字段」时只列域字段**；取消勾选显示全部字段。
+        """
         layer = self.current_layer()
         term = self.field_filter_edit.text().strip().lower() if self.field_filter_btn.isChecked() else ""
-        include_domains = self.domain_check.isChecked()
+        only_domains = self.domain_check.isChecked()
+        domain_names = self._domain_field_names(layer) if layer is not None else set()
 
         self.field_list.blockSignals(True)
         self.field_list.clear()
         self._field_entries = []
         if layer is not None:
             for field in layer.fields():
+                name = field.name()
                 labels = _domain_labels(field)
-                is_domain = labels is not None or _has_dict_table(layer, field.name())
-                if is_domain and not include_domains:
+                is_domain = labels is not None or name in domain_names
+                if only_domains and not is_domain:
                     continue
-                display = field.name()
+                display = name
                 alias = field_alias(field)
                 if alias and alias != display:
                     display = f"{display}（{alias}）"
-                if term and term not in display.lower() and term not in field.name().lower():
+                if term and term not in display.lower() and term not in name.lower():
                     continue
                 self._field_entries.append(
                     _FieldEntry(
-                        name=field.name(),
+                        name=name,
                         display=display,
                         domain_labels=labels,
                     )
                 )
                 item = QListWidgetItem(display)
-                item.setData(Qt.ItemDataRole.UserRole, field.name())
-                item.setToolTip(f"字段：{field.name()}")
-                if alias and alias != field.name():
-                    item.setToolTip(f"字段：{field.name()}\n别名：{alias}")
+                item.setData(Qt.ItemDataRole.UserRole, name)
+                item.setToolTip(
+                    f"字段：{name}" + (f"\n别名：{alias}" if alias and alias != name else "")
+                    + ("\n（已挂接字典）" if is_domain else "")
+                )
                 self.field_list.addItem(item)
 
         if self._field_entries:
@@ -466,10 +529,25 @@ class ConditionQueryDialog(BaseDialog):
     # ------------------------------------------------------------ 唯一值
 
     def _clear_unique_values(self) -> None:
-        """清空唯一值列表（切字段 / 切图层 / 改筛选条件时调用）。"""
+        """清空唯一值列表（切字段 / 切图层 / 改筛选条件时调用）。
+
+        「显示代码」只要当前字段有字典标签就保持可用 —— 用户可以直接勾选它，
+        触发自动获取唯一值，不用先点「获取唯一值」。
+        """
         self.unique_list.clear()
         self._unique_values = []
-        self.show_code_check.setEnabled(False)
+        entry = self._active_entry()
+        has_labels = bool(self._labels_for(entry.name)) if entry is not None else False
+        self.show_code_check.setEnabled(has_labels)
+
+    def _on_show_code_toggled(self, _checked: bool) -> None:
+        """勾选 / 取消「显示代码」时自动获取唯一值（已取过则只重绘）。"""
+        if self._active_entry() is None:
+            return
+        if not self._unique_values:
+            self._refresh_unique_values()
+        else:
+            self._render_unique_values()
 
     def _refresh_unique_values(self) -> None:
         """取当前字段的唯一值（``provider.uniqueValues``，最多 ``_UNIQUE_LIMIT`` 个）。"""
@@ -498,23 +576,27 @@ class ConditionQueryDialog(BaseDialog):
         cleaned = [value for value in cleaned if value is not None and value != ""]
         cleaned.sort(key=_sort_key)
         self._unique_values = cleaned
-        self.show_code_check.setEnabled(bool(entry.domain_labels) and bool(cleaned))
+        labels = self._labels_for(entry.name)
+        self.show_code_check.setEnabled(bool(labels) and bool(cleaned))
         self._render_unique_values()
 
     def _render_unique_values(self) -> None:
-        """按「显示代码」开关把唯一值渲染成标签或代码。"""
+        """按「显示代码」开关渲染：勾选 = 名称(代码)，未勾选 = 名称。"""
         self.unique_list.clear()
         entry = self._active_entry()
+        labels = self._labels_for(entry.name) if entry is not None else {}
         show_code = self.show_code_check.isChecked()
         for value in self._unique_values:
             code = format_value(value)
-            text = code
-            if entry is not None and entry.domain_labels and not show_code:
-                text = entry.domain_labels.get(code, code)
+            label = labels.get(code)
+            if label:
+                text = f"{label}({code})" if show_code else label
+            else:
+                text = code
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, value)
             if text != code:
-                item.setToolTip(code)
+                item.setToolTip(f"代码：{code}")
             self.unique_list.addItem(item)
         if len(self._unique_values) >= _UNIQUE_LIMIT:
             hint = QListWidgetItem(f"（仅显示前 {_UNIQUE_LIMIT} 个唯一值）")

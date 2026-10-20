@@ -63,6 +63,16 @@ _AREA_BACKENDS: dict[str, str] = {
     "椭球面积": BACKEND_ELLIPSOID,
 }
 
+
+def length_backend_for(method: str) -> str:
+    """长度计算方法名 → 量算后端（认不出就按高斯平面）。"""
+    return _LENGTH_BACKENDS.get(str(method or ""), BACKEND_GAUSS)
+
+
+def area_backend_for(method: str) -> str:
+    """面积计算方法名 → 量算后端（认不出就按高斯平面）。"""
+    return _AREA_BACKENDS.get(str(method or ""), BACKEND_GAUSS)
+
 #: 老配置里用过的方法名 → 新名字（选项收敛过几轮，避免旧值被判非法而回默认）
 _LENGTH_ALIASES = {
     "长度(Karney测地线)": "测地线长度",
@@ -117,12 +127,12 @@ class EditSettings:
     @property
     def length_backend(self) -> str:
         """长度量算后端：``gauss`` / ``albers`` / ``ellipsoid``。"""
-        return _LENGTH_BACKENDS.get(self.len_method, BACKEND_GAUSS)
+        return length_backend_for(self.len_method)
 
     @property
     def area_backend(self) -> str:
         """面积量算后端：``gauss`` / ``albers`` / ``ellipsoid``。"""
-        return _AREA_BACKENDS.get(self.area_method, BACKEND_GAUSS)
+        return area_backend_for(self.area_method)
 
 
 DEFAULTS = EditSettings()
@@ -229,6 +239,8 @@ __all__ = [
     "SELECT_FILTER_POSITIONS",
     "WHEEL_MODES",
     "from_mapping",
+    "length_backend_for",
     "load_settings",
     "save_settings",
+    "area_backend_for",
 ]

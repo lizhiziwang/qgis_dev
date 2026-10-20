@@ -30,12 +30,15 @@ from contextlib import suppress
 
 from qgis.core import (
     QgsApplication,
+    QgsLayerTree,
+    QgsLayerTreeGroup,
     QgsLayerTreeModel,
     QgsProject,
     QgsVectorLayer,
 )
 from qgis.gui import QgsLayerTreeView
-from qgis.PyQt.QtCore import QEvent, QPoint, QRectF, QSize, Qt, pyqtSignal
+from qgis.PyQt import sip
+from qgis.PyQt.QtCore import QEvent, QModelIndex, QPoint, QRectF, QSize, Qt, pyqtSignal
 from qgis.PyQt.QtGui import (
     QColor,
     QFont,
@@ -48,10 +51,12 @@ from qgis.PyQt.QtGui import (
 )
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
+    QButtonGroup,
     QDockWidget,
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QStackedWidget,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
@@ -66,6 +71,8 @@ from app.ui.common.theme import DOCK_SELECTION_ALPHA, ThemeManager
 # QGIS 主题图标名（3.40 / 4.2 两个运行时均已实测可用）
 _THEME_ICONS = {
     "add_layer": "mActionAddLayer.svg",
+    "view_order": "mIconLayerTree.svg",
+    "view_source": "mActionDataSourceManager.svg",
     "style": "mActionOptions.svg",
     "group": "mActionAddGroup.svg",
     "remove": "mActionRemoveLayer.svg",
@@ -76,9 +83,12 @@ _THEME_ICONS = {
 }
 
 # (按钮属性名, 图标键, 信号名, 悬停提示)
-# 顺序按 QGIS 桌面图层面板：样式 → 添加组 → 删除 → 展开/折叠所有 → 上移/下移
-# 「添加图层」按用户要求放在样式（图层渲染设置）左边
+# 顺序：先「按图层顺序 / 按数据源」两个展示方式按钮（用户要求放在添加图层
+# 前面），再是 QGIS 桌面图层面板那套：添加图层 → 样式 → 添加组 → 删除 →
+# 展开/折叠所有 → 上移/下移。展示方式按钮信号名 None = 特殊处理。
 _HEADER_SPECS = (
+    ("btn_view_order", "view_order", None, "按图层顺序展示"),
+    ("btn_view_source", "view_source", None, "按数据源展示"),
     ("btn_add_layer", "add_layer", "add_layer_requested", "添加图层（矢量 / 栅格 / GDB）"),
     ("btn_render_tab", "style", "render_tab_requested", "打开图层渲染设置"),
     ("btn_add_group", "group", "add_group_requested", "添加图层组"),
@@ -97,6 +107,78 @@ def _theme_icon(name: str) -> QIcon:
         if icon is not None and not icon.isNull():
             return icon
     return QIcon()
+
+
+class _SourceTreeModel(QgsLayerTreeModel):
+    """「按数据源展示」用的模型：**分组行不显示勾选框**。
+
+    QGIS 的组节点默认带一个可见性勾选框（勾上/取消会级联组内图层）。数据源
+    分组只是归类，不是工程里的真实图层组，给它勾选框既多余又容易误导 ——
+    只有图层行保留勾选框（控制显示 / 隐藏）。
+    """
+
+    def _is_group_index(self, index) -> bool:
+        if not index.isValid():
+            return False
+        try:
+            node = self.index2node(index)
+        except Exception:  # noqa: BLE001 —— 野索引不能拖垮绘制
+            return False
+        return isinstance(node, QgsLayerTreeGroup)
+
+    def flags(self, index):
+        flags = super().flags(index)
+        if self._is_group_index(index):
+            flags &= ~Qt.ItemFlag.ItemIsUserCheckable
+        return flags
+
+    def data(self, index, role=Qt.ItemDataRole.DisplayRole):
+        if (
+            role == Qt.ItemDataRole.CheckStateRole
+            and self._is_group_index(index)
+        ):
+            return None
+        return super().data(index, role)
+
+
+#: 「按数据源展示」里非文件类图层的分组（键, 显示名）
+_MEMORY_SOURCE = ("~memory", "内存图层")
+
+
+def _layer_source_group(layer) -> tuple[str, str]:
+    """图层 → ``(分组键, 显示名)``（「按数据源展示」用）。
+
+    与 ArcMap 的 List By Source 一致：**同一个工作空间/库的图层归到一组**，
+    而不是一个图层一组。Shapefile 按所在文件夹归组；GeoPackage / SQLite /
+    FileGDB 按库文件（目录）归组；内存图层单独一组；其余在线服务按数据源分组。
+    """
+    try:
+        provider = str(layer.providerType() or "")
+        source = str(layer.source() or "")
+    except RuntimeError:  # 图层对象已销毁
+        return ("~unknown", "未知数据源")
+    if provider in ("memory", "virtual"):
+        return _MEMORY_SOURCE
+    container = source
+    if provider in ("ogr", "gdal", "spatialite"):
+        try:
+            from app.core.util.local_layer_loader import layer_source_container
+
+            container = str(layer_source_container(layer) or source)
+        except Exception:  # noqa: BLE001 —— 解析失败按原始 source 归组
+            container = source.split("|", 1)[0].strip() or source
+    else:
+        # 在线服务 / 数据库连接：source 里就带着主机与库名，整串归组
+        return (f"{provider}:{source}", source or provider or "未知数据源")
+    if not container:
+        return (f"~{provider}", provider or "未知数据源")
+    lowered = container.lower()
+    if "://" in lowered:
+        return (container, container)
+    if lowered.endswith((".shp", ".dbf", ".shx", ".tab", ".mif", ".mid")):
+        folder = os.path.dirname(container) or container
+        return (folder, folder)
+    return (container, container)
 
 
 # 「标注」开关的几何（相对行矩形右端）
@@ -445,10 +527,11 @@ class _LabelRadioDelegate(QStyledItemDelegate):
         return size
 
     def helpEvent(self, event, view, option, index) -> bool:
-        """悬停整行都弹完整图层名气泡。
+        """悬停整行都弹完整名称气泡。
 
         名字长到被行尾开关盖住、或 Dock 太窄把名字挤没了时，气泡是看全名的兜底
-        （另一条路是把 Dock 拉宽，行自然就够长）。组等非图层节点交回默认处理。
+        （另一条路是把 Dock 拉宽，行自然就够长）。**分组行**同样处理：数据源视图
+        的分组名是完整路径，窄面板里一定显示不全，没有气泡就完全看不到路径。
         """
         try:
             layer = self._node_layer(index)
@@ -462,6 +545,23 @@ class _LabelRadioDelegate(QStyledItemDelegate):
                     return True
                 QToolTip.showText(event.globalPos(), layer.name(), view)
                 return True
+            if event is not None and event.type() == QEvent.Type.ToolTip:
+                try:
+                    # 视图里的 index 属于内部代理模型（QgsLayerTreeProxyModel）；
+                    # 先映射回源模型，再用源模型的 index2node 取节点。直接用
+                    # view.index2node 拿分组索引会得到根节点（实测），拿不到分组名。
+                    model = self._view.model()
+                    src_index = index
+                    mapper = getattr(model, "mapToSource", None)
+                    if callable(mapper):
+                        src_index = mapper(index)
+                        model = model.sourceModel()
+                    node = model.index2node(src_index) if src_index.isValid() else None
+                except Exception:  # noqa: BLE001
+                    node = None
+                if isinstance(node, QgsLayerTreeGroup):
+                    QToolTip.showText(event.globalPos(), node.name(), view)
+                    return True
         except Exception:  # noqa: BLE001
             pass
         try:
@@ -548,6 +648,9 @@ class LayerDock(QDockWidget):
 
         self.project: QgsProject = QgsProject.instance()
         self.tree_root = self.project.layerTreeRoot()
+        #: 当前展示方式：``order`` = 按图层顺序（真实工程图层树），
+        #: ``source`` = 按数据源（分组用的是一棵**独立**的树，不碰工程图层顺序）
+        self._view_mode = "order"
 
         self.model = QgsLayerTreeModel(self.tree_root)
         self.model.setFlags(
@@ -557,29 +660,18 @@ class LayerDock(QDockWidget):
             # 不显示图例：分类/渐变渲染会挤进 "1"、"2" 等图例项
         )
 
-        self.view = QgsLayerTreeView(self)
-        self.view.setModel(self.model)
-        # 行尾「标注」开关要一直看得见：列撑满视口 + 关横向滚动条，长图层名交给
-        # 默认委托右侧省略（悬停气泡看全名、拉宽 Dock 看更多）。这样 ``option.rect``
-        # 的右端就是视口右端，开关不会被长名字顶进横向滚动区里。
-        self.view.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.view.setTextElideMode(Qt.TextElideMode.ElideRight)
-        self.view.clicked.connect(self.layer_clicked.emit)
-        # 另接一个槽刷新底部「图层信息」（不动 layer_clicked 的载荷：那边收的是 index）
-        self.view.clicked.connect(self._on_view_clicked)
-        # 双击图层项 → 打开属性表；就地重命名改用编辑键（F2），别一次双击干两件事
-        self.view.setEditTriggers(QAbstractItemView.EditTrigger.EditKeyPressed)
-        self.view.doubleClicked.connect(self._on_view_double_clicked)
-        self.view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-        self.view.customContextMenuRequested.connect(self._on_view_context_menu)
-        # 行尾「标注」开关：只画、只发信号（读写标注由主窗口实现）
-        self.label_delegate = _LabelRadioDelegate(self.view)
-        self.view.setItemDelegate(self.label_delegate)
-        self.label_delegate.toggle_requested.connect(self.label_toggle_requested.emit)
-        self.label_delegate.source_repair_requested.connect(
-            self.source_repair_requested.emit
-        )
+        self._order_view = self._make_view(self.model, order=True)
+        # 「按数据源展示」：独立的根节点 + 模型，图层节点按数据源分组。
+        # 不复用工程树是为了**不改绘制顺序**（ArcMap 的 List By Source 也是
+        # 纯视图）；图层对象仍是同一个，勾选可见性 / 标注开关照样生效。
+        self.source_root = QgsLayerTree()
+        self.source_model = _SourceTreeModel(self.source_root)
+        self.source_model.setFlags(QgsLayerTreeModel.AllowNodeChangeVisibility)
+        self.source_view = self._make_view(self.source_model, order=False)
+
+        self.view_stack = QStackedWidget(self)
+        self.view_stack.addWidget(self._order_view)
+        self.view_stack.addWidget(self.source_view)
 
         self._build_header()
 
@@ -589,9 +681,278 @@ class LayerDock(QDockWidget):
         body_layout.setContentsMargins(0, 0, 0, 0)
         body_layout.setSpacing(0)
         body_layout.addWidget(self.header_bar)
-        body_layout.addWidget(self.view, 1)
+        body_layout.addWidget(self.view_stack, 1)
         body_layout.addWidget(self._build_info_panel())
         self.setWidget(body)
+
+        self._view_mode = "order"
+        self.view_stack.setCurrentWidget(self._order_view)
+        # 工程增删图层 → 数据源视图跟着重建（只在数据源模式下做，省得白跑）。
+        # 以**图层树**的增删信号为准：``layersAdded`` 在节点挂进树之前就发了，
+        # 那时 findLayers() 还看不到新图层。嵌套组里的增删只有该组会发信号，
+        # 所以递归给每个组节点都挂上。
+        self._structure_hooked: set[int] = set()
+        self._hook_tree_nodes()
+        # 可见性在 QGIS 4 里挂在**图层树节点**上（QgsMapLayer 已没有 isVisible）：
+        # 数据源视图是另一棵树，勾选框必须和工程节点双向同步，否则点了没反应
+        self._visibility_hooked: set[str] = set()
+        self._hook_project_visibility()
+
+    def _make_view(self, model: QgsLayerTreeModel, *, order: bool) -> QgsLayerTreeView:
+        """建一个图层树视图（两个展示方式共用同一套交互 / 委托）。"""
+        view = QgsLayerTreeView(self)
+        view.setModel(model)
+        # 行尾「标注」开关要一直看得见：列撑满视口 + 关横向滚动条，长图层名交给
+        # 默认委托右侧省略（悬停气泡看全名、拉宽 Dock 看更多）。这样 ``option.rect``
+        # 的右端就是视口右端，开关不会被长名字顶进横向滚动区里。
+        view.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        view.setTextElideMode(Qt.TextElideMode.ElideRight)
+        # clicked 载荷是 index：主窗口按「当前视图」映射节点，再记录选中图层
+        view.clicked.connect(self.layer_clicked.emit)
+        view.clicked.connect(self._on_view_clicked)
+        # 双击图层项 → 打开属性表；就地重命名改用编辑键（F2），别一次双击干两件事
+        view.setEditTriggers(QAbstractItemView.EditTrigger.EditKeyPressed)
+        view.doubleClicked.connect(self._on_view_double_clicked)
+        view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        view.customContextMenuRequested.connect(self._on_view_context_menu)
+        # 行尾「标注」开关：只画、只发信号（读写标注由主窗口实现）
+        delegate = _LabelRadioDelegate(view)
+        view.setItemDelegate(delegate)
+        delegate.toggle_requested.connect(self.label_toggle_requested.emit)
+        delegate.source_repair_requested.connect(self.source_repair_requested.emit)
+        if order:
+            self.label_delegate = delegate
+        else:
+            self.source_delegate = delegate
+        return view
+
+    @property
+    def view(self) -> QgsLayerTreeView:
+        """当前**可见**的图层树视图（主窗口的所有操作都作用在它上面）。"""
+        if self._view_mode == "source":
+            return self.source_view
+        return self._order_view
+
+    # ------------------------------------------------------- 按数据源展示
+
+    def _hook_tree_nodes(self) -> None:
+        """给工程树根及所有组挂增删 / 勾选信号（嵌套组的增删不会冒泡到根）。"""
+        try:
+            nodes = [self.tree_root, *self.tree_root.findGroups()]
+        except RuntimeError:
+            return
+        for node in nodes:
+            # 用底层 C++ 指针做键：Python 包装对象被回收后 id() 可能复用
+            try:
+                key = int(sip.unwrapinstance(node))
+            except (TypeError, RuntimeError):
+                continue
+            if key in self._structure_hooked:
+                continue
+            try:
+                node.addedChildren.connect(self._on_layers_changed)
+                node.removedChildren.connect(self._on_layers_changed)
+                # 组 / 根节点的勾选**不会**给子图层发 visibilityChanged（实测），
+                # 所以整组开关要单独接一个「全量对账」的槽
+                node.visibilityChanged.connect(
+                    self._on_project_group_visibility_changed
+                )
+            except (RuntimeError, AttributeError):
+                continue
+            self._structure_hooked.add(key)
+
+    def _on_layers_changed(self, *_args) -> None:
+        """工程里的图层增删了：数据源视图需要重建（顺序视图由 Qt 模型自己跟）。"""
+        # 新加的组也要挂信号，否则组内再增删就收不到
+        self._hook_tree_nodes()
+        self._hook_project_visibility()
+        if self._view_mode == "source":
+            self._rebuild_source_view()
+
+    def _hook_project_visibility(self) -> None:
+        """给工程图层节点挂可见性同步（每个图层只挂一次）。"""
+        try:
+            nodes = self.tree_root.findLayers()
+        except RuntimeError:
+            return
+        for node in nodes:
+            try:
+                layer_id = str(node.layerId())
+                if layer_id in self._visibility_hooked:
+                    continue
+                node.visibilityChanged.connect(self._on_project_visibility_changed)
+                self._visibility_hooked.add(layer_id)
+            except RuntimeError:
+                continue
+
+    def _on_project_visibility_changed(self, node) -> None:
+        """工程节点勾选变了 → 数据源视图里同一图层的勾选跟着变。"""
+        if self._view_mode != "source":
+            return
+        layer = self._node_layer_of(node)
+        if layer is None:
+            return
+        source_node = self.source_root.findLayer(layer.id())
+        if source_node is None:
+            return
+        # 用**实际可见性**（含所在组的勾选）：工程里组关了但图层自己仍勾着，
+        # 画布上就是不显示，数据源视图里也该显示为不勾选
+        checked = node.isVisible()
+        if source_node.itemVisibilityChecked() != checked:
+            source_node.setItemVisibilityChecked(checked)
+
+    def _on_project_group_visibility_changed(self, _node) -> None:
+        """工程里的组 / 根勾选变了 → 全量对账（子图层不会逐个发信号）。"""
+        if self._view_mode != "source":
+            return
+        try:
+            nodes = self.tree_root.findLayers()
+        except RuntimeError:
+            return
+        for node in nodes:
+            layer = self._node_layer_of(node)
+            if layer is None:
+                continue
+            source_node = self.source_root.findLayer(layer.id())
+            if source_node is None:
+                continue
+            checked = node.isVisible()
+            if source_node.itemVisibilityChecked() != checked:
+                source_node.setItemVisibilityChecked(checked)
+
+    def _on_source_visibility_changed(self, node) -> None:
+        """数据源视图勾选变了 → 写回工程节点（canvas 才会真的显示 / 隐藏）。
+
+        组节点的勾选是**级联到组内每个图层**的（QGIS 的组节点就是这个语义），
+        所以按组里的图层逐个写回，而不是只同步组节点自己。
+        """
+        try:
+            if isinstance(node, QgsLayerTreeGroup):
+                targets = list(node.findLayers())
+                checked = node.itemVisibilityChecked()
+            else:
+                targets = [node]
+                checked = node.itemVisibilityChecked()
+        except RuntimeError:
+            return
+        for target in targets:
+            layer = self._node_layer_of(target)
+            if layer is None:
+                continue
+            self._set_project_layer_visible(layer, checked)
+
+    def _set_project_layer_visible(self, layer, checked: bool) -> None:
+        """把数据源视图的勾选写回工程图层节点（必要时连带打开祖先组）。
+
+        数据源视图的分组和工程分组不是一回事：某图层在工程里可能躺在被关掉的
+        组里。用户在数据源视图里把它勾上，是希望画布上出现它 —— 只改图层节点
+        自己的勾选还不够，祖先组也得打开。
+        """
+        try:
+            node = self.tree_root.findLayer(layer.id())
+        except RuntimeError:
+            return
+        if node is None:
+            return
+        if checked:
+            try:
+                parent = node.parent()
+                while isinstance(parent, QgsLayerTreeGroup) and parent is not self.tree_root:
+                    if not parent.itemVisibilityChecked():
+                        parent.setItemVisibilityChecked(True)
+                    parent = parent.parent()
+            except RuntimeError:
+                return
+        if node.itemVisibilityChecked() != checked:
+            node.setItemVisibilityChecked(checked)
+
+    @staticmethod
+    def _node_layer_of(node):
+        """节点 → ``QgsMapLayer``（组 / 已销毁节点返回 ``None``）。"""
+        try:
+            getter = getattr(node, "layer", None)
+            return getter() if callable(getter) else None
+        except RuntimeError:
+            return None
+
+    def _rebuild_source_view(self) -> None:
+        """按「数据源」重组独立树：同一工作空间 / 库的图层归到一个组里。"""
+        view = self.source_view
+        # 重建前先清掉选中 / 当前项：节点随后会被删，别让视图留着持久索引
+        with suppress(Exception):
+            view.selectionModel().clear()
+            view.setCurrentIndex(QModelIndex())
+        self.source_root.removeAllChildren()
+        grouped: dict[str, tuple[str, list]] = {}
+        # findLayers() 就是树里从上到下（绘制顺序从上到下）的图层顺序
+        order = [
+            node.layer() for node in self.tree_root.findLayers() if node.layer() is not None
+        ]
+        for layer in order:
+            key, label = _layer_source_group(layer)
+            grouped.setdefault(key, (label, []))[1].append(layer)
+        for key in sorted(grouped, key=lambda item: grouped[item][0].casefold()):
+            label, layers = grouped[key]
+            group = self.source_root.addGroup(label)
+            group.setCustomProperty("data_source_key", key)
+            group.visibilityChanged.connect(self._on_source_visibility_changed)
+            for layer in layers:
+                node = group.addLayer(layer)
+                # 初值取工程图层的**实际可见性**；之后两边靠 visibilityChanged 双向同步
+                try:
+                    project_node = self.tree_root.findLayer(layer.id())
+                    if project_node is not None:
+                        node.setItemVisibilityChecked(project_node.isVisible())
+                except RuntimeError:
+                    pass
+                node.visibilityChanged.connect(self._on_source_visibility_changed)
+            group.setExpanded(True)
+
+    def set_view_mode(self, mode: str) -> None:
+        """切换展示方式：``order``（按图层顺序）/ ``source``（按数据源）。"""
+        mode = "source" if mode == "source" else "order"
+        if mode == "source":
+            self._rebuild_source_view()
+        self._view_mode = mode
+        self.view_stack.setCurrentWidget(self.view)
+        if hasattr(self, "btn_view_order"):
+            self.btn_view_order.blockSignals(True)
+            self.btn_view_source.blockSignals(True)
+            self.btn_view_order.setChecked(mode == "order")
+            self.btn_view_source.setChecked(mode == "source")
+            self.btn_view_order.blockSignals(False)
+            self.btn_view_source.blockSignals(False)
+        self.set_current_layer(self._info_layer_obj)
+
+    def _source_tree_has(self, node) -> bool:
+        """节点是不是「按数据源」那棵独立树里的（含其虚拟分组）。"""
+        try:
+            cursor = node
+            while cursor is not None:
+                if cursor is self.source_root:
+                    return True
+                cursor = cursor.parent()
+        except RuntimeError:  # 节点已销毁
+            pass
+        return False
+
+    def project_node(self, node):
+        """数据源视图里的节点 → 工程图层树里的真实节点。
+
+        主窗口的删除 / 上移下移 / 分组等操作都按节点干；数据源视图里的节点是
+        **副本**（不在工程树里），必须映射回工程节点，否则删的只是视图。
+        虚拟的「数据源」分组节点没有对应工程节点，返回 ``None``（调用方跳过）。
+        """
+        if node is None or not self._source_tree_has(node):
+            return node
+        getter = getattr(node, "layer", None)
+        layer = getter() if callable(getter) else None
+        if layer is None:
+            return None
+        with suppress(RuntimeError):
+            return self.tree_root.findLayer(layer.id())
+        return None
 
     # ------------------------------------------------------------- 图层信息块
 
@@ -617,6 +978,15 @@ class LayerDock(QDockWidget):
         self._info_layer_obj = None
         return panel
 
+    def _sender_view(self) -> QgsLayerTreeView:
+        """发出信号的视图（两个展示方式共用槽；直接调用时按当前视图）。"""
+        sender = self.sender()
+        if sender is self.source_view:
+            return self.source_view
+        if sender is self._order_view:
+            return self._order_view
+        return self.view
+
     def _on_view_double_clicked(self, index) -> None:
         """双击**图层项** → 打开它的属性表（栅格没有属性表，不发）。
 
@@ -626,7 +996,7 @@ class LayerDock(QDockWidget):
         from qgis.core import QgsVectorLayer
 
         try:
-            node = self.view.index2node(index)
+            node = self._sender_view().index2node(index)
             getter = getattr(node, "layer", None)
             layer = getter() if callable(getter) else None
         except Exception:  # noqa: BLE001 —— 野索引不该把双击拖垮
@@ -666,7 +1036,7 @@ class LayerDock(QDockWidget):
         """点中节点：刷新底部「图层信息」（点到组 / 空白显示占位）。"""
         layer = None
         try:
-            node = self.view.index2node(index)
+            node = self._sender_view().index2node(index)
             getter = getattr(node, "layer", None)
             layer = getter() if callable(getter) else None
         except Exception:  # noqa: BLE001 —— 野索引不该把点击拖垮
@@ -688,15 +1058,16 @@ class LayerDock(QDockWidget):
         组节点 / 图例节点没有 ``layer()``（返回 None），无效位置也直接返回，
         一律不弹菜单。
         """
-        index = self.view.indexAt(pos)
+        view = self._sender_view()
+        index = view.indexAt(pos)
         if not index.isValid():
             # **空白处右键**：树本身不弹菜单，发信号给宿主（添加组 / 展开折叠 /
             # 粘贴…）。以前这里直接返回，空白处右键什么都不出来。
-            self.blank_context_menu_requested.emit(self.view.viewport().mapToGlobal(pos))
+            self.blank_context_menu_requested.emit(view.viewport().mapToGlobal(pos))
             return
         # index2node 对越界/野索引会抛异常；槽内异常未捕获会崩（0xC0000409）
         try:
-            node = self.view.index2node(index)
+            node = view.index2node(index)
         except Exception:  # noqa: BLE001
             return
         layer_getter = getattr(node, "layer", None)
@@ -707,11 +1078,14 @@ class LayerDock(QDockWidget):
             from qgis.core import QgsLayerTreeGroup
 
             if isinstance(node, QgsLayerTreeGroup):
+                # 数据源视图里的分组是纯视图节点：工程里没有对应组，不弹组菜单
+                if self._source_tree_has(node):
+                    return
                 self.group_context_menu_requested.emit(
-                    node, self.view.viewport().mapToGlobal(pos)
+                    node, view.viewport().mapToGlobal(pos)
                 )
             return
-        self.context_menu_requested.emit(layer, self.view.viewport().mapToGlobal(pos))
+        self.context_menu_requested.emit(layer, view.viewport().mapToGlobal(pos))
 
     def refresh_label_state(self) -> None:
         """重绘树视图，让行尾「标注」开关跟上图层实时标注状态。
@@ -720,7 +1094,8 @@ class LayerDock(QDockWidget):
         图层信号（见 :class:`_LabelRadioDelegate`），所以**调用方在改完标注后自己
         喊一声**——主窗口的标注开关、图层属性对话框收尾都会调它。
         """
-        self.view.viewport().update()
+        for _view in (self._order_view, self.source_view):
+            _view.viewport().update()
 
     # ------------------------------------------------------- 头部工具条
 
@@ -745,8 +1120,18 @@ class LayerDock(QDockWidget):
             btn.setToolTip(tip)
             btn.setIconSize(QSize(14, 14))
             btn.setFixedSize(QSize(20, 20))
-            btn.clicked.connect(getattr(self, signal_name).emit)
+            if signal_name:
+                btn.clicked.connect(getattr(self, signal_name).emit)
             header_layout.addWidget(btn)
             setattr(self, attr, btn)
+        # 两个展示方式按钮：互斥的勾选态（ArcMap 的按钮组），默认「按图层顺序」
+        self.view_mode_group = QButtonGroup(self)
+        self.view_mode_group.setExclusive(True)
+        for btn in (self.btn_view_order, self.btn_view_source):
+            btn.setCheckable(True)
+            self.view_mode_group.addButton(btn)
+        self.btn_view_order.setChecked(True)
+        self.btn_view_order.clicked.connect(lambda: self.set_view_mode("order"))
+        self.btn_view_source.clicked.connect(lambda: self.set_view_mode("source"))
         # QGIS 桌面风格：按钮靠左排列，右侧留白
         header_layout.addStretch(1)

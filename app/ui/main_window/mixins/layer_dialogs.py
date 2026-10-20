@@ -15,9 +15,7 @@ from qgis.core import (
 )
 from qgis.gui import (
     QgsRendererPropertiesDialog,
-    QgsVectorLayerSaveAsDialog,
 )
-from qgis.PyQt.QtGui import QAction
 from qgis.PyQt.QtWidgets import (
     QDialog,
     QListWidget,
@@ -156,20 +154,28 @@ class LayerDialogsMixin:
         dlg.exec()
 
     def _export_layer(self, layer) -> None:
-        dlg = QgsVectorLayerSaveAsDialog(layer)
-        for btn in dlg.findChildren(QAction):
-            t = btn.text().lower()
-            if t in ("ok", "save", "确定", "保存"):
-                btn.setText("确定")
-            elif t in ("cancel", "取消"):
-                btn.setText("取消")
-            elif t in ("help", "帮助"):
-                btn.hide()
-        result = dlg.exec()
-        if result == QDialog.DialogCode.Accepted:
-            # 对话框内部已把图层写出（exec 的 OK 槽触发保存）；记日志
-            out = dlg.fileName() or ""
-            logger.info("导出图层：%s → %s", layer.name(), out)
+        """图层列表右键「导出」：用自建导出对话框（与数据管理一致，多支持四种格式）。"""
+        from app.ui.dialogs.create_data_dialog import default_output_dir
+        from app.ui.dialogs.export_layer_dialog import (
+            ExportLayerDialog,
+            export_with_progress,
+        )
+
+        if layer is None:
+            return
+        dlg = ExportLayerDialog(
+            self,
+            layer=layer,
+            default_dir=default_output_dir(),
+            extra_formats=True,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        spec = dlg.spec()
+        if spec is not None:
+            export_with_progress(self, layer, spec)
+        else:
+            logger.warning("导出图层：表单不合法，未导出")
 
     def _open_layer_properties(self, layer) -> None:
         """打开自建图层属性对话框（不再用 QGIS 原生 ``QgsVectorLayerProperties``）。

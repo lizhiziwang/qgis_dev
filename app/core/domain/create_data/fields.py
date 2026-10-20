@@ -404,12 +404,16 @@ def fields_from_layer(layer: QgsVectorLayer) -> list[FieldSpec]:
     """从已有图层复制字段结构（「结构来源 → 外部数据集」）。
 
     带出：名字 / 别名 / 类型 / 长度 / 小数位数 / 是否可为空 / 是否可见；
-    字典信息在图层自定义属性里（本工程建出来的图层才会有，见 :func:`configure_created_layer`）。
+    字典信息优先看图层自定义属性；没有时读本地字典 / GDB、GPKG 属性域
+    （见 :mod:`app.core.util.dict_values`）。
     """
     from qgis.core import QgsFieldConstraints
 
+    from app.core.util.dict_values import layer_dict_fields
     from app.core.util.text_encoding import repair_mojibake
 
+    #: 字段名 → 字典域（本地字典 / GDB、GPKG 属性域都算）
+    dict_map = {name: info for name, info in layer_dict_fields(layer)}
     specs: list[FieldSpec] = []
     layer_fields = layer.fields()
     for i in range(layer_fields.size()):
@@ -417,20 +421,26 @@ def fields_from_layer(layer: QgsVectorLayer) -> list[FieldSpec]:
         not_null = bool(
             fld.constraints().constraints() & QgsFieldConstraints.Constraint.ConstraintNotNull
         )
-        dict_table = layer.customProperty(_DICT_TABLE_PROP + fld.name(), "") or ""
+        info = dict_map.get(fld.name())
+        dict_table = (
+            layer.customProperty(_DICT_TABLE_PROP + fld.name(), "") or ""
+        ) or (info.table if info is not None else "")
+        dict_domain = (
+            layer.customProperty(_DICT_DOMAIN_PROP + fld.name(), "") or ""
+        ) or (info.domain if info is not None else "")
         specs.append(
             FieldSpec(
                 name=fld.name(),
                 alias=repair_mojibake(fld.alias()),
                 # 带字典信息的按「字典」还原：库里就是个文本列，类型是从自定义属性认回来的，
                 # 不然「复制字段结构」过来会把字典字段悄悄降级成普通文本
-                type_key="dict" if dict_table else _QGS_TYPE_NAMES.get(fld.typeName().lower(), "text"),
+                type_key="dict" if (dict_table or dict_domain) else _QGS_TYPE_NAMES.get(fld.typeName().lower(), "text"),
                 length=fld.length(),
                 precision=fld.precision(),
                 nullable=not not_null,
                 visible=fld.editorWidgetSetup().type() != "Hidden",
                 dict_table=dict_table,
-                dict_domain=layer.customProperty(_DICT_DOMAIN_PROP + fld.name(), "") or "",
+                dict_domain=dict_domain,
             )
         )
     return specs

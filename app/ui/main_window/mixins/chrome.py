@@ -14,7 +14,7 @@ from qgis.gui import (
     QgsMapToolPan,
     QgsMapToolZoom,
 )
-from qgis.PyQt.QtCore import Qt, QTimer
+from qgis.PyQt.QtCore import QSize, Qt, QTimer
 from qgis.PyQt.QtGui import (
     QAction,
     QColor,
@@ -25,6 +25,8 @@ from qgis.PyQt.QtWidgets import QApplication, QDialog, QDockWidget, QToolBar
 
 from app.infra.logging import get_logger
 from app.infra.shortcuts import DEFAULT_SHORTCUTS, effective_sequences, load_overrides
+from app.ui.common import tool_icons
+from app.ui.common.ribbon import RibbonToolBar
 from app.ui.common.theme import (
     TOOLBAR_ITEM_GAP,
     ThemeManager,
@@ -42,6 +44,9 @@ from app.ui.main_window.tool_bar import ToolBar
 from app.ui.tools.pan_zoom import ZoomClickTool
 
 logger = get_logger(__name__)
+
+#: 文件 / 查看 / 质检页签的 Ribbon 图标逻辑边长（与「通用」工具条一致）
+_TAB_ICON = 20
 
 
 class WindowChromeMixin:
@@ -121,6 +126,11 @@ class WindowChromeMixin:
         tab_bar.setDrawBase(False)
         tab_bar.setExpanding(False)
 
+        #: 页签 Ribbon 按钮：(QAction, 图标 key)，切主题时重刷图标颜色
+        self._tab_icon_items: list[tuple[QAction, str]] = []
+        #: 页签 Ribbon 工具条：切主题时刷新组名颜色
+        self._ribbon_tab_toolbars: list[QToolBar] = []
+
         self._file_toolbar = self._build_file_toolbar()
         self._view_toolbar = self._build_view_toolbar()
         self._quality_toolbar = self._build_quality_toolbar()
@@ -144,73 +154,107 @@ class WindowChromeMixin:
         tab_bar.currentChanged.connect(self._on_tab_changed)
         self._on_tab_changed(tab_bar.currentIndex())
 
-    def _build_file_toolbar(self) -> QToolBar:
-        """「文件」tab 工具条：新建工程 / 保存工程 / 另存为工程 / 打开工程 / 打开文件 / 退出。"""
-        tb = QToolBar("文件", self)
-        tb.setObjectName("FileTabToolbar")
-        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+    # ------------------------------------------------- 页签 Ribbon 工具条
 
-        act_new = QAction("新建工程", self)
-        act_new.setShortcut("Ctrl+N")
-        act_new.triggered.connect(self._on_new_project)
-        tb.addAction(act_new)
-        self._act_new_project = act_new
+    def _tab_action(
+        self,
+        text: str,
+        icon_key: str,
+        slot,
+        *,
+        tooltip: str = "",
+        shortcut: str = "",
+    ) -> QAction:
+        """建一个页签工具条按钮（图标在上、文字在下，和「通用」一致）。"""
+        act = QAction(text, self)
+        act.setIcon(
+            tool_icons.icon(
+                icon_key, ThemeManager.instance().current().input_focus, _TAB_ICON
+            )
+        )
+        act.setToolTip(tooltip or text)
+        if shortcut:
+            act.setShortcut(shortcut)
+        act.triggered.connect(slot)
+        self._tab_icon_items.append((act, icon_key))
+        return act
 
-        act_save = QAction("保存工程", self)
-        act_save.setShortcut("Ctrl+S")
-        act_save.triggered.connect(self._save_current_project)
-        tb.addAction(act_save)
-        self._act_save_project = act_save
-
-        act_save_as = QAction("另存为工程", self)
-        act_save_as.setShortcut("Ctrl+Shift+S")
-        act_save_as.triggered.connect(self._on_save_project_as)
-        tb.addAction(act_save_as)
-        self._act_save_project_as = act_save_as
-
-        act_open_proj = QAction("打开工程", self)
-        act_open_proj.setShortcut("Ctrl+Shift+O")
-        act_open_proj.triggered.connect(self._on_open_project)
-        tb.addAction(act_open_proj)
-        self._act_open_project = act_open_proj
-
-        act_open = QAction("打开文件", self)
-        act_open.setShortcut("Ctrl+O")
-        act_open.triggered.connect(self._on_open_file)
-        tb.addAction(act_open)
-        self._act_open_file = act_open
-
-        tb.addSeparator()
-
-        act_exit = QAction("退出", self)
-        act_exit.setShortcut("Ctrl+Q")
-        act_exit.triggered.connect(self.close)
-        tb.addAction(act_exit)
-        self._act_exit = act_exit
-
+    def _build_ribbon_tab_toolbar(
+        self, title: str, object_name: str, groups: list
+    ) -> QToolBar:
+        """按「通用」页签的 Ribbon 样式组装工具条（按钮成组 + 组名画在下方）。"""
+        tb = RibbonToolBar(title, self)
+        tb.setObjectName(object_name)
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
+        tb.setIconSize(QSize(_TAB_ICON, _TAB_ICON))
+        theme = ThemeManager.instance().current()
+        for idx, (_group_name, actions) in enumerate(groups):
+            for act in actions:
+                tb.addAction(act)
+            if idx != len(groups) - 1:
+                tb.addSeparator()
+        tb.set_groups(groups, theme.text_secondary)
+        tb.setStyleSheet(toolbar_qss(theme))
+        self._ribbon_tab_toolbars.append(tb)
         self.addToolBar(tb)
         return tb
+
+    def _build_file_toolbar(self) -> QToolBar:
+        """「文件」tab：工程 / 数据 / 应用三组（Ribbon 布局，与通用页签一致）。"""
+        self._act_new_project = self._tab_action(
+            "新建工程", "new_project", self._on_new_project,
+            tooltip="新建工程（Ctrl+N）", shortcut="Ctrl+N",
+        )
+        self._act_save_project = self._tab_action(
+            "保存工程", "save", self._save_current_project,
+            tooltip="保存工程（Ctrl+S）", shortcut="Ctrl+S",
+        )
+        self._act_save_project_as = self._tab_action(
+            "另存为", "archive", self._on_save_project_as,
+            tooltip="另存为工程（Ctrl+Shift+S）", shortcut="Ctrl+Shift+S",
+        )
+        self._act_open_project = self._tab_action(
+            "打开工程", "folder_open", self._on_open_project,
+            tooltip="打开工程（Ctrl+Shift+O）", shortcut="Ctrl+Shift+O",
+        )
+        self._act_open_file = self._tab_action(
+            "打开文件", "file", self._on_open_file,
+            tooltip="打开数据文件（Ctrl+O）", shortcut="Ctrl+O",
+        )
+        self._act_exit = self._tab_action(
+            "退出", "exit", self.close,
+            tooltip="退出程序（Ctrl+Q）", shortcut="Ctrl+Q",
+        )
+        return self._build_ribbon_tab_toolbar(
+            "文件",
+            "FileTabToolbar",
+            [
+                ("工程", [
+                    self._act_new_project,
+                    self._act_save_project,
+                    self._act_save_project_as,
+                    self._act_open_project,
+                ]),
+                ("数据", [self._act_open_file]),
+                ("应用", [self._act_exit]),
+            ],
+        )
 
     def _build_view_toolbar(self) -> QToolBar:
-        """「查看」tab 工具条：日志、流程节点编辑器（原查看 / 流程菜单）。"""
-        tb = QToolBar("查看", self)
-        tb.setObjectName("ViewTabToolbar")
-        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-
-        act_log = QAction("日志", self)
-        act_log.setShortcut("Ctrl+L")
-        act_log.triggered.connect(self._show_log_dock)
-        tb.addAction(act_log)
-        self._act_log = act_log
-
-        act_flow = QAction("流程节点编辑器", self)
-        act_flow.setShortcut("Ctrl+Shift+F")
-        act_flow.triggered.connect(self._open_flow_editor)
-        tb.addAction(act_flow)
-        self._act_flow_editor = act_flow
-
-        self.addToolBar(tb)
-        return tb
+        """「查看」tab：调试 / 流程两组（Ribbon 布局）。"""
+        self._act_log = self._tab_action(
+            "日志", "log", self._show_log_dock,
+            tooltip="打开日志面板（Ctrl+L）", shortcut="Ctrl+L",
+        )
+        self._act_flow_editor = self._tab_action(
+            "流程编排", "sitemap", self._open_flow_editor,
+            tooltip="流程节点编辑器（Ctrl+Shift+F）", shortcut="Ctrl+Shift+F",
+        )
+        return self._build_ribbon_tab_toolbar(
+            "查看",
+            "ViewTabToolbar",
+            [("调试", [self._act_log]), ("流程", [self._act_flow_editor])],
+        )
 
     # ===================================================== 全局快捷键
 
@@ -395,18 +439,13 @@ class WindowChromeMixin:
         return default
 
     def _build_quality_toolbar(self) -> QToolBar:
-        """「质检」tab 工具条：当前只有一个「质检」工具，打开质检面板 dock。"""
-        tb = QToolBar("质检", self)
-        tb.setObjectName("QualityTabToolbar")
-        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
-
-        act_check = QAction("质检", self)
-        act_check.setToolTip("打开质检面板")
-        act_check.triggered.connect(self._on_quality_dock)
-        tb.addAction(act_check)
-
-        self.addToolBar(tb)
-        return tb
+        """「质检」tab：分析组里的「质检」按钮（Ribbon 布局）。"""
+        act_check = self._tab_action(
+            "质检", "quality", self._on_quality_dock, tooltip="打开质检面板"
+        )
+        return self._build_ribbon_tab_toolbar(
+            "质检", "QualityTabToolbar", [("分析", [act_check])]
+        )
 
     def _on_tab_changed(self, index: int) -> None:
         """tab 切换：只显示当前 tab 对应的工具条，其余隐藏（模拟"换工具栏"）。
@@ -566,6 +605,11 @@ class WindowChromeMixin:
         tbb = getattr(self, "tool_bar_builder", None)
         if tbb is not None:
             tbb.apply_theme(theme)
+        # 文件 / 查看 / 质检页签的 Ribbon 按钮图标与组名颜色
+        for act, key in getattr(self, "_tab_icon_items", []):
+            act.setIcon(tool_icons.icon(key, theme.input_focus, _TAB_ICON))
+        for ribbon in getattr(self, "_ribbon_tab_toolbars", []):
+            ribbon.set_group_color(theme.text_secondary)
         # 左侧竖排工具条图标同步重刷
         side_tb = getattr(self, "side_toolbar", None)
         if side_tb is not None:

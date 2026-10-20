@@ -421,10 +421,10 @@ def _import_to_local(
 
 
 def _persist_source_domains(util, layer, table_name: str, columns) -> None:
-    """把源图层的属性域 / 源库字典表合并进目标库，并写字段元数据。
+    """把源图层的属性域 / 源库字典表并进一张 ``dict_<图层名>``，并写字段元数据。
 
-    已有同域字典表就补缺 / 更新，没有才新建（见
-    :mod:`app.core.domain.import_dicts`）。失败只记日志，不毁已导入的数据。
+    多个属性域都进同一张字典表（``domain`` 列区分）；目标库已有同名表就补缺 /
+    更新（见 :mod:`app.core.domain.import_dicts`）。失败只记日志，不毁已导入的数据。
     """
     try:
         from app.core.domain.import_dicts import (

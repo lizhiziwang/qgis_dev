@@ -43,9 +43,11 @@ from app.core.domain.create_data import (
     xlsx_available,
 )
 from app.core.domain.create_data.dict_tables import (
+    DictInline,
     DictPlan,
     DictSource,
     source_dict_tables,
+    source_inline_dicts,
 )
 from app.core.util.sublayers import (
     VECTOR_FILE_FILTER,
@@ -211,6 +213,8 @@ class FieldsStepPage(QWidget):
         self._target_db_path = target_db_path
         #: 外部数据集源库里匹配到的 dict 表（创建时一并落进目标库）
         self._source_dicts: list[DictSource] = []
+        #: 外部数据集自带的属性域取值（GDB / GPKG；源库里没有字典表可读）
+        self._source_inlines: tuple[DictInline, ...] = ()
         self._build()
 
     # --------------------------------------------------------------- 构建
@@ -440,7 +444,13 @@ class FieldsStepPage(QWidget):
             for source in self._source_dicts
             if (source.category.strip(), source.domain.strip()) in domains
         )
-        return DictPlan(domains=domains, sources=sources)
+        # 属性域取值只在字段仍挂着该字典时带进来（用户删掉关联就不该再建表）
+        inlines = tuple(
+            item
+            for item in self._source_inlines
+            if (item.category.strip(), item.domain.strip()) in domains
+        )
+        return DictPlan(domains=domains, sources=sources, inline=inlines)
 
     def set_fields(self, fields: Sequence[FieldSpec]) -> None:
         """整表替换（导入 / 删除 / 清空都走这里）。"""
@@ -871,6 +881,7 @@ class FieldsStepPage(QWidget):
             return
         self.set_fields(fields)
         self._source_dicts.clear()
+        self._source_inlines = ()
         self.statusMessage.emit(f"已从模板导入 {len(fields)} 个字段：{path}")
 
     def _import_from_dataset(self) -> None:
@@ -887,12 +898,14 @@ class FieldsStepPage(QWidget):
             return
         fields = fields_from_layer(layer)
         self._source_dicts = source_dict_tables(layer, fields)
+        self._source_inlines = source_inline_dicts(layer, fields)
         self.set_fields(fields)
-        extra = (
-            f"，并识别到 {len(self._source_dicts)} 个源库字典表"
-            if self._source_dicts
-            else ""
-        )
+        extras: list[str] = []
+        if self._source_dicts:
+            extras.append(f"识别到 {len(self._source_dicts)} 个源库字典表")
+        if self._source_inlines:
+            extras.append(f"识别到 {len(self._source_inlines)} 个属性域字典")
+        extra = f"，并{'、'.join(extras)}" if extras else ""
         self.statusMessage.emit(
             f"已从「{layer.name()}」复制 {len(fields)} 个字段的结构{extra}"
         )

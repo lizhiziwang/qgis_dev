@@ -190,7 +190,13 @@ class FieldCalculatorDialog(BaseDialog):
         layout = QVBoxLayout(group)
         layout.setContentsMargins(3, 9, 3, 0)
         self.update_combo = QComboBox(group)
-        for field in self._layer.fields():
+        from app.ui.tools.feature_attrs import readonly_field_indices
+
+        readonly = readonly_field_indices(self._layer.fields())
+        for index, field in enumerate(self._layer.fields()):
+            # 系统自维护 / 唯一标识字段（OBJECTID、id、FGUID…）不参与字段计算
+            if index in readonly:
+                continue
             # 字段前带类型图标（对齐 QGIS 字段计算器）：QgsFields.iconForFieldType
             # 按 QVariant 类型 / 子类型 / 类型名给出与 QGIS 同款图标。
             icon = QgsFields.iconForFieldType(field.type(), field.subType(), field.typeName())

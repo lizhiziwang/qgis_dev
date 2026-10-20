@@ -81,6 +81,9 @@ class ExportSpec:
     #: Shapefile 超过 :data:`SHAPEFILE_MAX_FIELDS` 个字段时，调用方必须给出一个
     #: ≤255 的子集（空元组 = 只导几何、不写属性）。
     field_names: tuple[str, ...] | None = None
+    #: 与 ``field_names`` 一一对应的**导出字段名**（可改名）；``None`` = 用原字段名。
+    #: 目标驱动支持时由 ``QgsVectorFileWriter.attributesExportNames`` 写入。
+    field_export_names: tuple[str, ...] | None = None
     #: 是否把字段挂接的字典一起导出：
     #: - FileGDB → 写成 GDB 的**属性域**（coded value domain）并挂到字段上；
     #: - GeoPackage / SQLite → 在目标库里附带字典表，并写字段元数据；
@@ -152,8 +155,20 @@ def export_vector_layer(
     is_container = spec.is_container
     if is_container and not spec.layer_name.strip():
         raise ExportLayerError("导出到库/地理数据库时，图层名不能为空")
+    if (
+        spec.driver == "ESRI Shapefile"
+        and spec.field_names is not None
+        and len(spec.field_names) > SHAPEFILE_MAX_FIELDS
+    ):
+        raise ExportLayerError(
+            f"Shapefile 最多支持 {SHAPEFILE_MAX_FIELDS} 个字段，当前要导出 "
+            f"{len(spec.field_names)} 个。请减少导出字段，或改用 FileGDB / GeoPackage。"
+        )
 
-    source, name_map = _prepare_source(layer, spec)
+    source = _prepare_source(layer, spec)
+    # 字段选择 / 改名：OGR 写入器自带 attributes / attributesExportNames，
+    # 不用再复制图层；映射同时用于字典属性域与别名落库（按导出后的列名写）。
+    export_map = _export_name_map(layer, spec)
     target = spec.file_path
     existed = os.path.exists(target)
 
@@ -166,6 +181,7 @@ def export_vector_layer(
     options.driverName = spec.driver
     options.layerName = spec.layer_name.strip() or os.path.splitext(spec.file_name)[0]
     options.fileEncoding = "UTF-8"
+    _apply_field_options(options, source, spec, export_map)
     # 容器已存在 → 只替换同名图层；否则（新文件 / 单文件格式）整份写出。
     # **默认的 CreateOrOverwriteFile 会整库删掉重建**，绝不能用在已有的库上。
     if existed and is_container:
@@ -208,12 +224,74 @@ def export_vector_layer(
         if progress is not None:
             progress("正在写入字典…")
         try:
-            _export_dictionaries(layer, spec, target, name_map)
+            _export_dictionaries(layer, spec, target, export_map)
         except Exception as exc:  # noqa: BLE001 —— 数据已写成功，字典失败不毁结果
             logger.warning("导出字典失败（图层数据已写出）：%s", exc, exc_info=True)
+    try:
+        _store_export_aliases(layer, spec, target, export_map)
+    except Exception as exc:  # noqa: BLE001 —— 别名失败不毁已写出的数据
+        logger.warning("导出字段别名失败（图层数据已写出）：%s", exc, exc_info=True)
     if progress is not None:
         progress("导出完成")
     return target
+
+
+def _store_export_aliases(layer, spec: ExportSpec, target: str, name_map=None) -> None:
+    """把字段别名写进导出的 GPKG / SQLite。
+
+    Shapefile 没有别名承载位置；其它单文件格式也不处理。SQLite 目标写本工程
+    的 ``qgis_dev_column_alias`` 表，GPKG 写标准 ``gpkg_data_columns``。
+    字段被改名时按**导出后的列名**记别名（``name_map`` = 原名 → 导出名）。
+    """
+    from app.core.util.local_db_util import local_db_util
+    from app.core.util.text_encoding import repair_mojibake
+
+    ext = str(spec.extension or os.path.splitext(spec.file_name)[1]).lower()
+    if ext not in (".gpkg", ".sqlite", ".sqlite3", ".db"):
+        return
+    mapping = name_map or {}
+    wanted = set(spec.field_names) if spec.field_names is not None else None
+    aliases: dict[str, str] = {}
+    for field in layer.fields():
+        name = field.name()
+        if wanted is not None and name not in wanted:
+            continue
+        alias = repair_mojibake(field.alias() or "")
+        if alias:
+            aliases[mapping.get(name, name)] = alias
+    if not aliases:
+        return
+    layer_name = spec.layer_name.strip() or os.path.splitext(spec.file_name)[0]
+    db = local_db_util(target)
+    try:
+        # SQLite 驱动可能把表名 / 列名改成小写：按目标真实名字写别名
+        actual_layer = layer_name
+        actual_cols: dict[str, str] = {}
+        try:
+            row = db.cursor.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND lower(name) = lower(?)",
+                (layer_name,),
+            ).fetchone()
+            if row is not None:
+                actual_layer = str(row[0])
+            quoted = '"' + actual_layer.replace('"', '""') + '"'
+            for info_row in db.cursor.execute(f"PRAGMA table_info({quoted})"):
+                actual_cols[str(info_row[1]).casefold()] = str(info_row[1])
+        except Exception:  # noqa: BLE001
+            pass
+        resolved = {
+            actual_cols.get(name.casefold(), name): alias
+            for name, alias in aliases.items()
+        }
+        if db.kind == "gpkg":
+            for column, alias in resolved.items():
+                db.set_gpkg_column_alias(actual_layer, column, alias)
+        else:
+            db.set_column_aliases(actual_layer, resolved)
+        db.conn.commit()
+    finally:
+        db.conn.close()
 
 
 # --------------------------------------------------------------------- 字典导出
@@ -558,37 +636,10 @@ def shapefile_field_names(fields) -> dict[str, str]:
     - 重名（不分大小写）追加 ``_1`` / ``_2``。
     """
     used: set[str] = set()
-    mapping: dict[str, str] = {}
-    for field in fields:
-        original = str(field.name())
-        cleaned = "".join(
-            ch if (ch.isalnum() or ch == "_") else "_" for ch in original
-        ).strip("_")
-        if not cleaned:
-            cleaned = "FIELD"
-        # 首字符必须是 ASCII 字母：中文名的第一个字也算「不是字母」
-        prefix = "" if cleaned[0].isascii() and cleaned[0].isalpha() else "F"
-        budget = 10 - len(prefix.encode("utf-8"))
-        body = ""
-        for ch in cleaned:
-            if len((body + ch).encode("utf-8")) > budget:
-                break
-            body += ch
-        candidate = f"{prefix}{body}" or "FIELD"
-        base = candidate
-        index = 1
-        while candidate.lower() in used:
-            suffix = f"_{index}"
-            index += 1
-            trimmed = ""
-            for ch in base:
-                if len((trimmed + ch + suffix).encode("utf-8")) > 10:
-                    break
-                trimmed += ch
-            candidate = f"{trimmed or 'F'}{suffix}"
-        used.add(candidate.lower())
-        mapping[original] = candidate
-    return mapping
+    return {
+        str(field.name()): sanitize_shapefile_field_name(field.name(), used)
+        for field in fields
+    }
 
 
 def _shapefile_copy(
@@ -638,19 +689,30 @@ def _copy_to_memory(
     features,
     fields,
     renamed: dict[str, str],
+    target_crs=None,
 ) -> QgsVectorLayer:
     """把 ``fields``（源字段子集，可改名）与要素复制到内存图层。
 
     ``features=None`` 表示没做筛选（现取全部）。属性按**源字段下标**逐个搬运：
     不能把源要素直接塞进字段数不同的图层（按位置对齐，会错列）。
+    ``target_crs`` 非空时把几何重投影到该坐标系（KML / GeoJSON 用）。
     """
-    from qgis.core import QgsFeature, QgsField, QgsVectorLayer
+    from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsVectorLayer
 
     wkb_name = _wkb_name(layer)
-    crs_text = layer.crs().authid() or layer.crs().toProj()
+    crs = target_crs or layer.crs()
+    crs_text = crs.authid() or crs.toProj()
     memory = QgsVectorLayer(f"{wkb_name}?crs={crs_text}", layer.name(), "memory")
     if not memory.isValid():
         raise ExportLayerError("建不出导出用的内存图层（图层没有几何类型？）")
+
+    transform = None
+    if target_crs is not None:
+        from qgis.core import QgsCoordinateTransform, QgsProject
+
+        transform = QgsCoordinateTransform(
+            layer.crs(), target_crs, QgsProject.instance()
+        )
 
     source_fields = layer.fields()
     source_indices: list[int] = []
@@ -671,7 +733,7 @@ def _copy_to_memory(
     if not features:
         return memory
 
-    if _is_full_unchanged(layer, fields, {}):
+    if transform is None and _is_full_unchanged(layer, fields, {}):
         # 字段原样、只是筛了要素：源要素与目标结构一一对应，直接写
         if not provider.addFeatures(features):
             raise ExportLayerError("把要素复制到导出用的内存图层时失败")
@@ -682,7 +744,11 @@ def _copy_to_memory(
         source_attrs = feature.attributes()
         copy = QgsFeature(memory.fields())
         try:
-            copy.setGeometry(feature.geometry())
+            geometry = feature.geometry()
+            if transform is not None and geometry is not None and not geometry.isNull():
+                geometry = QgsGeometry(geometry)
+                geometry.transform(transform)
+            copy.setGeometry(geometry)
             copy.setAttributes([source_attrs[index] for index in source_indices])
         except (IndexError, KeyError):
             # 字段结构对不上（图层在导出过程中被改过）——跳过这条，别整批崩
@@ -724,22 +790,18 @@ def _restore_aliases(source, restore: list[tuple[int, str]]) -> None:
         pass
 
 
-def _prepare_source(
-    layer: QgsVectorLayer, spec: ExportSpec
-) -> tuple[QgsVectorLayer, dict[str, str]]:
-    """要写给 OGR 的那份图层：按需筛要素 / 选字段 / 改 Shapefile 字段名。
+def _prepare_source(layer: QgsVectorLayer, spec: ExportSpec) -> QgsVectorLayer:
+    """要写给 OGR 的那份图层：按需筛要素 / 把 KML、GeoJSON 转到经纬度。
 
-    返回 ``(写入用图层, 原字段名 → 导出字段名)``。除 Shapefile 的字段名改写外，
-    只有**字段名本身是 Latin-1 误读的乱码**时才复制图层（见
-    :func:`app.core.util.text_encoding.repair_mojibake`）；其余情况零拷贝。
+    字段子集与改名**不在这里复制**：``QgsVectorFileWriter`` 的
+    ``attributes`` / ``attributesExportNames`` 能直接选字段、改导出名（所有
+    格式通用），见 :func:`_apply_field_options`。
     """
-    from app.core.util.text_encoding import repair_mojibake
+    from qgis.core import QgsCoordinateReferenceSystem, QgsExpression, QgsFeatureRequest
 
     expression = (spec.expression or "").strip()
     features = None
     if expression:
-        from qgis.core import QgsExpression, QgsFeatureRequest
-
         expr = QgsExpression(expression)
         if expr.hasParserError():
             raise ExportLayerError(f"筛选条件有语法错误：{expr.parserErrorString()}")
@@ -750,37 +812,120 @@ def _prepare_source(
         features = list(layer.getFeatures(QgsFeatureRequest().setFilterExpression(expression)))
         logger.info("导出筛选：%s → 命中 %d 个要素", expression, len(features))
 
-    fields = _selected_fields(layer, spec.field_names)
-    if spec.driver == "ESRI Shapefile":
-        if len(fields) > SHAPEFILE_MAX_FIELDS:
-            raise ExportLayerError(
-                f"Shapefile 最多支持 {SHAPEFILE_MAX_FIELDS} 个字段，当前要导出 "
-                f"{len(fields)} 个。请减少导出字段，或改用 FileGDB / GeoPackage。"
-            )
-        names = shapefile_field_names(fields)
-        return _shapefile_copy(layer, features, names, fields), names
+    # KML / GeoJSON 规范只认经纬度：投影坐标系（3857 / 4547 …）直接写会把米
+    # 当成度。这里先复制并转到 EPSG:4326；本来就是地理坐标系的图层零拷贝。
+    target_crs = None
+    if spec.driver in ("KML", "GeoJSON"):
+        crs = layer.crs()
+        if crs is not None and crs.isValid() and not crs.isGeographic():
+            target_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+    if target_crs is not None:
+        return _copy_to_memory(
+            layer, features, list(layer.fields()), {}, target_crs
+        )
+    if features is not None:
+        return _copy_to_memory(layer, features, list(layer.fields()), {})
+    return layer
 
-    # GDB 的字段**名字**也可能是「UTF-8 被当成 Latin-1」的乱码（属性表用
-    # 别名显示时看着正常，导出到别的库就露馅）。只修看起来确实是这种乱码的
-    # 名字，普通 Latin-1 名字（Café）不会被误改。
-    renamed: dict[str, str] = {}
+
+def sanitize_shapefile_field_name(name: str, used: set[str]) -> str:
+    """单个字段名 → 合法 DBF 字段名（≤10 字节、去重、字母开头）。"""
+    cleaned = "".join(
+        ch if (ch.isalnum() or ch == "_") else "_" for ch in str(name)
+    ).strip("_")
+    if not cleaned:
+        cleaned = "FIELD"
+    # 首字符必须是 ASCII 字母：中文名的第一个字也算「不是字母」
+    prefix = "" if cleaned[0].isascii() and cleaned[0].isalpha() else "F"
+    budget = 10 - len(prefix.encode("utf-8"))
+    body = ""
+    for ch in cleaned:
+        if len((body + ch).encode("utf-8")) > budget:
+            break
+        body += ch
+    candidate = f"{prefix}{body}" or "FIELD"
+    base = candidate
+    index = 1
+    while candidate.lower() in used:
+        suffix = f"_{index}"
+        index += 1
+        trimmed = ""
+        for ch in base:
+            if len((trimmed + ch + suffix).encode("utf-8")) > 10:
+                break
+            trimmed += ch
+        candidate = f"{trimmed or 'F'}{suffix}"
+    used.add(candidate.lower())
+    return candidate
+
+
+def _export_name_map(layer: QgsVectorLayer, spec: ExportSpec) -> dict[str, str]:
+    """``{原字段名: 导出字段名}``（只含真正改名的字段）。
+
+    - 优先用 ``spec.field_export_names``（与 ``field_names`` 一一对应）；
+    - 没给导出名时用原字段名（顺手修 GDB 的 Latin-1 乱码字段名）；
+    - Shapefile 再按 DBF 规则截到 ≤10 字节并去重；
+    - 其它格式重名（不分大小写）自动加 ``_2``。
+    """
+    from app.core.util.text_encoding import repair_mojibake
+
+    if spec.driver == "DXF":
+        return {}
+    fields = layer.fields()
+    wanted = (
+        list(spec.field_names)
+        if spec.field_names is not None
+        else [field.name() for field in fields]
+    )
+    requested = dict(zip(wanted, spec.field_export_names or ()))
+    is_shapefile = spec.driver == "ESRI Shapefile"
     used: set[str] = set()
-    for field in fields:
-        original = field.name()
-        fixed = repair_mojibake(original)
-        if fixed != original and fixed:
-            candidate = fixed
-            suffix = 2
-            while candidate.casefold() in used:
-                candidate = f"{fixed}_{suffix}"
-                suffix += 1
-            renamed[original] = candidate
-            used.add(candidate.casefold())
+    rename: dict[str, str] = {}
+    for original in wanted:
+        if fields.indexOf(original) < 0:
+            continue
+        desired = str(requested.get(original) or "").strip()
+        if not desired:
+            desired = repair_mojibake(original) if not is_shapefile else original
+        if is_shapefile:
+            desired = sanitize_shapefile_field_name(desired, used)
         else:
-            used.add(original.casefold())
-    if features is None and spec.field_names is None and not renamed:
-        return layer, {}
-    return _copy_to_memory(layer, features, fields, renamed), renamed
+            base = desired
+            index = 2
+            while desired.casefold() in used:
+                desired = f"{base}_{index}"
+                index += 1
+            used.add(desired.casefold())
+        if desired != original:
+            rename[original] = desired
+    return rename
+
+
+def _apply_field_options(options, source: QgsVectorLayer, spec: ExportSpec, name_map) -> None:
+    """把「只导出这些字段 / 改成这些名字」写进 OGR 写入选项。
+
+    ``attributesExportNames`` 的约定是**与图层字段一一对应的全量列表**（不是
+    只对应选中的那几个）；没选的字段填原名即可，写入器会忽略。
+    """
+    if spec.driver == "DXF":
+        # DXF 不支持任意属性列（写了会报 "does not support arbitrary field
+        # creation"），只写几何
+        options.skipAttributeCreation = True
+        return
+    fields = source.fields()
+    if spec.field_names is None:
+        indices = list(range(fields.size()))
+    else:
+        indices = [
+            fields.indexOf(name) for name in spec.field_names if fields.indexOf(name) >= 0
+        ]
+    if not indices:
+        return
+    options.attributes = indices
+    if name_map:
+        options.attributesExportNames = [
+            name_map.get(field.name(), field.name()) for field in fields
+        ]
 
 
 def _wkb_name(layer: QgsVectorLayer) -> str:

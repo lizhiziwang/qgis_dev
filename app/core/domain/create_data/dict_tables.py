@@ -96,11 +96,26 @@ class DictSource:
 
 
 @dataclass(frozen=True)
+class DictInline:
+    """随字段结构一起带进来的字典内容（GDB / GPKG 属性域等）。
+
+    没有源库字典表可读（属性域不在 ``user_relation`` 里），直接把
+    ``(domain, code, name, parent_code, sort_order)`` 行带进创建流程。
+    """
+
+    category: str
+    domain: str
+    rows: tuple[tuple[str, str, str, str, int], ...] = ()
+
+
+@dataclass(frozen=True)
 class DictPlan:
     """创建数据字段表里涉及的字典需求。"""
 
     domains: frozenset[tuple[str, str]] = frozenset()
     sources: tuple[DictSource, ...] = ()
+    #: 直接带值的字典（GDB / GPKG 属性域），不需要再读系统字典或源库
+    inline: tuple[DictInline, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -401,6 +416,13 @@ def build_dict_table_specs(
         category, domain = str(category or "").strip(), str(domain or "").strip()
         if category and domain:
             by_category.setdefault(category, set()).add(domain)
+    # 直接带值的字典（GDB / GPKG 属性域）：先灌进分组，后续不再去系统字典查
+    inline_categories = {item.category for item in plan.inline}
+    for item in plan.inline:
+        bucket = grouped.setdefault(item.category, {})
+        for domain, code, name, parent, sort_order in item.rows:
+            bucket.setdefault(domain, {})[code] = (name, parent, sort_order)
+        bucket.setdefault(item.domain, {})
     for category, domains in by_category.items():
         bucket = grouped.setdefault(category, {})
         # **目标库自己已有的字典表优先**：字段挂接只允许选当前库里的字典，
@@ -420,6 +442,11 @@ def build_dict_table_specs(
                 local_rows = []
             for domain, code, name, parent, sort_order in local_rows:
                 bucket.setdefault(domain, {})[code] = (name, parent, sort_order)
+            for domain in domains:
+                bucket.setdefault(domain, {})
+            continue
+        if category in inline_categories:
+            # 内容已经在上面灌进来了，不能再去应用级字典里查（类别可能不存在）
             for domain in domains:
                 bucket.setdefault(domain, {})
             continue
@@ -548,6 +575,52 @@ def source_dict_tables(layer, fields) -> list[DictSource]:
                 )
             )
     return sources
+
+
+def source_inline_dicts(layer, fields) -> tuple[DictInline, ...]:
+    """外部数据集里**只能从数据源本身读到**的字典（GDB / GPKG 属性域）。
+
+    :func:`source_dict_tables` 只认源库 ``user_relation`` 里登记的字典表；
+    GDB / GPKG 的属性域不在里面（连 sqlite 都打不开 ``.gdb`` 目录），所以这里
+    把字段挂接的字典取值直接带进创建流程 —— 否则「字典表 / 字典域」两列虽然
+    显示出来了，落库时却因为应用级字典里没有这个类别而被跳过。
+    """
+    wanted = {
+        (field.dict_table.strip(), field.dict_domain.strip())
+        for field in fields
+        if field.dict_table.strip() and field.dict_domain.strip()
+    }
+    if not wanted or layer is None:
+        return ()
+    try:
+        from app.core.util.dict_values import layer_dict_fields
+
+        dict_fields = layer_dict_fields(layer)
+    except Exception as exc:  # noqa: BLE001 —— 读不到属性域就按没有
+        logger.info("读取源数据集属性域失败：%s", exc)
+        return ()
+    merged: dict[tuple[str, str], dict[str, tuple[str, str, int]]] = {}
+    for _name, info in dict_fields:
+        key = (str(info.table or "").strip(), str(info.domain or "").strip())
+        if key not in wanted:
+            continue
+        bucket = merged.setdefault(key, {})
+        for index, value in enumerate(info.values):
+            if not value.code:
+                continue
+            bucket.setdefault(
+                str(value.code), (str(value.name), str(value.parent_code), index)
+            )
+    inline: list[DictInline] = []
+    for (category, domain), codes in merged.items():
+        if not codes:
+            continue
+        rows = tuple(
+            (domain, code, name, parent, sort_order)
+            for code, (name, parent, sort_order) in codes.items()
+        )
+        inline.append(DictInline(category=category, domain=domain, rows=rows))
+    return tuple(inline)
 
 
 def resolve_local_table(field, specs: Sequence[DictTableSpec]) -> str:

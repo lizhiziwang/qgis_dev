@@ -13,6 +13,7 @@ import os
 from contextlib import suppress
 
 from qgis.core import Qgis
+from qgis.PyQt import sip
 from qgis.PyQt.QtWidgets import QMessageBox
 
 from app.infra.logging import get_logger
@@ -230,6 +231,10 @@ class FileBrowserMixin:
             return
         source = ""
         provider = ""
+        #: 新数据源对应的图层对象：setDataSource 真的失败时用它整层替换
+        #: （保留名称 / 样式 / 树中位置）。跨 provider（SpatiaLite ↔ OGR）在
+        #: QGIS 4 里一般能直接换，换不了时这就是兜底。
+        replacement = None
         if is_vector and (os.path.isdir(path) or ext in _CONTAINER_VECTOR_EXTS):
             from app.core.util.sublayers import open_sublayer
             from app.ui.dialogs.sublayer_pick_dialog import SublayerPickDialog
@@ -246,7 +251,7 @@ class FileBrowserMixin:
                 return
             source = str(new_layer.source() or "")
             provider = str(new_layer.providerType() or "")
-            new_layer.deleteLater()
+            replacement = new_layer
         elif is_raster or ext in _RASTER_EXTS:
             if not is_raster:
                 QMessageBox.warning(
@@ -276,18 +281,54 @@ class FileBrowserMixin:
                 return
             source = str(probe.source() or path)
             provider = str(probe.providerType() or "ogr")
-            probe.deleteLater()
+            replacement = probe
 
+        # **setDataSource 的返回值不能当成败判据**：QGIS 4.x 里它是 void
+        # （PyQt 拿到 None），但数据源已经换好了；照旧代码 `if not ok` 就会对
+        # 所有格式都误报「设置数据源失败」（用户报的 sqlite / gpkg / gdb / shp 警告）。
+        # 正确做法：调用后看图层是否有效、数据源是否真的变了。
         try:
-            ok = layer.setDataSource(source, layer.name(), provider)
+            previous_source = str(layer.source() or "")
+        except RuntimeError:
+            previous_source = ""
+        try:
+            result = layer.setDataSource(source, layer.name(), provider)
         except Exception as exc:  # noqa: BLE001
             logger.error("重设图层数据源失败：%s", exc, exc_info=True)
-            ok = False
+            result = False
+        if result is None:
+            try:
+                current_source = str(layer.source() or "")
+                ok = bool(layer.isValid()) and (
+                    current_source == source or current_source != previous_source
+                )
+            except RuntimeError:
+                ok = False
+        else:
+            ok = bool(result)
+        if not ok and replacement is not None and not sip.isdeleted(replacement):
+            # 兜底：用刚打开的新图层整层替换（保留名称 / 样式 / 树中位置）。
+            # provider 不同、或驱动拒绝了 setDataSource 时都能完成重设。
+            try:
+                self._replace_layer_object(layer, replacement)
+                return
+            except Exception as exc:  # noqa: BLE001 —— 槽内异常不能冒出去
+                logger.exception("替换图层对象失败")
+                QMessageBox.warning(
+                    self, "重设数据源", f"设置数据源失败：\n{source}\n{exc}"
+                )
+                return
         if not ok:
             QMessageBox.warning(
                 self, "重设数据源", f"设置数据源失败：\n{source}"
             )
             return
+        # setDataSource 成功：把新数据源的字段别名 / 字典元数据抄回目标图层。
+        # **只换 provider 不会带走这些** —— 实测重设后仍显示旧数据源的别名，
+        # 新库里的 gpkg_data_columns / qgis_dev_column_alias 根本没生效。
+        if replacement is not None and not sip.isdeleted(replacement):
+            self._adopt_source_metadata(layer, replacement)
+            replacement.deleteLater()
         with suppress(Exception):
             layer.dataProvider().reloadData()
         layer.triggerRepaint()
@@ -301,6 +342,68 @@ class FileBrowserMixin:
             level=Qgis.MessageLevel.Success,
             duration=5,
         )
+
+    def _adopt_source_metadata(self, layer, source_layer) -> None:
+        """把新数据源的字段元数据抄回重设了数据源的图层。
+
+        ``setDataSource`` 只替换 provider：字段别名、隐藏字段、字典关联这些
+        **挂在图层/字段上的属性不会跟着换**，不抄的话重设后显示的还是旧数据源
+        的别名与字典（用户报的「重设后别名没有更新」）。
+
+        Args:
+            layer: 被重设数据源的目标图层（字段已是新 provider 的）。
+            source_layer: 从新数据源打开、已经套好别名 / 字典元数据的探测图层。
+        """
+        from app.core.util.field_meta import (
+            DICT_DOMAIN_PROP,
+            DICT_LOCAL_TABLE_PROP,
+            DICT_TABLE_PROP,
+        )
+
+        prefixes = (DICT_TABLE_PROP, DICT_DOMAIN_PROP, DICT_LOCAL_TABLE_PROP)
+        try:
+            # QgsObjectCustomProperties 不是 dict（不能直接迭代），要走 keys()/value()
+            source_props_obj = source_layer.customProperties()
+            source_props = {
+                key: source_props_obj.value(key) for key in source_props_obj.keys()
+            }
+            # 先清掉旧数据源留下的字典关联，再按新数据源补齐
+            target_props = layer.customProperties()
+            for key in list(target_props.keys()):
+                if key.startswith(prefixes):
+                    layer.removeCustomProperty(key)
+            for key, value in source_props.items():
+                if key.startswith(prefixes):
+                    layer.setCustomProperty(key, value)
+
+            source_fields = source_layer.fields()
+            source_index = {
+                source_fields.at(i).name().casefold(): i
+                for i in range(source_fields.size())
+            }
+            fields = layer.fields()
+            for index in range(fields.size()):
+                name = fields.at(index).name()
+                src_index = source_index.get(name.casefold())
+                if src_index is None:
+                    # 新数据源里没有同名字段：别名清空，别留旧数据源的
+                    if fields.at(index).alias():
+                        layer.setFieldAlias(index, "")
+                    continue
+                src_field = source_fields.at(src_index)
+                alias = str(src_field.alias() or "")
+                if fields.at(index).alias() != alias:
+                    layer.setFieldAlias(index, alias)
+                # 隐藏字段也跟着新数据源走（probe 里非隐藏的就恢复默认控件）
+                setup = src_field.editorWidgetSetup()
+                if setup.type() == "Hidden":
+                    layer.setEditorWidgetSetup(index, setup)
+                elif fields.at(index).editorWidgetSetup().type() == "Hidden":
+                    from qgis.core import QgsEditorWidgetSetup
+
+                    layer.setEditorWidgetSetup(index, QgsEditorWidgetSetup("", {}))
+        except Exception:  # noqa: BLE001 —— 元数据抄不过来不影响数据源本身可用
+            logger.warning("重设数据源后同步字段元数据失败", exc_info=True)
 
     def _replace_layer_object(self, old_layer, new_layer) -> None:
         """用新图层对象替换旧图层：保留名称、样式、可见性与图层树位置。
@@ -337,7 +440,8 @@ class FileBrowserMixin:
             logger.debug("重设数据源：取旧图层样式失败", exc_info=True)
         custom = {}
         try:
-            custom = dict(old_layer.customProperties())
+            props = old_layer.customProperties()
+            custom = {key: props.value(key) for key in props.keys()}
         except Exception:  # noqa: BLE001
             custom = {}
         project.removeMapLayer(old_layer.id())
@@ -352,8 +456,20 @@ class FileBrowserMixin:
         except Exception:  # noqa: BLE001
             pass
         if custom:
-            with suppress(Exception):
-                new_layer.setCustomProperties(custom)
+            from app.core.util.field_meta import (
+                DICT_DOMAIN_PROP,
+                DICT_LOCAL_TABLE_PROP,
+                DICT_TABLE_PROP,
+            )
+
+            # 字典 / 字段元数据以**新数据源**为准（probe 上已经套好），别被旧图层覆盖；
+            # 其它自定义属性（path_c、用户属性…）才从旧图层带过来
+            prefixes = (DICT_TABLE_PROP, DICT_DOMAIN_PROP, DICT_LOCAL_TABLE_PROP)
+            for key, value in custom.items():
+                if key.startswith(prefixes):
+                    continue
+                with suppress(Exception):
+                    new_layer.setCustomProperty(key, value)
         if style_xml:
             with suppress(Exception):
                 manager = new_layer.styleManager()

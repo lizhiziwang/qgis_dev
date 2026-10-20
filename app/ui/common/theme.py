@@ -583,6 +583,11 @@ def window_qss(t: Theme) -> str:
     QWidget#LayerDockHeader QToolButton:pressed {{
         background-color: {t.toolbar_pressed};
     }}
+    /* 图层展示方式（按图层顺序 / 按数据源）：勾选态要一眼看出当前用的是哪个 */
+    QWidget#LayerDockHeader QToolButton:checked {{
+        background-color: {t.toolbar_pressed};
+        border: 1px solid {t.border};
+    }}
 
     /* 数据管理 Dock 左栏「连接管理树」：统一字号 / 行距 / 悬停选中态。
        节点级的字重、文字色与图标选不中单个 item，由

@@ -250,7 +250,9 @@ class LayerTreeOpsMixin:
             return None
         view = self.layer_dock.view
         try:
-            current = self._normalize_dock_node(view.currentNode())
+            current = self.layer_dock.project_node(
+                self._normalize_dock_node(view.currentNode())
+            )
         except Exception:  # noqa: BLE001
             current = None
         for node in selected:
@@ -297,6 +299,9 @@ class LayerTreeOpsMixin:
         out: list = []
         seen: set[int] = set()
         for node in nodes:
+            # 「按数据源展示」里选中的是独立树里的副本节点：先映射回工程节点，
+            # 否则删除 / 上移下移 / 分组只作用于视图，工程里的图层纹丝不动
+            node = self.layer_dock.project_node(node)
             node = self._normalize_dock_node(node)
             if node is None or id(node) in seen:
                 continue

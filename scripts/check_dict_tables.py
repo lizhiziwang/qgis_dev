@@ -625,6 +625,104 @@ def case_editor_search(out: Path) -> str:
 
 
 @case
+def case_condition_query_domain(out: Path) -> str:
+    """条件查询：域字段过滤 + 显示代码（名称(代码)），双击仍写原始代码。"""
+    from qgis.PyQt.QtCore import Qt
+
+    from app.core.domain.create_data.dict_tables import create_local_dict_table
+    from app.core.util.field_meta import FieldMeta, upsert_field_meta
+    from app.core.util.local_db_util import local_db_util
+    from app.core.util.local_layer_loader import open_local_vector_table
+    from app.ui.dialogs.condition_query import ConditionQueryDialog
+
+    work = out / "condition_query"
+    service, category = _dict_service(work / "dicts.db")
+    target = work / "query.gpkg"
+    _new_gpkg(target)
+    db = local_db_util(str(target))
+    try:
+        db.create_vector_table(
+            "地块",
+            columns=[("DLBM", "TEXT")],
+            geometry_column="geom",
+            geometry_type="POINT",
+            srid=4490,
+            register=True,
+        )
+        db.batch_add_vector_data(
+            "地块", [{"attributes": {"DLBM": "A1"}, "geometry": "POINT(100 30)"}]
+        )
+        upsert_field_meta(
+            db.conn,
+            "地块",
+            "DLBM",
+            FieldMeta(
+                dict_table="地类字典",
+                dict_domain="域A",
+                dict_local_table="地类字典",
+            ),
+            commit=True,
+        )
+    finally:
+        db.conn.close()
+    create_local_dict_table(
+        str(target), "地类字典", source_category=category.name, dict_service=service
+    )
+    layer, error = open_local_vector_table(str(target), "地块")
+    expect(layer is not None, f"图层打不开：{error}")
+    dialog = ConditionQueryDialog([layer], current_layer=layer)
+    try:
+        expect(not dialog.domain_check.isHidden(), "「域字段」应显示出来")
+        expect(not dialog.domain_check.isChecked(), "域字段默认不应勾选")
+        expect(
+            "DLBM"
+            in [
+                dialog.field_list.item(i).text()
+                for i in range(dialog.field_list.count())
+            ],
+            "默认应显示全部字段（含字典字段）",
+        )
+        dialog.domain_check.setChecked(True)
+        expect(
+            [dialog.field_list.item(i).text() for i in range(dialog.field_list.count())]
+            == ["DLBM"],
+            "勾选域字段后应只列字典字段",
+        )
+        dialog.domain_check.setChecked(False)
+        expect(
+            "fid" in [
+                dialog.field_list.item(i).text()
+                for i in range(dialog.field_list.count())
+            ],
+            "取消域字段后应显示全部字段",
+        )
+        dialog.domain_check.setChecked(True)
+        dialog.field_list.setCurrentRow(0)
+        expect(dialog.show_code_check.isEnabled(), "「显示代码」应可用")
+        # 直接勾选「显示代码」应自动获取唯一值（不用先点「获取唯一值」）
+        dialog.show_code_check.setChecked(True)
+        texts = [
+            dialog.unique_list.item(i).text()
+            for i in range(dialog.unique_list.count())
+        ]
+        expect(texts == ["甲(A1)"], f"显示代码应带名称和代码：{texts}")
+        dialog.show_code_check.setChecked(False)
+        texts = [
+            dialog.unique_list.item(i).text()
+            for i in range(dialog.unique_list.count())
+        ]
+        expect(texts == ["甲"], f"不显示代码时应只显示名称：{texts}")
+        expect(
+            str(dialog.unique_list.item(0).data(Qt.ItemDataRole.UserRole)) == "A1",
+            "唯一值的原始代码没有保留",
+        )
+    finally:
+        dialog.deleteLater()
+        layer.deleteLater()
+    return "条件查询域字段过滤 / 显示代码(名称+代码)通过"
+
+
+@case
 def case_local_dict_reuse(out: Path) -> str:
     """建数据落库时沿用当前库已有的字典表名与内容，不另建重复表。"""
     from app.core.domain.create_data.dict_tables import (

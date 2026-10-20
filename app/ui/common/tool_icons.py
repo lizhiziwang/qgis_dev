@@ -52,6 +52,10 @@ _GLYPHS: dict[str, str] = {
     "space_query_point": "",   # map-marker 定位大头针
     "space_query_line": "",    # route 路线（线查询）
     "space_query_polygon": "", # draw-polygon 多边形（面查询）
+    # ---- 顶部「文件 / 查看 / 质检」页签的 Ribbon 按钮 ----
+    "new_project": "",   # file-alt 新建工程
+    "exit": "",          # power-off 退出
+    "log": "",           # clipboard-list 日志
     # ---- 流程节点编排工具（app/ui/flow_editor）----
     "play": "",           # play 运行全部
     "step": "",           # step-forward 单步执行

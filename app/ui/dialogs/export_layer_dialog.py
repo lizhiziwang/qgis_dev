@@ -21,45 +21,59 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import Qt, QVariant
 from qgis.PyQt.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QCheckBox,
-    QDialog,
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
+    QTableWidget,
+    QTableWidgetItem,
     QVBoxLayout,
     QWidget,
 )
+from qgis.PyQt.QtWidgets import QApplication
 
 from app.core.domain.create_data import available_drivers
 from app.core.domain.export_layer import (
-    EXPORT_EXTENSIONS,
     SHAPEFILE_MAX_FIELDS,
+    ExportLayerError,
     ExportSpec,
     existing_target_description,
-    shapefile_field_names,
+    export_vector_layer,
+    sanitize_shapefile_field_name,
 )
 from app.core.util.dict_values import layer_dict_field_names
 from app.core.util.vector_formats import VECTOR_FORMATS, VectorFormat, resolve_format
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.widgets import open_file_dir, save_file
-from app.ui.dialogs.organize_columns import OrganizeColumnsDialog
 from app.ui.dialogs.query_builder import QueryBuilderDialog
+from app.ui.tools.feature_attrs import field_alias
 
 if TYPE_CHECKING:
     from qgis.core import QgsVectorLayer
 
 logger = get_logger(__name__)
 
-#: 下拉顺序（按用户点名要的顺序；GeoPackage 排最后但作为默认 —— 它不丢字段名 / 别名）
+#: 数据管理导出：四种本地库 / 文件格式
 _EXPORT_ORDER: tuple[str, ...] = (".shp", ".gdb", ".gpkg", ".sqlite")
+
+#: 图层右键「导出」额外支持的格式（AutoCAD / KML / Excel 属性表 / GeoJSON）
+_EXTRA_EXPORT_ORDER: tuple[str, ...] = (".dxf", ".kml", ".xlsx", ".geojson")
+
+#: Excel 属性表不在通用格式表里（创建数据不该出现它），导出对话框单独加
+_XLSX_FORMAT = VectorFormat(
+    "Excel 属性表", "XLSX", ".xlsx", "只写属性表，不写几何"
+)
 
 #: 默认格式：GeoPackage（字段名 / 别名 / 类型都不丢；Shapefile 会截字段名）
 _DEFAULT_EXTENSION = ".gpkg"
@@ -86,17 +100,42 @@ def _clean_stem(name: str) -> str:
             return stem or "导出"
 
 
-def _export_formats() -> list[VectorFormat]:
-    """本机真能写出的四种导出格式（顺序按 :data:`_EXPORT_ORDER`）。"""
+def _export_formats(include_extra: bool = False) -> list[VectorFormat]:
+    """本机真能写出的导出格式（数据管理四种；图层导出再加四种）。"""
     writers = available_drivers()
+    wanted = set(_EXPORT_ORDER) | (set(_EXTRA_EXPORT_ORDER) if include_extra else set())
     found: dict[str, VectorFormat] = {}
     for fmt in VECTOR_FORMATS:
-        if fmt.extension not in EXPORT_EXTENSIONS:
+        if fmt.extension not in wanted:
             continue
         resolved = resolve_format(fmt, writers)
         if resolved is not None:
             found[resolved.extension] = resolved
-    return [found[ext] for ext in _EXPORT_ORDER if ext in found]
+    if include_extra:
+        resolved = resolve_format(_XLSX_FORMAT, writers)
+        if resolved is not None:
+            found[resolved.extension] = resolved
+    order = _EXPORT_ORDER + (_EXTRA_EXPORT_ORDER if include_extra else ())
+    return [found[ext] for ext in order if ext in found]
+
+
+#: 数据类型显示名（与 OGR / ArcGIS 的叫法一致，比 QVariant 的 "string" 好认）
+_TYPE_LABELS = {
+    QVariant.Int: "Integer",
+    QVariant.LongLong: "Integer64",
+    QVariant.UInt: "Integer",
+    QVariant.ULongLong: "Integer64",
+    QVariant.Double: "Real",
+    QVariant.String: "String",
+    QVariant.Date: "Date",
+    QVariant.DateTime: "DateTime",
+    QVariant.Bool: "Boolean",
+    QVariant.ByteArray: "Binary",
+}
+
+
+def _type_label(field) -> str:
+    return _TYPE_LABELS.get(field.type(), field.typeName() or "")
 
 
 class ExportLayerDialog(BaseDialog):
@@ -108,23 +147,22 @@ class ExportLayerDialog(BaseDialog):
         *,
         layer: QgsVectorLayer,
         default_dir: str = "",
+        extra_formats: bool = False,
     ) -> None:
         super().__init__(parent, "导出数据")
         self._layer = layer
         self._default_dir = default_dir
         #: 当前筛选条件（QGIS 表达式；空串 = 全部要素）
         self._expression = ""
-        #: Shapefile 要导出的字段名（按图层顺序）；``None`` = 全部字段。
-        #: 图层字段超过 :data:`SHAPEFILE_MAX_FIELDS` 时切到 Shapefile 会默认裁到前
-        #: 255 个（用户可点「选择字段…」改），否则 ArcMap 打不开（用户报过）。
-        self._shapefile_fields: list[str] | None = None
         #: 挂了字典的字段名（GDB 写属性域 / GPKG、SQLite 附带字典表用）
         self._dict_field_names = layer_dict_field_names(layer)
-        self._formats = _export_formats()
+        self._formats = _export_formats(extra_formats)
+        #: 重填字段表期间忽略 itemChanged（否则每加一行就刷一次提示）
+        self._loading_fields = False
         if not self._formats:
             logger.warning("导出：本机没有可用的矢量写驱动")
         self.setMinimumSize(0, 0)
-        self.resize(620, 380)
+        self.resize(760, 640)
         self._build()
         self._apply_format_defaults()
 
@@ -177,21 +215,57 @@ class ExportLayerDialog(BaseDialog):
         self.layer_name_edit.setPlaceholderText("写进库里的图层名")
         form.addRow("图层名", self.layer_name_edit)
 
-        # 导出字段（Shapefile 专用）：字段数必须 ≤255，否则 ArcMap 打不开
-        field_row = QHBoxLayout()
-        field_row.setContentsMargins(0, 0, 0, 0)
-        field_row.setSpacing(6)
-        self.field_label = QLabel()
-        self.field_label.setWordWrap(True)
-        field_row.addWidget(self.field_label, 1)
-        self.field_btn = QPushButton("选择字段…")
-        self.field_btn.setToolTip(
-            f"挑要写进 Shapefile 的字段（最多 {SHAPEFILE_MAX_FIELDS} 个；"
-            "超过上限的文件 ArcMap 打不开）"
+        # 导出字段：勾选要写的字段 + 可改导出名（所有格式通用）
+        # 先建到独立容器里，等 form 挂到 root 之后再放（表要显示在格式设置下方）
+        fields_box = QWidget()
+        fields_layout = QVBoxLayout(fields_box)
+        fields_layout.setContentsMargins(0, 0, 0, 0)
+        fields_layout.setSpacing(4)
+        fields_title = QLabel("导出字段")
+        fields_title.setObjectName("SectionLabel")
+        fields_layout.addWidget(fields_title)
+        self.field_table = QTableWidget(0, 3)
+        self.field_table.setHorizontalHeaderLabels(["名称", "导出名称", "类型"])
+        self.field_table.verticalHeader().setVisible(False)
+        self.field_table.setSelectionBehavior(
+            QAbstractItemView.SelectionBehavior.SelectRows
         )
-        self.field_btn.clicked.connect(self._on_pick_fields)
-        field_row.addWidget(self.field_btn)
-        form.addRow("导出字段", field_row)
+        self.field_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.NoSelection
+        )
+        self.field_table.setEditTriggers(
+            QAbstractItemView.EditTrigger.DoubleClicked
+            | QAbstractItemView.EditTrigger.EditKeyPressed
+        )
+        fh = self.field_table.horizontalHeader()
+        fh.setSectionResizeMode(0, QHeaderView.ResizeMode.Interactive)
+        fh.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        fh.setSectionResizeMode(2, QHeaderView.ResizeMode.Interactive)
+        self.field_table.setColumnWidth(0, 220)
+        self.field_table.setColumnWidth(2, 110)
+        self.field_table.setMinimumHeight(180)
+        self._fill_field_table()
+        self.field_table.itemChanged.connect(self._on_field_item_changed)
+        fields_layout.addWidget(self.field_table, 1)
+
+        field_tools = QHBoxLayout()
+        field_tools.setContentsMargins(0, 0, 0, 0)
+        field_tools.setSpacing(6)
+        self.select_all_btn = QPushButton("全选")
+        self.select_all_btn.setToolTip("勾选全部字段")
+        self.select_all_btn.clicked.connect(self._select_all_fields)
+        self.select_none_btn = QPushButton("全不选")
+        self.select_none_btn.setToolTip("取消勾选全部字段")
+        self.select_none_btn.clicked.connect(self._select_no_fields)
+        field_tools.addWidget(self.select_all_btn, 1)
+        field_tools.addWidget(self.select_none_btn)
+        fields_layout.addLayout(field_tools)
+        self.alias_names_check = QCheckBox("为导出名称使用别名")
+        self.alias_names_check.setToolTip(
+            "勾选后，导出名称默认取字段别名（没有别名时用字段名）；仍可手动改"
+        )
+        self.alias_names_check.toggled.connect(self._apply_alias_names)
+        fields_layout.addWidget(self.alias_names_check)
 
         # 字典转换：Shapefile 没有承载字典的位置 → 禁用；GDB 写成属性域，
         # GPKG / SQLite 附带字典表（并写字段元数据）。
@@ -219,12 +293,12 @@ class ExportLayerDialog(BaseDialog):
         form.addRow("筛选条件", condition_row)
 
         root.addLayout(form)
+        root.addWidget(fields_box, 1)
 
         self.hint = QLabel()
         self.hint.setObjectName("PropHint")
         self.hint.setWordWrap(True)
         root.addWidget(self.hint)
-        root.addStretch(1)
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
@@ -261,14 +335,17 @@ class ExportLayerDialog(BaseDialog):
         if not base_dir:
             base_dir = self._default_dir
         self.path_edit.setText(os.path.join(base_dir, f"{stem}{fmt.extension}") if base_dir else f"{stem}{fmt.extension}")
-        # 字段选择只对 Shapefile 有意义：DBF 最多 255 列，超了 ArcMap 打不开
-        is_shapefile = fmt.extension == ".shp"
-        self.field_btn.setEnabled(is_shapefile)
-        if is_shapefile:
-            self._ensure_shapefile_fields()
-        self._update_field_label(is_shapefile)
-        # 字典转换：只对挂了字典的图层、且目标格式能承载字典时可用
-        supports_dict = fmt.extension != ".shp"
+        # 字段选择 / 改名对所有格式通用；DXF 没有属性表，整块禁用
+        is_dxf = fmt.extension == ".dxf"
+        for widget in (
+            self.field_table,
+            self.select_all_btn,
+            self.select_none_btn,
+            self.alias_names_check,
+        ):
+            widget.setEnabled(not is_dxf)
+        # 字典只有 GDB / GPKG / SQLite 能承载
+        supports_dict = fmt.extension in (".gdb", ".gpkg", ".sqlite", ".sqlite3", ".db")
         dict_ok = bool(self._dict_field_names) and supports_dict
         self.dict_check.setEnabled(dict_ok)
         # 有字典、目标格式也能承载时**默认勾选**（用户仍可手动取消）
@@ -276,95 +353,169 @@ class ExportLayerDialog(BaseDialog):
         if not self._dict_field_names:
             self.dict_check.setText("转换字典（图层没有挂接字典）")
         elif not supports_dict:
-            self.dict_check.setText("转换字典（Shapefile 不支持）")
+            self.dict_check.setText("转换字典（当前格式不支持）")
         else:
             self.dict_check.setText(
                 f"转换字典（{len(self._dict_field_names)} 个字段）"
             )
-        hint = (
-            "导出后可直接用本软件打开；带条件的导出只写符合条件的要素（图层本身的筛选不受影响）。"
-            if is_container
-            else self._shapefile_hint()
-        )
-        if dict_ok:
-            hint += " 勾选「转换字典」后，GDB 会写入属性域，GeoPackage / SQLite 会附带字典表。"
-        self.hint.setText(hint)
+        self._update_hint()
 
-    def _shapefile_field_list(self) -> list[str]:
-        """本次要写进 Shapefile 的字段名；``None`` 状态 = 全部字段。"""
-        if self._shapefile_fields is not None:
-            return list(self._shapefile_fields)
-        return [field.name() for field in self._layer.fields()]
-
-    def _ensure_shapefile_fields(self) -> None:
-        """字段超过 DBF 上限时默认裁到前 255 个（用户可再手改）。"""
-        if self._shapefile_fields is not None:
+    def _update_hint(self) -> None:
+        """按当前格式 / 勾选 / 导出名刷新底部提示。"""
+        fmt = self._current_format()
+        if fmt is None:
             return
-        names = [field.name() for field in self._layer.fields()]
-        if len(names) > SHAPEFILE_MAX_FIELDS:
-            self._shapefile_fields = names[:SHAPEFILE_MAX_FIELDS]
-
-    def _update_field_label(self, is_shapefile: bool) -> None:
-        """「导出字段」行文案：全部 / 已选多少 / 是否超上限。"""
         total = len(self._layer.fields())
-        if not is_shapefile:
-            self.field_label.setText("（仅 Shapefile 需要选择字段；其他格式写入全部字段）")
-            return
-        selected = len(self._shapefile_field_list())
-        text = f"全部 {total} 个字段" if selected == total else f"已选 {selected} / {total} 个字段"
-        if selected > SHAPEFILE_MAX_FIELDS:
-            text += f"（超过 Shapefile 上限 {SHAPEFILE_MAX_FIELDS} 个，无法导出）"
-        elif total > SHAPEFILE_MAX_FIELDS:
-            text += f"（Shapefile 最多 {SHAPEFILE_MAX_FIELDS} 个，其余字段不会写入）"
-        self.field_label.setText(text)
+        selected = len(self._selected_field_names())
+        parts: list[str] = []
+        if fmt.extension == ".dxf":
+            parts.append("DXF 无属性表，只写几何；字段选择不适用")
+        else:
+            if selected == total:
+                parts.append(f"导出全部 {total} 个字段")
+            else:
+                parts.append(f"将导出 {selected} / {total} 个字段")
+            if fmt.extension == ".shp":
+                if selected > SHAPEFILE_MAX_FIELDS:
+                    parts.append(
+                        f"超过 Shapefile 上限 {SHAPEFILE_MAX_FIELDS} 个，"
+                        "请减少字段或改用 FileGDB / GeoPackage"
+                    )
+                renamed = self._shapefile_renames()
+                if renamed:
+                    preview = "、".join(
+                        f"{old}→{new}" for old, new in list(renamed.items())[:3]
+                    )
+                    extra = f" 等 {len(renamed)} 个" if len(renamed) > 3 else ""
+                    parts.append(f"字段名 ≤10 字节，会被改写：{preview}{extra}")
+            else:
+                export_names = self._export_name_map()
+                selected_set = set(self._selected_field_names())
+                changed = {
+                    original: name
+                    for original, name in export_names.items()
+                    if original in selected_set and name != original
+                }
+                if changed:
+                    preview = "、".join(
+                        f"{old}→{new}" for old, new in list(changed.items())[:3]
+                    )
+                    extra = f" 等 {len(changed)} 个" if len(changed) > 3 else ""
+                    parts.append(f"导出字段将改名：{preview}{extra}")
+        if fmt.extension in (".kml", ".geojson"):
+            parts.append("只认 WGS 84，投影坐标系图层会自动转换到 EPSG:4326")
+        elif fmt.extension == ".xlsx":
+            parts.append("Excel 只写属性表，不写几何")
+        if self.dict_check.isChecked():
+            parts.append("勾选「转换字典」后，GDB 会写入属性域，GeoPackage / SQLite 会附带字典表")
+        self.hint.setText("；".join(parts) + "。")
 
-    def _on_pick_fields(self) -> None:
-        """「选择字段…」：勾选要写进 Shapefile 的字段。"""
-        dialog = OrganizeColumnsDialog(
-            self._layer,
-            self._shapefile_field_list(),
-            self,
-            title=f"导出字段 - {self._layer.name()}",
-            hint=(
-                f"勾选要写进 Shapefile 的字段（最多 {SHAPEFILE_MAX_FIELDS} 个；"
-                "超过上限的文件 ArcMap 打不开）："
-            ),
-        )
-        accepted = dialog.exec() == QDialog.DialogCode.Accepted
-        if accepted:
-            self._shapefile_fields = dialog.checked_field_names()
-        dialog.deleteLater()
-        if accepted:
-            self._update_field_label(True)
-            self.hint.setText(self._shapefile_hint())
+    # ---------------------------------------------------------- 导出字段表
 
-    def _shapefile_hint(self) -> str:
-        """Shapefile 的提示：字段数上限 + 字段名会按 DBF 规则改写（中文名截到 10 字节）。"""
-        total = len(self._layer.fields())
-        selected = len(self._shapefile_field_list())
-        parts = ["Shapefile 只存单图层"]
-        parts.append(
-            f"将写入 {selected} / {total} 个字段"
-            if selected != total
-            else f"共 {total} 个字段"
-        )
-        if selected > SHAPEFILE_MAX_FIELDS:
-            parts.append(
-                f"超过 {SHAPEFILE_MAX_FIELDS} 个字段的文件 ArcMap 打不开，请减少字段"
+    def _fill_field_table(self) -> None:
+        """按图层字段填表：名称（勾选）/ 导出名称（可改）/ 类型。"""
+        fields = self._layer.fields()
+        self._loading_fields = True
+        try:
+            self.field_table.setRowCount(fields.size())
+            for row in range(fields.size()):
+                field = fields.at(row)
+                name_item = QTableWidgetItem(field.name())
+                name_item.setFlags(
+                    Qt.ItemFlag.ItemIsEnabled
+                    | Qt.ItemFlag.ItemIsSelectable
+                    | Qt.ItemFlag.ItemIsUserCheckable
+                )
+                name_item.setCheckState(Qt.CheckState.Checked)
+                name_item.setData(Qt.ItemDataRole.UserRole, field.name())
+                self.field_table.setItem(row, 0, name_item)
+
+                # 默认导出名 = 字段名；勾「为导出名称使用别名」后才切到别名
+                export_item = QTableWidgetItem(field.name())
+                export_item.setToolTip("导出到目标文件时使用的字段名")
+                self.field_table.setItem(row, 1, export_item)
+
+                type_item = QTableWidgetItem(_type_label(field))
+                type_item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+                self.field_table.setItem(row, 2, type_item)
+        finally:
+            self._loading_fields = False
+
+    def _on_field_item_changed(self, _item) -> None:
+        if not self._loading_fields:
+            self._update_hint()
+
+    def _select_all_fields(self) -> None:
+        self._set_all_checked(True)
+
+    def _select_no_fields(self) -> None:
+        self._set_all_checked(False)
+
+    def _set_all_checked(self, checked: bool) -> None:
+        self._loading_fields = True
+        try:
+            state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            for row in range(self.field_table.rowCount()):
+                item = self.field_table.item(row, 0)
+                if item is not None:
+                    item.setCheckState(state)
+        finally:
+            self._loading_fields = False
+        self._update_hint()
+
+    def _apply_alias_names(self, checked: bool) -> None:
+        """「为导出名称使用别名」：导出名切到别名 / 字段名。"""
+        fields = self._layer.fields()
+        self._loading_fields = True
+        try:
+            for row in range(self.field_table.rowCount()):
+                item = self.field_table.item(row, 1)
+                if item is None:
+                    continue
+                field = fields.at(row)
+                item.setText(
+                    (field_alias(field) or field.name()) if checked else field.name()
+                )
+        finally:
+            self._loading_fields = False
+        self._update_hint()
+
+    def _selected_field_names(self) -> list[str]:
+        """勾选的字段名（按图层字段顺序）。"""
+        names: list[str] = []
+        for row in range(self.field_table.rowCount()):
+            item = self.field_table.item(row, 0)
+            if item is not None and item.checkState() == Qt.CheckState.Checked:
+                names.append(str(item.data(Qt.ItemDataRole.UserRole) or item.text()))
+        return names
+
+    def _export_name_map(self) -> dict[str, str]:
+        """``{原字段名: 导出名称}``（空白的回退原字段名）。"""
+        mapping: dict[str, str] = {}
+        for row in range(self.field_table.rowCount()):
+            name_item = self.field_table.item(row, 0)
+            export_item = self.field_table.item(row, 1)
+            if name_item is None:
+                continue
+            original = str(
+                name_item.data(Qt.ItemDataRole.UserRole) or name_item.text()
             )
-        selected_names = set(self._shapefile_field_list())
-        renamed = {
-            old: new
-            for old, new in shapefile_field_names(
-                [field for field in self._layer.fields() if field.name() in selected_names]
-            ).items()
-            if old != new
-        }
-        if renamed:
-            preview = "、".join(f"{old}→{new}" for old, new in list(renamed.items())[:3])
-            extra = f" 等 {len(renamed)} 个" if len(renamed) > 3 else ""
-            parts.append(f"字段名 ≤10 字节，以下会被改写：{preview}{extra}")
-        return "；".join(parts) + "。"
+            text = export_item.text().strip() if export_item is not None else ""
+            mapping[original] = text or original
+        return mapping
+
+    def _shapefile_renames(self) -> dict[str, str]:
+        """Shapefile 下「导出名 → DBF 合法名」中被改写的部分（提示用）。"""
+        used: set[str] = set()
+        out: dict[str, str] = {}
+        names = self._export_name_map()
+        for original in self._selected_field_names():
+            desired = names.get(original, original)
+            safe = sanitize_shapefile_field_name(desired, used)
+            if safe != desired:
+                out[original] = safe
+        return out
+
 
     def _on_browse(self) -> None:
         """选保存位置：GDB 是目录，用「选文件夹」；其余格式用「另存为」。"""
@@ -440,16 +591,16 @@ class ExportLayerDialog(BaseDialog):
             )
             if ret != QMessageBox.StandardButton.Yes:
                 return
-        # Shapefile 会裁掉字段：明确问一句，别让用户以为全部字段都写进去了
-        if spec.driver == "ESRI Shapefile":
+        # 只导出部分字段：明确问一句，别让用户以为全部字段都写进去了
+        if spec.driver != "DXF":
             total = len(self._layer.fields())
-            selected = len(self._shapefile_field_list())
+            selected = len(spec.field_names or ())
             if selected < total:
                 ret = QMessageBox.question(
                     self,
                     "导出字段",
                     f"本次只导出 {selected} 个字段，其余 {total - selected} 个字段"
-                    "不会写进 Shapefile。\n\n确定继续？",
+                    "不会写入目标文件。\n\n确定继续？",
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                     QMessageBox.StandardButton.Yes,
                 )
@@ -473,12 +624,14 @@ class ExportLayerDialog(BaseDialog):
                 return f"目录不存在：{os.path.dirname(target)}"
         if fmt.container and not self.layer_name_edit.text().strip():
             return "写进库/地理数据库时，图层名不能为空"
-        if fmt.extension == ".shp":
-            selected = len(self._shapefile_field_list())
-            if selected > SHAPEFILE_MAX_FIELDS:
+        if fmt.extension != ".dxf":
+            selected = self._selected_field_names()
+            if not selected:
+                return "请至少勾选一个导出字段（或改用 DXF 只导几何）"
+            if fmt.extension == ".shp" and len(selected) > SHAPEFILE_MAX_FIELDS:
                 return (
                     f"Shapefile 最多支持 {SHAPEFILE_MAX_FIELDS} 个字段，当前已选 "
-                    f"{selected} 个。请点「选择字段…」减少字段，或改导出为 "
+                    f"{len(selected)} 个。请减少字段，或改导出为 "
                     "FileGDB / GeoPackage。"
                 )
         return ""
@@ -489,12 +642,17 @@ class ExportLayerDialog(BaseDialog):
         if fmt is None or self._validation_error():
             return None
         target = self.path_edit.text().strip()
-        # Shapefile 只在用户改过字段时传子集；没改（且不超上限）保持零拷贝
-        field_names = (
-            tuple(self._shapefile_fields)
-            if fmt.extension == ".shp" and self._shapefile_fields is not None
-            else None
-        )
+        if fmt.extension == ".dxf":
+            # DXF 不写属性表：不带字段子集 / 导出名
+            field_names = None
+            field_export_names = None
+        else:
+            selected = self._selected_field_names()
+            mapping = self._export_name_map()
+            field_names = tuple(selected)
+            field_export_names = tuple(
+                mapping.get(name, name) for name in selected
+            )
         return ExportSpec(
             path=os.path.dirname(target) or ".",
             file_name=os.path.basename(target),
@@ -503,8 +661,60 @@ class ExportLayerDialog(BaseDialog):
             layer_name=self.layer_name_edit.text().strip() or os.path.splitext(os.path.basename(target))[0],
             expression=self._expression,
             field_names=field_names,
+            field_export_names=field_export_names,
             convert_dict=bool(self.dict_check.isChecked()),
         )
 
 
-__all__ = ["ExportLayerDialog"]
+def export_with_progress(parent: QWidget | None, layer, spec: ExportSpec) -> str | None:
+    """带进度提示执行导出（数据管理 / 图层右键「导出」共用）。
+
+    写 GDB / 大图层是同步阻塞调用，没有可用的分阶段回调；用不确定进度条 +
+    阶段文字，至少让用户看到「正在写入图层 / 字典」而不是界面卡死。
+    成功返回写出的路径；失败弹提示并返回 ``None``。
+    """
+    progress = QProgressDialog(parent)
+    progress.setWindowTitle("导出数据")
+    progress.setLabelText("正在准备导出…")
+    progress.setRange(0, 0)  # 不确定进度（转圈）
+    progress.setCancelButton(None)
+    progress.setAutoClose(False)
+    progress.setAutoReset(False)
+    progress.setMinimumDuration(0)
+    progress.setWindowModality(Qt.WindowModality.WindowModal)
+    progress.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
+    progress.show()
+    QApplication.processEvents()
+
+    def _show_stage(text: str) -> None:
+        progress.setLabelText(text)
+        QApplication.processEvents()
+
+    QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+    try:
+        try:
+            target = export_vector_layer(layer, spec, progress=_show_stage)
+        except ExportLayerError as exc:
+            logger.warning("导出数据失败：%s", exc)
+            QMessageBox.warning(parent, "导出数据", f"导出失败：{exc}")
+            return None
+        except Exception as exc:  # noqa: BLE001 —— 任何意外都要让用户看到
+            logger.error("导出数据异常：%s", exc, exc_info=True)
+            QMessageBox.warning(
+                parent, "导出数据", f"导出失败（{type(exc).__name__}）：{exc}"
+            )
+            return None
+    finally:
+        QApplication.restoreOverrideCursor()
+        if progress.isVisible():
+            progress.close()
+        QApplication.processEvents()
+    QMessageBox.information(
+        parent,
+        "导出数据",
+        f"已导出{'（含字典）' if spec.convert_dict else ''}：\n{target}",
+    )
+    return target
+
+
+__all__ = ["ExportLayerDialog", "export_with_progress"]

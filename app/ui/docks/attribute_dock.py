@@ -34,10 +34,13 @@ from qgis.core import (
     QgsProject,
     QgsRectangle,
     QgsVectorLayer,
+    QgsWkbTypes,
 )
+from qgis.PyQt import sip
 from qgis.PyQt.QtCore import (QAbstractTableModel, QEvent, QItemSelection, QItemSelectionModel,
-                              QModelIndex, QObject, QPoint, Qt, QTimer, QVariant, pyqtSignal)
-from qgis.PyQt.QtGui import QBrush, QColor, QKeySequence, QStandardItem, QStandardItemModel
+                              QModelIndex, QObject, QPoint, QPointF, QRect, Qt, QTimer, QVariant, pyqtSignal)
+from qgis.PyQt.QtGui import (QBrush, QColor, QKeySequence, QPainter, QPalette, QPen, QPolygonF,
+                             QStandardItem, QStandardItemModel)
 from qgis.PyQt.QtWidgets import (
     QAbstractItemDelegate,
     QAbstractItemView,
@@ -52,6 +55,7 @@ from qgis.PyQt.QtWidgets import (
     QProgressBar,
     QPushButton,
     QSizePolicy,
+    QStyle,
     QStyledItemDelegate,
     QTableView,
     QTreeView,
@@ -1012,6 +1016,21 @@ class PagedAttributeTableModel(QAbstractTableModel):
                     value = float(value)
                 except (ValueError, TypeError):
                     return False
+        # 值没变就别写：changeAttributeValue 即使写同值也会进撤销栈、把图层标脏。
+        # 用户只是点开字典下拉、没选任何新值，退出编辑就会误报「有未保存修改」。
+        try:
+            current = feature.attribute(col)
+        except Exception:  # noqa: BLE001
+            current = None
+        if value is None:
+            if current is None or current == "":
+                return True
+        else:
+            try:
+                if current is not None and current == value:
+                    return True
+            except Exception:  # noqa: BLE001 —— 无法比较的类型按真修改处理
+                pass
         success = self.layer.changeAttributeValue(fid, col, value)
         if success:
             # 缓存里的旧要素失效：弹出，下次渲染按需重取新值
@@ -1192,18 +1211,57 @@ class _DictTreeCombo(QComboBox):
             self.view().setVerticalScrollBarPolicy(
                 Qt.ScrollBarPolicy.ScrollBarAsNeeded
             )
-            # 属性表高度有限：下方放不下且上方放得下时，翻到单元格上方弹出
-            anchor = self.parentWidget()
-            if anchor is not None and anchor.height() > 0:
-                table_top = anchor.mapToGlobal(QPoint(0, 0)).y()
-                table_bottom = table_top + anchor.height()
-                cell_top = self.mapToGlobal(QPoint(0, 0)).y()
-                popup_h = popup.height()
-                if (
-                    cell_top + self.height() + popup_h > table_bottom
-                    and cell_top - popup_h >= table_top
-                ):
-                    popup.move(popup.x(), cell_top - popup_h)
+            # 属性表高度有限：下方放不下且上方放得下时，翻到单元格上方弹出。
+            # **弹窗的 show 是延后的**（showPopup() 返回时 isVisible() 还是 False），
+            # 但此刻它的 geometry 已经算好、还没绘制：现在摆位置不会闪，等可见后
+            # 再摆反而会看到它先出现在 Qt 算错的位置、再跳过来（用户报的「飞出去」）。
+            self._place_popup(popup)
+            self._place_popup_later(popup)
+        except RuntimeError:
+            pass
+
+    def _place_popup_later(self, popup, attempts: int = 0) -> None:
+        """弹窗真正可见后再摆一次（防止 Qt 在 show 时又改位置）。"""
+        try:
+            if not popup.isVisible():
+                if attempts < 20:
+                    QTimer.singleShot(
+                        10,
+                        lambda p=popup, n=attempts: self._place_popup_later(p, n + 1),
+                    )
+                return
+            self._place_popup(popup)
+        except RuntimeError:
+            pass
+
+    def _place_popup(self, popup) -> None:
+        """按单元格位置摆放下拉弹窗（下方放不下就翻到单元格上方，紧贴单元格）。
+
+        **不能拿表格视口当边界**：属性表 Dock 往往只有一两百像素高，向下放不下、
+        向上也放不下整张弹窗，旧逻辑就放弃了手动定位、退回 Qt 的默认位置 ——
+        而 Qt 在滚动视口里会把弹窗扔到视口顶上方很远（用户报的「飞上去」）。
+        这里只按**屏幕可用区域**判断上下，弹窗允许盖住表格上方的画布。
+        """
+        try:
+            from qgis.PyQt.QtGui import QGuiApplication
+
+            natural = popup.height()
+            popup_h = min(200, max(160, natural if natural > 0 else 160))
+            if natural != popup_h:
+                popup.resize(popup.width(), popup_h)
+            cell_top = self.mapToGlobal(QPoint(0, 0)).y()
+            cell_bottom = cell_top + self.height()
+            screen = QGuiApplication.screenAt(self.mapToGlobal(self.rect().center()))
+            if screen is None:
+                screen = QGuiApplication.primaryScreen()
+            avail = screen.availableGeometry() if screen is not None else None
+            if avail is None:
+                return
+            if avail.bottom() - cell_bottom >= popup_h:
+                popup.move(popup.x(), cell_bottom)  # 下方放得下：贴单元格下沿
+            else:
+                # 上方：底部紧贴单元格上沿；连屏幕顶都放不下时贴屏幕上沿
+                popup.move(popup.x(), max(avail.top(), cell_top - popup_h))
         except RuntimeError:
             pass
 
@@ -1218,6 +1276,90 @@ class _DictValueDelegate(QStyledItemDelegate):
     def __init__(self, parent, model: "PagedAttributeTableModel") -> None:
         super().__init__(parent)
         self._model = model
+        #: 所属视图（主表 / 冻结表各有一份委托）：箭头点击要在**这个**视图里开编辑器
+        self._view = parent
+
+    # ------------------------------------------------------------ 字典箭头
+
+    @staticmethod
+    def _arrow_rect(rect: QRect) -> QRect:
+        """单元格右侧的字典箭头按钮矩形（视图坐标系）。"""
+        size = 16
+        return QRect(
+            rect.right() - size - 2,
+            rect.center().y() - size // 2,
+            size,
+            size,
+        )
+
+    def paint(self, painter, option, index) -> None:  # noqa: N802 —— Qt 命名
+        """当前单元格是字典字段时，在右侧画一个"下拉箭头"按钮。
+
+        只有**当前/聚焦**的单元格才画，避免整列都是箭头把数据看花。
+        """
+        super().paint(painter, option, index)
+        try:
+            if self._model.dict_info(index.column()) is None:
+                return
+            if not (self._view.hasFocus() and self._view.currentIndex() == index):
+                return
+            rect = self._arrow_rect(option.rect)
+            if not rect.isValid():
+                return
+            painter.save()
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            # 用主题色而不是 palette：表格底色由 QSS 指定（window_bg / 交替行
+            # panel_bg，选中 toolbar_hover），调色板里的 Base/Highlight 对不上，
+            # 会在深色主题下露出白块
+            theme = ThemeManager.instance().current()
+            selected = bool(option.state & QStyle.StateFlag.State_Selected)
+            if selected:
+                bg = QColor(theme.toolbar_hover)
+            else:
+                bg = QColor(theme.panel_bg if index.row() % 2 else theme.window_bg)
+            fg = QColor(theme.menu_text)
+            # 先把箭头区域的文字盖掉，再画一个小下拉箭头
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(bg)
+            painter.drawRect(rect.adjusted(-3, -2, 2, 2))
+            painter.setPen(QPen(fg, 1.4))
+            cx, cy = rect.center().x(), rect.center().y()
+            painter.drawLine(cx - 4, cy - 2, cx, cy + 2)
+            painter.drawLine(cx, cy + 2, cx + 4, cy - 2)
+            painter.restore()
+        except Exception:  # noqa: BLE001 —— 绘制里不能抛异常
+            return
+
+    def editorEvent(self, event, model, option, index):  # noqa: N802 —— Qt 命名
+        """点字典单元格右侧箭头 → 打开字典下拉（不点正文）。"""
+        try:
+            if (
+                self._model.dict_info(index.column()) is not None
+                and self._view.currentIndex() == index
+                and event.button() == Qt.MouseButton.LeftButton
+                and event.type()
+                in (
+                    QEvent.Type.MouseButtonPress,
+                    QEvent.Type.MouseButtonRelease,
+                    QEvent.Type.MouseButtonDblClick,
+                )
+                and self._arrow_rect(option.rect)
+                .adjusted(-3, -2, 2, 2)
+                .contains(event.position().toPoint())
+            ):
+                if event.type() == QEvent.Type.MouseButtonRelease:
+                    QTimer.singleShot(0, lambda i=index: self._edit_dict(i))
+                return True
+        except Exception:  # noqa: BLE001 —— 事件里不能抛异常
+            return False
+        return super().editorEvent(event, model, option, index)
+
+    def _edit_dict(self, index) -> None:
+        try:
+            if self._view.isVisible():
+                self._view.edit(index)
+        except RuntimeError:
+            pass
 
     def createEditor(self, parent, option, index):  # noqa: N802 —— Qt 命名
         info = self._model.dict_info(index.column())
@@ -1235,7 +1377,7 @@ class _DictValueDelegate(QStyledItemDelegate):
             except RuntimeError:
                 pass
 
-        # 双击单元格直接弹出树，不用再点一次箭头
+        # 点箭头进入编辑态后直接展开字典树，不用再点一次下拉按钮
         QTimer.singleShot(0, _open_popup)
         return editor
 
@@ -1254,21 +1396,164 @@ class _DictValueDelegate(QStyledItemDelegate):
     def setModelData(self, editor, model, index):  # noqa: N802 —— Qt 命名
         if not isinstance(editor, _DictTreeCombo):
             return super().setModelData(editor, model, index)
+        # 当前值（EditRole 是原始 code）：没变就别写回，否则点开下拉又关掉也会
+        # 触发 changeAttributeValue，把图层标成「有未保存修改」
+        current = index.model().data(index, Qt.ItemDataRole.EditRole)
         if editor.is_cleared():
+            if current is None or current == "":
+                return
             model.setData(index, None, Qt.ItemDataRole.EditRole)
             return
         code = editor.selected_code()
         if not code:
             return
+        current_text = "" if current is None else str(current)
+        if str(code) == current_text:
+            return
         model.setData(index, code, Qt.ItemDataRole.EditRole)
 
 
+class _SortHeaderView(QHeaderView):
+    """属性表表头：**只有右侧的三角箭头可点来排序**。
+
+    整列点击不排序（用户要求）——拖列宽 / 调整列时很容易误触整列点击。
+    每列右侧常驻一个箭头（未排序时是淡色的上下双箭头，已排序时按方向显示
+    单个实心三角），点击箭头才发出 :attr:`sortClicked`。
+    """
+
+    sortClicked = pyqtSignal(int)  # N815 —— Qt 信号命名
+
+    #: 箭头命中区宽度（含留白）
+    _ARROW_WIDTH = 18
+
+    def __init__(self, orientation, parent=None) -> None:
+        super().__init__(orientation, parent)
+        # 自己画箭头：**已排序列**常驻，其它列只在鼠标悬停时显示（不留一列
+        # 多余的图标）；QHeaderView 自带的指示器只在已排序列画，关掉避免重影
+        self.setSortIndicatorShown(False)
+        self.setSectionsClickable(True)
+        self.setMouseTracking(True)
+        self._hover_section = -1
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        section = int(self.logicalIndexAt(event.position().toPoint()))
+        if section != self._hover_section:
+            self._hover_section = section
+            self.viewport().update()
+        super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        if self._hover_section != -1:
+            self._hover_section = -1
+            self.viewport().update()
+        super().leaveEvent(event)
+
+    def arrow_rect(self, section: int) -> QRect:
+        """某列右侧箭头的矩形（表头坐标系）。"""
+        if section < 0:
+            return QRect()
+        width = int(self.sectionSize(section))
+        if width <= 0:
+            return QRect()
+        left = int(self.sectionViewportPosition(section)) + width - self._ARROW_WIDTH
+        # 右边留 3px 给「拖列宽」的边界热区，别让点箭头把拖拽也吃掉
+        return QRect(left, 0, self._ARROW_WIDTH - 3, self.height())
+
+    def paintSection(self, painter, rect, logicalIndex) -> None:  # noqa: N802 —— Qt 命名
+        super().paintSection(painter, rect, logicalIndex)
+        if logicalIndex < 0 or not rect.isValid():
+            return
+        try:
+            sorted_here = (
+                self.sortIndicatorSection() >= 0
+                and self.sortIndicatorSection() == logicalIndex
+            )
+            # 未排序列只有鼠标悬停时才露出（否则每列右边都多一个图标）
+            if not sorted_here and logicalIndex != self._hover_section:
+                return
+            painter.save()
+            try:
+                painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+                order = self.sortIndicatorOrder()
+                color = self.palette().color(QPalette.ColorRole.WindowText)
+                if not sorted_here:
+                    color.setAlpha(105)  # 未排序列：淡色提示"这里可以排序"
+                painter.setPen(Qt.PenStyle.NoPen)
+                painter.setBrush(color)
+                box = self.arrow_rect(logicalIndex)
+                cx = box.center().x() + 0.5
+                cy = float(rect.center().y())
+                half = 3.6
+                if sorted_here:
+                    if order == Qt.SortOrder.AscendingOrder:
+                        points = [QPointF(cx - half, cy + 2), QPointF(cx + half, cy + 2), QPointF(cx, cy - 3)]
+                    else:
+                        points = [QPointF(cx - half, cy - 2), QPointF(cx + half, cy - 2), QPointF(cx, cy + 3)]
+                else:
+                    # 未排序：上下两个小三角（可升可降）
+                    points = [
+                        QPointF(cx - half, cy - 2.2), QPointF(cx + half, cy - 2.2), QPointF(cx, cy - 6.2),
+                        QPointF(cx - half, cy + 2.2), QPointF(cx + half, cy + 2.2), QPointF(cx, cy + 6.2),
+                    ]
+                painter.drawPolygon(QPolygonF(points))
+            finally:
+                painter.restore()
+        except Exception:  # noqa: BLE001 —— 绘制里不能抛异常
+            return
+
+    def _hit_arrow(self, pos: QPoint) -> int:
+        """坐标命中的“箭头”所在列；点的是列其它位置返回 -1。"""
+        section = int(self.logicalIndexAt(pos))
+        if section < 0:
+            return -1
+        return section if self.arrow_rect(section).contains(pos) else -1
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        # 记下按下时是否落在箭头上：只有"按下和松开都在同一列的箭头"才算排序，
+        # 避免在列文字上按下、拖到箭头松开时误触
+        self._press_arrow = -1
+        if event.button() == Qt.MouseButton.LeftButton:
+            section = self._hit_arrow(event.position().toPoint())
+            if section >= 0:
+                self._press_arrow = section
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        press_arrow = getattr(self, "_press_arrow", -1)
+        self._press_arrow = -1
+        if event.button() == Qt.MouseButton.LeftButton:
+            section = self._hit_arrow(event.position().toPoint())
+            if section >= 0 and section == press_arrow:
+                self.sortClicked.emit(section)
+                event.accept()
+                return
+        # QHeaderView 自己会在整列点击时翻转排序指示器（即使 sortIndicatorShown
+        # 为 False）。排序只由箭头驱动，这里把内部状态还原，避免"点文字也换方向"。
+        old_section = self.sortIndicatorSection()
+        old_order = self.sortIndicatorOrder()
+        super().mouseReleaseEvent(event)
+        if (self.sortIndicatorSection(), self.sortIndicatorOrder()) != (
+            old_section,
+            old_order,
+        ):
+            self.blockSignals(True)
+            try:
+                self.setSortIndicator(old_section, old_order)
+            finally:
+                self.blockSignals(False)
+
+
 class _AttributeTableView(QTableView):
-    """属性表视图。只为一件事存在：**接管 Ctrl+A**。
+    """属性表视图：接管 Ctrl+A、以及"第二次点同一格才进入编辑"的鼠标行为。
 
     Qt 自带的 ``selectAll()`` 会把每一行都塞进选中模型，而视图处理选中变化是
     O(行数)、约 0.4 ms/行（见 :data:`MAX_TABLE_SELECTION_ROWS`）。所以这里不直接
     全选，改成问上层要"行数少就照选、行数多就只选要素"。
+
+    编辑：第一次点单元格只聚焦；**再点一次同一格**才开编辑器（字典格只认右侧
+    箭头，见 :class:`_DictValueDelegate`）。键盘 F2 / 直接输入仍可编辑。
     """
 
     #: 用户按了 Ctrl+A
@@ -1288,6 +1573,41 @@ class _AttributeTableView(QTableView):
                 callback()
             except Exception:  # noqa: BLE001 —— 槽里未捕获异常是原生崩溃，兜住
                 pass
+
+    def mousePressEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        """记录按下时它是不是**当前单元格**（判断是不是"第二次点同一格"）。"""
+        if event.button() == Qt.MouseButton.LeftButton:
+            index = self.indexAt(event.position().toPoint())
+            self._press_index = index
+            self._press_was_current = bool(
+                index.isValid() and index == self.currentIndex()
+            )
+        else:
+            self._press_index = None
+            self._press_was_current = False
+        super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
+        """第二次点同一格才开始编辑（第一次只聚焦）。
+
+        字典单元格例外：编辑入口是单元格右侧的箭头（见 :class:`_DictValueDelegate`），
+        点正文不弹编辑器 —— 避免"点开字典看一眼"就进编辑态。
+        """
+        super().mouseReleaseEvent(event)
+        if event.button() != Qt.MouseButton.LeftButton:
+            return
+        index = self.indexAt(event.position().toPoint())
+        if not (
+            index.isValid()
+            and index == getattr(self, "_press_index", None)
+            and getattr(self, "_press_was_current", False)
+        ):
+            return
+        model = self.model()
+        dict_info = getattr(model, "dict_info", None)
+        if dict_info is not None and dict_info(index.column()) is not None:
+            return  # 字典格：只认右侧箭头
+        QTimer.singleShot(0, lambda i=index: self.edit(i))
 
     def keyPressEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
         if event.matches(QKeySequence.StandardKey.SelectAll):
@@ -1482,9 +1802,10 @@ class PagedAttributeTableWidget(QWidget):
         # 多选：普通点=只选它，Ctrl 点=加/减，Shift 点=连选（与 QGIS 属性表一致）
         self.table_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.table_view.setAlternatingRowColors(True)
-        self.table_view.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
+        self.table_view.setEditTriggers(QAbstractItemView.EditTrigger.EditKeyPressed)
         self.table_view.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        header = self.table_view.horizontalHeader()
+        header = _SortHeaderView(Qt.Orientation.Horizontal, self.table_view)
+        self.table_view.setHorizontalHeader(header)
         # 列宽以"字符"为单位：以当前字体全角字符宽为基准，默认列宽 8 字符、
         # 最小 4 字符（防止列被拖拽到消失）。用全角"中"作基准保证默认宽度下
         # 中文字符 / ASCII 编码值都能完整显示。
@@ -1499,11 +1820,10 @@ class PagedAttributeTableWidget(QWidget):
         header.setDefaultSectionSize(_char_w * 8)
         header.setStretchLastSection(True)
         # 排序：**不**用 setSortingEnabled(True)——它一开启就会按当前指示列立刻排一次
-        # （默认第 0 列），而我们要的是"点哪列才排哪列"。手动接管点击与三角指示。
-        header.setSectionsClickable(True)
-        header.setSortIndicatorShown(True)
-        header.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)   # 未排序：不显示箭头
-        header.sectionClicked.connect(self._on_header_clicked)
+        # （默认第 0 列），而我们要的是"点哪列的箭头才排哪列"。
+        # 只有列右侧的三角箭头可点（_SortHeaderView），点整列不排序。
+        header.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)   # 未排序
+        header.sortClicked.connect(self._on_header_clicked)
         # 列头右键 → 冻结 / 取消冻结该列（见 _show_header_menu）
         self._install_header_menu(header)
         self.table_view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -1518,15 +1838,14 @@ class PagedAttributeTableWidget(QWidget):
         self.frozen_view.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.frozen_view.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.frozen_view.setAlternatingRowColors(True)
-        self.frozen_view.setEditTriggers(QAbstractItemView.EditTrigger.DoubleClicked)
+        self.frozen_view.setEditTriggers(QAbstractItemView.EditTrigger.EditKeyPressed)
         self.frozen_view.setVerticalHeader(
             _LocatedHeaderView(Qt.Orientation.Vertical, self.frozen_view)
         )
-        fheader = self.frozen_view.horizontalHeader()
+        fheader = _SortHeaderView(Qt.Orientation.Horizontal, self.frozen_view)
+        self.frozen_view.setHorizontalHeader(fheader)
         fheader.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
         fheader.setStretchLastSection(False)
-        fheader.setSectionsClickable(True)
-        fheader.setSortIndicatorShown(True)
         fheader.setSortIndicator(-1, Qt.SortOrder.AscendingOrder)
         self._install_header_menu(fheader)
         self.frozen_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
@@ -2520,9 +2839,10 @@ class PagedAttributeTableWidget(QWidget):
         if fv is None or self.model is None:
             return
         fv.setModel(self.model)
-        delegate = getattr(self, "_dict_delegate", None)
-        if delegate is not None:
-            fv.setItemDelegate(delegate)
+        # 两个视图各用一份委托：委托要记住"自己属于哪个视图"（箭头点击后在该
+        # 视图里开编辑器 / 判断当前单元格），共用一份会把冻结列的编辑开在主表上
+        self._frozen_dict_delegate = _DictValueDelegate(fv, self.model)
+        fv.setItemDelegate(self._frozen_dict_delegate)
         sel_model = self.table_view.selectionModel()
         if sel_model is not None:
             fv.setSelectionModel(sel_model)
@@ -2540,9 +2860,11 @@ class PagedAttributeTableWidget(QWidget):
         fv.verticalScrollBar().valueChanged.connect(
             self.table_view.verticalScrollBar().setValue
         )
-        # 冻结列被拖宽 / 点表头排序 / 双击定位 / Ctrl+A / 右键菜单，行为与主表一致
+        # 冻结列被拖宽 / 点表头箭头排序 / 双击定位 / Ctrl+A / 右键菜单，行为与主表一致
         fv.horizontalHeader().sectionResized.connect(lambda *_: self._update_frozen_geometry())
-        fv.horizontalHeader().sectionClicked.connect(self._on_header_clicked)
+        header = fv.horizontalHeader()
+        if hasattr(header, "sortClicked"):
+            header.sortClicked.connect(self._on_header_clicked)
         fv.doubleClicked.connect(self._on_row_double_clicked)
         fv.select_all_requested.connect(self._on_select_all_requested)
         fv.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -2721,7 +3043,40 @@ class PagedAttributeTableWidget(QWidget):
             menu.addAction(act_del)
             act_calc = QAction("字段计算器", self)
             act_calc.triggered.connect(lambda: self._open_field_calculator(key))
+            if readonly:
+                act_calc.setEnabled(False)
+                act_calc.setToolTip("系统自维护 / 唯一标识字段（ID / OBJECTID / GUID 等），不允许计算")
             menu.addAction(act_calc)
+            # 几何计算：把周长 / 长度 / 面积写进**该列**数值字段。
+            # 点图层没有可算的；系统自维护字段、非数值字段也不允许写。
+            act_geom = QAction("几何计算", self)
+            field_index = self.layer.fields().indexOf(key)
+            field = (
+                self.layer.fields().at(field_index)
+                if field_index >= 0
+                else None
+            )
+            numeric = field is not None and field.type() in (
+                QVariant.Int,
+                QVariant.LongLong,
+                QVariant.UInt,
+                QVariant.ULongLong,
+                QVariant.Double,
+            )
+            geometric = self.layer is not None and self.layer.geometryType() in (
+                QgsWkbTypes.PolygonGeometry,
+                QgsWkbTypes.LineGeometry,
+            )
+            geom_ok = geometric and numeric and not readonly
+            act_geom.setEnabled(geom_ok)
+            if readonly:
+                act_geom.setToolTip("系统自维护 / 唯一标识字段，不允许写入几何计算结果")
+            elif not geometric:
+                act_geom.setToolTip("点图层没有长度 / 面积可计算")
+            elif not numeric:
+                act_geom.setToolTip("几何计算只能写入数值字段")
+            act_geom.triggered.connect(lambda: self._open_geometry_calculator(key))
+            menu.addAction(act_geom)
         menu.setToolTipsVisible(True)
         menu.exec(header.viewport().mapToGlobal(position))
 
@@ -2787,6 +3142,14 @@ class PagedAttributeTableWidget(QWidget):
         """列头菜单「字段计算器」：打开并默认切到「更新已有字段」= 该列字段。"""
         from app.ui.dialogs.field_calculator import FieldCalculatorDialog
 
+        index = self.layer.fields().indexOf(name)
+        if index in readonly_field_indices(self.layer.fields()):
+            QMessageBox.information(
+                self,
+                "字段计算器",
+                f"字段「{name}」为系统自维护 / 唯一标识字段，不允许计算。",
+            )
+            return
         dlg = FieldCalculatorDialog(self.layer, self, initial_field=name)
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
@@ -2794,6 +3157,39 @@ class PagedAttributeTableWidget(QWidget):
         self._sync_edit_buttons()
         if self.model is not None:
             self.model.reload_fields()
+
+    def _open_geometry_calculator(self, name: str) -> None:
+        """列头菜单「几何计算」：把周长 / 长度 / 面积写进**该列字段**。
+
+        非模态：算完可以继续在表里滚动 / 改选中要素，再回来重新计算。
+        目标字段固定为右键的那一列（菜单里已保证它是可写数值字段）。
+        """
+        from app.ui.dialogs.geometry_calculator import GeometryCalculatorDialog
+
+        existing = getattr(self, "_geometry_dialog", None)
+        if (
+            existing is not None
+            and not sip.isdeleted(existing)
+            and existing.isVisible()
+        ):
+            existing.raise_()
+            existing.activateWindow()
+            return
+        dlg = GeometryCalculatorDialog(self.layer, self, field_name=name)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+
+        def _refresh() -> None:
+            # 对话框可能启动了编辑 / 批量改值：同步按钮并让可视行重取新值
+            self._sync_edit_buttons()
+            if self.model is not None:
+                self.model.reload_fields()
+
+        dlg.accepted.connect(_refresh)
+        dlg.destroyed.connect(lambda *_: setattr(self, "_geometry_dialog", None))
+        self._geometry_dialog = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
 
     def _show_context_menu(self, position) -> None:
         from qgis.PyQt.QtGui import QAction

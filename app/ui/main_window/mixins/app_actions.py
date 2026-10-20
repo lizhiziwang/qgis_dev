@@ -1096,9 +1096,11 @@ class AppActionsMixin:
 
     def _on_dm_export_layer(self, db: dict, category: str, name: str) -> None:
         """数据管理图层右键「导出数据」：导出成 shp / gdb / gpkg / sqlite，可带条件筛选。"""
-        from app.core.domain.export_layer import ExportLayerError, export_vector_layer
         from app.core.util.local_layer_loader import open_local_vector_table
-        from app.ui.dialogs.export_layer_dialog import ExportLayerDialog
+        from app.ui.dialogs.export_layer_dialog import (
+            ExportLayerDialog,
+            export_with_progress,
+        )
 
         path = str(db.get("path") or "")
         # 导出结果 / 进度都要挂在「数据管理」窗口上：主窗口的浮动提示条在
@@ -1123,52 +1125,7 @@ class AppActionsMixin:
         dialog.deleteLater()
         if spec is None:
             return
-        from qgis.PyQt.QtWidgets import QProgressDialog
-
-        # 写 GDB / 大图层是同步阻塞调用，没有可用的分阶段回调；用不确定进度条
-        # + 阶段文字，至少让用户看到「正在写入图层 / 字典」而不是界面卡死。
-        progress = QProgressDialog(owner)
-        progress.setWindowTitle("导出数据")
-        progress.setLabelText("正在准备导出…")
-        progress.setRange(0, 0)  # 不确定进度（转圈）
-        progress.setCancelButton(None)
-        progress.setAutoClose(False)
-        progress.setAutoReset(False)
-        progress.setMinimumDuration(0)
-        progress.setWindowModality(Qt.WindowModality.WindowModal)
-        progress.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
-        progress.show()
-        QApplication.processEvents()
-
-        def _show_stage(text: str) -> None:
-            progress.setLabelText(text)
-            QApplication.processEvents()
-
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            target = export_vector_layer(layer, spec, progress=_show_stage)
-        except ExportLayerError as exc:
-            logger.warning("导出数据失败：%s", exc)
-            progress.close()
-            QMessageBox.warning(owner, "导出数据", f"导出失败：{exc}")
-            return
-        except Exception as exc:  # noqa: BLE001 —— 任何意外都要让用户看到，不能静默
-            logger.error("导出数据异常：%s", exc, exc_info=True)
-            progress.close()
-            QMessageBox.warning(
-                owner, "导出数据", f"导出失败（{type(exc).__name__}）：{exc}"
-            )
-            return
-        finally:
-            QApplication.restoreOverrideCursor()
-            if progress.isVisible():
-                progress.close()
-            QApplication.processEvents()
-        QMessageBox.information(
-            owner,
-            "导出数据",
-            f"已导出{'（含字典）' if spec.convert_dict else ''}：\n{target}",
-        )
+        export_with_progress(owner, layer, spec)
 
     def _on_dm_delete_layer(self, db: dict, category: str, name: str) -> None:
         """数据管理左树右键「删除图层」：删库内数据表 + 注册信息 + 移出工程图层。

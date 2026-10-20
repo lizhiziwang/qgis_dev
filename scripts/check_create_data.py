@@ -1569,7 +1569,11 @@ def case_export_dict(out: Path) -> str:
         )
     finally:
         db.conn.close()
-    service = DictService(work / "dicts.db")
+    # 自检目录会保留产物：重复跑时上一次的字典库还在，先把字典库清掉
+    dicts_db = work / "dicts.db"
+    if dicts_db.exists():
+        dicts_db.unlink()
+    service = DictService(dicts_db)
     category = service.create_category("测试字典")
     domain = service.create_domain(category.name, "FL_SYS_TEST-图斑地类")
     service.add_item(domain.id, "1", "I级")
@@ -1596,7 +1600,8 @@ def case_export_dict(out: Path) -> str:
     if layer is None:
         raise RuntimeError(f"源图层打不开：{error}")
 
-    # GPKG / SQLite：字典表 + spatial 注册 + 字段元数据
+    # GPKG / SQLite：字典表 + spatial 注册 + 字段元数据 + 字段别名
+    layer.setFieldAlias(layer.fields().indexOf("DLBM"), "权属性质")
     stages: list[str] = []
     for name, driver, ext in (
         ("dict_out.gpkg", "GPKG", ".gpkg"),
@@ -1636,20 +1641,31 @@ def case_export_dict(out: Path) -> str:
             db.conn.close()
         if meta is None or meta.dict_domain != domain.domain:
             raise RuntimeError(f"{name} 字段元数据没写：{meta}")
+        # 别名也要导出（SQLite 目标写本工程的别名表）
+        from app.core.util.local_layer_loader import open_local_vector_table
+
+        reopened, error = open_local_vector_table(str(target), "地块")
+        if reopened is None:
+            raise RuntimeError(f"导出的图层打不开：{error}")
+        fields = reopened.fields()
+        index = fields.indexOf("dlbm")
+        if index < 0:
+            index = fields.indexOf("DLBM")
+        field = fields.at(index) if index >= 0 else None
+        if field is None or field.alias() != "权属性质":
+            raise RuntimeError(
+                f"{name} 字段别名没有导出：{field.alias() if field else None}"
+            )
         if ext == ".sqlite":
             # SQLite 驱动可能把列名改成小写：重新打开也要能读到字典
             from app.core.util.dict_values import load_field_dict
-            from app.core.util.local_layer_loader import open_local_vector_table
 
-            reopened, error = open_local_vector_table(str(target), "地块")
-            if reopened is None:
-                raise RuntimeError(f"导出的 SQLite 图层打不开：{error}")
             info = load_field_dict(reopened, "dlbm") or load_field_dict(
                 reopened, "DLBM"
             )
             if info is None or info.name_for("1") != "I级":
                 raise RuntimeError(f"SQLite 重新打开后读不到字典值：{info}")
-            reopened.deleteLater()
+        reopened.deleteLater()
 
     # GDB：coded value domain 挂到 DLBM 字段上；乱码别名导出时也要修复
     gdb = work / "dict_out.gdb"
@@ -1733,12 +1749,15 @@ def case_import_gdb_domain(out: Path) -> str:
     ds = driver.CreateDataSource(str(gdb))
     layer = ds.CreateLayer("小班", geom_type=ogr.wkbPoint)
     layer.CreateField(ogr.FieldDefn("DLBM", ogr.OFTString))
+    layer.CreateField(ogr.FieldDefn("QSXZ", ogr.OFTString))
     feature = ogr.Feature(layer.GetLayerDefn())
     feature["DLBM"] = "1"
+    feature["QSXZ"] = "A"
     feature.SetGeometry(ogr.CreateGeometryFromWkt("POINT(100 30)"))
     layer.CreateFeature(feature)
     ds = None
-    # 重新以可写方式打开，追加 coded value domain 并用新 FieldDefn 挂接
+    # 重新以可写方式打开，追加 coded value domain 并用新 FieldDefn 挂接。
+    # 两个域：导入后必须并进同一张 dict_<图层名> 字典表。
     ds = driver.Open(str(gdb), 1)
     domain = ogr.CreateCodedFieldDomain(
         "DL_DOMAIN",
@@ -1748,12 +1767,22 @@ def case_import_gdb_domain(out: Path) -> str:
         {"1": "乔木林地", "2": "灌木林地"},
     )
     ds.AddFieldDomain(domain)
+    ds.AddFieldDomain(
+        ogr.CreateCodedFieldDomain(
+            "QSXZ_DOMAIN",
+            "权属性质",
+            ogr.OFTString,
+            ogr.OFSTNone,
+            {"A": "集体土地所有权", "B": "国有土地所有权"},
+        )
+    )
     layer = ds.GetLayerByName("小班")
-    original = layer.GetLayerDefn().GetFieldDefn(0)
-    new_def = ogr.FieldDefn(original.GetName(), original.GetType())
-    new_def.SetWidth(original.GetWidth())
-    new_def.SetDomainName("DL_DOMAIN")
-    layer.AlterFieldDefn(0, new_def, ogr.ALTER_DOMAIN_FLAG)
+    for index, domain_name in ((0, "DL_DOMAIN"), (1, "QSXZ_DOMAIN")):
+        original = layer.GetLayerDefn().GetFieldDefn(index)
+        new_def = ogr.FieldDefn(original.GetName(), original.GetType())
+        new_def.SetWidth(original.GetWidth())
+        new_def.SetDomainName(domain_name)
+        layer.AlterFieldDefn(index, new_def, ogr.ALTER_DOMAIN_FLAG)
     ds = None
 
     source = QgsVectorLayer(f"{gdb}|layername=小班", "小班", "ogr")
@@ -1774,24 +1803,137 @@ def case_import_gdb_domain(out: Path) -> str:
         source, {"kind": "local", "path": str(target)}, "EPSG:4490"
     )
     cats = describe_local_db(str(target))["categories"]
-    if "DL_DOMAIN" not in cats["dict"]:
-        raise RuntimeError(f"属性域没有落成字典表：{cats}")
+    if set(cats["dict"]) != {"dict_小班"}:
+        raise RuntimeError(f"多个属性域没有合并成一张 dict_<图层名>：{cats}")
     db = local_db_util(str(target))
     try:
         meta = read_field_meta(db.conn, result.table_name).get("DLBM")
+        meta_qsxz = read_field_meta(db.conn, result.table_name).get("QSXZ")
+        domains = {
+            str(row[0])
+            for row in db.cursor.execute(
+                'SELECT DISTINCT domain FROM "dict_小班" ORDER BY domain'
+            )
+        }
     finally:
         db.conn.close()
-    if meta is None or meta.dict_domain != "DL_DOMAIN":
+    if meta is None or meta.dict_domain != "DL_DOMAIN" or meta.dict_table != "dict_小班":
         raise RuntimeError(f"字段元数据没有挂属性域：{meta}")
+    if (
+        meta_qsxz is None
+        or meta_qsxz.dict_domain != "QSXZ_DOMAIN"
+        or meta_qsxz.dict_table != "dict_小班"
+    ):
+        raise RuntimeError(f"第二个属性域的字段元数据不对：{meta_qsxz}")
+    if domains != {"DL_DOMAIN", "QSXZ_DOMAIN"}:
+        raise RuntimeError(f"合并后的字典表域不齐：{domains}")
     imported, error = open_local_vector_table(str(target), result.table_name)
     if imported is None:
         raise RuntimeError(f"导入后的图层打不开：{error}")
     info = load_field_dict(imported, "DLBM")
     if info is None or info.name_for("1") != "乔木林地":
         raise RuntimeError(f"属性域值没有读出来：{info}")
+    info_qsxz = load_field_dict(imported, "QSXZ")
+    if info_qsxz is None or info_qsxz.name_for("A") != "集体土地所有权":
+        raise RuntimeError(f"第二个属性域值没有读出来：{info_qsxz}")
     imported.deleteLater()
     source.deleteLater()
-    return "导入 GDB 属性域 → 库内字典表 / 字段元数据 / 显示值 OK"
+    return "导入 GDB 多属性域 → 合并成一张 dict_<图层名> / 字段元数据 / 显示值 OK"
+
+
+def case_create_gdb_domain(out: Path) -> str:
+    """创建数据导入带属性域的 GDB：域字段进字段表，字典随建库一起落库。"""
+    import shutil
+
+    from osgeo import ogr
+    from qgis.core import QgsVectorLayer
+
+    from app.core.domain.create_data.dict_tables import (
+        DictPlan,
+        build_dict_table_specs,
+        source_inline_dicts,
+    )
+    from app.core.domain.create_data.fields import fields_from_layer
+    from app.core.domain.create_data.library import (
+        CreateLayerInDbService,
+        CreateLayerInDbSpec,
+    )
+    from app.core.util.dict_values import load_field_dict
+    from app.core.util.local_db_util import local_db_util
+    from app.core.util.local_layer_loader import open_local_vector_table
+
+    work = out / "create_gdb_domain"
+    work.mkdir(parents=True, exist_ok=True)
+    gdb = work / "src.gdb"
+    if gdb.exists():
+        shutil.rmtree(gdb)
+    driver = ogr.GetDriverByName("OpenFileGDB")
+    ds = driver.CreateDataSource(str(gdb))
+    layer = ds.CreateLayer("小班", geom_type=ogr.wkbPoint)
+    layer.CreateField(ogr.FieldDefn("DLBM", ogr.OFTString))
+    feature = ogr.Feature(layer.GetLayerDefn())
+    feature["DLBM"] = "1"
+    feature.SetGeometry(ogr.CreateGeometryFromWkt("POINT(100 30)"))
+    layer.CreateFeature(feature)
+    ds = None
+    ds = driver.Open(str(gdb), 1)
+    ds.AddFieldDomain(
+        ogr.CreateCodedFieldDomain(
+            "DL_DOMAIN", "地类", ogr.OFTString, ogr.OFSTNone,
+            {"1": "乔木林地", "2": "灌木林地"},
+        )
+    )
+    layer = ds.GetLayerByName("小班")
+    original = layer.GetLayerDefn().GetFieldDefn(0)
+    new_def = ogr.FieldDefn(original.GetName(), original.GetType())
+    new_def.SetWidth(original.GetWidth())
+    new_def.SetDomainName("DL_DOMAIN")
+    layer.AlterFieldDefn(0, new_def, ogr.ALTER_DOMAIN_FLAG)
+    ds = None
+
+    source = QgsVectorLayer(f"{gdb}|layername=小班", "小班", "ogr")
+    if not source.isValid():
+        raise RuntimeError("源 GDB 图层打不开")
+    fields = fields_from_layer(source)
+    dlbm = next((field for field in fields if field.name == "DLBM"), None)
+    if dlbm is None or dlbm.dict_table != "DL_DOMAIN" or dlbm.dict_domain != "DL_DOMAIN":
+        raise RuntimeError(f"属性域没有进字段表：{dlbm}")
+    inline = source_inline_dicts(source, fields)
+    if not inline or inline[0].category != "DL_DOMAIN":
+        raise RuntimeError(f"属性域取值没有带进创建流程：{inline}")
+    target = work / "out.gpkg"
+    if target.exists():
+        target.unlink()
+    db = local_db_util(str(target))
+    db.conn.close()
+    domains = frozenset(
+        (field.dict_table, field.dict_domain)
+        for field in fields
+        if field.dict_table and field.dict_domain
+    )
+    specs = build_dict_table_specs(
+        str(target), DictPlan(domains=domains, inline=inline), None
+    )
+    created = CreateLayerInDbService().create(
+        CreateLayerInDbSpec(
+            db_path=str(target),
+            layer_name="小班",
+            geometry_type="Point",
+            crs_authid="EPSG:4490",
+            fields=tuple(fields),
+            dict_tables=tuple(specs),
+        )
+    )
+    created.deleteLater()
+    reopened, error = open_local_vector_table(str(target), "小班")
+    if reopened is None:
+        raise RuntimeError(f"建出来的图层打不开：{error}")
+    info = load_field_dict(reopened, "DLBM")
+    if info is None or info.name_for("1") != "乔木林地":
+        raise RuntimeError(f"属性域字典没有落库：{info}")
+    reopened.deleteLater()
+    source.deleteLater()
+    return "创建数据导入 GDB 属性域 → 字段表字典列 + 库内字典表 OK"
 
 
 def case_import_dict_merge(out: Path) -> str:
@@ -1840,7 +1982,7 @@ def case_import_dict_merge(out: Path) -> str:
     db = local_db_util(str(target))
     try:
         db.create_vector_table(
-            "DL_DOMAIN",
+            "dict_小班",
             columns=[
                 ("id", "INTEGER PRIMARY KEY AUTOINCREMENT"),
                 ("domain", "TEXT NOT NULL"),
@@ -1853,13 +1995,13 @@ def case_import_dict_merge(out: Path) -> str:
             register=False,
         )
         db.cursor.execute(
-            'INSERT INTO "DL_DOMAIN" (domain, code, name) VALUES (?, ?, ?)',
+            'INSERT INTO "dict_小班" (domain, code, name) VALUES (?, ?, ?)',
             ("DL_DOMAIN", "1", "旧名称"),
         )
         db.add_domain_table(
-            "DL_DOMAIN",
+            "dict_小班",
             "dict",
-            '{"schema":"dict_v1","dict_table":"DL_DOMAIN","domains":["DL_DOMAIN"]}',
+            '{"schema":"dict_v1","dict_table":"dict_小班","domains":["DL_DOMAIN"]}',
         )
         db.conn.commit()
     finally:
@@ -1870,16 +2012,16 @@ def case_import_dict_merge(out: Path) -> str:
         source, {"kind": "local", "path": str(target)}, "EPSG:4490"
     )
     cats = describe_local_db(str(target))["categories"]
-    if "DL_DOMAIN" not in cats["dict"] or any(
-        name.startswith("DL_DOMAIN_") for name in cats["dict"]
+    if "dict_小班" not in cats["dict"] or any(
+        name.startswith("dict_小班_") for name in cats["dict"]
     ):
-        raise RuntimeError(f"同域字典表没有合并复用：{cats}")
+        raise RuntimeError(f"同名字典表没有合并复用：{cats}")
     db = local_db_util(str(target))
     try:
         rows = [
             tuple(row)
             for row in db.cursor.execute(
-                'SELECT code, name FROM "DL_DOMAIN" ORDER BY code'
+                'SELECT code, name FROM "dict_小班" ORDER BY code'
             )
         ]
         meta = read_field_meta(db.conn, result.table_name).get("DLBM")
@@ -1887,10 +2029,10 @@ def case_import_dict_merge(out: Path) -> str:
         db.conn.close()
     if rows != [("1", "乔木林地"), ("2", "灌木林地")]:
         raise RuntimeError(f"字典表没有补全 / 更新：{rows}")
-    if meta is None or meta.dict_domain != "DL_DOMAIN":
+    if meta is None or meta.dict_domain != "DL_DOMAIN" or meta.dict_table != "dict_小班":
         raise RuntimeError(f"字段元数据不对：{meta}")
     source.deleteLater()
-    return "同域字典表合并补全（不建 _1 表）OK"
+    return "dict_<图层名> 字典表合并补全（不建 _1 表）OK"
 
 
 def case_fields_sort(out: Path) -> str:
@@ -3451,6 +3593,7 @@ CASES: list[tuple[str, Callable[[Path], str]]] = [
     ("export-append-services", case_export_append_services),
     ("export-dict", case_export_dict),
     ("import-gdb-domain", case_import_gdb_domain),
+    ("create-gdb-domain", case_create_gdb_domain),
     ("import-dict-merge", case_import_dict_merge),
     ("fields-sort", case_fields_sort),
     ("data-manage-menus", case_data_manage_menus),

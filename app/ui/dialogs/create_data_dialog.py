@@ -1496,14 +1496,21 @@ class CreateDataDialog(BaseDialog):
         不让它拦住整个创建流程。
         """
         plan = self.fields_page.dict_plan()
-        if not plan.domains and not plan.sources:
+        if not plan.domains and not plan.sources and not plan.inline:
             return ()
         service = DictService()
         known_tables = {item.name for item in service.list_categories()}
         local_tables = local_dict_categories(db_path)
+        # GDB / GPKG 属性域：类别本来就不在应用级字典里，取值已经随 plan.inline
+        # 带进来了，不能按「未知字典表」拦掉
+        inline_categories = {item.category for item in plan.inline}
         valid_domains = set()
         for category, domain in plan.domains:
-            if category not in known_tables and category not in local_tables:
+            if (
+                category not in known_tables
+                and category not in local_tables
+                and category not in inline_categories
+            ):
                 send(
                     "warning",
                     f"字典表「{category}」不在当前库、也不在字典管理里，"
@@ -1512,9 +1519,13 @@ class CreateDataDialog(BaseDialog):
                 )
                 continue
             valid_domains.add((category, domain))
-        if not valid_domains and not plan.sources:
+        if not valid_domains and not plan.sources and not plan.inline:
             return ()
-        plan = DictPlan(domains=frozenset(valid_domains), sources=plan.sources)
+        plan = DictPlan(
+            domains=frozenset(valid_domains),
+            sources=plan.sources,
+            inline=plan.inline,
+        )
         return tuple(build_dict_table_specs(db_path, plan, service))
 
     @staticmethod
@@ -1530,7 +1541,7 @@ class CreateDataDialog(BaseDialog):
     def _persist_file_dicts(self, spec, layer) -> None:
         """独立文件如果是 gpkg / sqlite，也把字典表写进去；其他格式明确提示。"""
         plan = self.fields_page.dict_plan()
-        if not plan.domains and not plan.sources:
+        if not plan.domains and not plan.sources and not plan.inline:
             return
         suffix = Path(spec.file_path).suffix.lower()
         if suffix not in (".gpkg", ".sqlite", ".db"):

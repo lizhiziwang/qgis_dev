@@ -91,7 +91,8 @@ def _field_kind(field: "QgsField") -> str | None:
 #: 由**数据源自动赋值**的标识字段（保存时自己会填 / 重算，用户不该手改）。
 #: 与 :data:`_UID_TOKENS` 分开：那些是"新要素必须重新生成 uuid"的列，分割 / 分解时
 #: 要赋新值；objectid 这类是自增 / 自维护的，赋 uuid 反而是错的。
-_AUTO_ID_TOKENS = ("objectid", "object_id", "ogc_fid", "fid", "gid", "rowid")
+#: 普通 ``id`` 也按自维护字段处理（用户要求它和 OBJECTID 一样不可编辑）。
+_AUTO_ID_TOKENS = ("objectid", "object_id", "ogc_fid", "fid", "gid", "rowid", "id")
 
 
 def auto_id_field_index(fields: "QgsFields") -> int | None:
@@ -113,10 +114,17 @@ def uid_field_index(fields: "QgsFields") -> int | None:
 def readonly_field_indices(fields: "QgsFields") -> set[int]:
     """**只读**字段下标的集合（系统自维护主键 + 全局唯一标识）。
 
-    只读字段不允许手工改值（见属性录入弹窗），也不允许改名 / 删除（属性表列头、
-    图层属性「字段」页统一按本函数判定）。
+    **所有**命中 ``_UID_TOKENS`` / ``_AUTO_ID_TOKENS`` 的字段都算（以前只取第一个
+    命中项，图层里同时有 OBJECTID 和 id 这类字段时后一个仍可编辑）。只读字段
+    不允许手工改值（见属性录入弹窗），也不允许改名 / 删除 / 参与字段计算器与
+    几何计算（属性表列头、图层属性「字段」页统一按本函数判定）。
     """
-    return {i for i in (uid_field_index(fields), auto_id_field_index(fields)) if i is not None}
+    tokens = set(_UID_TOKENS) | set(_AUTO_ID_TOKENS)
+    return {
+        index
+        for index, field in enumerate(fields)
+        if field.name().strip().lower() in tokens
+    }
 
 
 def _geometry_value(
@@ -150,6 +158,25 @@ def _geometry_value(
             else (geometry.area() if is_area else geometry.length())
         )
     except Exception:  # noqa: BLE001 —— 几何运算失败不阻断编辑
+        return None
+
+
+def measure_geometry_value(
+    layer: "QgsVectorLayer",
+    geometry: "QgsGeometry",
+    *,
+    is_area: bool,
+    backend: str,
+) -> float | None:
+    """按指定后端把几何量成（米 / 平方米）；失败返回 ``None``。
+
+    与自动计算系统字段同一套量算口径（高斯投影 / 等积投影 / 椭球），供属性表
+    「几何计算」对话框复用，避免另抄一份投影与椭球处理。
+    """
+    try:
+        return _measure_with(layer, geometry, is_area, backend)
+    except Exception:  # noqa: BLE001 —— 单要素算不出来不影响其它要素
+        logger.warning("几何计算量算失败", exc_info=True)
         return None
 
 

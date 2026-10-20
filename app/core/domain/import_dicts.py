@@ -6,9 +6,10 @@
 2. 源本地库（GPKG / SQLite）里已经登记过的字典表（``user_relation.type=dict``）
    及其字段元数据。
 
-口径：**目标库里已有同域字典表就合并**（补缺失代码、更新名称），没有才新建；
-这样重复导入 / 导入到已有库不会产生 ``_1``、``_2`` 的重复字典表，也不会留下
-只有一个域、缺条目的半截字典。
+口径：**一次导入只落一张字典表**，表名固定为 ``dict_<导入图层名>``；源数据源
+里的多个属性域 / 字典表全部并进这一张（用 ``domain`` 列区分）。目标库里已有
+同名字典表就直接合并（补缺失代码、更新名称），重复导入不会产生 ``_1``、``_2``
+的重复字典表，也不会留下只有一个域、缺条目的半截字典。
 """
 
 from __future__ import annotations
@@ -239,26 +240,6 @@ def _dict_table_names(util) -> set[str]:
         return set()
 
 
-def _find_table_for_domain(util, domain: str, names: set[str]) -> str:
-    """目标库里已经含该域的字典表（复用，避免重复建表）。"""
-    for table in names:
-        try:
-            columns = {
-                str(row[1])
-                for row in util.cursor.execute(f"PRAGMA table_info({_quote(table)})")
-            }
-            if "domain" not in columns:
-                continue
-            hit = util.cursor.execute(
-                f"SELECT 1 FROM {_quote(table)} WHERE domain = ? LIMIT 1", (domain,)
-            ).fetchone()
-            if hit is not None:
-                return table
-        except Exception:  # noqa: BLE001
-            continue
-    return ""
-
-
 def _ensure_dict_table(util, table: str, *, create: bool) -> set[str] | None:
     """确保表是 canonical 字典结构；返回列名集合。"""
     if not _table_exists(util, table):
@@ -318,10 +299,11 @@ def _register_dict(util, table: str, domains: set[str]) -> None:
 
 
 def merge_import_dicts(util, target_table: str, bindings, field_sql_map) -> int:
-    """把 bindings 合并进目标库字典表；返回写入/更新的字典表数。
+    """把 bindings 合并进**一张**目标字典表；返回写入/更新的字典表数。
 
-    目标已有同域字典表 → 复用并补缺；没有才新建。已存在的 ``(domain, code)``
-    行只更新名称 / 上级 / 排序，不会重复插入。
+    表名固定为 ``dict_<导入图层名>``（重名时按 ``_1`` / ``_2`` 避让）；源数据源
+    的多个属性域 / 字典表都写进这一张，用 ``domain`` 列区分。目标已有同名字典表
+    就直接复用补缺，已存在的 ``(domain, code)`` 行只更新名称 / 上级 / 排序。
     """
     if not bindings:
         return 0
@@ -329,21 +311,17 @@ def merge_import_dicts(util, target_table: str, bindings, field_sql_map) -> int:
     from app.core.domain.import_layer import unique_table_name
 
     names = _dict_table_names(util)
-    taken: set[str] = set()
-    by_base: dict[str, str] = {}
+    base = f"dict_{str(target_table or '').strip()}".strip() or "dict_imported_layer"
+    target = ""
     touched: set[str] = set()
     for binding in bindings:
         domain = str(binding.domain or "")
         if not domain or not binding.rows:
             continue
-        target = by_base.get(binding.table_base, "")
         if not target:
-            target = _find_table_for_domain(util, domain, names)
-            if not target:
-                base = binding.table_base or domain
-                target = unique_table_name(db_path, base, taken=taken)
-                taken.add(target)
-            by_base[binding.table_base] = target
+            # 同名（dict_<图层名>）字典表已存在就复用它；否则起一个不撞库的名字
+            target = base if base in names else unique_table_name(db_path, base)
+            names.add(target)
         columns = _ensure_dict_table(util, target, create=True)
         if columns is None:
             logger.warning("导入字典表结构不对，已跳过：%s", target)
