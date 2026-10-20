@@ -42,11 +42,11 @@ class LayerPropertiesDialog(BaseDialog):
     #: (标签名, 页类)；页类为 None → 占位页。
     _TAB_SPECS = (
         ("常规", GeneralTab),
-        ("条件", ConditionTab),
         ("字段", FieldsTab),
         ("选择", SelectionTab),
         ("标注", LabelingTab),
         ("渲染", RenderTab),
+        ("条件", ConditionTab),
     )
 
     def __init__(self, layer, canvas=None, parent=None) -> None:
