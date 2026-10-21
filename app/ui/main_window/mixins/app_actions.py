@@ -646,7 +646,7 @@ class AppActionsMixin:
                 self.messageBar.pushWarning("标注", f"打开失败：{exc}")
 
     def _show_annotation_page(self) -> None:
-        """把标注页设为中央区当前页，并保证日志面板可见（用户要能看到刷新）。"""
+        """把标注页设为中央区当前页（不自动打开日志面板）。"""
         page = self._annotation_page
         if page is None:
             return
@@ -656,7 +656,6 @@ class AppActionsMixin:
         self._inference_page_visible = False
         self._last_deep_learning_page = "annotation"
         self._set_annotation_shortcuts_blocked(True)
-        self._show_log_dock()
         page.activate()
 
     def _close_annotation_page(self) -> None:
@@ -702,7 +701,7 @@ class AppActionsMixin:
                 self.messageBar.pushWarning("训练", f"打开失败：{exc}")
 
     def _show_training_page(self) -> None:
-        """把训练页设为中央区当前页，并保证日志面板可见。"""
+        """把训练页设为中央区当前页（不自动打开日志面板）。"""
         page = self._training_page
         if page is None:
             return
@@ -712,7 +711,6 @@ class AppActionsMixin:
         self._inference_page_visible = False
         self._last_deep_learning_page = "training"
         self._set_annotation_shortcuts_blocked(True)
-        self._show_log_dock()
         page.activate()
 
     def _close_training_page(self) -> None:
@@ -777,7 +775,7 @@ class AppActionsMixin:
         self._inference_applied_hint = hint
 
     def _show_inference_page(self) -> None:
-        """把推理页设为中央区当前页，并保证日志面板可见。"""
+        """把推理页设为中央区当前页（不自动打开日志面板）。"""
         page = self._inference_page
         if page is None:
             return
@@ -787,7 +785,6 @@ class AppActionsMixin:
         self._training_page_visible = False
         self._last_deep_learning_page = "inference"
         self._set_annotation_shortcuts_blocked(True)
-        self._show_log_dock()
         page.activate()
 
     def _close_inference_page(self) -> None:

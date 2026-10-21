@@ -11,7 +11,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import common
+from . import common, finetune
 from .data import InstanceDataset, SemanticDataset, count_instances
 from .models import build_model, count_parameters
 
@@ -187,12 +187,14 @@ def _train_semantic(context: dict) -> int:
     )
     model.to(context["device"])
     common.log(f"模型参数量：{count_parameters(model) / 1e6:.2f} M")
-    _load_checkpoint(model, params["init_checkpoint"], meta, num_classes)
+    _load_initial_weights(model, params, meta, num_classes, classes)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=params["lr"], weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=max(1, epochs), eta_min=params["lr"] * 0.01
     )
+    freeze_parts = _prepare_freeze(model, params, meta, epochs)
+    freeze_state: dict = {"frozen": None}
     use_amp = bool(params["amp"] and context["device"] == "cuda")
     scaler = _make_grad_scaler(context["device"], use_amp)
     if use_amp:
@@ -209,6 +211,7 @@ def _train_semantic(context: dict) -> int:
         if common.stop_requested():
             raise _StopTrainingError
         model.train()
+        _apply_epoch_freeze(freeze_parts, params, epoch, freeze_state)
         running_loss = 0.0
         seen = 0
         steps = len(train_loader)
@@ -464,12 +467,14 @@ def _train_instances(context: dict) -> int:
     )
     model.to(context["device"])
     common.log(f"模型参数量：{count_parameters(model) / 1e6:.2f} M")
-    _load_checkpoint(model, params["init_checkpoint"], meta, num_classes)
+    _load_initial_weights(model, params, meta, num_classes, classes)
 
     optimizer = torch.optim.AdamW(model.parameters(), lr=params["lr"], weight_decay=1e-4)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
         optimizer, T_max=max(1, epochs), eta_min=params["lr"] * 0.01
     )
+    freeze_parts = _prepare_freeze(model, params, meta, epochs)
+    freeze_state: dict = {"frozen": None}
 
     best_value = -1.0
     best_epoch = 0
@@ -482,6 +487,7 @@ def _train_instances(context: dict) -> int:
         if common.stop_requested():
             raise _StopTrainingError
         model.train()
+        _apply_epoch_freeze(freeze_parts, params, epoch, freeze_state)
         running_loss = 0.0
         seen = 0
         steps = len(train_loader)
@@ -667,6 +673,8 @@ def _checkpoint(model, meta: dict, num_classes: int, epoch: int, metrics: dict, 
         "model": meta["model"],
         "encoder": meta["encoder"],
         "task": meta["task"],
+        "mode": str(meta.get("mode") or ""),
+        "base_checkpoint": str(meta.get("base_checkpoint") or ""),
         "num_classes": int(num_classes),
         "class_ids": [int(item.get("id") or index + 1) for index, item in enumerate(classes)],
         "class_names": [str(item.get("name") or "") for item in classes],
@@ -678,18 +686,27 @@ def _checkpoint(model, meta: dict, num_classes: int, epoch: int, metrics: dict, 
     }
 
 
+def _torch_load_checkpoint(checkpoint_path: Path):
+    """优先用 ``weights_only=True`` 安全反序列化；旧 torch / 旧 checkpoint 回退。"""
+    import torch  # noqa: PLC0415 - 只有外部训练 Python 才有 torch
+
+    try:
+        return torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+    except TypeError:
+        # torch < 1.13 没有 weights_only 参数
+        return torch.load(checkpoint_path, map_location="cpu")
+    except Exception as exc:  # noqa: BLE001 —— 旧 checkpoint 可能含非基础类型
+        common.log(f"权重无法以安全模式读取（{exc}），回退到完整反序列化；请只使用可信文件")
+        return torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+
+
 def _load_checkpoint(model, path: str, meta: dict, num_classes: int) -> None:
     if not path:
         return
-    import torch
-
     checkpoint_path = Path(path)
     if not checkpoint_path.is_file():
         raise ValueError(f"继续训练的权重不存在：{checkpoint_path}")
-    try:
-        payload = torch.load(checkpoint_path, map_location="cpu")
-    except Exception:  # noqa: BLE001 —— 老版本 torch 不认识 weights_only
-        payload = torch.load(checkpoint_path, map_location="cpu", weights_only=False)
+    payload = _torch_load_checkpoint(checkpoint_path)
     if not isinstance(payload, dict) or "state_dict" not in payload:
         raise ValueError(f"不是本工具保存的 checkpoint：{checkpoint_path}")
     expected = {
@@ -711,6 +728,165 @@ def _load_checkpoint(model, path: str, meta: dict, num_classes: int) -> None:
     common.log(f"已加载继续训练权重：{checkpoint_path}（第 {payload.get('epoch', '?')} 轮）")
 
 
+def _load_finetune_checkpoint(
+    model,
+    path: str,
+    meta: dict,
+    num_classes: int,
+    classes: list[dict],
+) -> None:
+    """微调加载：复用结构与形状兼容的权重，类别相关输出头按需重建。"""
+    if not path:
+        raise ValueError("微调需要选择基础模型（.pt）")
+    checkpoint_path = Path(path)
+    if not checkpoint_path.is_file():
+        raise ValueError(f"微调的基础模型不存在：{checkpoint_path}")
+
+    payload = _torch_load_checkpoint(checkpoint_path)
+    payload_meta: dict = {}
+    if isinstance(payload, dict) and isinstance(payload.get("state_dict"), dict):
+        payload_meta = payload
+        saved_state = payload["state_dict"]
+    elif isinstance(payload, dict) and payload and all(
+        hasattr(value, "shape") for value in payload.values()
+    ):
+        # 裸 state_dict（来自其他工具或手工导出），没有元数据可校验
+        saved_state = payload
+    else:
+        raise ValueError(f"不是可识别的 checkpoint：{checkpoint_path}")
+
+    problem = finetune.finetune_meta_problem(payload_meta, meta)
+    if problem:
+        raise ValueError(problem)
+
+    saved_state = finetune.strip_common_prefix(saved_state)
+    saved_names = [str(item) for item in payload_meta.get("class_names") or []]
+    current_names = [str(item.get("name") or "") for item in classes]
+    saved_num_classes = payload_meta.get("num_classes")
+    saved_task = str(payload_meta.get("task") or "")
+    try:
+        num_classes_changed = (
+            saved_num_classes is not None and int(saved_num_classes) != int(num_classes)
+        )
+    except (TypeError, ValueError):
+        num_classes_changed = False
+    skip_head = bool(
+        num_classes_changed
+        or (saved_names and saved_names != current_names)
+        or (saved_task and saved_task != str(meta["task"]))
+    )
+
+    match = finetune.matching_state_entries(
+        saved_state,
+        model.state_dict(),
+        task=str(meta["task"]),
+        model_id=str(meta["model"]),
+        skip_head=skip_head,
+    )
+    if match.shape_mismatch:
+        shown = "、".join(match.shape_mismatch[:3])
+        more = f" 等 {len(match.shape_mismatch)} 个" if len(match.shape_mismatch) > 3 else ""
+        raise ValueError(
+            f"基础模型结构与当前模型不匹配（{shown}{more}）；"
+            "请确认模型 / 骨干与基础模型一致"
+        )
+    if not match.loadable:
+        raise ValueError(
+            "基础模型没有可复用的权重：结构与当前模型完全不一致，"
+            "请选择模型 / 骨干相同的 checkpoint"
+        )
+
+    result = model.load_state_dict(match.loadable, strict=False)
+    unexpected = getattr(result, "unexpected_keys", [])
+    if unexpected:
+        # matching_state_entries 已保证键都存在；这里只做防御
+        raise ValueError(f"基础模型加载失败：{unexpected[:3]}")
+
+    common.log(
+        f"微调：已加载 {len(match.loadable)}/{len(saved_state)} 个权重张量"
+        f"（跳过输出头 {len(match.head_skipped)} 个、结构不匹配 "
+        f"{len(match.shape_mismatch)} 个、当前模型缺失 {len(match.absent)} 个）"
+    )
+    if skip_head:
+        common.log("基础模型的类别 / 类别数 / 任务与当前数据集不同，分类头将重新初始化")
+    common.log(f"微调基础模型：{checkpoint_path}（第 {payload_meta.get('epoch', '?')} 轮）")
+
+
+def _load_initial_weights(
+    model, params: dict, meta: dict, num_classes: int, classes: list[dict]
+) -> None:
+    """按训练方式加载初始权重；从零训练不做任何加载。"""
+    mode = str(meta.get("mode") or finetune.resolve_mode(params))
+    if mode == "resume":
+        _load_checkpoint(model, str(params.get("init_checkpoint") or ""), meta, num_classes)
+    elif mode == "finetune":
+        _load_finetune_checkpoint(
+            model,
+            str(params.get("finetune_checkpoint") or ""),
+            meta,
+            num_classes,
+            classes,
+        )
+
+
+def _prepare_freeze(model, params: dict, meta: dict, epochs: int) -> list:
+    """微调 + 冻结骨干时应用初始冻结，返回需要逐轮维护的骨干模块。"""
+    if not bool(params.get("freeze_backbone")):
+        return []
+    if str(meta.get("mode") or "") != "finetune":
+        common.log("冻结骨干只在微调模式下生效，本次训练忽略")
+        return []
+    parts = finetune.backbone_parts(model, str(meta["task"]))
+    if not parts:
+        common.log("当前模型没有可识别的骨干，忽略冻结骨干设置")
+        return []
+    finetune.set_backbone_frozen(parts, True)
+    common.log(f"已冻结骨干：可训练参数 {count_parameters(model) / 1e6:.2f} M")
+    try:
+        limit = int(params.get("unfreeze_epochs") or 0)
+    except (TypeError, ValueError):
+        limit = 0
+    if limit and limit >= int(epochs):
+        common.log(f"前 {limit} 轮冻结，但总轮数为 {epochs}，训练结束前不会解冻")
+    return parts
+
+
+def _apply_epoch_freeze(parts: list, params: dict, epoch: int, state: dict) -> None:
+    """``model.train()`` 会递归恢复训练态，每轮都要重新应用冻结。"""
+    if not parts:
+        return
+    frozen = finetune.backbone_should_be_frozen(params, epoch)
+    finetune.set_backbone_frozen(parts, frozen)
+    if state.get("frozen") != frozen:
+        state["frozen"] = frozen
+        if frozen:
+            common.log("骨干保持冻结（只训练输出头）")
+        else:
+            common.log(f"第 {epoch} 轮起解冻骨干，全部参数参与训练")
+
+
+def _validate_training_mode(params: dict, mode: str) -> None:
+    """训练方式与权重路径的前置校验（加载数据前执行）。"""
+    if mode == "resume":
+        path = str(params.get("init_checkpoint") or "").strip()
+        if not path:
+            raise ValueError("继续训练需要选择上一次训练的权重（best.pt / last.pt）")
+        if not Path(path).is_file():
+            raise ValueError(f"继续训练的权重不存在：{path}")
+        return
+    if mode != "finetune":
+        return
+    path = str(params.get("finetune_checkpoint") or "").strip()
+    if not path:
+        raise ValueError("微调需要选择基础模型（.pt）")
+    if not Path(path).is_file():
+        raise ValueError(f"微调的基础模型不存在：{path}")
+    if params.get("pretrained"):
+        # 基础模型会覆盖 ImageNet 权重；关闭可避免无意义的下载与误导性回退日志
+        params["pretrained"] = False
+        common.log("微调模式不使用 ImageNet 预训练初始化，直接加载基础模型")
+
+
 def _write_metrics(
     out_dir: Path,
     meta: dict,
@@ -729,6 +905,8 @@ def _write_metrics(
             "task": meta["task"],
             "model": meta["model"],
             "encoder": meta["encoder"],
+            "mode": str(meta.get("mode") or ""),
+            "base_checkpoint": str(meta.get("base_checkpoint") or ""),
             "classes": classes,
             "planned_epochs": int(epochs),
             "completed_epochs": len(history),
@@ -756,12 +934,26 @@ def run_training(manifest: dict) -> int:
     params.setdefault("early_stop", 8)
     params.setdefault("seed", 42)
     params.setdefault("device", "auto")
-    params.setdefault("pretrained", True)
+    params.setdefault("pretrained", False)
     params.setdefault("augment", True)
     params.setdefault("loss", "dice_ce")
     params.setdefault("min_instance_area", 16)
     params.setdefault("init_checkpoint", "")
     params.setdefault("amp", True)
+    params.setdefault("mode", "")
+    params.setdefault("finetune_checkpoint", "")
+    params.setdefault("freeze_backbone", False)
+    params.setdefault("unfreeze_epochs", 0)
+
+    mode = finetune.resolve_mode(params)
+    params["mode"] = mode
+    _validate_training_mode(params, mode)
+    if mode == "finetune":
+        base_checkpoint = str(params.get("finetune_checkpoint") or "")
+    elif mode == "resume":
+        base_checkpoint = str(params.get("init_checkpoint") or "")
+    else:
+        base_checkpoint = ""
 
     task = str(manifest.get("task") or "objects")
     model_id = str(manifest.get("model") or "unet")
@@ -797,6 +989,8 @@ def run_training(manifest: dict) -> int:
         "model": model_id,
         "encoder": encoder,
         "tile_size": int(params["tile_size"]),
+        "mode": mode,
+        "base_checkpoint": base_checkpoint,
     }
     context = {
         "params": params,
@@ -820,11 +1014,25 @@ def run_training(manifest: dict) -> int:
         model=model_id,
         encoder=encoder,
         task=task,
+        mode=mode,
+        base_checkpoint=base_checkpoint,
     )
     common.log(
         f"训练开始：{common.now_stamp()} / {task} / {model_id} / {encoder} / {device}；"
         f"训练 {len(train_samples)} 个样本，验证 {len(val_samples)} 个"
     )
+    if mode == "finetune":
+        common.log(f"训练方式：微调（基础模型 {base_checkpoint}）")
+        if params.get("freeze_backbone"):
+            try:
+                limit = int(params.get("unfreeze_epochs") or 0)
+            except (TypeError, ValueError):
+                limit = 0
+            common.log(f"冻结骨干：前 {limit} 轮" if limit else "冻结骨干：全程冻结")
+    elif mode == "resume":
+        common.log(f"训练方式：继续训练（{base_checkpoint}）")
+    else:
+        common.log("训练方式：从零训练")
     if ignore_index == 0:
         common.log("类别 0 视为未标注区域：损失与验证指标均忽略这些像素")
 

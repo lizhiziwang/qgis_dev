@@ -60,6 +60,10 @@ TRAINING_FIELDS: tuple[str, ...] = (
     "augment",
     "min_instance_area",
     "init_checkpoint",
+    "mode",
+    "finetune_checkpoint",
+    "freeze_backbone",
+    "unfreeze_epochs",
 )
 
 
@@ -253,10 +257,18 @@ class TrainingConfig:
     early_stop: int = 8
     seed: int = 42
     device: str = "auto"
-    pretrained: bool = True
+    pretrained: bool = False
     augment: bool = True
     min_instance_area: int = 16
     init_checkpoint: str = ""
+    #: 训练方式：scratch 从零 / resume 继续训练 / finetune 微调
+    mode: str = "scratch"
+    #: 微调基础模型（任意本工具 .pt）
+    finetune_checkpoint: str = ""
+    #: 微调：冻结骨干（只训练输出头）
+    freeze_backbone: bool = False
+    #: 微调：前 N 轮冻结；0 = 全程冻结
+    unfreeze_epochs: int = 0
 
 
 @dataclass(frozen=True)
@@ -556,6 +568,16 @@ def _load_training_config(
         device = "auto"
 
     python = path_override(key("python"), raw.get("python")) or fallback_python
+    init_checkpoint = path_override(key("init_checkpoint"), raw.get("init_checkpoint"))
+    # 旧配置没有 mode：有继续训练权重就按 resume 处理，保持原有行为
+    mode_fallback = raw.get("mode")
+    if mode_fallback is None:
+        mode_fallback = "auto"
+    mode = text_override(key("mode"), mode_fallback).strip().lower()
+    if mode == "auto":
+        mode = "resume" if init_checkpoint else "scratch"
+    if mode not in training_catalog.MODE_IDS:
+        mode = "scratch"
     return TrainingConfig(
         python=python,
         dataset_dir=path_override(key("dataset_dir"), raw.get("dataset_dir")),
@@ -572,13 +594,21 @@ def _load_training_config(
         early_stop=min(1000, max(0, int_override(key("early_stop"), raw.get("early_stop", 8)))),
         seed=min(2**31 - 1, max(0, int_override(key("seed"), raw.get("seed", 42)))),
         device=device,
-        pretrained=bool_override(key("pretrained"), raw.get("pretrained", True)),
+        pretrained=bool_override(key("pretrained"), raw.get("pretrained", False)),
         augment=bool_override(key("augment"), raw.get("augment", True)),
         min_instance_area=min(
             1_000_000,
             max(0, int_override(key("min_instance_area"), raw.get("min_instance_area", 16))),
         ),
-        init_checkpoint=path_override(key("init_checkpoint"), raw.get("init_checkpoint")),
+        init_checkpoint=init_checkpoint,
+        mode=mode,
+        finetune_checkpoint=path_override(
+            key("finetune_checkpoint"), raw.get("finetune_checkpoint")
+        ),
+        freeze_backbone=bool_override(key("freeze_backbone"), raw.get("freeze_backbone", False)),
+        unfreeze_epochs=min(
+            10000, max(0, int_override(key("unfreeze_epochs"), raw.get("unfreeze_epochs", 0)))
+        ),
     )
 
 

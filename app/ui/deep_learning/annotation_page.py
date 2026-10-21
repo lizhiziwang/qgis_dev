@@ -324,7 +324,7 @@ class AnnotationPage(QWidget):
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setStretchFactor(2, 0)
-        self._splitter.setSizes([280, 800, 330])
+        self._splitter.setSizes([392, 688, 330])
 
     def _build_actions(self) -> None:
         theme = ThemeManager.instance().current()

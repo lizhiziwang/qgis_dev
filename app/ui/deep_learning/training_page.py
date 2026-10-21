@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import time
 from collections.abc import Callable
@@ -49,6 +50,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from app.core.ai.sam_environment import DependencyInstaller, stripped_environ_dict
+from app.core.inference.runs import RunInfo, read_run, scan_runs
 from app.core.training.client import TrainingClient
 from app.core.training.dataset import DatasetScan, scan_dataset
 from app.core.training.environment import (
@@ -129,6 +131,8 @@ class TrainingPage(QWidget):
         self._shutting_down = False
         self._environment_probe = environment_probe or probe_environment
         self._tool_actions: list[tuple[QAction, str]] = []
+        #: 基础模型路径（规范化后）→ 训练 run 元数据；未知路径不在表里
+        self._runs_by_checkpoint: dict[str, RunInfo] = {}
 
         self.client = client or TrainingClient(python=self._python(), parent=self)
         self._installer = DependencyInstaller(self)
@@ -289,7 +293,7 @@ class TrainingPage(QWidget):
         self._splitter.addWidget(right)
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
-        self._splitter.setSizes([390, 900])
+        self._splitter.setSizes([546, 744])
 
     def _build_form(self) -> QWidget:
         scroll = QScrollArea(self)
@@ -300,6 +304,7 @@ class TrainingPage(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(8)
 
+        layout.addWidget(self._build_mode_group(body))
         layout.addWidget(self._build_dataset_group(body))
         layout.addWidget(self._build_task_group(body))
         layout.addWidget(self._build_params_group(body))
@@ -307,6 +312,80 @@ class TrainingPage(QWidget):
         layout.addStretch(1)
         scroll.setWidget(body)
         return scroll
+
+    def _build_mode_group(self, parent: QWidget) -> QGroupBox:
+        group = QGroupBox("训练方式", parent)
+        layout = QVBoxLayout(group)
+        layout.setSpacing(6)
+
+        form = QFormLayout()
+        self.mode_combo = QComboBox(group)
+        for mode_id, label in catalog.TRAINING_MODES:
+            self.mode_combo.addItem(label, mode_id)
+        form.addRow("方式", self.mode_combo)
+        layout.addLayout(form)
+
+        self.mode_hint = QLabel("", group)
+        self.mode_hint.setWordWrap(True)
+        self.mode_hint.setEnabled(False)
+        layout.addWidget(self.mode_hint)
+
+        # 继续训练：结构必须完全一致
+        self.resume_panel = QWidget(group)
+        resume_form = QFormLayout(self.resume_panel)
+        resume_form.setContentsMargins(0, 0, 0, 0)
+        self.checkpoint_edit = QLineEdit(self.resume_panel)
+        self.checkpoint_edit.setPlaceholderText("上一次训练的 best.pt / last.pt")
+        checkpoint_browse = QPushButton("浏览…", self.resume_panel)
+        checkpoint_browse.clicked.connect(self._choose_checkpoint)
+        checkpoint_row = QHBoxLayout()
+        checkpoint_row.addWidget(self.checkpoint_edit, 1)
+        checkpoint_row.addWidget(checkpoint_browse)
+        resume_form.addRow("权重", checkpoint_row)
+        layout.addWidget(self.resume_panel)
+
+        # 微调：基础模型 + 冻结参数
+        self.finetune_panel = QWidget(group)
+        finetune_form = QFormLayout(self.finetune_panel)
+        finetune_form.setContentsMargins(0, 0, 0, 0)
+        self.base_model_combo = QComboBox(self.finetune_panel)
+        self.base_model_combo.setMinimumContentsLength(18)
+        self.base_model_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        base_browse = QPushButton("浏览…", self.finetune_panel)
+        base_browse.setToolTip("选择任意本工具保存的 .pt / .pth")
+        base_browse.clicked.connect(self._browse_finetune_model)
+        base_refresh = QPushButton("刷新", self.finetune_panel)
+        base_refresh.setToolTip("重新扫描输出目录下的训练 run")
+        base_refresh.clicked.connect(lambda: self._refresh_finetune_models())
+        base_row = QHBoxLayout()
+        base_row.addWidget(self.base_model_combo, 1)
+        base_row.addWidget(base_browse)
+        base_row.addWidget(base_refresh)
+        finetune_form.addRow("基础模型", base_row)
+
+        self.base_info_label = QLabel("尚未选择基础模型", self.finetune_panel)
+        self.base_info_label.setWordWrap(True)
+        self.base_info_label.setEnabled(False)
+        finetune_form.addRow("", self.base_info_label)
+
+        self.freeze_check = QCheckBox("冻结骨干（只训练输出头）", self.finetune_panel)
+        finetune_form.addRow(self.freeze_check)
+        self.unfreeze_spin = self._int_spin(self.finetune_panel, 0, 10000, 0)
+        self.unfreeze_spin.setSuffix(" 轮")
+        self.unfreeze_spin.setToolTip("前 N 轮冻结骨干；0 = 全程冻结")
+        finetune_form.addRow("前 N 轮冻结", self.unfreeze_spin)
+
+        finetune_hint = QLabel(
+            "允许更换数据与类别；类别不一致时自动重建输出头。只选择可信来源的 .pt 文件。",
+            self.finetune_panel,
+        )
+        finetune_hint.setWordWrap(True)
+        finetune_hint.setEnabled(False)
+        finetune_form.addRow("", finetune_hint)
+        layout.addWidget(self.finetune_panel)
+        return group
 
     def _build_dataset_group(self, parent: QWidget) -> QGroupBox:
         group = QGroupBox("数据集", parent)
@@ -319,7 +398,8 @@ class TrainingPage(QWidget):
         row = QHBoxLayout()
         row.addWidget(self.dataset_edit, 1)
         row.addWidget(browse)
-        form.addRow("标注目录", row)
+        self.dataset_label = QLabel("标注目录", group)
+        form.addRow(self.dataset_label, row)
 
         self.summary_label = QLabel("尚未扫描")
         self.summary_label.setWordWrap(True)
@@ -421,15 +501,6 @@ class TrainingPage(QWidget):
         row.addWidget(browse)
         form.addRow("输出目录", row)
 
-        self.checkpoint_edit = QLineEdit(group)
-        self.checkpoint_edit.setPlaceholderText("可选：上一次训练的 best.pt / last.pt")
-        checkpoint_browse = QPushButton("浏览…", group)
-        checkpoint_browse.clicked.connect(self._choose_checkpoint)
-        checkpoint_row = QHBoxLayout()
-        checkpoint_row.addWidget(self.checkpoint_edit, 1)
-        checkpoint_row.addWidget(checkpoint_browse)
-        form.addRow("继续训练", checkpoint_row)
-
         hint = QLabel("每次训练生成 run_日期_时间_任务_模型 子目录。")
         hint.setWordWrap(True)
         hint.setEnabled(False)
@@ -458,6 +529,13 @@ class TrainingPage(QWidget):
             self._populate_models(task, config.model, config.encoder)
             self._select_combo(self.loss_combo, config.loss if catalog.is_semantic_task(task) else "")
 
+            mode_index = self.mode_combo.findData(config.mode)
+            self.mode_combo.setCurrentIndex(mode_index if mode_index >= 0 else 0)
+            if config.mode == "finetune" or config.finetune_checkpoint:
+                self._refresh_finetune_models(config.finetune_checkpoint)
+            self.freeze_check.setChecked(config.freeze_backbone)
+            self.unfreeze_spin.setValue(config.unfreeze_epochs)
+
             self.epochs_spin.setValue(config.epochs)
             self.batch_spin.setValue(config.batch_size)
             self.lr_spin.setValue(config.lr)
@@ -471,10 +549,12 @@ class TrainingPage(QWidget):
             self.min_area_spin.setValue(config.min_instance_area)
         finally:
             self._loading = False
+        self._apply_mode_state()
 
     def _form_values(self) -> dict:
         model = self.current_model()
         task = self.current_task()
+        mode = self.current_mode()
         return {
             "dataset_dir": self.dataset_edit.text().strip(),
             "output_dir": self.output_edit.text().strip(),
@@ -490,10 +570,19 @@ class TrainingPage(QWidget):
             "early_stop": self.early_spin.value(),
             "seed": self.seed_spin.value(),
             "device": self.device_combo.currentData() or "auto",
-            "pretrained": bool(self.pretrained_check.isChecked() and model and model.pretrained_supported),
+            "pretrained": bool(
+                self.pretrained_check.isChecked()
+                and model
+                and model.pretrained_supported
+                and mode != "finetune"
+            ),
             "augment": self.augment_check.isChecked(),
             "min_instance_area": self.min_area_spin.value(),
+            "mode": mode,
             "init_checkpoint": self.checkpoint_edit.text().strip(),
+            "finetune_checkpoint": self.current_finetune_checkpoint(),
+            "freeze_backbone": self.freeze_check.isChecked(),
+            "unfreeze_epochs": self.unfreeze_spin.value(),
         }
 
     def _save_settings(self) -> None:
@@ -509,6 +598,12 @@ class TrainingPage(QWidget):
     def current_model(self):
         model_id = str(self.model_combo.currentData() or "")
         return catalog.get_model(model_id)
+
+    def current_mode(self) -> str:
+        return str(self.mode_combo.currentData() or "scratch")
+
+    def current_finetune_checkpoint(self) -> str:
+        return str(self.base_model_combo.currentData() or "")
 
     def _select_combo(self, combo: QComboBox, value: str) -> None:
         index = combo.findData(value)
@@ -557,21 +652,244 @@ class TrainingPage(QWidget):
     def _update_model_options(self) -> None:
         model = self.current_model()
         task = self.current_task()
+        finetune_mode = self.current_mode() == "finetune"
         if model is not None:
             note = model.note
             if not model.pretrained_supported:
                 note = (note + " " if note else "") + "当前模型没有可用的预训练权重。"
+            if finetune_mode:
+                note = (
+                    (note + " " if note else "")
+                    + "微调直接加载基础模型，不使用 ImageNet 预训练。"
+                )
             self.model_note.setText(note)
-            self.pretrained_check.setEnabled(model.pretrained_supported)
-            self.pretrained_check.setToolTip(
-                "" if model.pretrained_supported else "该模型没有官方预训练权重"
-            )
+            self.pretrained_check.setEnabled(model.pretrained_supported and not finetune_mode)
+            if finetune_mode:
+                tooltip = "微调直接加载基础模型，不使用 ImageNet 预训练初始化"
+            elif not model.pretrained_supported:
+                tooltip = "该模型没有官方预训练权重"
+            else:
+                tooltip = "勾选后加载 ImageNet 预训练骨干（需联网下载）；默认从随机初始化开始"
+            self.pretrained_check.setToolTip(tooltip)
         else:
             self.model_note.setText("")
             self.pretrained_check.setEnabled(False)
         semantic = catalog.is_semantic_task(task)
         self.loss_combo.setEnabled(semantic)
         self.min_area_spin.setEnabled(not semantic)
+
+    # ------------------------------------------------------------------ 训练方式
+    def _apply_mode_state(self) -> None:
+        mode = self.current_mode()
+        self.resume_panel.setVisible(mode == "resume")
+        finetune_on = mode == "finetune"
+        self.finetune_panel.setVisible(finetune_on)
+        self.dataset_label.setText("微调数据" if finetune_on else "标注目录")
+        self.dataset_edit.setPlaceholderText(
+            "微调数据的标注成果目录（含 *_mask.png / *_grid）"
+            if finetune_on
+            else "标注页的输出目录（含 *_mask.png / *_grid）"
+        )
+        self.mode_hint.setText(
+            {
+                "scratch": "随机初始化，从头训练。",
+                "resume": "从上一次的权重继续训练：模型 / 骨干 / 任务 / 类别必须完全一致。",
+                "finetune": "加载基础模型并复用兼容权重；可更换数据与类别，结构不一致时会报错。",
+            }.get(mode, "")
+        )
+        self.unfreeze_spin.setEnabled(finetune_on and self.freeze_check.isChecked())
+        self._update_model_options()
+
+    def _on_mode_changed(self, _index: int = -1) -> None:
+        if self._loading:
+            return
+        self._apply_mode_state()
+        if self.current_mode() == "finetune":
+            self._refresh_finetune_models()
+
+    def _on_freeze_toggled(self, checked: bool) -> None:
+        self.unfreeze_spin.setEnabled(self.current_mode() == "finetune" and bool(checked))
+
+    @staticmethod
+    def _path_key(path: str) -> str:
+        text = str(path or "").strip()
+        if not text:
+            return ""
+        return os.path.normcase(os.path.abspath(os.path.expanduser(text)))
+
+    @staticmethod
+    def _absolute_path(path: str) -> str:
+        text = str(path or "").strip()
+        return str(Path(text).expanduser().resolve()) if text else ""
+
+    def _find_combo_path(self, combo: QComboBox, path: str) -> int:
+        key = self._path_key(path)
+        if not key:
+            return -1
+        for index in range(combo.count()):
+            if self._path_key(str(combo.itemData(index) or "")) == key:
+                return index
+        return -1
+
+    def _refresh_finetune_models(self, preferred: str = "") -> None:
+        """扫描输出目录下的 run，重建基础模型下拉并尽量保留当前选择。"""
+        current = str(preferred or self.current_finetune_checkpoint())
+        runs = scan_runs(self._resolve_output_base())
+        self._runs_by_checkpoint = {
+            self._path_key(run.checkpoint): run for run in runs
+        }
+        blocked = self.base_model_combo.blockSignals(True)
+        try:
+            self.base_model_combo.clear()
+            self.base_model_combo.addItem("（选择基础模型）", "")
+            for run in runs:
+                self.base_model_combo.addItem(run.summary, run.checkpoint)
+                self.base_model_combo.setItemData(
+                    self.base_model_combo.count() - 1,
+                    f"{run.checkpoint}\n{run.run_dir}",
+                    Qt.ItemDataRole.ToolTipRole,
+                )
+            if current:
+                index = self._find_combo_path(self.base_model_combo, current)
+                if index < 0:
+                    self.base_model_combo.addItem(f"自定义：{Path(current).name}", current)
+                    index = self.base_model_combo.count() - 1
+                self.base_model_combo.setCurrentIndex(index)
+        finally:
+            self.base_model_combo.blockSignals(blocked)
+        if not self._loading:
+            self._on_finetune_model_selected()
+
+    def _browse_finetune_model(self) -> None:
+        start = self.current_finetune_checkpoint() or str(self._resolve_output_base())
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择微调基础模型", start, "PyTorch 权重 (*.pt *.pth);;所有文件 (*)"
+        )
+        if not path:
+            return
+        path = str(Path(path).expanduser().resolve())
+        run = read_run(Path(path).parent)
+        if run is not None:
+            self._runs_by_checkpoint[self._path_key(path)] = run
+        index = self._find_combo_path(self.base_model_combo, path)
+        blocked = self.base_model_combo.blockSignals(True)
+        try:
+            if index < 0:
+                self.base_model_combo.addItem(f"自定义：{Path(path).name}", path)
+                index = self.base_model_combo.count() - 1
+            self.base_model_combo.setCurrentIndex(index)
+        finally:
+            self.base_model_combo.blockSignals(blocked)
+        self._on_finetune_model_selected()
+
+    def _on_finetune_model_selected(self, _index: int = -1) -> None:
+        if self._loading:
+            return
+        path = self.current_finetune_checkpoint()
+        if not path:
+            self.base_info_label.setText("尚未选择基础模型；微调需要先选择一个 .pt")
+            return
+        run = self._runs_by_checkpoint.get(self._path_key(path))
+        if run is None:
+            self.base_info_label.setText(
+                "未读取到训练记录；开始训练时由子进程校验模型 / 骨干是否与基础模型一致。"
+            )
+            return
+
+        lines = [
+            f"任务：{catalog.task_label(run.task) if run.task else '未知'}",
+            f"模型：{run.model or '—'} / 骨干：{run.encoder or '—'}",
+        ]
+        names = [str(item.get("name") or "") for item in run.classes if item.get("name")]
+        if names:
+            lines.append(f"类别：{' / '.join(names)}")
+        if run.best_metric and run.best_value:
+            lines.append(f"最佳 {run.best_metric}：{run.best_value:.4f}")
+
+        same_family = bool(run.task) and (
+            catalog.is_semantic_task(run.task) == catalog.is_semantic_task(self.current_task())
+        )
+        if not same_family:
+            lines.append("任务族与当前训练任务不同，不能用于微调")
+        else:
+            if self._sync_model_from_run(run):
+                lines.append("已按基础模型同步模型 / 骨干")
+            if self._dataset_classes_differ(run):
+                lines.append("类别与当前数据集不同，分类头将重新初始化")
+        self.base_info_label.setText("\n".join(lines))
+
+    def _sync_model_from_run(self, run: RunInfo) -> bool:
+        """把模型 / 骨干同步到基础模型（仅当当前任务支持该模型）。"""
+        if not run.model:
+            return False
+        model_index = self.model_combo.findData(run.model)
+        if model_index < 0:
+            return False
+        model = catalog.get_model(run.model)
+        encoder = run.encoder if model and run.encoder in model.encoder_ids() else ""
+        blocked = self.model_combo.blockSignals(True)
+        try:
+            self.model_combo.setCurrentIndex(model_index)
+        finally:
+            self.model_combo.blockSignals(blocked)
+        self._populate_encoders(encoder)
+        self._update_model_options()
+        current_encoder = str(self.encoder_combo.currentData() or "")
+        return run.model == str(self.model_combo.currentData() or "") and (
+            not run.encoder or run.encoder == current_encoder
+        )
+
+    def _dataset_classes_differ(self, run: RunInfo) -> bool:
+        current_task = self.current_task()
+        if current_task == "objects" and run.task == "objects":
+            # 对象提取固定使用「背景 / 目标」，标注类别名不参与训练
+            return False
+        if self._scan is None:
+            return False
+        current_names = [
+            str(item.get("name") or "") for item in self._scan.classes if item.get("name")
+        ]
+        run_names = [
+            str(item.get("name") or "") for item in run.classes if item.get("name")
+        ]
+        return bool(current_names and run_names and current_names != run_names)
+
+    def _finetune_problem(self) -> str:
+        """启动前的微调结构校验；通过时返回空串。"""
+        if self.current_mode() != "finetune":
+            return ""
+        path = self.current_finetune_checkpoint()
+        if not path:
+            return "微调需要先选择基础模型（.pt）"
+        if not Path(path).is_file():
+            return f"基础模型不存在：\n{path}"
+        run = self._runs_by_checkpoint.get(self._path_key(path))
+        if run is None:
+            # 未知路径没有元数据，交给训练子进程按实际权重校验
+            return ""
+        current_task = self.current_task()
+        if run.task and (
+            catalog.is_semantic_task(run.task) != catalog.is_semantic_task(current_task)
+        ):
+            return (
+                f"任务不兼容：基础模型为 {catalog.task_label(run.task)}，"
+                f"当前为 {catalog.task_label(current_task)}；"
+                "语义分割与实例分割不能互相微调"
+            )
+        model = self.current_model()
+        current_model_id = model.id if model is not None else ""
+        if run.model and run.model != current_model_id:
+            return (
+                f"模型结构不一致：基础模型为 {run.model}，当前为 {current_model_id or '—'}；"
+                "请选择相同模型"
+            )
+        current_encoder = str(self.encoder_combo.currentData() or "")
+        if run.encoder and run.encoder != current_encoder:
+            return (
+                f"骨干不一致：基础模型为 {run.encoder}，当前为 {current_encoder or '—'}；"
+                "请选择相同骨干"
+            )
+        return ""
 
     # ------------------------------------------------------------------ 扫描
     def set_dataset_hint(self, directory: str) -> None:
@@ -587,6 +905,8 @@ class TrainingPage(QWidget):
     def activate(self) -> None:
         if self._scan is None and self.dataset_edit.text().strip():
             QTimer.singleShot(0, self._rescan)
+        if self.current_mode() == "finetune":
+            QTimer.singleShot(0, self._refresh_finetune_models)
 
     def _choose_dataset(self) -> None:
         start = self.dataset_edit.text().strip() or str(Path.home())
@@ -619,6 +939,8 @@ class TrainingPage(QWidget):
         if directory:
             self.output_edit.setText(directory)
             self._update_action_state()
+            if self.current_mode() == "finetune":
+                self._refresh_finetune_models()
 
     def _choose_checkpoint(self) -> None:
         start = self.checkpoint_edit.text().strip() or str(self._resolve_output_base())
@@ -686,9 +1008,19 @@ class TrainingPage(QWidget):
             "augment": values["augment"],
             "loss": values["loss"] if catalog.is_semantic_task(task) else "",
             "min_instance_area": values["min_instance_area"],
-            "init_checkpoint": values["init_checkpoint"],
+            "mode": values["mode"],
+            "init_checkpoint": "",
+            "finetune_checkpoint": "",
+            "freeze_backbone": False,
+            "unfreeze_epochs": 0,
             "amp": True,
         }
+        if values["mode"] == "resume":
+            params["init_checkpoint"] = self._absolute_path(values["init_checkpoint"])
+        elif values["mode"] == "finetune":
+            params["finetune_checkpoint"] = self._absolute_path(values["finetune_checkpoint"])
+            params["freeze_backbone"] = bool(values["freeze_backbone"])
+            params["unfreeze_epochs"] = int(values["unfreeze_epochs"])
         roots = scan.roots or ([self.dataset_edit.text().strip()] if self.dataset_edit.text().strip() else [])
         return {
             "version": 1,
@@ -712,9 +1044,23 @@ class TrainingPage(QWidget):
             QMessageBox.warning(self, "开始训练", "当前目录没有可用的影像 / 掩膜，请先选择标注成果目录。")
             return
         checkpoint = self.checkpoint_edit.text().strip()
-        if checkpoint and not Path(checkpoint).is_file():
-            QMessageBox.warning(self, "开始训练", f"继续训练的权重不存在：\n{checkpoint}")
-            return
+        mode = self.current_mode()
+        if mode == "resume":
+            if not checkpoint:
+                QMessageBox.warning(
+                    self,
+                    "开始训练",
+                    "继续训练需要选择上一次训练的权重（best.pt / last.pt）。",
+                )
+                return
+            if not Path(checkpoint).is_file():
+                QMessageBox.warning(self, "开始训练", f"继续训练的权重不存在：\n{checkpoint}")
+                return
+        elif mode == "finetune":
+            problem = self._finetune_problem()
+            if problem:
+                QMessageBox.warning(self, "开始训练", problem)
+                return
         python = self._python()
         report = self._check_environment(python)
         if report.error:
@@ -835,7 +1181,17 @@ class TrainingPage(QWidget):
 
         self.task_combo.currentIndexChanged.connect(self._on_task_changed)
         self.model_combo.currentIndexChanged.connect(self._on_model_changed)
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+        self.freeze_check.toggled.connect(self._on_freeze_toggled)
+        self.base_model_combo.currentIndexChanged.connect(self._on_finetune_model_selected)
+        self.output_edit.editingFinished.connect(self._on_output_dir_edited)
         ThemeManager.instance().theme_changed.connect(self._apply_theme_qss)
+
+    def _on_output_dir_edited(self) -> None:
+        if self._loading:
+            return
+        if self.current_mode() == "finetune":
+            self._refresh_finetune_models()
 
     def _on_running_changed(self, running: bool) -> None:
         self._set_training(bool(running))
@@ -970,6 +1326,8 @@ class TrainingPage(QWidget):
             lines.append(f"指标：{metrics}")
         if self._run_dir is not None:
             lines.append(f"输出目录：{self._run_dir}")
+        if self.current_mode() == "finetune":
+            self._refresh_finetune_models()
         QMessageBox.information(self, "训练完成", "\n".join(lines))
 
     def _on_stopped(self, payload: dict) -> None:

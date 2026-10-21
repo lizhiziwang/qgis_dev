@@ -1,8 +1,9 @@
 """训练任务 / 模型 / 骨干目录（纯 stdlib，界面与训练子进程共用）。
 
-模型分三族：
+模型分四族：
 
 - ``smp``：``segmentation-models-pytorch`` 提供的语义分割网络；
+- ``stnet``：timm 的 Swin Transformer 骨干 + 多尺度 FPN 解码器；
 - ``internimage``：用 ``torchvision.ops.deform_conv2d`` 实现的 DCNv3 兼容骨干
   （官方 DCNv3 需要编译 mmcv CUDA 算子，Windows + 当前 torch 无可用轮子）；
 - ``torchvision``：Mask R-CNN / Cascade Mask R-CNN 实例分割。
@@ -24,6 +25,14 @@ TASKS: tuple[tuple[str, str], ...] = (
 TASK_IDS: tuple[str, ...] = tuple(task for task, _label in TASKS)
 SEMANTIC_TASKS: tuple[str, ...] = ("objects", "landcover")
 INSTANCE_TASKS: tuple[str, ...] = ("instances",)
+
+#: 训练方式：从零训练 / 继续训练（结构必须完全一致）/ 微调（可换数据与类别）
+TRAINING_MODES: tuple[tuple[str, str], ...] = (
+    ("scratch", "从零训练"),
+    ("resume", "继续训练"),
+    ("finetune", "微调（使用基础模型）"),
+)
+MODE_IDS: tuple[str, ...] = tuple(mode for mode, _label in TRAINING_MODES)
 
 #: 语义分割损失
 SEMANTIC_LOSSES: tuple[tuple[str, str], ...] = (
@@ -118,6 +127,19 @@ MODELS: tuple[ModelOption, ...] = (
         encoders=_encoders("mit_b0", "mit_b1", "mit_b2", "mit_b3"),
         default_encoder="mit_b0",
         note="Transformer 结构，轻量且全局感受野大。",
+    ),
+    ModelOption(
+        id="stnet",
+        name="STNet（Swin Transformer 分割）",
+        family="stnet",
+        tasks=SEMANTIC_TASKS,
+        encoders=(
+            EncoderOption("swin_tiny", "Swin-Tiny"),
+            EncoderOption("swin_small", "Swin-Small"),
+            EncoderOption("swin_base", "Swin-Base"),
+        ),
+        default_encoder="swin_tiny",
+        note="Swin Transformer 骨干 + 多尺度解码器；依赖 timm（随 SMP 一起安装），预训练为 ImageNet 权重。",
     ),
     ModelOption(
         id="internimage",
@@ -215,10 +237,12 @@ __all__ = [
     "INSTANCE_TASKS",
     "LOSS_IDS",
     "MODELS",
+    "MODE_IDS",
     "SEMANTIC_LOSSES",
     "SEMANTIC_TASKS",
     "TASKS",
     "TASK_IDS",
+    "TRAINING_MODES",
     "EncoderOption",
     "ModelOption",
     "default_encoder",

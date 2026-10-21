@@ -595,9 +595,9 @@ class WindowChromeMixin:
     def _enter_deep_learning_mode(self) -> None:
         """记录并隐藏所有可见停靠面板、地图画布与悬浮竖排工具条。
 
-        「日志信息」面板例外：它是排查标注 / SAM 问题的唯一入口，且 LogDock
-        在不可见时会暂停自动刷新（见 ``LogDock._auto_reload``）。切到「深度学习」
-        页签后紧接着就会打开标注窗口，把日志面板一起藏掉会让用户以为日志不再刷新。
+        「日志信息」面板例外：深度学习页面不再自动打开它，只有用户主动
+        「查看 → 日志信息」时才可见；此时保持原样，避免把用户刚打开的排查入口
+        藏掉（LogDock 在不可见时会暂停自动刷新，见 ``LogDock._auto_reload``）。
         """
         log_dock = getattr(self, "log_dock", None)
         page = getattr(self, "_annotation_page", None)

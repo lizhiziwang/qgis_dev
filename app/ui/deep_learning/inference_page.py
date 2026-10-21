@@ -289,7 +289,7 @@ class InferencePage(QWidget):
         self._splitter.setStretchFactor(0, 0)
         self._splitter.setStretchFactor(1, 1)
         self._splitter.setStretchFactor(2, 0)
-        self._splitter.setSizes([360, 820, 420])
+        self._splitter.setSizes([504, 676, 420])
 
     def _build_form(self) -> QWidget:
         scroll = QScrollArea(self)

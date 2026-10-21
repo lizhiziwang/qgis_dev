@@ -127,13 +127,21 @@ training:
   seed: 42
   # auto / cuda / cpu
   device: auto
-  # 加载预训练骨干（InternImage 兼容实现没有官方权重，会忽略）
-  pretrained: true
+  # 加载 ImageNet 预训练骨干（需联网下载；默认关闭，从随机初始化开始）
+  pretrained: false
   augment: true
   # 实例分割：连通域最小面积（像素）
   min_instance_area: 16
   # 继续训练：上一次的 best.pt / last.pt；结构必须一致
   init_checkpoint: ${TRAIN_INIT_CHECKPOINT:-}
+  # 训练方式：auto = 有 init_checkpoint 就继续训练，否则从零；也可显式填
+  # scratch / resume / finetune
+  mode: auto
+  # 微调：基础模型（训练 run 的 best.pt / last.pt 或任意本工具 .pt）
+  finetune_checkpoint: ${TRAIN_FINETUNE_CHECKPOINT:-}
+  # 微调：冻结骨干（只训练输出头）；unfreeze_epochs = 前 N 轮冻结，0 = 全程冻结
+  freeze_backbone: false
+  unfreeze_epochs: 0
 
 # ---------------------------------------------------------------------------
 # 推理工作区（用训练产出的 checkpoint 对新影像做滑动窗口推理）

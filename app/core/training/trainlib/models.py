@@ -1,8 +1,9 @@
-"""模型构建：SMP 语义分割、InternImage 兼容骨干、Mask / Cascade Mask R-CNN。"""
+"""模型构建：SMP 语义分割、STNet（Swin）、InternImage 兼容骨干、Mask / Cascade Mask R-CNN。"""
 
 from __future__ import annotations
 
 import copy
+import math
 from collections.abc import Callable
 
 LogFn = Callable[[str], None]
@@ -43,6 +44,182 @@ def _build_smp(model_id: str, encoder: str, num_classes: int, pretrained: bool, 
         log(f"预训练权重不可用（{exc}），改用随机初始化骨干继续训练")
         kwargs["encoder_weights"] = None
         return factory(**kwargs)
+
+
+# ---------------------------------------------------------------------- STNet
+_STNET_ENCODERS = {
+    "swin_tiny": "swin_tiny_patch4_window7_224",
+    "swin_small": "swin_small_patch4_window7_224",
+    "swin_base": "swin_base_patch4_window7_224",
+}
+
+
+def _resize_swin_position_bias(state_dict: dict, own_state: dict) -> dict:
+    """把不同窗口尺寸的相对位置偏置表插值到当前模型。
+
+    timm 的 Swin 会按各 stage 的输入分辨率收缩窗口（7 → 4/2/...），
+    ``relative_position_bias_table`` 的形状因此随训练 / 推理窗口变化。表项是
+    连续的位置偏置，按二维网格插值即可复用（timm 加载 ImageNet 权重时也这样
+    处理），这样同一份权重可以在不同 tile / 推理窗口下加载。
+    """
+    try:
+        from timm.layers import resize_rel_pos_bias_table
+    except ImportError:  # pragma: no cover - timm 版本过旧时保持严格加载
+        return state_dict
+
+    resized = dict(state_dict)
+    for key, value in state_dict.items():
+        key = str(key)
+        if not key.endswith("relative_position_bias_table"):
+            continue
+        target = own_state.get(key)
+        shape = getattr(value, "shape", None)
+        if target is None or shape is None or tuple(shape) == tuple(target.shape):
+            continue
+        # 表项数 = (2w-1)^2，由表项数反推窗口边长
+        source_side = math.isqrt(int(shape[0]))
+        target_side = math.isqrt(int(target.shape[0]))
+        if (
+            source_side * source_side != int(shape[0])
+            or target_side * target_side != int(target.shape[0])
+            or source_side % 2 == 0
+            or target_side % 2 == 0
+        ):
+            continue
+        window = (target_side + 1) // 2
+        resized[key] = resize_rel_pos_bias_table(
+            value,
+            new_window_size=(window, window),
+            new_bias_shape=tuple(target.shape),
+        )
+    return resized
+
+
+def _build_stnet(
+    encoder: str,
+    num_classes: int,
+    pretrained: bool,
+    tile_size: int,
+    log: LogFn,
+):
+    """Swin Transformer 骨干 + 多尺度 FPN 解码器的语义分割网络。
+
+    SMP 0.5 没有 Swin 编码器，这里直接用 timm（安装 SMP 时会作为依赖装上）
+    创建 ``features_only`` 骨干。timm 的 Swin 在创建时固定输入尺寸，因此传入
+    实际训练 / 推理窗口尺寸；权重结构与窗口尺寸无关的部分可直接复用，随窗口
+    变化的相对位置偏置表在加载时插值。
+    """
+    try:
+        import timm
+    except ImportError as exc:
+        raise ImportError(
+            "缺少 timm，STNet 需要 timm（安装 segmentation-models-pytorch 时会自动安装），"
+            "或手动执行：python -m pip install timm"
+        ) from exc
+
+    from torch import nn
+    from torch.nn import functional
+
+    name = _STNET_ENCODERS.get(encoder)
+    if name is None:
+        raise ValueError(f"STNet 不支持的骨干：{encoder}")
+    size = max(32, int(tile_size))
+    # 训练数据固定 tile_size × tile_size，推理按 32 对齐补齐；Swin 要求创建时
+    # 固定输入尺寸，这里统一按 32 向上取整，小于模型尺寸的输入在 forward 里补零。
+    size = ((size + 31) // 32) * 32
+
+    def _create(use_pretrained: bool):
+        return timm.create_model(
+            name,
+            pretrained=use_pretrained,
+            features_only=True,
+            img_size=size,
+        )
+
+    try:
+        backbone = _create(bool(pretrained))
+    except Exception as exc:  # 多为离线下载权重失败
+        if not pretrained:
+            raise
+        log(f"预训练权重不可用（{exc}），改用随机初始化骨干继续训练")
+        backbone = _create(False)
+
+    channels = tuple(int(item) for item in backbone.feature_info.channels())
+    width = 256
+    levels = len(channels)
+
+    class STNet(nn.Module):
+        """Swin 特征金字塔 + 自顶向下融合 + 逐级上采样解码。"""
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.backbone = backbone
+            self.lateral = nn.ModuleList(
+                nn.Conv2d(channel, width, kernel_size=1) for channel in channels
+            )
+            self.smooth = nn.ModuleList(
+                nn.Sequential(
+                    nn.Conv2d(width, width, kernel_size=3, padding=1, bias=False),
+                    nn.BatchNorm2d(width),
+                    nn.ReLU(inplace=True),
+                )
+                for _ in range(max(0, levels - 1))
+            )
+            self.fuse = nn.Sequential(
+                nn.Conv2d(width, width, kernel_size=3, padding=1, bias=False),
+                nn.BatchNorm2d(width),
+                nn.ReLU(inplace=True),
+            )
+            self.segmentation_head = nn.Sequential(
+                nn.Conv2d(width, width // 2, kernel_size=3, padding=1, bias=False),
+                nn.BatchNorm2d(width // 2),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(width // 2, int(num_classes), kernel_size=1),
+            )
+
+        def load_state_dict(self, state_dict, strict=True):
+            # Swin 的相对位置偏置表随窗口尺寸变化；加载时插值到当前尺寸，
+            # 使不同训练 tile / 推理窗口的权重可以互相复用。
+            return super().load_state_dict(
+                _resize_swin_position_bias(state_dict, self.state_dict()),
+                strict=strict,
+            )
+
+        def forward(self, x):
+            input_height, input_width = int(x.shape[-2]), int(x.shape[-1])
+            padded = x
+            if input_height < size or input_width < size:
+                padded = functional.pad(
+                    x, (0, size - input_width, 0, size - input_height)
+                )
+            # timm 的 Swin features_only 输出 NHWC，转成 NCHW 再进卷积解码器
+            features = [
+                item.permute(0, 3, 1, 2).contiguous() for item in self.backbone(padded)
+            ]
+            laterals = [
+                lateral(feature)
+                for lateral, feature in zip(self.lateral, features, strict=False)
+            ]
+            merged = laterals[-1]
+            for level in range(len(laterals) - 2, -1, -1):
+                merged = functional.interpolate(
+                    merged,
+                    size=laterals[level].shape[-2:],
+                    mode="bilinear",
+                    align_corners=False,
+                )
+                merged = self.smooth[level](merged + laterals[level])
+            logits = self.segmentation_head(self.fuse(merged))
+            if padded is not x:
+                logits = logits[..., :input_height, :input_width]
+            if logits.shape[-2:] != x.shape[-2:]:
+                logits = functional.interpolate(
+                    logits, size=x.shape[-2:], mode="bilinear", align_corners=False
+                )
+            return logits
+
+    log(f"STNet：timm {timm.__version__} / {name}，输入固定为 {size}，特征通道 {channels}")
+    return STNet()
 
 
 # ---------------------------------------------------------------------- InternImage
@@ -349,6 +526,8 @@ def build_model(
             int(tile_size),
             log,
         )
+    if model_id == "stnet":
+        return _build_stnet(encoder, int(num_classes), bool(pretrained), int(tile_size), log)
     if model_id == "internimage":
         return _build_internimage(encoder, int(num_classes), log)
     return _build_smp(model_id, encoder, int(num_classes), bool(pretrained), log)
