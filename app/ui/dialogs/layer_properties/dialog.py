@@ -56,7 +56,7 @@ class LayerPropertiesDialog(BaseDialog):
         self.canvas = canvas
         # 基类默认下限 800x600 对这个表单偏大，按 add_connection.py 的写法清掉再 resize
         self.setMinimumSize(0, 0)
-        self.resize(880, 580)
+        self.resize(880, 520)
         self._tab_widgets = []
         self._build()
 
@@ -118,7 +118,7 @@ class LayerPropertiesDialog(BaseDialog):
                 continue
             try:
                 ok = applier(self.layer)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:
                 logger.error("应用图层属性失败: %s", exc, exc_info=True)
                 QMessageBox.warning(self, "图层属性", f"应用失败：{exc}")
                 return False

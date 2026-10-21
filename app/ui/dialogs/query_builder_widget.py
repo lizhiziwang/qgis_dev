@@ -13,10 +13,12 @@
 
 from __future__ import annotations
 
+import contextlib
+import threading
 from dataclasses import dataclass
 
 from qgis.core import QgsExpression, QgsFeatureRequest, QgsVectorLayer
-from qgis.PyQt.QtCore import Qt, QVariant
+from qgis.PyQt.QtCore import QObject, Qt, QVariant, pyqtSignal
 from qgis.PyQt.QtGui import QTextCursor
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
@@ -45,7 +47,44 @@ _OPERATORS = [
 ]
 
 #: 「加载采样值」读取的要素条数
-_SAMPLE_COUNT = 50
+_SAMPLE_COUNT = 500
+
+
+class _SqlCountWorker(QObject):
+    """后台统计匹配要素数（「测试条件」全表扫描不阻塞主线程）。"""
+
+    counted = pyqtSignal(int)
+    failed = pyqtSignal(str)
+
+    def __init__(self, layer: QgsVectorLayer, condition: str) -> None:
+        super().__init__()
+        self.layer = layer
+        self.condition = condition
+        self._cancel = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self._run, name="condition-count", daemon=True)
+        self._thread.start()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    def _run(self) -> None:
+        try:
+            request = QgsFeatureRequest().setFilterExpression(self.condition)
+            count = 0
+            iterator = self.layer.getFeatures(request)
+            for _ in iterator:
+                if self._cancel.is_set():
+                    break
+                count += 1
+            with contextlib.suppress(Exception):
+                iterator.close()
+            if not self._cancel.is_set():
+                self.counted.emit(count)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))
 
 
 @dataclass(frozen=True)
@@ -60,10 +99,32 @@ class _FieldEntry:
     is_domain: bool
 
 
+class _CompactListWidget(QListWidget):
+    """值列表：默认高度小一点，窗口变大时仍可继续拉伸。"""
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        hint.setHeight(150)
+        return hint
+
+
+class _CompactTextEdit(QTextEdit):
+    """条件编辑框：默认高度小一点，窗口变大时仍可继续拉伸。"""
+
+    def sizeHint(self):
+        hint = super().sizeHint()
+        hint.setHeight(120)
+        return hint
+
+
 class QueryBuilderWidget(QWidget):
     """字段选择 + 值预览 + 操作符 + 条件编辑框。"""
 
-    def __init__(self, layer: QgsVectorLayer | None, parent: QWidget | None = None) -> None:
+    def __init__(
+        self,
+        layer: QgsVectorLayer | None,
+        parent: QWidget | None = None,
+    ) -> None:
         super().__init__(parent)
         self.layer = layer if isinstance(layer, QgsVectorLayer) else None
         self.valid_fields = [field.name() for field in layer.fields()] if self.layer is not None else []
@@ -71,6 +132,7 @@ class QueryBuilderWidget(QWidget):
         self._field_entries: list[_FieldEntry] = []
         self._values: list[object] = []
         self._labels: dict[str, str] = {}
+        self._test_worker: _SqlCountWorker | None = None
         self._build()
         self._init_signals()
         self._reload_fields()
@@ -108,14 +170,8 @@ class QueryBuilderWidget(QWidget):
         completer.setMaxVisibleItems(15)
         self.field_combo.setCompleter(completer)
         f_layout.addWidget(self.field_combo)
-        value_title = QHBoxLayout()
-        value_title.addWidget(QLabel("字段值预览："))
-        value_title.addStretch(1)
-        self.show_code_check = QCheckBox("显示代码")
-        self.show_code_check.setChecked(False)
-        value_title.addWidget(self.show_code_check)
-        f_layout.addLayout(value_title)
-        self.value_list = QListWidget()
+        f_layout.addWidget(QLabel("字段值预览："))
+        self.value_list = _CompactListWidget()
         self.value_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
         f_layout.addWidget(self.value_list)
         btn_layout = QHBoxLayout()
@@ -124,8 +180,13 @@ class QueryBuilderWidget(QWidget):
         self.sample_btn.setToolTip(f"加载前{_SAMPLE_COUNT}条数据的去重值")
         self.all_btn = QPushButton("加载全部值")
         self.all_btn.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.show_code_check = QCheckBox("显示代码")
+        self.show_code_check.setChecked(False)
+        self.show_code_check.setToolTip("勾选后域值显示为 名称(代码)")
         btn_layout.addWidget(self.sample_btn)
         btn_layout.addWidget(self.all_btn)
+        btn_layout.addStretch(1)
+        btn_layout.addWidget(self.show_code_check)
         f_layout.addLayout(btn_layout)
         splitter.addWidget(field_group)
 
@@ -141,7 +202,7 @@ class QueryBuilderWidget(QWidget):
             button.clicked.connect(lambda _checked=False, text=op: self._insert_text(text))
             grid.addWidget(button, r, c)
         sql_layout.addLayout(grid)
-        self.sql_edit = QTextEdit()
+        self.sql_edit = _CompactTextEdit()
         self.sql_edit.setPlaceholderText("请输入筛选条件（如：县代码 = '360202'）")
         self.sql_edit.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
         self.sql_edit.setFocus()
@@ -150,6 +211,17 @@ class QueryBuilderWidget(QWidget):
         self.applied_label.setObjectName("QueryBuilderAppliedLabel")
         self.applied_label.setWordWrap(True)
         sql_layout.addWidget(self.applied_label)
+        action_row = QHBoxLayout()
+        self.test_condition_btn = QPushButton("测试条件")
+        self.test_condition_btn.setToolTip("统计当前条件匹配的要素数")
+        self.test_condition_btn.clicked.connect(self._test_condition)
+        self.clear_condition_btn = QPushButton("清除条件")
+        self.clear_condition_btn.setToolTip("清空条件；点「确定 / 应用」后恢复显示全部要素")
+        self.clear_condition_btn.clicked.connect(self.clear_condition)
+        action_row.addWidget(self.test_condition_btn)
+        action_row.addWidget(self.clear_condition_btn)
+        action_row.addStretch(1)
+        sql_layout.addLayout(action_row)
         splitter.addWidget(sql_group)
 
         splitter.setSizes([300, 420])
@@ -160,7 +232,7 @@ class QueryBuilderWidget(QWidget):
         self.field_combo.currentIndexChanged.connect(self._on_field_changed)
         self.field_combo.activated[int].connect(self._on_field_chosen)
         self.field_combo.editTextChanged.connect(self._on_field_text_edited)
-        self.show_code_check.toggled.connect(lambda _checked: self._render_values())
+        self.show_code_check.toggled.connect(self._on_show_code_toggled)
         self.sample_btn.clicked.connect(lambda: self._load_values(sample=True))
         self.all_btn.clicked.connect(lambda: self._load_values(sample=False))
         self.value_list.itemDoubleClicked.connect(self._on_value_double_clicked)
@@ -204,6 +276,47 @@ class QueryBuilderWidget(QWidget):
         if unknown:
             return "无效字段：" + "、".join(unknown)
         return None
+
+    def _test_condition(self) -> None:
+        """统计当前条件匹配的要素数。"""
+        condition = self.condition()
+        if not condition:
+            QMessageBox.warning(self, "警告", "请输入有效的筛选条件！")
+            return
+        error = self.condition_error(condition)
+        if error is not None:
+            QMessageBox.critical(self, "测试失败", error)
+            return
+        self.test_condition_btn.setEnabled(False)
+        self.test_condition_btn.setText("查询中…")
+        worker = _SqlCountWorker(self.layer, condition)
+        worker.counted.connect(self._on_test_counted)
+        worker.failed.connect(self._on_test_failed)
+        self._test_worker = worker
+        worker.start()
+
+    def _reset_test_btn(self) -> None:
+        self._test_worker = None
+        self.test_condition_btn.setEnabled(True)
+        self.test_condition_btn.setText("测试条件")
+
+    def _on_test_counted(self, count: int) -> None:
+        self._reset_test_btn()
+        QMessageBox.information(self, "测试成功", f"条件合法！\n匹配要素：{count}")
+
+    def _on_test_failed(self, message: str) -> None:
+        self._reset_test_btn()
+        QMessageBox.critical(self, "测试失败", f"查询执行异常！\n{message}")
+
+    def cancel_test(self) -> None:
+        """关闭 / 隐藏编辑器时取消后台计数，避免线程继续占用图层。"""
+        if self._test_worker is not None:
+            self._test_worker.cancel()
+        self._reset_test_btn()
+
+    def hideEvent(self, event) -> None:
+        self.cancel_test()
+        super().hideEvent(event)
 
     # ------------------------------------------------------------ 字段
 
@@ -317,24 +430,17 @@ class QueryBuilderWidget(QWidget):
                 self._clear_values()
             return
         if not text:
-            # 清空输入：尽量回到之前选中的字段，否则选第一个
-            if self.current_field:
-                index = self.field_combo.findData(self.current_field)
-            if index < 0 and self.field_combo.count():
-                index = 0
-            if index >= 0:
-                if index != self.field_combo.currentIndex():
-                    self.field_combo.setCurrentIndex(index)
-                else:
-                    self.field_combo.blockSignals(True)
-                    self.field_combo.setEditText(self.field_combo.itemText(index))
-                    self.field_combo.blockSignals(False)
-                self.current_field = str(self.field_combo.itemData(index) or "")
-                self._clear_values()
-                return
-        if self.current_field:
+            # 点清空按钮 / 手动删空：保持「未选中字段」，不要自动跳回某个字段
+            self.field_combo.blockSignals(True)
+            self.field_combo.setCurrentIndex(-1)
+            self.field_combo.setEditText("")
+            self.field_combo.blockSignals(False)
             self.current_field = ""
             self._clear_values()
+            return
+        # 还没匹配到具体字段：清掉当前字段，避免继续用上一次字段取值
+        self.current_field = ""
+        self._clear_values()
 
     def _on_field_chosen(self, index: int) -> None:
         name = self.field_combo.itemData(index)
@@ -395,6 +501,19 @@ class QueryBuilderWidget(QWidget):
         self._values = values
         self._render_values()
 
+    def _on_show_code_toggled(self, checked: bool) -> None:
+        """预览为空时手动勾选「显示代码」，顺带加载一次采样值。"""
+        if (
+            checked
+            and not self._values
+            and self.layer is not None
+            and self.current_field
+            and self.layer.fields().indexOf(self.current_field) >= 0
+        ):
+            self._load_values(sample=True)
+            return
+        self._render_values()
+
     def _render_values(self) -> None:
         """按「显示代码」当前状态重画值列表（双击插入的始终是原始值）。"""
         self.value_list.clear()
@@ -402,10 +521,7 @@ class QueryBuilderWidget(QWidget):
         for value in self._values:
             code = str(value)
             label = self._labels.get(code, code)
-            if show_code and label != code:
-                text = f"{label}({code})"
-            else:
-                text = label
+            text = f"{label}({code})" if show_code and label != code else label
             item = QListWidgetItem(text)
             item.setData(Qt.ItemDataRole.UserRole, value)
             if label != code and not show_code:
