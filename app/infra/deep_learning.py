@@ -326,7 +326,7 @@ def _qsettings_checkpoint() -> str:
 
 
 def save_sam_setting(key: str, value) -> None:
-    """保存 SAM 设置页/标注窗口的单个选项（QSettings，下一步启动生效）。"""
+    """保存深度学习设置页/标注窗口的单个选项（QSettings，下一步启动生效）。"""
     from qgis.PyQt.QtCore import QSettings
 
     settings = QSettings(_SETTINGS_ORG, _SETTINGS_APP)

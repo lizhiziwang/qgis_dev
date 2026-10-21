@@ -21,11 +21,11 @@ sam_src: ${SAM_SRC:-D:/zsh/app/sam_src/segment-anything-main}
 # SAM2 / SAM2.1 的 sam2*.pt 会自动识别系列与 hydra 配置。
 checkpoint: ${SAM_CHECKPOINT:-}
 
-# 模型管理目录（「SAM 设置 → 模型管理」下载/删除模型的位置）
+# 模型管理目录（「深度学习设置 → 模型管理」下载/删除模型的位置）
 # 留空 = 用户配置目录/models/sam（Windows: %APPDATA%\qgis_dev\models\sam）
 models_dir: ${SAM_MODELS_DIR:-}
 
-# 「SAM 设置」里选中的注册表模型 id（一般由设置页写入 QSettings，不用手改）
+# 「深度学习设置」里选中的注册表模型 id（一般由设置页写入 QSettings，不用手改）
 model_id: ""
 # SAM2 的 hydra 配置；选注册表模型时自动带出，手填权重可留空自动推断
 sam2_config: ""

@@ -89,6 +89,11 @@ import json
 import sys
 from importlib import metadata, util
 
+# 可选的额外 sys.path（例如 SAM 源码目录）；由调用方作为第 1 个参数传入
+extra_sys_path = sys.argv[1] if len(sys.argv) > 1 else ""
+if extra_sys_path:
+    sys.path.insert(0, extra_sys_path)
+
 specs = __SPECS__
 
 
@@ -138,8 +143,12 @@ def build_probe_command(
     python: str,
     *,
     dependencies: Iterable[dict] = TRAINING_DEPENDENCIES,
+    extra_sys_path: str = "",
 ) -> list[str]:
-    return [str(python), "-c", probe_script(dependencies)]
+    command = [str(python), "-c", probe_script(dependencies)]
+    if extra_sys_path:
+        command.append(str(extra_sys_path))
+    return command
 
 
 def parse_probe_output(

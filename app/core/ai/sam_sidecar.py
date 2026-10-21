@@ -312,7 +312,7 @@ def _handle_load(request_id: int, request: dict) -> None:
                 _error(
                     request_id,
                     "missing_config",
-                    "无法推断 SAM2 配置；请在「SAM 设置 → 模型管理」选择注册表模型",
+                    "无法推断 SAM2 配置；请在「深度学习设置 → 模型管理」选择注册表模型",
                 )
                 return
             from sam2.build_sam import build_sam2

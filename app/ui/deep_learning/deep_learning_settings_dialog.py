@@ -1,6 +1,7 @@
-"""SAM 设置：依赖项 / 模型管理 / 缓存 / 帮助。
+"""深度学习设置：依赖项 / 模型管理 / 缓存 / 帮助。
 
-- 所有选项即时写入 QSettings（`deep_learning/*`），关闭后由标注窗口读取并应用；
+- 依赖页统一管理标注 / 训练 / 推理的外部 Python 依赖；
+- 所有选项即时写入 QSettings（`deep_learning/*`），关闭后由主窗口/标注窗口读取并应用；
 - 依赖探测/一键 pip 安装在 GUI 线程用 QProcess 异步执行，日志流式显示；
 - 模型下载在 daemon 线程（`ModelDownloadTask`），支持续传与取消；
 - 缓存页只做目录统计/清空，真正的特征缓存由 sidecar 读写。
@@ -10,7 +11,9 @@ from __future__ import annotations
 
 import contextlib
 import os
+from dataclasses import replace
 from pathlib import Path
+from typing import ClassVar
 
 from qgis.PyQt.QtCore import QProcess, QProcessEnvironment, Qt, QTimer, QUrl
 from qgis.PyQt.QtGui import QColor, QDesktopServices
@@ -41,13 +44,9 @@ from qgis.PyQt.QtWidgets import (
 
 from app.core.ai.sam_download import ModelDownloadTask, resolve_download_headers
 from app.core.ai.sam_environment import (
-    DEPENDENCIES,
     MAX_LOG_LINES,
     DependencyInstaller,
-    EnvironmentReport,
-    build_probe_command,
     clean_process_environment,
-    parse_probe_output,
     python_problem,
 )
 from app.core.ai.sam_models import (
@@ -59,6 +58,14 @@ from app.core.ai.sam_models import (
     resolve_sam_paths,
     sam2_config_for_filename,
 )
+from app.core.deep_learning.environment import (
+    DEEP_LEARNING_DEPENDENCIES,
+    USAGE_TITLES,
+    build_install_commands,
+    build_probe_command,
+    parse_probe_output,
+)
+from app.core.training.environment import TrainingEnvironmentReport
 from app.infra.deep_learning import (
     SETTING_CACHE_CLEAR_ON_CLOSE,
     SETTING_CACHE_DIR,
@@ -71,8 +78,10 @@ from app.infra.deep_learning import (
     SETTING_PYTHON,
     SETTING_SAM2_CONFIG,
     SETTING_SAM_SRC,
-    SamConfig,
+    DeepLearningConfig,
+    save_inference_setting,
     save_sam_setting,
+    save_training_setting,
 )
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.widgets import make_table
@@ -95,9 +104,7 @@ def _same_path(left: str, right: str | Path) -> bool:
     if not left or not right:
         return False
     try:
-        return os.path.normcase(os.path.abspath(str(left))) == os.path.normcase(
-            os.path.abspath(str(right))
-        )
+        return os.path.normcase(os.path.abspath(str(left))) == os.path.normcase(os.path.abspath(str(right)))
     except OSError:
         return False
 
@@ -109,17 +116,34 @@ def _open_directory(path: str | Path) -> None:
     QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
 
 
-class SamSettingsDialog(BaseDialog):
-    """标注 SAM 的四页设置对话框。"""
+class DeepLearningSettingsDialog(BaseDialog):
+    """标注 / 训练 / 推理的统一设置对话框（依赖、SAM 模型、缓存）。"""
 
-    def __init__(self, config: SamConfig, parent: QWidget | None = None) -> None:
-        super().__init__(parent, "SAM 设置", show_max_button=False)
-        self._config = resolve_sam_paths(config)
-        self._checkpoint = self._config.checkpoint
-        self._model_id = self._config.model_id
-        self._sam2_config = self._config.sam2_config
-        self._model_type = self._config.model_type
-        self._report: EnvironmentReport | None = None
+    _TAB_INDEX: ClassVar[dict[str, int]] = {
+        "dependencies": 0,
+        "models": 1,
+        "cache": 2,
+        "help": 3,
+    }
+
+    def __init__(
+        self,
+        config: DeepLearningConfig,
+        parent: QWidget | None = None,
+        initial_tab: str = "dependencies",
+    ) -> None:
+        super().__init__(parent, "深度学习设置", show_max_button=False)
+        self._config = config
+        self._sam = resolve_sam_paths(config.sam)
+        self._shared_python = self._sam.python
+        self._training_python = config.training.python or self._shared_python
+        self._inference_python = config.inference.python or self._training_python
+        self._checkpoint = self._sam.checkpoint
+        self._model_id = self._sam.model_id
+        self._sam2_config = self._sam.sam2_config
+        self._model_type = self._sam.model_type
+        self._report: TrainingEnvironmentReport | None = None
+        self._missing_keys: tuple[str, ...] = ()
         self._probe_process: QProcess | None = None
         self._probe_stdout = b""
         self._probe_stderr = ""
@@ -155,6 +179,8 @@ class SamSettingsDialog(BaseDialog):
         layout.addWidget(buttons)
         self.setLayout(layout)
 
+        self.tabs.setCurrentIndex(self._TAB_INDEX.get(str(initial_tab), 0))
+        self._update_effective_pythons()
         self._refresh_models()
         self._refresh_cache_usage()
 
@@ -167,8 +193,8 @@ class SamSettingsDialog(BaseDialog):
         runtime = QGroupBox("外部运行环境")
         runtime_layout = QVBoxLayout(runtime)
         python_row = QHBoxLayout()
-        python_row.addWidget(QLabel("Python："))
-        self.python_edit = QLineEdit(self._config.python)
+        python_row.addWidget(QLabel("共享 Python："))
+        self.python_edit = QLineEdit(self._sam.python)
         self.python_edit.setPlaceholderText("选择独立 Python（不能是 QGIS 自带解释器）")
         self.python_edit.editingFinished.connect(self._on_python_changed)
         self.btn_python_browse = QToolButton()
@@ -182,10 +208,29 @@ class SamSettingsDialog(BaseDialog):
         python_row.addWidget(self.btn_python_detect)
         runtime_layout.addLayout(python_row)
 
+        self.effective_label = QLabel()
+        self.effective_label.setWordWrap(True)
+        self.effective_label.setTextFormat(Qt.TextFormat.PlainText)
+        self.effective_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        runtime_layout.addWidget(self.effective_label)
+
+        override_row = QHBoxLayout()
+        self.override_label = QLabel()
+        self.override_label.setWordWrap(True)
+        self.override_label.setStyleSheet("color: #b8860b;")
+        self.btn_unify_python = QPushButton("统一为共享 Python")
+        self.btn_unify_python.setToolTip("清除训练 / 推理的独立 Python 设置，让它们回退到上面的共享 Python")
+        self.btn_unify_python.clicked.connect(self._unify_python)
+        override_row.addWidget(self.override_label, 1)
+        override_row.addWidget(self.btn_unify_python)
+        runtime_layout.addLayout(override_row)
+        self.override_label.setVisible(False)
+        self.btn_unify_python.setVisible(False)
+
         sam_src_row = QHBoxLayout()
         sam_src_row.addWidget(QLabel("SAM 源码："))
-        self.sam_src_edit = QLineEdit(self._config.sam_src)
-        self.sam_src_edit.setPlaceholderText("可留空（使用 pip 安装的 segment-anything）")
+        self.sam_src_edit = QLineEdit(self._sam.sam_src)
+        self.sam_src_edit.setPlaceholderText("可选（使用 pip 安装的 segment-anything 时留空）")
         self.sam_src_edit.editingFinished.connect(self._on_sam_src_changed)
         self.btn_sam_src_browse = QToolButton()
         self.btn_sam_src_browse.setText("浏览…")
@@ -204,7 +249,7 @@ class SamSettingsDialog(BaseDialog):
         self.dependency_status = QLabel("尚未检测")
         self.dependency_status.setWordWrap(True)
         deps_layout.addWidget(self.dependency_status)
-        self.dependency_table = make_table(["依赖", "状态", "版本", "来源"])
+        self.dependency_table = make_table(["依赖", "用途", "状态", "版本"])
         self.dependency_table.verticalHeader().setVisible(False)
         deps_layout.addWidget(self.dependency_table, 1)
 
@@ -217,7 +262,7 @@ class SamSettingsDialog(BaseDialog):
         install_row.addStretch(1)
         self.btn_refresh_deps = QPushButton("重新检测")
         self.btn_refresh_deps.clicked.connect(self.refresh_dependencies)
-        self.btn_install = QPushButton("一键安装缺失依赖")
+        self.btn_install = QPushButton("安装缺失依赖")
         self.btn_install.setEnabled(False)
         self.btn_install.clicked.connect(self._install_missing)
         self.btn_cancel_install = QPushButton("取消安装")
@@ -248,6 +293,97 @@ class SamSettingsDialog(BaseDialog):
         save_sam_setting(SETTING_SAM_SRC, self.sam_src_edit.text().strip())
         self.refresh_dependencies()
 
+    def _persist_environment(self) -> None:
+        save_sam_setting(SETTING_PYTHON, self.python_edit.text().strip())
+        save_sam_setting(SETTING_SAM_SRC, self.sam_src_edit.text().strip())
+
+    def _sync_shared_python(self) -> None:
+        """共享 Python 改动后，把沿用它的训练/推理有效路径一起更新。"""
+        new = self.python_edit.text().strip()
+        old = self._shared_python
+        if new == old:
+            return
+        old_training = self._training_python
+        if self._training_python in ("", old):
+            self._training_python = new
+        if self._inference_python in ("", old, old_training):
+            self._inference_python = self._training_python
+        self._shared_python = new
+
+    def _usage_pythons(self) -> dict[str, str]:
+        return {
+            "annotation": self._shared_python,
+            "training": self._training_python,
+            "inference": self._inference_python,
+        }
+
+    def _update_effective_pythons(self) -> None:
+        shared = self._shared_python
+        training = self._training_python
+        inference = self._inference_python
+
+        def text(path: str) -> str:
+            return path or "未配置"
+
+        if not training:
+            training_note = "未配置"
+        elif training == shared:
+            training_note = "沿用共享"
+        else:
+            training_note = "独立"
+
+        if not inference:
+            inference_note = "未配置"
+        elif inference == training:
+            inference_note = "沿用训练"
+        elif inference == shared:
+            inference_note = "沿用共享"
+        else:
+            inference_note = "独立"
+
+        self.effective_label.setText(
+            "\n".join(
+                (
+                    f"标注：{text(shared)}（共享）",
+                    f"训练：{text(training)}（{training_note}）",
+                    f"推理：{text(inference)}（{inference_note}）",
+                )
+            )
+        )
+
+        overrides = [
+            USAGE_TITLES[usage] for usage in ("training", "inference") if self._usage_pythons()[usage] != shared
+        ]
+        if overrides:
+            self.override_label.setText(
+                f"{'、'.join(overrides)}使用独立 Python；本页只检测/安装共享 Python 的依赖。"
+                "可在对应页面使用「安装…依赖」，或点击右侧统一。"
+            )
+        self.override_label.setVisible(bool(overrides))
+        self.btn_unify_python.setVisible(bool(overrides))
+        self.btn_unify_python.setEnabled(bool(overrides) and bool(shared))
+
+    def _unify_python(self) -> None:
+        shared = self._shared_python
+        if not shared:
+            QMessageBox.warning(self, "统一 Python", "请先配置共享 Python。")
+            return
+        reply = QMessageBox.question(
+            self,
+            "统一 Python",
+            f"清除训练 / 推理的独立 Python 设置，让两者都回退到共享 Python？\n\n{shared}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        save_training_setting("python", "")
+        save_inference_setting("python", "")
+        self._training_python = shared
+        self._inference_python = shared
+        self._update_effective_pythons()
+        self.refresh_dependencies()
+
     def _browse_python(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self,
@@ -270,14 +406,17 @@ class SamSettingsDialog(BaseDialog):
         self._on_sam_src_changed()
 
     def refresh_dependencies(self) -> None:
-        """异步检测外部 Python 的依赖（只读，不改环境）。"""
+        """异步检测共享 Python 的依赖（只读，不改环境）。"""
         if self._installing or self._closing:
             return
-        python = self.python_edit.text().strip()
+        self._persist_environment()
+        self._sync_shared_python()
+        self._update_effective_pythons()
+        python = self._shared_python
         problem = python_problem(python)
         if problem:
             self._probe_stdout = b""
-            self._apply_report(EnvironmentReport(error=problem))
+            self._apply_report(TrainingEnvironmentReport(error=problem))
             return
         self._stop_probe()
         self._probe_stdout = b""
@@ -326,7 +465,7 @@ class SamSettingsDialog(BaseDialog):
         report = parse_probe_output(text, error=error)
         if not text.strip() and not error:
             error = "依赖探测没有输出"
-            report = EnvironmentReport(error=error)
+            report = TrainingEnvironmentReport(error=error)
         self._apply_report(report)
 
     def _on_probe_error(self, process: QProcess, _error: QProcess.ProcessError) -> None:
@@ -336,7 +475,7 @@ class SamSettingsDialog(BaseDialog):
         self._probe_timer.stop()
         self._probe_process = None
         process.deleteLater()
-        self._apply_report(EnvironmentReport(error=f"无法启动依赖探测：{message}"))
+        self._apply_report(TrainingEnvironmentReport(error=f"无法启动依赖探测：{message}"))
 
     def _on_probe_timeout(self) -> None:
         process = self._probe_process
@@ -347,7 +486,7 @@ class SamSettingsDialog(BaseDialog):
         process.waitForFinished(1000)
         self._probe_process = None
         process.deleteLater()
-        self._apply_report(EnvironmentReport(error="依赖探测超时"))
+        self._apply_report(TrainingEnvironmentReport(error="依赖探测超时"))
 
     def _stop_probe(self) -> None:
         process = self._probe_process
@@ -359,24 +498,54 @@ class SamSettingsDialog(BaseDialog):
                 process.waitForFinished(500)
             process.deleteLater()
 
-    def _apply_report(self, report: EnvironmentReport) -> None:
+    def _apply_report(self, report: TrainingEnvironmentReport) -> None:
         self._report = report
-        self.dependency_table.setRowCount(len(DEPENDENCIES))
-        for row, spec in enumerate(DEPENDENCIES):
-            status = report.status(spec.key)
-            if status is None:
-                found, version, origin = False, "", ""
+        usage_paths = self._usage_pythons()
+        shared = self._shared_python
+        missing_keys: list[str] = []
+        relevant_total = 0
+        available = 0
+
+        self.dependency_table.setRowCount(len(DEEP_LEARNING_DEPENDENCIES))
+        for row, spec in enumerate(DEEP_LEARNING_DEPENDENCIES):
+            shared_usages = [usage for usage in spec["usages"] if usage_paths.get(usage) == shared]
+            usages_text = " / ".join(
+                USAGE_TITLES[usage] + ("(独立)" if usage_paths.get(usage) != shared else "") for usage in spec["usages"]
+            )
+            status = report.status(spec["key"])
+            found = bool(status and status.found)
+
+            if shared_usages:
+                relevant_total += 1
+                if found:
+                    available += 1
+                elif not report.error:
+                    missing_keys.append(spec["key"])
+
+            if not shared_usages:
+                state_text, color, version = "—", "#808080", ""
+                tooltip = "该依赖仅用于独立 Python 环境，本页不检测"
+            elif report.error and not report.statuses:
+                state_text, color, version = "未知", "#808080", ""
+                tooltip = report.error
+            elif status is None:
+                state_text, color, version = "未知", "#808080", ""
+                tooltip = "探测结果缺少该依赖"
+            elif found:
+                state_text, color, version = "已安装", "#2e8b57", status.version
+                tooltip = f"版本：{version}" if version else "已安装"
             else:
-                found, version, origin = status.found, status.version, status.origin
-            if report.error and not report.statuses:
-                found, version, origin = False, "", ""
-            state_text = "已安装" if found else ("未知" if report.error else "缺失")
-            self._set_table_item(row, 0, spec.title)
+                state_text, color, version = "缺失", "#c0392b", ""
+                tooltip = f"未检测到模块 {spec['module']}"
+
+            self._set_table_item(row, 0, spec["title"])
+            self._set_table_item(row, 1, usages_text)
             state_item = self._make_item(state_text)
-            state_item.setForeground(QColor("#2e8b57" if found else "#c0392b"))
-            self.dependency_table.setItem(row, 1, state_item)
-            self._set_table_item(row, 2, version or "—")
-            self._set_table_item(row, 3, origin or "—")
+            state_item.setForeground(QColor(color))
+            state_item.setToolTip(tooltip)
+            self.dependency_table.setItem(row, 2, state_item)
+            self._set_table_item(row, 3, version or "—")
+
         header = self.dependency_table.horizontalHeader()
         header.setStretchLastSection(False)
         for column in range(4):
@@ -384,17 +553,18 @@ class SamSettingsDialog(BaseDialog):
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self.dependency_table.verticalHeader().setVisible(False)
 
-        total = len(DEPENDENCIES)
-        missing = len(report.missing) if report.statuses else total
-        if report.error:
+        self._missing_keys = tuple(missing_keys)
+        if not shared:
+            self.dependency_status.setText("尚未配置外部 Python")
+        elif report.error:
             self.dependency_status.setText(report.error)
         else:
-            self.dependency_status.setText(
-                f"Python {report.python or '?'} · {total - missing}/{total} 项依赖可用"
-            )
-        self.btn_install.setText(f"一键安装缺失依赖（{missing} 项）")
+            self.dependency_status.setText(f"Python {report.python or '?'} · {available}/{relevant_total} 项依赖可用")
+
+        count = len(missing_keys)
+        self.btn_install.setText(f"安装缺失依赖（{count} 项）" if count else "安装缺失依赖")
         self.btn_install.setEnabled(
-            bool(report.statuses) and missing > 0 and not self._installing and not self._closing
+            bool(report.statuses) and count > 0 and not report.error and not self._installing and not self._closing
         )
 
     def _set_table_item(self, row: int, column: int, text: str) -> None:
@@ -407,31 +577,33 @@ class SamSettingsDialog(BaseDialog):
         return item
 
     def _install_missing(self) -> None:
-        report = self._report
-        if report is None or not report.missing_keys or self._installing:
+        keys = self._missing_keys
+        if not keys or self._installing or self._closing:
             return
-        python = self.python_edit.text().strip()
-        specs = "、".join(status.spec.title for status in report.missing)
+        python = self._shared_python
+        titles = "、".join(spec["title"] for spec in DEEP_LEARNING_DEPENDENCIES if spec["key"] in keys)
         problem = python_problem(python)
         if problem:
-            QMessageBox.warning(self, "SAM 设置", problem)
+            QMessageBox.warning(self, "深度学习设置", problem)
             return
         reply = QMessageBox.question(
             self,
-            "安装 SAM 依赖",
-            f"将使用以下外部 Python 安装 {len(report.missing_keys)} 项依赖：\n\n{python}\n\n"
-            f"缺失：{specs}\n\n是否继续？",
+            "安装深度学习依赖",
+            f"将使用以下共享 Python 安装 {len(keys)} 项依赖：\n\n{python}\n\n缺失：{titles}\n\n是否继续？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        self.install_log.appendPlainText(f"—— 开始安装：{python}")
-        self.installer.start(
+        commands = build_install_commands(
             python,
-            report.missing_keys,
+            keys,
             torch_variant=str(self.torch_variant_combo.currentData() or "cpu"),
         )
+        if not commands:
+            return
+        self.install_log.appendPlainText(f"—— 开始安装：{python}")
+        self.installer.start_commands(commands)
 
     def _on_install_started(self) -> None:
         self._installing = True
@@ -439,7 +611,13 @@ class SamSettingsDialog(BaseDialog):
         self.btn_install.setEnabled(False)
         self.btn_refresh_deps.setEnabled(False)
         self.btn_cancel_install.setEnabled(True)
+        self.python_edit.setEnabled(False)
+        self.sam_src_edit.setEnabled(False)
         self.btn_python_browse.setEnabled(False)
+        self.btn_python_detect.setEnabled(False)
+        self.btn_sam_src_browse.setEnabled(False)
+        self.btn_sam_src_clear.setEnabled(False)
+        self.torch_variant_combo.setEnabled(False)
 
     def _cancel_install(self) -> None:
         if self._installing:
@@ -450,7 +628,13 @@ class SamSettingsDialog(BaseDialog):
         self.install_progress.setVisible(False)
         self.btn_refresh_deps.setEnabled(True)
         self.btn_cancel_install.setEnabled(False)
+        self.python_edit.setEnabled(True)
+        self.sam_src_edit.setEnabled(True)
         self.btn_python_browse.setEnabled(True)
+        self.btn_python_detect.setEnabled(True)
+        self.btn_sam_src_browse.setEnabled(True)
+        self.btn_sam_src_clear.setEnabled(True)
+        self.torch_variant_combo.setEnabled(True)
         if ok:
             self.install_log.appendPlainText("—— 安装完成，重新检测依赖")
             self.refresh_dependencies()
@@ -473,16 +657,14 @@ class SamSettingsDialog(BaseDialog):
 
         dir_row = QHBoxLayout()
         dir_row.addWidget(QLabel("模型目录："))
-        self.models_dir_edit = QLineEdit(self._config.models_dir)
+        self.models_dir_edit = QLineEdit(self._sam.models_dir)
         self.models_dir_edit.editingFinished.connect(self._on_models_dir_changed)
         self.btn_models_dir = QToolButton()
         self.btn_models_dir.setText("浏览…")
         self.btn_models_dir.clicked.connect(self._browse_models_dir)
         self.btn_open_models_dir = QToolButton()
         self.btn_open_models_dir.setText("打开")
-        self.btn_open_models_dir.clicked.connect(
-            lambda: _open_directory(self.models_dir_edit.text().strip())
-        )
+        self.btn_open_models_dir.clicked.connect(lambda: _open_directory(self.models_dir_edit.text().strip()))
         dir_row.addWidget(self.models_dir_edit, 1)
         dir_row.addWidget(self.btn_models_dir)
         dir_row.addWidget(self.btn_open_models_dir)
@@ -560,7 +742,7 @@ class SamSettingsDialog(BaseDialog):
         return [model for model in MODELS if model.version_label == key]
 
     def _refresh_models(self) -> None:
-        models_dir = self.models_dir_edit.text().strip() or self._config.models_dir
+        models_dir = self.models_dir_edit.text().strip() or self._sam.models_dir
         selected_model = self._selected_model()
         selected_id = selected_model.id if selected_model is not None else ""
         self.model_table.blockSignals(True)
@@ -633,7 +815,7 @@ class SamSettingsDialog(BaseDialog):
         model = self._selected_model()
         if model is None:
             return None
-        return model_path(model, self.models_dir_edit.text().strip() or self._config.models_dir)
+        return model_path(model, self.models_dir_edit.text().strip() or self._sam.models_dir)
 
     def _update_model_buttons(self) -> None:
         model = self._selected_model()
@@ -767,10 +949,8 @@ class SamSettingsDialog(BaseDialog):
         self.model_status.setText(f"已设为当前模型：{model.name}")
 
     def _import_weights(self) -> None:
-        start = self.models_dir_edit.text().strip() or self._config.models_dir
-        path, _ = QFileDialog.getOpenFileName(
-            self, "导入 SAM 权重", start, "PyTorch 权重 (*.pth *.pt);;所有文件 (*)"
-        )
+        start = self.models_dir_edit.text().strip() or self._sam.models_dir
+        path, _ = QFileDialog.getOpenFileName(self, "导入 SAM 权重", start, "PyTorch 权重 (*.pth *.pt);;所有文件 (*)")
         if not path:
             return
         entry = model_for_checkpoint(path)
@@ -813,22 +993,20 @@ class SamSettingsDialog(BaseDialog):
         group = QGroupBox("SAM 图像特征缓存")
         group_layout = QVBoxLayout(group)
         self.cache_enabled_check = QCheckBox("启用图像特征缓存（同一影像再次打开时跳过编码器）")
-        self.cache_enabled_check.setChecked(self._config.cache_enabled)
+        self.cache_enabled_check.setChecked(self._sam.cache_enabled)
         self.cache_enabled_check.toggled.connect(self._on_cache_enabled_changed)
         group_layout.addWidget(self.cache_enabled_check)
 
         dir_row = QHBoxLayout()
         dir_row.addWidget(QLabel("缓存目录："))
-        self.cache_dir_edit = QLineEdit(self._config.cache_dir)
+        self.cache_dir_edit = QLineEdit(self._sam.cache_dir)
         self.cache_dir_edit.editingFinished.connect(self._on_cache_dir_changed)
         self.btn_cache_dir = QToolButton()
         self.btn_cache_dir.setText("浏览…")
         self.btn_cache_dir.clicked.connect(self._browse_cache_dir)
         self.btn_open_cache_dir = QToolButton()
         self.btn_open_cache_dir.setText("打开")
-        self.btn_open_cache_dir.clicked.connect(
-            lambda: _open_directory(self.cache_dir_edit.text().strip())
-        )
+        self.btn_open_cache_dir.clicked.connect(lambda: _open_directory(self.cache_dir_edit.text().strip()))
         dir_row.addWidget(self.cache_dir_edit, 1)
         dir_row.addWidget(self.btn_cache_dir)
         dir_row.addWidget(self.btn_open_cache_dir)
@@ -839,18 +1017,14 @@ class SamSettingsDialog(BaseDialog):
         self.cache_max_spin.setRange(0, 102400)
         self.cache_max_spin.setSuffix(" MB")
         self.cache_max_spin.setSpecialValueText("不限制")
-        self.cache_max_spin.setValue(int(self._config.cache_max_mb))
-        self.cache_max_spin.valueChanged.connect(
-            lambda value: save_sam_setting(SETTING_CACHE_MAX_MB, int(value))
-        )
+        self.cache_max_spin.setValue(int(self._sam.cache_max_mb))
+        self.cache_max_spin.valueChanged.connect(lambda value: save_sam_setting(SETTING_CACHE_MAX_MB, int(value)))
         form.addRow("容量上限", self.cache_max_spin)
         group_layout.addLayout(form)
 
         self.cache_clear_on_close_check = QCheckBox("退出程序时清空缓存")
-        self.cache_clear_on_close_check.setChecked(self._config.cache_clear_on_close)
-        self.cache_clear_on_close_check.setToolTip(
-            "只清空程序退出时；不勾选则缓存保留，下次启动仍可复用"
-        )
+        self.cache_clear_on_close_check.setChecked(self._sam.cache_clear_on_close)
+        self.cache_clear_on_close_check.setToolTip("只清空程序退出时；不勾选则缓存保留，下次启动仍可复用")
         self.cache_clear_on_close_check.toggled.connect(
             lambda checked: save_sam_setting(SETTING_CACHE_CLEAR_ON_CLOSE, bool(checked))
         )
@@ -923,14 +1097,23 @@ class SamSettingsDialog(BaseDialog):
         browser.setOpenExternalLinks(True)
         browser.setHtml(
             """
-            <h3>SAM 设置说明</h3>
-            <p><b>依赖项</b>：SAM 不在 QGIS 自带 Python 里运行。请选择一个独立 Python
-            （SAM2 需要 Python 3.10 及以上，SAM3 建议 3.12 及以上），点击「一键安装缺失依赖」
-            会执行 pip 安装 <code>torch / torchvision / numpy / opencv-python</code>，以及 Meta 官方
-            <code>segment-anything</code>、<code>sam2</code>、<code>sam3</code> 源码包。</p>
+            <h3>深度学习设置说明</h3>
+            <p><b>依赖项</b>：标注 / 训练 / 推理都不在 QGIS 自带 Python 里运行，而是共用
+            外部 Python（训练、推理也可在对应页面或 YAML 中指定独立解释器）。请选择一个
+            独立 Python（SAM2 需要 Python 3.10 及以上，SAM3 建议 3.12 及以上），
+            「安装缺失依赖」会执行 pip 安装标注 / 训练 / 推理所需的全部包：</p>
+            <ul>
+              <li>三者共用：<code>torch / torchvision / numpy / opencv-python</code>；</li>
+              <li>仅标注：Meta 官方 <code>segment-anything</code>、<code>sam2</code>、<code>sam3</code> 源码包；</li>
+              <li>训练 / 推理：<code>pillow</code>、<code>segmentation-models-pytorch</code>；</li>
+              <li>仅推理：<code>rasterio&gt;=1.4</code>。</li>
+            </ul>
             <p>PyTorch 可选 CPU 或 CUDA 12.4。安装日志会实时显示；取消只会终止当前 pip。
             SAM3 采用 <code>--no-deps</code> 安装再补齐依赖，避免其 numpy&lt;2 约束把
             Python 3.13 环境的 numpy 降级。</p>
+            <p>若训练 / 推理使用了独立 Python，依赖页顶部会显示黄色提示；本页只检测和
+            安装共享 Python 的依赖。可点「统一为共享 Python」清除独立设置，或继续在
+            训练 / 推理页面用各自的「安装…依赖」快捷入口。</p>
 
             <p><b>模型管理</b>：SAM1 权重为 <code>.pth</code>，SAM2 / SAM2.1 / SAM3 / SAM3.1 为
             <code>.pt</code>。下载写入模型目录（支持断点续传），点击「使用该模型」后，
@@ -946,7 +1129,7 @@ class SamSettingsDialog(BaseDialog):
 
             <p><b>手动安装（离线/公司网络）</b>：在外层命令行执行：</p>
             <pre>python -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-python -m pip install numpy opencv-python
+python -m pip install numpy opencv-python pillow segmentation-models-pytorch "rasterio&gt;=1.4"
 python -m pip install https://github.com/facebookresearch/segment-anything/archive/refs/heads/main.zip
 python -m pip install https://github.com/facebookresearch/sam2/archive/refs/heads/main.zip
 python -m pip install --no-deps https://github.com/facebookresearch/sam3/archive/refs/heads/main.zip
@@ -962,24 +1145,40 @@ python -m pip install triton-windows  # 仅 Windows：sam3 顶层 import triton<
         return page
 
     # ================================================================== 配置
-    def config(self) -> SamConfig:
-        """把当前控件值组装成 ``SamConfig``（目录为已补全的绝对路径）。"""
-        from dataclasses import replace
+    def config(self) -> DeepLearningConfig:
+        """返回当前设置的完整内存快照。
 
-        return replace(
-            self._config,
-            python=self.python_edit.text().strip(),
-            sam_src=self.sam_src_edit.text().strip(),
+        模型 / 缓存选项在控件改动时已写入 QSettings；这里再落一次共享 Python
+        与 SAM 源码。训练 / 推理的 Python 只返回内存值，不写 QSettings，
+        避免把回退结果固化（主窗口关闭后会重新加载权威配置）。
+        """
+        python = self.python_edit.text().strip()
+        sam_src = self.sam_src_edit.text().strip()
+        save_sam_setting(SETTING_PYTHON, python)
+        save_sam_setting(SETTING_SAM_SRC, sam_src)
+        self._sync_shared_python()
+        self._update_effective_pythons()
+
+        sam = replace(
+            self._sam,
+            python=python,
+            sam_src=sam_src,
             checkpoint=self._checkpoint,
             model_type=self._model_type,
-            device=self._config.device,
+            device=self._sam.device,
             model_id=self._model_id,
             sam2_config=self._sam2_config,
-            models_dir=self.models_dir_edit.text().strip() or self._config.models_dir,
+            models_dir=self.models_dir_edit.text().strip() or self._sam.models_dir,
             cache_enabled=self.cache_enabled_check.isChecked(),
-            cache_dir=self.cache_dir_edit.text().strip() or self._config.cache_dir,
+            cache_dir=self.cache_dir_edit.text().strip() or self._sam.cache_dir,
             cache_max_mb=int(self.cache_max_spin.value()),
             cache_clear_on_close=self.cache_clear_on_close_check.isChecked(),
+        )
+        return replace(
+            self._config,
+            sam=sam,
+            training=replace(self._config.training, python=self._training_python),
+            inference=replace(self._config.inference, python=self._inference_python),
         )
 
     # ================================================================== 生命周期
@@ -1013,7 +1212,7 @@ python -m pip install triton-windows  # 仅 Windows：sam3 顶层 import triton<
             return True
         reply = QMessageBox.question(
             self,
-            "SAM 设置",
+            "深度学习设置",
             "依赖安装或模型下载正在进行，关闭会取消任务。确定关闭？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No,
@@ -1032,4 +1231,4 @@ python -m pip install triton-windows  # 仅 Windows：sam3 顶层 import triton<
             self._download_task.join(1.0)
 
 
-__all__ = ["SamSettingsDialog"]
+__all__ = ["DeepLearningSettingsDialog"]

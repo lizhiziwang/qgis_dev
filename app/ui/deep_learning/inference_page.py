@@ -7,15 +7,29 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import subprocess
+import threading
 import time
+import warnings
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
+from qgis.core import (
+    Qgis,
+    QgsContrastEnhancement,
+    QgsMultiBandColorRenderer,
+    QgsProject,
+    QgsRasterBandStats,
+    QgsRasterLayer,
+    QgsSingleBandGrayRenderer,
+)
+from qgis.gui import QgsMapCanvas, QgsMapToolPan
 from qgis.PyQt.QtCore import QSize, Qt, QTimer, QUrl, pyqtSignal
-from qgis.PyQt.QtGui import QAction, QDesktopServices, QKeySequence
+from qgis.PyQt.QtGui import QAction, QColor, QDesktopServices, QKeySequence
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -68,15 +82,18 @@ from app.infra.logging import get_logger
 from app.ui.common import tool_icons
 from app.ui.common.icons import Icons
 from app.ui.common.theme import ThemeManager, toolbar_qss, window_qss
-from app.ui.deep_learning.annotation_canvas import MODE_PAN, AnnotationView
-from app.ui.deep_learning.annotation_model import AnnotationDocument, LabelSet
 from app.ui.deep_learning.raster_io import (
     RASTER_FILTER,
     RasterInfo,
     default_bands,
-    read_class_preview,
-    read_preview,
     read_raster_info,
+)
+from app.ui.deep_learning.raster_preview import (
+    PREVIEW_MAX_SIDE,
+    build_preview,
+    cached_preview,
+    needs_preview,
+    preview_cache_path,
 )
 
 logger = get_logger(__name__)
@@ -115,6 +132,10 @@ class InferencePage(QWidget):
 
     #: 用户点了「关闭」/ Ctrl+W：由主窗口切回地图页（页面状态保留）
     close_requested = pyqtSignal()
+    #: 后台预览代理事件（源影像路径, 预览路径 / 错误信息）
+    preview_ready = pyqtSignal(str, str)
+    preview_failed = pyqtSignal(str, str)
+    preview_progress = pyqtSignal(str, int)
 
     def __init__(
         self,
@@ -143,13 +164,16 @@ class InferencePage(QWidget):
         self._current_task = ""
         self._image_info: RasterInfo | None = None
         self._source_path = ""
-        self._source_preview = None
-        self._document: AnnotationDocument | None = None
-        self._labels: LabelSet | None = None
+        self._source_layer: QgsRasterLayer | None = None
+        self._source_layer_path = ""
+        self._source_preview_path = ""
+        self._preview_build_path = ""
+        self._preview_cancel: threading.Event | None = None
+        self._result_layer: QgsRasterLayer | None = None
+        self._pan_tool = None
         self._output_file = ""
         self._output_dir: Path | None = None
         self._updating_bands = False
-        self._preview_timer: QTimer | None = None
 
         self.client = client or InferenceClient(python=self._python(), parent=self)
         self._installer = DependencyInstaller(self)
@@ -173,6 +197,19 @@ class InferencePage(QWidget):
             self.inference_config.python
             or self._config.training.python
             or self._config.sam.python
+        )
+
+    def apply_environment_python(self, python: str) -> None:
+        """应用设置中心里的推理解释器；运行中的进程不受影响。"""
+        python = str(python or "")
+        self._config = replace(
+            self._config,
+            inference=replace(self._config.inference, python=python),
+        )
+        self.client.python = python
+        running = bool(getattr(self, "_inference", False) or self.client.is_running)
+        self._append_log(
+            "推理外部 Python 已更新，下次推理生效" if running else "推理外部 Python 已更新"
         )
 
     # ------------------------------------------------------------------ 装配
@@ -445,7 +482,7 @@ class InferencePage(QWidget):
         fit.clicked.connect(self._fit_preview)
         controls.addWidget(fit)
         controls.addStretch(1)
-        hint = QLabel("滚轮缩放 / 中键平移 · 预览为缩略图，成果以 GeoTIFF 为准", panel)
+        hint = QLabel("滚轮缩放 / 拖拽平移 · 成果以 GeoTIFF 为准", panel)
         hint.setEnabled(False)
         controls.addWidget(hint)
         layout.addLayout(controls)
@@ -458,8 +495,12 @@ class InferencePage(QWidget):
         self.preview_placeholder.setWordWrap(True)
         self.preview_stack.addWidget(self.preview_placeholder)
 
-        self.view = AnnotationView(panel)
-        self.view.set_mode(MODE_PAN)
+        self.view = QgsMapCanvas(panel)
+        self.view.setObjectName("InferenceMapCanvas")
+        self.view.setProject(QgsProject.instance())
+        self.view.setCanvasColor(QColor(ThemeManager.instance().current().canvas_bg))
+        self._pan_tool = QgsMapToolPan(self.view)
+        self.view.setMapTool(self._pan_tool)
         self.preview_stack.addWidget(self.view)
         self.preview_stack.setCurrentWidget(self.preview_placeholder)
         layout.addWidget(self.preview_stack, 1)
@@ -572,6 +613,10 @@ class InferencePage(QWidget):
 
     def _effective_preview_side(self) -> int:
         return max(256, int(self.preview_spin.value()))
+
+    def _preview_side(self) -> int:
+        """画布预览代理长边：沿用「预览分辨率」，但不超过 8192。"""
+        return min(PREVIEW_MAX_SIDE, self._effective_preview_side())
 
     def _form_values(self) -> dict:
         return {
@@ -764,10 +809,15 @@ class InferencePage(QWidget):
         if path != self._source_path:
             self._reset_result()
             self._source_path = path
-            self._source_preview = None
+            self._drop_source_layer()
         if not path or not Path(path).is_file():
             self._image_info = None
             self.image_info_label.setText("尚未选择影像")
+            self._drop_source_layer()
+            self.preview_placeholder.setText(
+                "选择影像后显示预览；开始推理后在这里叠加预测类别颜色。"
+            )
+            self.preview_stack.setCurrentWidget(self.preview_placeholder)
             self._update_action_state()
             return
         info = read_raster_info(path)
@@ -794,13 +844,13 @@ class InferencePage(QWidget):
             self.band_b.setValue(bands[2])
         finally:
             self._updating_bands = False
-        self._schedule_source_preview()
+        self._show_source_layer(path)
         self._update_action_state()
 
     def _on_bands_changed(self, _value: int = 0) -> None:
         if self._updating_bands:
             return
-        self._schedule_source_preview()
+        self._apply_band_renderer()
 
     def _current_bands(self) -> tuple[int, int, int]:
         maximum = max(1, int(self._image_info.band_count)) if self._image_info else 64
@@ -809,62 +859,292 @@ class InferencePage(QWidget):
             for spin in (self.band_r, self.band_g, self.band_b)
         )  # type: ignore[return-value]
 
-    def _schedule_source_preview(self) -> None:
-        if self._preview_timer is None:
-            self._preview_timer = QTimer(self)
-            self._preview_timer.setSingleShot(True)
-            self._preview_timer.timeout.connect(self._load_source_preview)
-        self._preview_timer.start(250)
+    # ------------------------------------------------------------ QGIS 画布
+    def _show_source_layer(self, path: str) -> None:
+        """把源影像挂到嵌入式画布。
 
-    def _load_source_preview(self) -> None:
-        path = self.image_edit.text().strip()
-        if not path or not Path(path).is_file():
-            return
-        try:
-            image, _scale = read_preview(
-                path,
-                bands=self._current_bands(),
-                max_side=self._effective_preview_side(),
-            )
-        except Exception as exc:  # noqa: BLE001 —— 预览失败不影响推理
-            logger.warning("读取源影像预览失败 %s：%s", path, exc)
-            self._append_log(f"源影像预览失败：{exc}")
-            return
-        self._source_preview = image
+        没有 overview 的巨幅影像先显示后台生成的降采样预览代理：直接让 QGIS
+        渲染源图会读取整幅数据，``stopRendering()`` 同步等待渲染任务导致窗口
+        未响应。预览代理与源图地理范围一致，推理仍使用原始路径。
+        """
         if (
-            self._document is None
-            or self._document.width != image.width()
-            or self._document.height != image.height()
+            self._source_layer is not None
+            and self._source_layer_path
+            and Path(self._source_layer_path) == Path(path)
         ):
-            labels = LabelSet()
-            document = AnnotationDocument(
-                image, source_path=path, labels=labels, undo_limit=1, parent=self
-            )
-            self._document = document
-            self._labels = labels
-            self.view.set_document(document, image)
-        else:
-            self.view.set_image(image)
-        self.view.set_mode(MODE_PAN)
+            self._apply_band_renderer()
+            self.preview_stack.setCurrentWidget(self.view)
+            return
+
+        info = self._image_info
+        if info is not None and Path(info.path) == Path(path) and needs_preview(info):
+            cached = cached_preview(path, max_side=self._preview_side())
+            if cached is not None:
+                self._load_source_layer(path, str(cached))
+            else:
+                self._start_preview_build(path)
+            return
+        self._load_source_layer(path, path)
+
+    def _load_source_layer(self, path: str, dataset: str) -> None:
+        """用 ``dataset``（源影像或预览代理）创建图层；``path`` 始终是源路径。"""
+        try:
+            layer = QgsRasterLayer(dataset, f"源影像 · {Path(path).name}", "gdal")
+        except Exception as exc:  # noqa: BLE001 —— 预览失败不影响推理
+            logger.warning("创建源影像图层失败 %s：%s", dataset, exc)
+            self._append_log(f"影像预览不可用：{exc}")
+            self._preview_unavailable("影像预览不可用；仍可开始推理。")
+            self._discard_bad_preview(path, dataset)
+            return
+        if not layer.isValid():
+            error = layer.error().message().strip()
+            logger.warning("加载源影像图层失败 %s：%s", dataset, error)
+            self._append_log(f"影像预览不可用：{error or 'QGIS 无法打开该文件'}")
+            self._preview_unavailable("影像预览不可用；仍可开始推理。")
+            self._discard_bad_preview(path, dataset)
+            return
+
+        old = self._source_layer
+        self._source_layer = layer
+        self._source_layer_path = path
+        self._source_preview_path = dataset
+        self.view.setDestinationCrs(layer.crs())
+        self._apply_band_renderer()
+        self._sync_canvas_layers()
         self._apply_overlay()
         self.preview_stack.setCurrentWidget(self.view)
+        QTimer.singleShot(0, self._fit_preview)
+        _ = old  # 保持旧图层的 C++ 对象存活到画布完成移除
+
+    def _preview_unavailable(self, message: str) -> None:
+        self.preview_placeholder.setText(message)
+        self.preview_stack.setCurrentWidget(self.preview_placeholder)
+
+    @staticmethod
+    def _discard_bad_preview(path: str, dataset: str) -> None:
+        """缓存文件损坏时删除，下次选择同一影像会重新生成。"""
+        if Path(dataset) == Path(path):
+            return
+        with contextlib.suppress(OSError):
+            Path(dataset).unlink(missing_ok=True)
+
+    def _start_preview_build(self, path: str) -> None:
+        """后台生成预览代理；同一路径重复触发时不重复启动。"""
+        if self._preview_build_path == path and self._preview_cancel is not None:
+            self.preview_stack.setCurrentWidget(self.preview_placeholder)
+            return
+        self._cancel_preview_build()
+        max_side = self._preview_side()
+        try:
+            dest = preview_cache_path(path, max_side=max_side)
+        except OSError as exc:
+            logger.warning("无法确定影像预览缓存路径 %s：%s", path, exc)
+            self._append_log(f"影像预览不可用：{exc}")
+            self._preview_unavailable("影像预览不可用；仍可开始推理。")
+            return
+
+        cancel = threading.Event()
+        self._preview_build_path = path
+        self._preview_cancel = cancel
+        self.preview_placeholder.setText(self._preview_building_text(0))
+        self.preview_stack.setCurrentWidget(self.preview_placeholder)
+        self._status.showMessage("正在生成影像预览…")
+        last_percent = [-1]
+
+        def report(percent: int) -> bool:
+            if cancel.is_set():
+                return False
+            percent = max(0, min(100, int(percent)))
+            if percent != last_percent[0]:
+                last_percent[0] = percent
+                try:
+                    self.preview_progress.emit(path, percent)
+                except RuntimeError:  # 页面已销毁
+                    return False
+            return True
+
+        def worker() -> None:
+            try:
+                build_preview(path, dest, max_side=max_side, progress=report)
+            except Exception as exc:
+                if cancel.is_set():
+                    return
+                logger.warning("生成影像预览失败 %s：%s", path, exc, exc_info=True)
+                self._emit_preview_signal("preview_failed", path, str(exc))
+                return
+            if cancel.is_set():
+                return
+            self._emit_preview_signal("preview_ready", path, str(dest))
+
+        threading.Thread(
+            target=worker, name="inference-preview", daemon=True
+        ).start()
+
+    @staticmethod
+    def _preview_building_text(percent: int) -> str:
+        return (
+            f"正在生成影像预览… {percent}%\n"
+            "影像较大且没有 overview，首次加载需读取整幅影像；"
+            "完成后会缓存，下次选择同一影像直接打开。"
+        )
+
+    def _emit_preview_signal(self, name: str, *args) -> None:
+        # 页面 C++ 对象已销毁时丢弃结果（信号属性本身也可能不可访问）
+        with contextlib.suppress(RuntimeError):
+            getattr(self, name).emit(*args)
+
+    def _on_preview_progress(self, path: str, percent: int) -> None:
+        if path != self._source_path or path != self._preview_build_path:
+            return
+        self.preview_placeholder.setText(self._preview_building_text(percent))
+
+    def _on_preview_ready(self, path: str, preview_path: str) -> None:
+        if path != self._source_path:
+            return
+        if path == self._preview_build_path:
+            self._preview_build_path = ""
+            self._preview_cancel = None
+        self._append_log(f"已生成影像预览（{Path(preview_path).name}）")
+        self._status.showMessage("影像预览就绪", 3000)
+        self._load_source_layer(path, preview_path)
+
+    def _on_preview_failed(self, path: str, message: str) -> None:
+        if path != self._source_path:
+            return
+        if path == self._preview_build_path:
+            self._preview_build_path = ""
+            self._preview_cancel = None
+        self._append_log(f"影像预览生成失败：{message}")
+        self._status.showMessage("影像预览生成失败", 5000)
+        self._preview_unavailable("影像预览生成失败；仍可开始推理。")
+
+    def _cancel_preview_build(self) -> None:
+        cancel = self._preview_cancel
+        self._preview_cancel = None
+        self._preview_build_path = ""
+        if cancel is not None:
+            cancel.set()
+
+    def _drop_source_layer(self) -> None:
+        """从画布移除源图层；局部变量保证移除期间图层不被提前销毁。"""
+        self._cancel_preview_build()
+        old = self._source_layer
+        self._source_layer = None
+        self._source_layer_path = ""
+        self._source_preview_path = ""
+        self._sync_canvas_layers()
+        self.preview_stack.setCurrentWidget(self.preview_placeholder)
+        _ = old
+
+    def _apply_band_renderer(self) -> None:
+        """按波段选择重建源图层渲染器（多波段 RGB / 单波段灰度）。"""
+        layer = self._source_layer
+        if layer is None or not layer.isValid():
+            return
+        provider = layer.dataProvider()
+        if provider is None:
+            return
+        band_count = max(1, int(layer.bandCount()))
+        bands = tuple(
+            min(max(1, band), band_count) for band in self._current_bands()
+        )
+        renderer = layer.renderer()
+        if isinstance(renderer, QgsMultiBandColorRenderer):
+            current = (renderer.redBand(), renderer.greenBand(), renderer.blueBand())
+            if current == bands:
+                return
+        elif isinstance(renderer, QgsSingleBandGrayRenderer):
+            if renderer.grayBand() == bands[0]:
+                return
+
+        if band_count >= 3:
+            new_renderer = QgsMultiBandColorRenderer(
+                provider,
+                bands[0],
+                bands[1],
+                bands[2],
+                self._contrast_enhancement(provider, bands[0]),
+                self._contrast_enhancement(provider, bands[1]),
+                self._contrast_enhancement(provider, bands[2]),
+            )
+        else:
+            new_renderer = QgsSingleBandGrayRenderer(provider, bands[0])
+            new_renderer.setContrastEnhancement(
+                self._contrast_enhancement(provider, bands[0])
+            )
+        layer.setRenderer(new_renderer)
+        layer.triggerRepaint()
+
+    @staticmethod
+    def _contrast_enhancement(provider, band: int) -> QgsContrastEnhancement:
+        """Byte 保持 0–255；其它位深按 25 万像元采样拉伸。"""
+        data_type = provider.dataType(band)
+        enhancement = QgsContrastEnhancement(data_type)
+        algorithm = QgsContrastEnhancement.ContrastEnhancementAlgorithm
+        if data_type == Qgis.DataType.Byte:
+            enhancement.setContrastEnhancementAlgorithm(algorithm.NoEnhancement)
+            enhancement.setMinimumValue(0)
+            enhancement.setMaximumValue(255)
+            return enhancement
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", DeprecationWarning)
+            stats = provider.bandStatistics(
+                band,
+                QgsRasterBandStats.Min | QgsRasterBandStats.Max,
+                sampleSize=250_000,
+            )
+        minimum = float(stats.minimumValue)
+        maximum = float(stats.maximumValue)
+        if maximum > minimum:
+            enhancement.setContrastEnhancementAlgorithm(
+                algorithm.StretchToMinimumMaximum
+            )
+            enhancement.setMinimumValue(minimum)
+            enhancement.setMaximumValue(maximum)
+        else:
+            enhancement.setContrastEnhancementAlgorithm(algorithm.NoEnhancement)
+        return enhancement
+
+    def _sync_canvas_layers(self) -> None:
+        """画布图层按「索引 0 在最上层」排列：成果叠在源影像之上。"""
+        layers = []
+        if self._result_layer is not None and (
+            self.overlay_check.isChecked() or self._source_layer is None
+        ):
+            layers.append(self._result_layer)
+        if self._source_layer is not None:
+            layers.append(self._source_layer)
+        self.view.setLayers(layers)
 
     def _reset_result(self) -> None:
-        self._document = None
-        self._labels = None
+        old = self._result_layer
+        self._result_layer = None
         self._output_file = ""
         self.output_label.setText("输出：—")
         self.load_map_button.setEnabled(False)
         self.stats_table.setRowCount(0)
-        self.view.set_document(None)
-        self.preview_stack.setCurrentWidget(self.preview_placeholder)
+        self._sync_canvas_layers()
+        if self._source_layer is None:
+            self.preview_stack.setCurrentWidget(self.preview_placeholder)
+        _ = old  # 保持旧成果图层的 C++ 对象存活到画布完成移除
 
     def _apply_overlay(self, *_args) -> None:
-        self.view.set_mask_visible(self.overlay_check.isChecked())
-        self.view.set_mask_opacity(self.opacity_slider.value() / 100.0)
+        layer = self._result_layer
+        if layer is None:
+            return
+        layer.setOpacity(self.opacity_slider.value() / 100.0)
+        desired = self.overlay_check.isChecked() or self._source_layer is None
+        shown = any(item.id() == layer.id() for item in self.view.layers())
+        if desired != shown:
+            self._sync_canvas_layers()
+        else:
+            layer.triggerRepaint()
 
     def _fit_preview(self) -> None:
-        self.view.fit_to_view()
+        if not self.view.layers():
+            return
+        self.view.zoomToFullExtent()
 
     # ------------------------------------------------------------------ 输出
     def _resolve_output_base(self) -> Path:
@@ -1014,7 +1294,6 @@ class InferencePage(QWidget):
         self.detail_label.setText("等待推理进程就绪…")
         self.status_label.setText("正在启动推理…")
         self._append_log(f"推理清单：{manifest_path}")
-        QTimer.singleShot(0, self._load_source_preview)
         self.client.python = python
         if not self.client.start(manifest_path):
             self._append_log("推理进程启动失败")
@@ -1095,6 +1374,10 @@ class InferencePage(QWidget):
 
         self._installer.log.connect(self._append_log)
         self._installer.finished.connect(self._on_install_finished)
+
+        self.preview_ready.connect(self._on_preview_ready)
+        self.preview_failed.connect(self._on_preview_failed)
+        self.preview_progress.connect(self._on_preview_progress)
 
         ThemeManager.instance().theme_changed.connect(self._apply_theme_qss)
 
@@ -1274,48 +1557,26 @@ class InferencePage(QWidget):
 
     # ------------------------------------------------------------------ 预览渲染
     def _show_result_preview(self, output: str, classes) -> None:
-        image_path = self.image_edit.text().strip()
-        if not image_path or not Path(output).is_file():
+        """把成果 GeoTIFF 作为调色板图层叠到源影像上（QGIS 自动处理 NoData）。"""
+        if not Path(output).is_file():
             return
-        max_side = self._effective_preview_side()
         try:
-            source, _scale = read_preview(
-                image_path, bands=self._current_bands(), max_side=max_side
-            )
-            mask_image, _scale = read_class_preview(output, max_side=max_side)
+            layer = QgsRasterLayer(output, "推理结果", "gdal")
         except Exception as exc:  # noqa: BLE001 —— 预览失败不影响成果
-            logger.warning("读取推理成果预览失败 %s：%s", output, exc)
+            logger.warning("创建推理成果图层失败 %s：%s", output, exc)
             self._append_log(f"成果预览失败：{exc}")
             return
-
-        labels = LabelSet()
-        labels.replace_from_dicts(
-            [
-                {
-                    "id": int(item["id"]),
-                    "name": str(item.get("name") or f"类别{item['id']}"),
-                    "color": str(item.get("color") or ""),
-                }
-                for item in classes
-                if isinstance(item, dict) and int(item.get("id") or 0) > 0
-            ]
-        )
-        document = AnnotationDocument(
-            source, source_path=image_path, labels=labels, undo_limit=1, parent=self
-        )
-        try:
-            document.load_mask(mask_image)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("载入推理掩膜失败：%s", exc)
-            self._append_log(f"载入推理掩膜失败：{exc}")
+        if not layer.isValid():
+            error = layer.error().message().strip()
+            logger.warning("加载推理成果图层失败 %s：%s", output, error)
+            self._append_log(f"成果预览失败：{error or 'QGIS 无法打开该文件'}")
             return
-        self._document = document
-        self._labels = labels
-        self._source_preview = source
-        self.view.set_document(document, source)
-        self.view.set_mode(MODE_PAN)
+
+        old = self._result_layer
+        self._result_layer = layer
         self._apply_overlay()
         self.preview_stack.setCurrentWidget(self.view)
+        _ = old  # 保持旧成果图层的 C++ 对象存活到画布完成移除
 
     def _append_log(self, text: str) -> None:
         text = str(text or "").rstrip()
@@ -1334,6 +1595,7 @@ class InferencePage(QWidget):
             + f"\n#InferenceStatusLabel {{ font-weight: 600; color: {theme.toolbar_text}; }}"
         )
         self._toolbar.setStyleSheet(toolbar_qss(theme))
+        self.view.setCanvasColor(QColor(theme.canvas_bg))
         for action, key in self._tool_actions:
             action.setIcon(tool_icons.icon(key, theme.toolbar_text))
 
@@ -1380,6 +1642,17 @@ class InferencePage(QWidget):
                 return False
         self._shutting_down = True
         try:
+            self._cancel_preview_build()
+            source = self._source_layer
+            result = self._result_layer
+            self._source_layer = None
+            self._source_layer_path = ""
+            self._source_preview_path = ""
+            self._result_layer = None
+            with contextlib.suppress(RuntimeError):
+                self.view.stopRendering()
+            with contextlib.suppress(RuntimeError):
+                self.view.setLayers([])
             self._save_settings()
             try:
                 self._installer.cancel()
@@ -1389,6 +1662,7 @@ class InferencePage(QWidget):
                 self.client.shutdown()
             except Exception:
                 logger.exception("停止推理子进程失败")
+            _ = source, result  # 保持图层 C++ 对象存活到画布清空并退出
         finally:
             self._shutting_down = False
             self._shutdown_done = True

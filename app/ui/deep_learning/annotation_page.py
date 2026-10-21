@@ -87,6 +87,7 @@ from app.ui.deep_learning.annotation_project import (
     load_project,
     save_project,
 )
+from app.ui.deep_learning.deep_learning_settings_dialog import DeepLearningSettingsDialog
 from app.ui.deep_learning.grid_slicing import (
     MAX_OVERLAP_PERCENT,
     MAX_TILE_SIZE,
@@ -108,7 +109,6 @@ from app.ui.deep_learning.raster_io import (
     write_mask_geotiff,
 )
 from app.ui.deep_learning.sam_cache import clear_cache
-from app.ui.deep_learning.sam_settings_dialog import SamSettingsDialog
 
 logger = get_logger(__name__)
 
@@ -205,6 +205,8 @@ class AnnotationPage(QWidget):
 
     #: 用户点了「关闭」/ Ctrl+W：由主窗口切回地图页（页面状态保留）
     close_requested = pyqtSignal()
+    #: 设置中心应用后通知主窗口同步训练 / 推理页的外部 Python
+    settings_applied = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -1752,15 +1754,22 @@ class AnnotationPage(QWidget):
         self._show_status("SAM 权重已更新，点击「加载模型」生效")
 
     def _open_sam_settings(self) -> None:
-        """模态打开 SAM 设置；控件已即时写 QSettings，关闭后统一应用。"""
+        """模态打开深度学习设置（落在模型管理页）；关闭后应用 SAM 配置。"""
         old = self._config.sam
-        dialog = SamSettingsDialog(old, self)
+        current = load_deep_learning_config()
+        current = replace(current, sam=resolve_sam_paths(current.sam))
+        dialog = DeepLearningSettingsDialog(current, self, initial_tab="models")
         try:
             dialog.exec()
-            new = dialog.config()
+            new_config = dialog.config()
         finally:
             dialog.deleteLater()
-        self._apply_sam_settings(old, new)
+        self._apply_sam_settings(old, new_config.sam)
+        self.settings_applied.emit()
+
+    def apply_sam_config(self, new: SamConfig) -> None:
+        """供主窗口「深度学习 → 设置」应用 SAM 部分配置。"""
+        self._apply_sam_settings(self._config.sam, new)
 
     def _apply_sam_settings(self, old: SamConfig, new: SamConfig) -> None:
         restart_keys = (
@@ -2251,8 +2260,9 @@ class AnnotationPage(QWidget):
             "一一对应（行列从 1 开始，与宫格面板编号一致），勾选后可同时输出 GeoTIFF；\n"
             "6. 用「工程 → 保存标注工程」把影像清单、宫格参数、标签、进度和上次位置"
             "存到 `.qann` 文件；退出标注窗口时会提示保存。\n\n"
-            "SAM 权重不随软件分发。请在「功能 → SAM 设置…」中安装依赖、下载 SAM1/SAM2/SAM3 "
-            "模型（SAM3 权重需在 HuggingFace 申请授权），并在「模型选择」里加载权重。",
+            "SAM 权重不随软件分发。请在「功能 → SAM 设置…」或「深度学习 → 设置」中"
+            "安装依赖、下载 SAM1/SAM2/SAM3 模型（SAM3 权重需在 HuggingFace 申请授权），"
+            "并在「模型选择」里加载权重。",
         )
 
     def _show_about(self) -> None:

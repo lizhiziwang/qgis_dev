@@ -467,7 +467,7 @@ class WindowChromeMixin:
         return tb
 
     def _build_deep_learning_toolbar(self) -> QToolBar:
-        """「深度学习」tab 工具条：标注 / 训练 / 推理三个业务入口。"""
+        """「深度学习」tab 工具条：标注 / 训练 / 推理业务入口 + 统一设置。"""
         tb = QToolBar("深度学习", self)
         tb.setObjectName("DeepLearningTabToolbar")
         tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
@@ -476,7 +476,10 @@ class WindowChromeMixin:
             ("标注", "对样本数据进行标注"),
             ("训练", "训练深度学习模型"),
             ("推理", "用训练好的模型对新影像做预测"),
+            ("设置", "统一管理标注 / 训练 / 推理的外部依赖、SAM 模型与缓存"),
         ):
+            if text == "设置":
+                tb.addSeparator()
             act = QAction(text, self)
             act.setToolTip(tip)
             # triggered 会带 bool 参数，用默认参数把按钮文案绑进去
@@ -489,7 +492,7 @@ class WindowChromeMixin:
         return tb
 
     def _on_deep_learning_tool(self, name: str) -> None:
-        """「标注 / 训练 / 推理」入口：打开对应的中央区工作页面。"""
+        """「标注 / 训练 / 推理 / 设置」入口。"""
         if name == "标注":
             opener = getattr(self, "_open_annotation_page", None)
             if opener is not None:
@@ -510,6 +513,13 @@ class WindowChromeMixin:
                 opener()
                 return
             QMessageBox.warning(self, "深度学习", "推理窗口不可用（缺少入口方法）")
+            return
+        if name == "设置":
+            opener = getattr(self, "_open_deep_learning_settings", None)
+            if opener is not None:
+                opener()
+                return
+            QMessageBox.warning(self, "深度学习", "设置窗口不可用（缺少入口方法）")
             return
         QMessageBox.information(self, "深度学习", f"「{name}」功能正在开发中")
 

@@ -631,6 +631,7 @@ class AppActionsMixin:
 
                 page = AnnotationPage(self)
                 page.close_requested.connect(self._close_annotation_page)
+                page.settings_applied.connect(self._on_annotation_settings_applied)
                 self._central_stack.addWidget(page)
                 self._annotation_page = page
             self._annotation_page_open = True
@@ -806,6 +807,59 @@ class AppActionsMixin:
         else:
             self._central_stack.setCurrentWidget(self._map_page)
             self.canvas.setFocus(Qt.FocusReason.OtherFocusReason)
+
+    def _open_deep_learning_settings(self) -> None:
+        """打开统一设置中心：依赖 / SAM 模型 / 缓存。"""
+        try:
+            from app.infra.deep_learning import (  # noqa: PLC0415 - 延迟导入，避免主窗口启动即加载配置
+                load_deep_learning_config,
+            )
+            from app.ui.deep_learning.deep_learning_settings_dialog import (  # noqa: PLC0415 - 设置对话框按需加载
+                DeepLearningSettingsDialog,
+            )
+
+            dialog = DeepLearningSettingsDialog(load_deep_learning_config(), self)
+            try:
+                dialog.exec()
+                dialog.config()  # 触发共享 Python / SAM 源码最终持久化
+                fresh = load_deep_learning_config()
+            finally:
+                dialog.deleteLater()
+            self._apply_deep_learning_environment(fresh)
+        except Exception as exc:  # noqa: BLE001
+            # 槽内异常会 native 崩溃，务必兜住（见 qgis-ui-integration-gotchas）
+            get_logger(__name__).error("打开深度学习设置失败：%s", exc, exc_info=True)
+            if hasattr(self, "messageBar"):
+                self.messageBar.pushWarning("深度学习设置", f"打开失败：{exc}")
+
+    def _apply_deep_learning_environment(
+        self, config, *, apply_annotation: bool = True
+    ) -> None:
+        """把最新配置同步到已经创建的页面；未创建的页面下次打开自行加载。"""
+        annotation = getattr(self, "_annotation_page", None)
+        if apply_annotation and annotation is not None:
+            annotation.apply_sam_config(config.sam)
+        training = getattr(self, "_training_page", None)
+        if training is not None:
+            training.apply_environment_python(config.training.python)
+        inference = getattr(self, "_inference_page", None)
+        if inference is not None:
+            inference.apply_environment_python(config.inference.python)
+
+    def _on_annotation_settings_applied(self) -> None:
+        """标注页的设置中心已应用 SAM 配置，这里只同步训练 / 推理解释器。"""
+        try:
+            from app.infra.deep_learning import (  # noqa: PLC0415 - 槽内按需读取最新配置
+                load_deep_learning_config,
+            )
+
+            self._apply_deep_learning_environment(
+                load_deep_learning_config(), apply_annotation=False
+            )
+        except Exception as exc:  # noqa: BLE001
+            get_logger(__name__).error("同步深度学习环境失败：%s", exc, exc_info=True)
+            if hasattr(self, "messageBar"):
+                self.messageBar.pushWarning("深度学习设置", f"同步失败：{exc}")
 
     def _attribute_docks(self) -> dict:
         """图层 id → 该图层的属性表面板（同一图层复用同一个，不同图层各开一个）。"""

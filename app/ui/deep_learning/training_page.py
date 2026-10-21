@@ -14,6 +14,7 @@ import json
 import subprocess
 import time
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -156,6 +157,19 @@ class TrainingPage(QWidget):
 
     def _python(self) -> str:
         return self._training_config().python or self._config.sam.python
+
+    def apply_environment_python(self, python: str) -> None:
+        """应用设置中心里的训练解释器；运行中的进程不受影响。"""
+        python = str(python or "")
+        self._config = replace(
+            self._config,
+            training=replace(self._config.training, python=python),
+        )
+        self.client.python = python
+        running = bool(getattr(self, "_training", False) or self.client.is_running)
+        self._append_log(
+            "训练外部 Python 已更新，下次训练生效" if running else "训练外部 Python 已更新"
+        )
 
     # ------------------------------------------------------------------ 装配
     def _build_container(self) -> None:

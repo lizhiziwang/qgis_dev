@@ -14,8 +14,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
-from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtGui import QColor, QImage
+from qgis.PyQt.QtCore import QSize
+from qgis.PyQt.QtGui import QColor, QImage, QImageReader
 
 from app.infra.logging import get_logger
 
@@ -58,6 +58,8 @@ class RasterInfo:
     unit: str = ""
     nodata: float | None = None
     band_names: tuple[str, ...] = field(default_factory=tuple)
+    #: 第一波段的 overview 级数（0 = 没有金字塔，QGIS 全图渲染会读取整幅影像）
+    overview_count: int = 0
 
     @property
     def georeferenced(self) -> bool:
@@ -95,6 +97,7 @@ def read_raster_info(path: str | Path) -> RasterInfo:
             if geotransform:
                 pixel_size = (abs(geotransform[1]), abs(geotransform[5]))
             nodata = band.GetNoDataValue()
+            overview_count = band.GetOverviewCount()
             dataset = None
             return RasterInfo(
                 path=path,
@@ -109,18 +112,22 @@ def read_raster_info(path: str | Path) -> RasterInfo:
                 unit=unit or "",
                 nodata=nodata,
                 band_names=tuple(names),
+                overview_count=overview_count,
             )
     except Exception as exc:  # noqa: BLE001 —— 元信息失败不影响手动标注
         logger.warning("读取影像元信息失败 %s：%s", path, exc)
 
-    image = QImage(path)
+    reader = QImageReader(path)
+    size = reader.size()
+    width = size.width() if size.isValid() else 0
+    height = size.height() if size.isValid() else 0
     return RasterInfo(
         path=path,
-        width=image.width(),
-        height=image.height(),
-        band_count=3 if image.format() != QImage.Format.Format_Grayscale8 else 1,
+        width=width,
+        height=height,
+        band_count=3,
         dtype_name="Byte",
-        band_names=("band_1", "band_2", "band_3") if image.format() != QImage.Format.Format_Grayscale8 else ("band_1",),
+        band_names=("band_1", "band_2", "band_3"),
     )
 
 
@@ -166,17 +173,18 @@ def read_preview(
         return _stack_rgb(arrays, bool(count == 1 or len(set(chosen)) == 1)), out_w / width if width else 1.0
     except Exception as exc:
         logger.warning("GDAL 读取预览失败，改用 QImage：%s（%s）", path, exc)
-        image = QImage(path)
+        reader = QImageReader(path)
+        size = reader.size()
+        if not size.isValid():
+            raise OSError(f"无法读取影像：{path}") from exc
+        scale = min(1.0, max_side / max(size.width(), size.height()))
+        out_w = max(1, round(size.width() * scale))
+        out_h = max(1, round(size.height() * scale))
+        # 用 QImageReader 直接按目标尺寸解码，避免超大影像先整幅载入内存
+        reader.setScaledSize(QSize(out_w, out_h))
+        image = reader.read()
         if image.isNull():
             raise OSError(f"无法读取影像：{path}") from exc
-        scale = min(1.0, max_side / max(image.width(), image.height()))
-        if scale < 1.0:
-            image = image.scaled(
-                max(1, round(image.width() * scale)),
-                max(1, round(image.height() * scale)),
-                Qt.AspectRatioMode.IgnoreAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
         if image.format() != QImage.Format.Format_RGB888:
             image = image.convertToFormat(QImage.Format.Format_RGB888)
         return image, scale
