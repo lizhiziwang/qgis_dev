@@ -98,6 +98,8 @@ _TOOL_KEYS = frozenset({
 #: 图标 key 别名：按钮的**高亮 key** 与顶部工具条区分（``side_zoom`` 独立高亮），
 #: 但图标复用 ``zoom_in`` 的那张，外观不变。
 _ICON_ALIAS = {"side_zoom": "zoom_in", "spatial_query": "space_query_polygon"}
+#: 按钮提示文案覆盖（默认用按钮文字）；「缩放」说明单击放大 / Shift 单击缩小。
+_TOOLTIPS = {"side_zoom": "点击地图放大，按住shift键点击地图缩小"}
 #: 会话型工具 key（独立常亮，不受地图工具切换影响；与顶部工具条同 key）。
 #: 「定位」也归这里：点开气泡 → 按钮保持高亮表示"气泡在显示"，
 #: 关闭气泡（再点同按钮或气泡上的 ×）→ 按钮弹起，与分屏会话同一套高亮逻辑。
@@ -216,7 +218,7 @@ class SideToolBar:
         font.setPointSize(8)  # 这里改字号，pt单位；或者 setPixelSize(10) 像素单位
         btn.setFont(font)
 
-        btn.setToolTip(text)
+        btn.setToolTip(_TOOLTIPS.get(key, text))
         icon_key = _ICON_ALIAS.get(key, key)
         btn.setIcon(tool_icons.icon(icon_key, color, _ICON))
         btn.setIconSize(QSize(_ICON, _ICON))

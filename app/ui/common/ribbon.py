@@ -13,13 +13,16 @@ Qt 的 :class:`QToolBar` 布局只会
 
 这样不改变工具条的 action 结构（``actions()`` 仍是全部工具 QAction），
 现有按 ``text()`` 查 action 的代码与测试都不受影响。
+
+另外提供 :class:`AlignedToolBar`：修正 QToolBar 收缩时自带的扩展按钮（三个点）
+与普通按钮的垂直对齐问题（Ribbon 加高后扩展按钮仍贴顶，见该类 docstring）。
 """
 
 from __future__ import annotations
 
-from qgis.PyQt.QtCore import QRect, QSize, Qt
+from qgis.PyQt.QtCore import QEvent, QRect, QSize, Qt, QTimer
 from qgis.PyQt.QtGui import QAction, QColor, QPainter
-from qgis.PyQt.QtWidgets import QToolBar
+from qgis.PyQt.QtWidgets import QToolBar, QToolButton
 
 from app.ui.common.theme import RIBBON_FONT_PX, TOOLBAR_ITEM_GAP
 
@@ -40,7 +43,65 @@ BOTTOM_PAD = 5
 BUTTON_WIDTH = 54
 
 
-class RibbonToolBar(QToolBar):
+class AlignedToolBar(QToolBar):
+    """扩展按钮（三个点）与普通工具按钮垂直对齐的 :class:`QToolBar`。
+
+    QToolBar 收缩放不下时会出现自带的扩展按钮（``qt_toolbar_ext_button``）。它由
+    ``QToolBarLayout`` 直接贴顶摆放，而普通按钮在内容区里垂直居中；Ribbon 工具条
+    为了给组名留白又额外加高了 ``2 * GROUP_BAND``，于是扩展按钮会比普通按钮高出
+    一截（实测 15px），看着像没对齐。
+
+    ``QToolBarLayout`` 会在 resize / LayoutRequest 之后重新摆扩展按钮的几何，所以
+    这里不能在 ``resizeEvent`` 里立即改（会被随后的一次布局覆盖），而是排一个
+    0ms 定时器，等布局跑完再按第一个可见 action 按钮的 ``y`` / 高度对齐。
+    """
+
+    def __init__(self, title: str, parent=None) -> None:
+        super().__init__(title, parent)
+        # 定时器挂在工具条自己身上：工具条销毁时 Qt 会一并销毁，不会留下
+        # 已删对象的回调（静态 QTimer.singleShot 绑定方法做不到这一点）。
+        self._ext_align_timer = QTimer(self)
+        self._ext_align_timer.setSingleShot(True)
+        self._ext_align_timer.setInterval(0)
+        self._ext_align_timer.timeout.connect(self._align_extension_button)
+
+    def event(self, event) -> bool:
+        handled = super().event(event)
+        if event.type() in (
+            QEvent.Type.LayoutRequest,
+            QEvent.Type.Resize,
+            QEvent.Type.Show,
+        ):
+            self._schedule_extension_alignment()
+        return handled
+
+    def _schedule_extension_alignment(self) -> None:
+        if not self._ext_align_timer.isActive():
+            self._ext_align_timer.start()
+
+    def _align_extension_button(self) -> None:
+        if self.orientation() != Qt.Orientation.Horizontal:
+            return
+        ext = self.findChild(QToolButton, "qt_toolbar_ext_button")
+        if ext is None or not ext.isVisible():
+            return
+        reference = None
+        for action in self.actions():
+            if action.isSeparator():
+                continue
+            widget = self.widgetForAction(action)
+            if widget is not None and widget.isVisible():
+                reference = widget
+                break
+        if reference is None:
+            return
+        geometry = ext.geometry()
+        if geometry.y() == reference.y() and geometry.height() == reference.height():
+            return
+        ext.setGeometry(geometry.x(), reference.y(), geometry.width(), reference.height())
+
+
+class RibbonToolBar(AlignedToolBar):
     """带「组名」的 Ribbon 工具条，见模块 docstring。"""
 
     def __init__(self, title: str, parent=None) -> None:
@@ -131,4 +192,10 @@ class RibbonToolBar(QToolBar):
         painter.end()
 
 
-__all__ = ["BOTTOM_PAD", "BUTTON_WIDTH", "GROUP_BAND", "RibbonToolBar"]
+__all__ = [
+    "BOTTOM_PAD",
+    "BUTTON_WIDTH",
+    "GROUP_BAND",
+    "AlignedToolBar",
+    "RibbonToolBar",
+]
