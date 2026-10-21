@@ -327,8 +327,20 @@ class SideToolBar:
             return
         menu = QMenu(widget)
         menu.setObjectName("SideToolBarMoreMenu")
-        panel = QWidget(menu)
+        # QMenu 只当弹出容器用：去掉它自己的底 / 边框，让里面的 FrostedPanel 透出
+        # 背后地图（与侧栏同一套毛玻璃底）；否则会盖上一层不透明的菜单底色。
+        menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        menu.setWindowFlags(
+            menu.windowFlags() | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint
+        )
+        menu.setStyleSheet(
+            "QMenu { background: transparent; border: none; padding: 0px; }"
+            "QMenu::item { padding: 0px; background: transparent; }"
+        )
+        canvas = getattr(self.main_window, "canvas", None)
+        panel = FrostedPanel(canvas, parent=menu)
         panel.setObjectName("SideToolBarMorePanel")
+        panel.setFixedWidth(52)
         # 与侧栏按钮同一套内边距 / 圆角；配色与悬停态继续走全局 QSS。
         panel.setStyleSheet(f"QToolButton {{ padding: 0px; border-radius: {TOOLBAR_BUTTON_RADIUS}px; }}")
         layout = QVBoxLayout(panel)
