@@ -828,6 +828,7 @@ def app_qss(t: Theme) -> str:
         font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
         font-size: 12px;
     }}
+    QDockWidget > QWidget {{ background-color: {t.window_bg}; }}
     /* 滚动区：**viewport 必须显式透明**。QScrollArea 的 viewport 是个 QWidget，
        默认按调色板的 Base/Window 色（浅色）自绘 —— 深色主题下就在弹窗里留下一大块
        浅灰，而里面的字段标签用主题文字色（浅色）画上去，直接看不见了（用户报
