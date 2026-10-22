@@ -22,8 +22,8 @@ from qgis.PyQt.QtWidgets import (
 from app.core.domain.oriented_bbox import OrientedBBoxJob, OrientedBBoxService
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
-from app.ui.common.algo_desc import make_description_browser
-from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.algo_desc import make_description_panel
+from app.ui.common.base_dialog import BaseDialog, make_scrollable
 
 logger = get_logger(__name__)
 
@@ -60,9 +60,9 @@ class OrientedBBoxDialog(BaseDialog):
 
         param_panel = QWidget()
         self._init_parameters_panel(param_panel)
-        main.addWidget(param_panel, stretch=3)
+        main.addWidget(make_scrollable(param_panel), stretch=3)
 
-        main.addWidget(make_description_browser("native:orientedminimumboundingbox"), stretch=2)
+        main.addWidget(make_description_panel("native:orientedminimumboundingbox"), stretch=1)
         layout.addLayout(main, stretch=1)
 
         b_l = QVBoxLayout()
@@ -91,6 +91,7 @@ class OrientedBBoxDialog(BaseDialog):
         layout.addLayout(b_l)
 
         self.setLayout(layout)
+        self.fit_height_to_content(param_panel)
 
     def _init_parameters_panel(self, parent) -> None:
         layout = QVBoxLayout(parent)

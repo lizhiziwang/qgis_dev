@@ -6,8 +6,8 @@
 :class:`app.core.domain.generic_alg.GenericAlgService` 跑算法。
 
 复用 :class:`BufferDialog` 的 layout（左参数 + 右算法描述 + 下按钮 / 进度条），
-但不写死任何参数名。Advanced flag 的参数折叠到「高级」``QGroupBox`` 内，与
-QGIS 自家工具箱保持一致。
+但不写死任何参数名。Advanced flag 的参数放在普通参数之后，由「高级」复选框
+统一展开 / 收起，并与普通参数共用同一套表单列。
 
 执行在**后台线程**（``QgsProcessingAlgRunnerTask``，与 QGIS processing 对话框
 同一机制）跑，主线程事件循环不阻塞——GDAL 大栅格处理不再卡死 UI；带进度条与
@@ -20,19 +20,20 @@ import os
 from typing import Optional
 
 from qgis.PyQt.QtCore import QTimer
-from qgis.PyQt.QtGui import QGuiApplication
 from qgis.PyQt.QtWidgets import (
+    QCheckBox,
+    QComboBox,
     QFileDialog,
     QFormLayout,
-    QGroupBox,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
-    QMainWindow,
     QProgressBar,
     QPushButton,
     QScrollArea,
     QSizePolicy,
+    QTableView,
     QVBoxLayout,
     QWidget,
 )
@@ -42,6 +43,8 @@ from qgis.core import (
     QgsApplication,
     QgsMapLayer,
     QgsProcessingParameterDefinition,
+    QgsProcessingParameterEnum,
+    QgsProcessingParameterExtent,
     QgsProject,
 )
 from qgis.gui import (
@@ -59,8 +62,14 @@ from app.core.domain.generic_alg import (
 )
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
-from app.ui.common.algo_desc import make_description_browser
+from app.ui.common.algo_desc import make_description_panel
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.processing_zh import (
+    algorithm_title,
+    enum_label,
+    parameter_label,
+    parameter_tooltip,
+)
 
 logger = get_logger(__name__)
 
@@ -90,19 +99,21 @@ class GenericAlgDialog(BaseDialog):
     构造参数：
     :param parent: 父窗口
     :param algo_id: 算法 id（``gdal:warpreproject`` / ``native:buffer`` 等）
-    :param title: 可选；为空时取 ``alg.displayName()``
+    :param title: 可选；为空时取算法中文标题（无映射时用 ``alg.displayName()``）
     """
 
     def __init__(self, parent=None, algo_id: str = "", title: str = "") -> None:
         self._algo_id = algo_id
         self._alg = self._resolve_algorithm(algo_id)
+        self._algo_title = algorithm_title(
+            algo_id, self._alg.displayName() if self._alg else algo_id
+        )
         if not title:
-            title = self._alg.displayName() if self._alg else algo_id
+            title = self._algo_title
         super().__init__(parent, title)
         self.setMinimumSize(760, 620)
-        # 最大高度对齐主窗口：避免 57 个 GDAL 算法参数面板太长时
-        # 超出主窗口范围；保留父级 QMainWindow 的实际可用高度，
-        # 没父级时退到当前屏幕可用高度减 80px 留出任务栏空间。
+        # 最大高度用屏幕可用高度（留出任务栏 / 边缘）：Grid IDW、PostgreSQL
+        # 导出等参数特别多的算法比主窗口还高，按主窗口封顶会一直差一点。
         max_h = self._resolve_max_height(parent)
         if max_h:
             self.setMaximumHeight(max_h)
@@ -134,23 +145,13 @@ class GenericAlgDialog(BaseDialog):
     # ----------------------------------------------------------- helpers
 
     def _resolve_max_height(self, parent) -> Optional[int]:
-        """算出 dialog 最大高度：与父 QMainWindow 高度对齐，无父级退到屏幕。
+        """算出 dialog 最大高度：取屏幕可用高度（留出任务栏 / 边缘）。
 
-        用户反馈：「gdal所有的算法的最大高度改为和mainwindow一致」——很多
-        GDAL 算法参数面板行数多（gdal:warpreproject 10+ 行），如果不限制，
-        dialog sizeHint 会撑到 900+ px（实测 927），比 mainwindow 800 还高。
-        走父链找 QMainWindow 拿真实高度；找不到再退到 QScreen.availableGeometry
-        减 80（任务栏）。
+        参数特别多的算法（Grid IDW / PostgreSQL 导出等）比主窗口还高；
+        若按主窗口高度封顶，会永远差一点、必须滚动。这里改用父类统一的
+        屏幕可用高度上限，让窗口能完整展开。
         """
-        node = parent
-        while node is not None:
-            if isinstance(node, QMainWindow) and node.height() > 0:
-                return node.height()
-            node = node.parentWidget() if hasattr(node, "parentWidget") else None
-        screen = QGuiApplication.primaryScreen()
-        if screen is not None:
-            return max(400, screen.availableGeometry().height() - 80)
-        return None
+        return self._max_window_height()
 
     def _resolve_algorithm(self, algo_id: str):
         if not algo_id:
@@ -197,7 +198,7 @@ class GenericAlgDialog(BaseDialog):
         param_scroll.setWidget(param_panel)
         main.addWidget(param_scroll, stretch=3)
 
-        main.addWidget(make_description_browser(self._algo_id), stretch=2)
+        main.addWidget(make_description_panel(self._algo_id), stretch=1)
         layout.addLayout(main, stretch=1)
 
         b_l = QVBoxLayout()
@@ -232,13 +233,19 @@ class GenericAlgDialog(BaseDialog):
         layout.addLayout(b_l)
 
         self.setLayout(layout)
+        self.fit_height_to_content(param_panel, extra=24)
+
+    def showEvent(self, event) -> None:
+        """窗口显示后统一表格列宽（rasteroptions 自己会在 showEvent 里改列宽）。"""
+        super().showEvent(event)
+        QTimer.singleShot(0, self._apply_creation_table_columns)
 
     def _init_parameters_panel(self, parent) -> None:
         """按 ``alg.parameterDefinitions()`` 走表生成表单。
 
         - 跳过 hidden flag（0x04，``FlagHidden``）
         - 跳过 destination 输出参数（统一走底部输出面板）
-        - Advanced flag（0x02，``FlagAdvanced``）→ 折叠到「高级」分组
+        - Advanced flag（0x02，``FlagAdvanced``）→ 放到普通参数之后，可勾选展开
         - 字段增长策略用 :attr:`QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow`
           —— QGIS wrapper 默认 size policy 是 ``Preferred``，若用
           ``ExpandingFieldsGrow`` 只会拉伸 ``Expanding`` 子控件，下拉框会卡
@@ -248,25 +255,21 @@ class GenericAlgDialog(BaseDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(8)
 
-        normal_form = QFormLayout()
-        normal_form.setFieldGrowthPolicy(
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setFieldGrowthPolicy(
             QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
         )
-        normal_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
-        normal_form.setSpacing(6)
+        form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+        form.setSpacing(6)
 
-        advanced_form = QFormLayout()
-        advanced_form.setFieldGrowthPolicy(
-            QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
-        )
-        advanced_form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
-        advanced_form.setSpacing(6)
-        advanced_box = QGroupBox("高级")
-        advanced_box.setCheckable(True)
-        advanced_box.setChecked(False)
-        advanced_box.setLayout(advanced_form)
-
-        normal_count = advanced_count = 0
+        advanced_count = 0
+        #: (是否高级, 标签控件或 None, 字段控件, 跨列控件, 跨列控件里的表格)
+        rows: list[
+            tuple[bool, Optional[QLabel], QWidget, Optional[QWidget], Optional[QWidget]]
+        ] = []
+        label_widgets: list[QLabel] = []
+        self._creation_tables: list[tuple[QWidget, int]] = []
         for pdef in self._alg.parameterDefinitions():
             name = pdef.name()
             if pdef.flags() & QgsProcessingParameterDefinition.Flag.FlagHidden:
@@ -276,43 +279,109 @@ class GenericAlgDialog(BaseDialog):
                 continue
             self._wrappers[name] = wrapper
 
-            target_form = advanced_form if (
+            is_advanced = bool(
                 pdef.flags() & QgsProcessingParameterDefinition.Flag.FlagAdvanced
-            ) else normal_form
-
+            )
             label = wrapper.createWrappedLabel()
             widget = wrapper.createWrappedWidget(self._ctx_gen.processingContext())
             if widget is None:
                 continue
-            widget.setToolTip(pdef.toolTip() or pdef.description())
+            label_text = self._parameter_label_text(pdef)
+            tooltip = parameter_tooltip(pdef)
+            self._apply_widget_tooltip(widget, pdef, tooltip)
+            self._translate_enum_options(widget, pdef)
             # 兜底：显式把横向 size policy 设为 Expanding，与上面增长策略配对
             # —— 防止某些 wrapper 子控件（多套一层 QWidget 容器）默认 Preferred
-            # 在 QGroupBox 内仍被压成最小宽度
+            # 被压成最小宽度
             widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Preferred)
-            if label is None:
-                desc = pdef.description() or pdef.name()
-                if isinstance(pdef, __import__("qgis.core", fromlist=["QgsProcessingParameterExtent"]).QgsProcessingParameterExtent):
-                    desc += "（xmin, xmax, ymin, ymax）"
-                if pdef.flags() & QgsProcessingParameterDefinition.Flag.FlagOptional:
-                    desc += " [可选]"
-                label_widget = QLabel(desc)
+            # rasteroptions 是「配置下拉 + 名称/值表格」。把表格所在的那块面板
+            # 单独取出来跨列放在该参数下面，才能让表格的两列跟普通参数的
+            # 标签列 / 字段列对齐。
+            span_widget, span_table = self._take_raster_options_panel(pdef, widget)
+            if label is None and isinstance(widget, QCheckBox) and widget.text().strip():
+                # 布尔参数的 wrapper 把描述写在复选框文字里（createLabel 返回 None），
+                # 再额外加一行 QLabel 会出现前后两条一样的说明。这里只保留复选框，
+                # 并放进第二列（字段列），与其他参数控件按同一层级对齐。
+                widget.setText(label_text)
+                rows.append((is_advanced, None, widget, span_widget, span_table))
+            elif label is None:
+                label_widget = QLabel(label_text)
                 label_widget.setSizePolicy(
                     QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred
                 )
-                target_form.addRow(label_widget, widget)
+                label_widgets.append(label_widget)
+                rows.append((is_advanced, label_widget, widget, span_widget, span_table))
             else:
-                target_form.addRow(label, widget)
+                if isinstance(label, QLabel):
+                    label.setText(label_text)
+                    # wrapper 建标签时会把英文 toolTip 一并挂上；标题已经是中文，
+                    # 不再在悬停时补一遍对应英文。
+                    label.setToolTip(tooltip)
+                    label_widgets.append(label)
+                rows.append((is_advanced, label, widget, span_widget, span_table))
 
-            if pdef.flags() & QgsProcessingParameterDefinition.Flag.FlagAdvanced:
+            if is_advanced:
                 advanced_count += 1
-            else:
-                normal_count += 1
 
-        # 高级框仅在确实有 advanced 参数时显示
+        label_width = 0
+        if label_widgets:
+            label_width = max(widget.sizeHint().width() for widget in label_widgets)
+            for widget in label_widgets:
+                widget.setMinimumWidth(label_width)
+
+        def add_row(
+            label: Optional[QLabel],
+            widget: QWidget,
+            span: Optional[QWidget],
+            span_table: Optional[QWidget],
+        ) -> None:
+            if label is None:
+                form.addRow("", widget)
+            else:
+                form.addRow(label, widget)
+            if span is not None:
+                form.addRow(span)
+                if span_table is not None:
+                    spacing = form.horizontalSpacing()
+                    if spacing < 0:
+                        spacing = 6
+                    self._creation_tables.append(
+                        (span_table, max(0, label_width + spacing))
+                    )
+
+        # 普通参数、高级开关、高级参数全部走同一个 QFormLayout，列宽天然一致
+        for is_advanced, label, widget, span, span_table in rows:
+            if is_advanced:
+                continue
+            add_row(label, widget, span, span_table)
+
         if advanced_count:
-            layout.addWidget(advanced_box)
-        # normal_form 必须有至少一行才挂（QFormLayout 行为）
-        layout.addLayout(normal_form)
+            advanced_toggle = QCheckBox("高级")
+            # 「高级」是分组开关，不是普通参数值，放回第一列（作为分组标题行）。
+            form.addRow(advanced_toggle)
+            advanced_widgets: list[QWidget] = []
+            for is_advanced, label, widget, span, span_table in rows:
+                if not is_advanced:
+                    continue
+                add_row(label, widget, span, span_table)
+                if label is not None:
+                    advanced_widgets.append(label)
+                advanced_widgets.append(widget)
+                if span is not None:
+                    advanced_widgets.append(span)
+
+            def _set_advanced_visible(visible: bool) -> None:
+                for child in advanced_widgets:
+                    child.setVisible(visible)
+                # rasteroptions 面板显示时会自己重设表格列宽，等事件处理完再按
+                # 表单列宽覆盖一次。
+                QTimer.singleShot(0, self._apply_creation_table_columns)
+
+            advanced_toggle.toggled.connect(_set_advanced_visible)
+            advanced_toggle.setChecked(False)
+            _set_advanced_visible(False)
+
+        layout.addLayout(form)
         layout.addStretch()
 
         # 工程图层增删后刷新 wrapper（layer/band/field 等下拉内容）
@@ -337,6 +406,83 @@ class GenericAlgDialog(BaseDialog):
             )
             return None
 
+    @staticmethod
+    def _parameter_label_text(pdef) -> str:
+        """参数中文标签（含可选 / 范围等提示）。"""
+        text = parameter_label(pdef.description() or pdef.name())
+        if isinstance(pdef, QgsProcessingParameterExtent):
+            text += "（xmin, xmax, ymin, ymax）"
+        if pdef.flags() & QgsProcessingParameterDefinition.Flag.FlagOptional:
+            text += "（可选）"
+        return text
+
+    @staticmethod
+    def _apply_widget_tooltip(widget: QWidget, pdef, tooltip: str) -> None:
+        """用中文提示覆盖 wrapper 自带的英文 tooltip（描述不再重复）。"""
+        widget.setToolTip(tooltip)
+        desc = (pdef.description() or "").strip()
+        for child in widget.findChildren(QWidget):
+            current = child.toolTip()
+            if not current:
+                continue
+            # wrapper 生成的提示统一是 <p><b>描述</b></p><p>Python identifier…；
+            # 只清理这类提示，保留子控件自己的功能说明。
+            if current.lstrip().startswith("<p><b>") or (desc and desc in current):
+                child.setToolTip(tooltip)
+
+    @staticmethod
+    def _translate_enum_options(widget: QWidget, pdef) -> None:
+        """把枚举参数下拉框里的英文选项换成中文。"""
+        if not isinstance(pdef, QgsProcessingParameterEnum):
+            return
+        combos = (
+            [widget]
+            if isinstance(widget, QComboBox)
+            else widget.findChildren(QComboBox)
+        )
+        for combo in combos:
+            for index in range(combo.count()):
+                option = combo.itemText(index)
+                translated = enum_label(option)
+                if translated != option:
+                    combo.setItemText(index, translated)
+
+    @staticmethod
+    def _take_raster_options_panel(
+        pdef, widget: QWidget
+    ) -> tuple[Optional[QWidget], Optional[QWidget]]:
+        """取出 rasteroptions 的表格面板与表格本身。
+
+        QGIS 的 ``rasteroptions`` wrapper 把「Profile 下拉 + 选项表格」放在同一个
+        字段控件里，表格整体落在字段列内，两列自然和上面的普通参数对不齐。
+        这里把表格所在的 ``mOptionsWidget`` 摘出来，稍后作为跨列行放到该参数
+        下面，再按表单列宽设置表格列宽。
+        """
+        metadata = pdef.metadata() or {}
+        wrapper_meta = metadata.get("widget_wrapper") or {}
+        if wrapper_meta.get("widget_type") != "rasteroptions":
+            return None, None
+        options_panel = widget.findChild(QWidget, "mOptionsWidget")
+        table = widget.findChild(QTableView, "mOptionsTable")
+        if options_panel is None or table is None:
+            return None, None
+        parent = options_panel.parentWidget()
+        if parent is not None and parent.layout() is not None:
+            parent.layout().removeWidget(options_panel)
+        options_panel.setParent(None)
+        return options_panel, table
+
+    def _apply_creation_table_columns(self) -> None:
+        """按表单列宽设置跨列表格的列宽（第二列对齐字段列）。"""
+        for table, first_width in getattr(self, "_creation_tables", []):
+            header = getattr(table, "horizontalHeader", lambda: None)()
+            model = table.model()
+            if header is None or model is None or model.columnCount() < 2:
+                continue
+            header.setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+            header.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+            table.setColumnWidth(0, first_width)
+
     def _refresh_wrappers(self, *args) -> None:
         """图层增删后通知所有 wrapper 刷新下拉内容。"""
         for wrapper in self._wrappers.values():
@@ -359,7 +505,7 @@ class GenericAlgDialog(BaseDialog):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
 
-        self.output_edit = QLineEdit(self._alg.displayName() + " 结果")
+        self.output_edit = QLineEdit(self._algo_title + " 结果")
         layout.addRow("输出图层名", self.output_edit)
 
         self.output_path_edit = QLineEdit()
@@ -457,7 +603,7 @@ class GenericAlgDialog(BaseDialog):
         output_name = (
             self.output_edit.text().strip()
             if self._has_destination and hasattr(self, "output_edit")
-            else (self._alg.displayName() or self._algo_id)
+            else self._algo_title
         )
         output_path = (
             self.output_path_edit.text().strip()

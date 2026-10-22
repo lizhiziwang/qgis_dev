@@ -21,11 +21,37 @@
 from __future__ import annotations
 
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtWidgets import QDialog, QLayout, QWidget
+from qgis.PyQt.QtGui import QGuiApplication
+from qgis.PyQt.QtWidgets import (
+    QDialog,
+    QFrame,
+    QLayout,
+    QMainWindow,
+    QScrollArea,
+    QWidget,
+)
 
 from app.ui.common.frameless import FramelessMixin
 from app.ui.common.icons import Icons
 from app.ui.common.minimized_bar import MinimizedBar
+
+
+def make_scrollable(widget: QWidget, *, horizontal: bool = False) -> QScrollArea:
+    """把参数面板装进无边框滚动区。
+
+    对话框被纵向拉小时，内容保持自身最小高度并由滚动条承载，而不是把控件
+    压扁到看不清；内容本身不高时滚动条不出现。
+    """
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setFrameShape(QFrame.Shape.NoFrame)
+    scroll.setWidget(widget)
+    scroll.setHorizontalScrollBarPolicy(
+        Qt.ScrollBarPolicy.ScrollBarAsNeeded
+        if horizontal
+        else Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+    )
+    return scroll
 
 
 class BaseDialog(FramelessMixin, QDialog):
@@ -143,6 +169,65 @@ class BaseDialog(FramelessMixin, QDialog):
             content.setLayout(layout)
             return
         super().setLayout(layout)
+
+    # -------------------------------------------------------- 尺寸自适应
+
+    def fit_height_to_content(
+        self, content: QWidget, *, min_height: int = 0, extra: int = 0
+    ) -> None:
+        """按左侧参数内容高度调整初始窗口高度。
+
+        分析工具对话框的参数通常只比默认高度差一点，刚打开就出现滚动条；
+        这里在构造完成后按参数面板的 ``sizeHint`` 把窗口高度调到刚好容纳，
+        上限用屏幕可用高度（不再受主窗口高度限制），并可用 ``extra`` 再多留
+        一点余量避免边缘滚动条。用户后续拉小窗口时，参数区由
+        :func:`make_scrollable` 的滚动条承载，控件不会被压扁。
+        """
+        layout = self._content.layout()
+        if layout is None:
+            return
+        layout.activate()
+        main_h = content.sizeHint().height()
+        extra_h = 0
+        for index in range(1, layout.count()):
+            item = layout.itemAt(index)
+            if item is not None:
+                extra_h += item.sizeHint().height()
+        margins = layout.contentsMargins()
+        spacing = max(0, layout.spacing()) * max(0, layout.count() - 1)
+        title_h = max(self.title_bar.height(), self.title_bar.sizeHint().height())
+        total = (
+            main_h
+            + extra_h
+            + margins.top()
+            + margins.bottom()
+            + spacing
+            + title_h
+            + 4
+            + max(0, extra)
+        )
+        max_h = self._max_window_height()
+        if max_h:
+            total = min(total, max_h)
+        height = max(total, min_height, self.minimumHeight())
+        self.resize(self.width(), height)
+
+    def _max_window_height(self) -> int | None:
+        """可用的最大窗口高度：优先用屏幕可用高度。
+
+        参数特别多的算法（Grid IDW / PostgreSQL 导出等）比主窗口还高；
+        按主窗口高度封顶会永远差一点、必须滚动。这里改成屏幕可用高度
+        减 24px（留出任务栏 / 边缘），让这类窗口能完整展开。
+        """
+        screen = QGuiApplication.screenAt(self.pos()) or QGuiApplication.primaryScreen()
+        if screen is not None:
+            return max(400, screen.availableGeometry().height() - 24)
+        node = self.parent()
+        while node is not None:
+            if isinstance(node, QMainWindow) and node.height() > 0:
+                return node.height()
+            node = node.parent()
+        return None
 
     def set_ui(self) -> None:
         """子类重写以构建 UI。"""

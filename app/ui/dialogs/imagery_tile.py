@@ -43,8 +43,8 @@ from app.core.domain.imagery_tiles.service import (
 )
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
-from app.ui.common.algo_desc import make_description_browser
-from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.algo_desc import make_description_panel
+from app.ui.common.base_dialog import BaseDialog, make_scrollable
 from app.ui.common.widgets import open_file_dir
 
 logger = get_logger(__name__)
@@ -81,10 +81,10 @@ class ImageryTileDialog(BaseDialog):
 
         param_panel = QWidget()
         self._init_parameters_panel(param_panel)
-        main.addWidget(param_panel, stretch=3)
+        main.addWidget(make_scrollable(param_panel), stretch=3)
 
         # 右侧算法描述（与工具树共用同一套描述逻辑，见 algo_desc）
-        main.addWidget(make_description_browser("native:tilesxyzdirectory"), stretch=2)
+        main.addWidget(make_description_panel("native:tilesxyzdirectory"), stretch=1)
         layout.addLayout(main, stretch=1)
 
         # ---- 任务日志（实时显示算法输出）----
@@ -115,6 +115,7 @@ class ImageryTileDialog(BaseDialog):
         layout.addLayout(b_l)
 
         self.setLayout(layout)
+        self.fit_height_to_content(param_panel)
 
     def _init_parameters_panel(self, parent) -> None:
         layout = QVBoxLayout(parent)
