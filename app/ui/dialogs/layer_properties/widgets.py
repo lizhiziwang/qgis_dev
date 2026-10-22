@@ -50,15 +50,27 @@ class ColorButton(QPushButton):
         self._pick()
 
     def _sync(self) -> None:
-        # 内联样式只作用于这一颗按钮：色块背景 + 中性描边
+        # 内联样式只作用于这一颗按钮：色块背景 + 中性描边。
+        # 背景用 rgba，带透明度的颜色能直接看出来（不再只是纯色块）
+        c = self._color
+        bg = f"rgba({c.red()}, {c.green()}, {c.blue()}, {c.alpha()})"
         self.setStyleSheet(
             "QPushButton#PropColorBtn {"
-            f" background-color: {self._color.name()};"
+            f" background-color: {bg};"
             " border: 1px solid palette(mid); border-radius: 3px; }"
             "QPushButton#PropColorBtn:hover { border-color: palette(highlight); }"
         )
+        alpha = round(c.alpha() / 255 * 100)
+        self.setToolTip(f"点击选择颜色（透明度 {alpha}%）")
 
     def _pick(self) -> None:
-        chosen = QColorDialog.getColor(self._color, self, "选择颜色")
+        # 回到早期的 Qt 取色窗（基本颜色 / 自定义颜色 / HSV/RGB/HTML），
+        # 额外打开透明度通道；强制非原生对话框，否则 Windows 原生取色框
+        # 会忽略 ShowAlphaChannel（看不到透明度）。
+        options = (
+            QColorDialog.ColorDialogOption.ShowAlphaChannel
+            | QColorDialog.ColorDialogOption.DontUseNativeDialog
+        )
+        chosen = QColorDialog.getColor(self._color, self, "选择颜色", options)
         if chosen.isValid():
             self.set_color(chosen)

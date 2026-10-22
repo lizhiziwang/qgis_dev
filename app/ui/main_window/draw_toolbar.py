@@ -92,6 +92,7 @@ from app.core.domain.drawing.tools import get_tool_class
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.ui.common import tool_icons
+from app.ui.common.modeless import show_modeless
 from app.ui.common.ribbon import RibbonToolBar
 from app.ui.common.theme import ThemeManager
 from app.ui.dialogs.copy_to_layer import CopyToLayerDialog
@@ -1401,27 +1402,32 @@ class DigitizingToolbar(QObject):
             )
             return
 
+        def _gap_done(result) -> None:
+            if result is None:
+                return  # 用户取消 / 失败原因已由下游落地
+            changed, filled = result
+            if filled == 0:
+                QMessageBox.information(
+                    self.main_window, "提示", "所选面要素之间未发现封闭缝隙"
+                )
+                return
+            QMessageBox.information(
+                self.main_window,
+                "提示",
+                f"已补 {filled} 处缝隙（并入 {changed} 个要素，可 Ctrl+Z 撤销）",
+            )
+            # 事件栈内不直接 refresh（仓库约束），推迟出栈后再刷新
+            QTimer.singleShot(0, self._safe_refresh)
+
         result = run_gap_repair(
             layer,
             canvas=self.canvas,
             parent=self.main_window,
             hint=self._tool_hint,
+            on_done=_gap_done,
         )
-        if result is None:
-            return  # 用户取消 / 失败原因已由下游落地
-        changed, filled = result
-        if filled == 0:
-            QMessageBox.information(
-                self.main_window, "提示", "所选面要素之间未发现封闭缝隙"
-            )
-            return
-        QMessageBox.information(
-            self.main_window,
-            "提示",
-            f"已补 {filled} 处缝隙（并入 {changed} 个要素，可 Ctrl+Z 撤销）",
-        )
-        # 事件栈内不直接 refresh（仓库约束），推迟出栈后再刷新
-        QTimer.singleShot(0, self._safe_refresh)
+        if result is not None:
+            _gap_done(result)  # 没检出缝隙时的同步结果
 
     def copy_to_layer(self) -> None:
         """「复制到」一次性动作：把选中要素复制到另一个图层（可搬运字段属性）。
@@ -1464,29 +1470,52 @@ class DigitizingToolbar(QObject):
             )
             return
 
-        dialog = CopyToLayerDialog(
-            source, targets, len(source.selectedFeatureIds()), parent=self.main_window
-        )
-        if dialog.exec() != QDialog.DialogCode.Accepted:
-            return
-        target = dialog.target_layer()
-        if target is None:
-            return
+        def _apply_copy(dlg) -> None:
+            try:
+                if not source.selectedFeatureIds():
+                    QMessageBox.warning(
+                        self.main_window,
+                        "复制到失败",
+                        "源图层当前没有选中的要素（选择可能在弹窗期间被清空），请重新选择后再复制。",
+                    )
+                    return
+                target = dlg.target_layer()
+                if target is None:
+                    return
+                result = run_copy_to(
+                    source,
+                    target,
+                    dlg.field_mappings(),
+                    dlg.copy_attributes_checked(),
+                    hint=self._tool_hint,
+                )
+            except Exception as exc:  # noqa: BLE001 —— 源/目标在弹窗期间被删
+                QMessageBox.warning(self.main_window, "复制到失败", str(exc))
+                return
+            if result.ok:
+                self._toast(
+                    f"已复制 {result.added} 个要素到「{target.name()}」（可 Ctrl+Z 撤销）"
+                )
+                QTimer.singleShot(0, self._safe_refresh)
+                return
+            # 校验失败 / 写入失败：面板已关，这里把原因讲清楚（附带涉及的字段名）
+            detail = f"【{'】【'.join(result.fields)}】" if result.fields else ""
+            QMessageBox.warning(
+                self.main_window, "复制到失败", f"{result.reason}{detail}"
+            )
 
-        result = run_copy_to(
-            source,
-            target,
-            dialog.field_mappings(),
-            dialog.copy_attributes_checked(),
-            hint=self._tool_hint,
+        show_modeless(
+            self.main_window,
+            ("copy_to", source.id()),
+            lambda: CopyToLayerDialog(
+                source,
+                targets,
+                len(source.selectedFeatureIds()),
+                parent=self.main_window,
+            ),
+            on_accepted=_apply_copy,
+            layer=source,
         )
-        if result.ok:
-            self._toast(f"已复制 {result.added} 个要素到「{target.name()}」（可 Ctrl+Z 撤销）")
-            QTimer.singleShot(0, self._safe_refresh)
-            return
-        # 校验失败 / 写入失败：面板已关，这里把原因讲清楚（附带涉及的字段名）
-        detail = f"【{'】【'.join(result.fields)}】" if result.fields else ""
-        QMessageBox.warning(self.main_window, "复制到失败", f"{result.reason}{detail}")
 
     def show_edit_settings_panel(self) -> None:
         """「编辑设置」一次性动作：弹面板编辑编辑工具的快捷键（保存即生效）。

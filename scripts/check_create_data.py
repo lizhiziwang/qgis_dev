@@ -1707,20 +1707,22 @@ def case_export_dict(out: Path) -> str:
             )
     finally:
         ds = None
-    # 导出对话框：有字典时「转换字典」默认勾选；切到 Shapefile 置灰
+    # 导出对话框：有字典时 GPKG 默认勾选；Shapefile 的「导出字典名称」默认不勾选
     from app.ui.dialogs.export_layer_dialog import ExportLayerDialog
 
     dlg = ExportLayerDialog(None, layer=layer, default_dir=str(work))
     try:
         if not dlg.dict_check.isChecked():
-            raise RuntimeError("有字典时「转换字典」应默认勾选")
+            raise RuntimeError("有字典时 GPKG「转换字典」应默认勾选")
         for index in range(dlg.format_combo.count()):
             fmt = dlg.format_combo.itemData(index)
             if fmt is not None and fmt.extension == ".shp":
                 dlg.format_combo.setCurrentIndex(index)
                 break
-        if dlg.dict_check.isEnabled() or dlg.dict_check.isChecked():
-            raise RuntimeError("Shapefile 下「转换字典」应禁用且不勾选")
+        if not dlg.dict_check.isEnabled() or dlg.dict_check.isChecked():
+            raise RuntimeError("Shapefile 下「导出字典名称」应可用且默认不勾选")
+        if "导出字典名称" not in dlg.dict_check.text():
+            raise RuntimeError(f"Shapefile 字典勾选框文案不对：{dlg.dict_check.text()}")
     finally:
         dlg.deleteLater()
     layer.deleteLater()
@@ -2185,12 +2187,12 @@ def case_data_manage_menus(out: Path) -> str:
     only = QueryBuilderDialog(source, None, apply_to_layer=False)
     picked: list[str] = []
     only.sqlConfirmed.connect(picked.append)
-    only.sql_edit.setPlainText('"代码" >= 1')
+    only.widget.sql_edit.setPlainText('"代码" >= 1')
     only._on_ok()
     if source.subsetString() != "" or picked != ['"代码" >= 1']:
         raise RuntimeError(f"只取条件模式改动了图层：subset={source.subsetString()!r} picked={picked}")
     applying = QueryBuilderDialog(source, None, apply_to_layer=True)
-    applying.sql_edit.setPlainText('"代码" >= 1')
+    applying.widget.sql_edit.setPlainText('"代码" >= 1')
     original_info = QMessageBox.information
     QMessageBox.information = staticmethod(lambda *a, **k: QMessageBox.StandardButton.Ok)
     try:
@@ -2361,7 +2363,8 @@ def case_auto_guid_and_import_data(out: Path) -> str:
     from app.core.util.sublayers import list_sublayers
     from app.ui.dialogs.create_data_dialog import CreateDataDialog
     from app.ui.dialogs.create_data_fields_step import ExternalDatasetDialog
-    from app.ui.dialogs.query_builder import QueryBuilderDialog, _OPERATORS
+    from app.ui.dialogs.query_builder import QueryBuilderDialog
+    from app.ui.dialogs.query_builder_widget import _OPERATORS
     from app.ui.docks.attribute_dock import PagedAttributeTableModel
 
     def memory_layer(name: str, fields: str = ""):
@@ -2491,7 +2494,7 @@ def case_auto_guid_and_import_data(out: Path) -> str:
     if "IS NULL" not in _OPERATORS:
         raise RuntimeError("属性查询器没有 IS NULL")
     builder = QueryBuilderDialog(source, None, apply_to_layer=False)
-    if builder._condition_error('"代码" IS NULL') is not None:
+    if builder.widget.condition_error('"代码" IS NULL') is not None:
         raise RuntimeError("IS NULL 条件没通过校验")
     return "mzguid 自动字段 / 属性表删除刷新+撤销 / 已有 GDB 加图层 / 多源追加替换 / IS NULL OK"
 

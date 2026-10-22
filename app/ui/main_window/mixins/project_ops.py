@@ -63,7 +63,7 @@ class ProjectOpsMixin:
         # 确保 Dock 存在
         if getattr(self, "project_dock", None) is None:
             self.project_dock = ProjectDock(self)
-            self.project_dock.render_requested.connect(self._show_style_editor)
+            self.project_dock.render_requested.connect(self._show_render_tab)
             self.project_dock.label_requested.connect(self._show_label_settings)
             self.project_dock.layer_context_menu_requested.connect(self._on_layer_context_menu)
             self.place_right_dock(self.project_dock)

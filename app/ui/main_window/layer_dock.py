@@ -32,15 +32,26 @@ from qgis.core import (
     QgsApplication,
     QgsLayerTree,
     QgsLayerTreeGroup,
+    QgsLayerTreeLayer,
     QgsLayerTreeModel,
     QgsProject,
     QgsVectorLayer,
 )
 from qgis.gui import QgsLayerTreeView
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import QEvent, QModelIndex, QPoint, QRectF, QSize, Qt, pyqtSignal
+from qgis.PyQt.QtCore import (
+    QEvent,
+    QModelIndex,
+    QPoint,
+    QRectF,
+    QSize,
+    Qt,
+    QTimer,
+    pyqtSignal,
+)
 from qgis.PyQt.QtGui import (
     QColor,
+    QCursor,
     QFont,
     QFontMetrics,
     QIcon,
@@ -629,6 +640,10 @@ class LayerDock(QDockWidget):
     blank_context_menu_requested = pyqtSignal(object)
     #: 双击底部「图层信息」块 → 打开该图层的属性表（只对矢量图层发）
     attribute_table_requested = pyqtSignal(object)
+    #: 双击图层行的符号图标 → 编辑整层符号（单一符号时弹符号选择器）
+    layer_symbol_edit_requested = pyqtSignal(object)  # QgsMapLayer
+    #: 双击分类图例子项 → 编辑该类别符号：(图层, 类别行号)
+    legend_symbol_edit_requested = pyqtSignal(object, int)
     layer_clicked = pyqtSignal(object)
     label_toggle_requested = pyqtSignal(object, bool)  # (QgsVectorLayer, 期望的标注开关)
     #: 图层数据源丢失，用户点了名称前的红色感叹号：请宿主重设数据源
@@ -651,13 +666,27 @@ class LayerDock(QDockWidget):
         #: 当前展示方式：``order`` = 按图层顺序（真实工程图层树），
         #: ``source`` = 按数据源（分组用的是一棵**独立**的树，不碰工程图层顺序）
         self._view_mode = "order"
+        # 多值符号图例的展开状态（见 _collapse_new_legends）：
+        # initialized = 已经按默认折叠过的图层；user_expanded = 用户手动展开的图层
+        self._legend_initialized: dict[str, set[str]] = {
+            "order": set(),
+            "source": set(),
+        }
+        self._legend_user_expanded: dict[str, set[str]] = {
+            "order": set(),
+            "source": set(),
+        }
+        self._legend_collapse_pending = False
 
         self.model = QgsLayerTreeModel(self.tree_root)
         self.model.setFlags(
             QgsLayerTreeModel.AllowNodeRename
             | QgsLayerTreeModel.AllowNodeReorder
             | QgsLayerTreeModel.AllowNodeChangeVisibility
-            # 不显示图例：分类/渐变渲染会挤进 "1"、"2" 等图例项
+            # 图层行前显示符号 / 图例：单一符号直接显示色块；分类渲染显示可展开的
+            # 类别子项（带下拉箭头），与 QGIS 图层树一致
+            | QgsLayerTreeModel.ShowLegend
+            | QgsLayerTreeModel.AllowLegendChangeState
         )
 
         self._order_view = self._make_view(self.model, order=True)
@@ -666,7 +695,11 @@ class LayerDock(QDockWidget):
         # 纯视图）；图层对象仍是同一个，勾选可见性 / 标注开关照样生效。
         self.source_root = QgsLayerTree()
         self.source_model = _SourceTreeModel(self.source_root)
-        self.source_model.setFlags(QgsLayerTreeModel.AllowNodeChangeVisibility)
+        self.source_model.setFlags(
+            QgsLayerTreeModel.AllowNodeChangeVisibility
+            | QgsLayerTreeModel.ShowLegend
+            | QgsLayerTreeModel.AllowLegendChangeState
+        )
         self.source_view = self._make_view(self.source_model, order=False)
 
         self.view_stack = QStackedWidget(self)
@@ -697,6 +730,10 @@ class LayerDock(QDockWidget):
         # 数据源视图是另一棵树，勾选框必须和工程节点双向同步，否则点了没反应
         self._visibility_hooked: set[str] = set()
         self._hook_project_visibility()
+        # 图层符号变化 → 行首色块重画（只挂一次）
+        self._style_hooked: set[str] = set()
+        self._hook_layer_styles()
+        self._schedule_collapse_legends()
 
     def _make_view(self, model: QgsLayerTreeModel, *, order: bool) -> QgsLayerTreeView:
         """建一个图层树视图（两个展示方式共用同一套交互 / 委托）。"""
@@ -716,6 +753,14 @@ class LayerDock(QDockWidget):
         view.doubleClicked.connect(self._on_view_double_clicked)
         view.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         view.customContextMenuRequested.connect(self._on_view_context_menu)
+        # 记录用户手动展开 / 折叠的多值图例（刷新时恢复，不被自动折叠）
+        view_key = "order" if order else "source"
+        view.expanded.connect(
+            lambda index, v=view, k=view_key: self._on_legend_expanded(k, v, index)
+        )
+        view.collapsed.connect(
+            lambda index, v=view, k=view_key: self._on_legend_collapsed(k, v, index)
+        )
         # 行尾「标注」开关：只画、只发信号（读写标注由主窗口实现）
         delegate = _LabelRadioDelegate(view)
         view.setItemDelegate(delegate)
@@ -767,8 +812,162 @@ class LayerDock(QDockWidget):
         # 新加的组也要挂信号，否则组内再增删就收不到
         self._hook_tree_nodes()
         self._hook_project_visibility()
+        self._hook_layer_styles()
+        # 图层增删：新图层的图例默认折叠（已有图层保持用户的展开状态）
+        self._schedule_collapse_legends()
         if self._view_mode == "source":
             self._rebuild_source_view()
+
+    # ------------------------------------------------------- 行首符号色块
+
+    def _hook_layer_styles(self) -> None:
+        """图层符号变化（样式 / 渲染器）→ 行首色块缓存失效并重画。"""
+        try:
+            nodes = self.tree_root.findLayers()
+        except RuntimeError:
+            return
+        for node in nodes:
+            try:
+                layer = node.layer()
+            except RuntimeError:
+                continue
+            if not isinstance(layer, QgsVectorLayer):
+                continue
+            try:
+                layer_id = str(layer.id())
+            except RuntimeError:
+                continue
+            if layer_id in self._style_hooked:
+                continue
+            for name in ("styleChanged", "rendererChanged"):
+                signal = getattr(layer, name, None)
+                if signal is None:
+                    continue
+                try:
+                    signal.connect(self._on_layer_style_changed)
+                except (TypeError, RuntimeError):
+                    pass
+            self._style_hooked.add(layer_id)
+
+    def _on_layer_style_changed(self, *_args) -> None:
+        self.refresh_symbol_icons()
+
+    def refresh_symbol_icons(self) -> None:
+        """重建两棵树的图例（行首色块 / 分类子项）。
+
+        图层属性的「确定 / 应用」里，单一符号的 ``renderer.setSymbol`` 不一定发
+        ``styleChanged``（本构建实测），所以对话框关闭时由主窗口显式调一次。
+        """
+        for model, root in (
+            (self.model, self.tree_root),
+            (self.source_model, self.source_root),
+        ):
+            try:
+                nodes = root.findLayers()
+            except RuntimeError:
+                continue
+            for node in nodes:
+                try:
+                    model.refreshLayerLegend(node)
+                except (RuntimeError, AttributeError):
+                    continue
+        for view in (self._order_view, self.source_view):
+            try:
+                view.viewport().update()
+            except RuntimeError:
+                pass
+        self._schedule_collapse_legends()
+
+    # ------------------------------------------------------- 图例展开状态
+
+    def _schedule_collapse_legends(self) -> None:
+        """等模型插完图例子项后再折叠（插入发生在信号 / 事件栈里）。"""
+        if self._legend_collapse_pending:
+            return
+        self._legend_collapse_pending = True
+        QTimer.singleShot(0, self._collapse_new_legends)
+
+    @staticmethod
+    def _layer_id_of_index(view, index):
+        """视图索引 → 图层 id；组 / 图例子项返回 ``None``。"""
+        try:
+            node = view.index2node(index)
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(node, QgsLayerTreeLayer):
+            return None
+        try:
+            return str(node.layerId())
+        except RuntimeError:
+            return None
+
+    def _on_legend_expanded(self, key: str, view, index) -> None:
+        """用户手动展开图例 → 记下来，刷新图例后恢复。"""
+        layer_id = self._layer_id_of_index(view, index)
+        if layer_id is None:
+            return
+        # 图例刚插入时 QGIS 会自动展开一次；这不算用户操作
+        if layer_id not in self._legend_initialized[key]:
+            return
+        self._legend_user_expanded[key].add(layer_id)
+
+    def _on_legend_collapsed(self, key: str, view, index) -> None:
+        layer_id = self._layer_id_of_index(view, index)
+        if layer_id is not None:
+            self._legend_user_expanded[key].discard(layer_id)
+
+    def _collapse_new_legends(self) -> None:
+        """新出现的图例子项默认折叠；用户手动展开过的图层保持展开。
+
+        分类 / 分级图层的图例子项是 QgsLayerTreeView **自动展开**的，这里只在
+        第一次看到某个图层的图例时折叠一次（记录在 ``_legend_initialized``）。
+        图层渲染器被替换 / 图例重建后，视图可能丢掉展开状态，所以每次都用
+        ``_legend_user_expanded`` 把用户手动展开的图层重新展开。
+        """
+        self._legend_collapse_pending = False
+        for key, view in (
+            ("order", self._order_view),
+            ("source", self.source_view),
+        ):
+            proxy = view.model()
+            if proxy is None:
+                continue
+            initialized = self._legend_initialized[key]
+            user_expanded = self._legend_user_expanded[key]
+            found: dict[str, object] = {}
+
+            def walk(parent) -> None:
+                for row in range(proxy.rowCount(parent)):
+                    index = proxy.index(row, 0, parent)
+                    try:
+                        node = view.index2node(index)
+                    except Exception:  # noqa: BLE001 —— 野索引跳过
+                        continue
+                    if isinstance(node, QgsLayerTreeLayer):
+                        try:
+                            layer_id = str(node.layerId())
+                        except RuntimeError:
+                            continue
+                        found[layer_id] = index
+                        if proxy.rowCount(index) <= 0:
+                            continue
+                        if layer_id in initialized:
+                            continue
+                        initialized.add(layer_id)
+                        if view.isExpanded(index):
+                            view.collapse(index)
+                    elif isinstance(node, QgsLayerTreeGroup):
+                        walk(index)
+
+            try:
+                walk(QModelIndex())
+                # 恢复用户手动展开的图层（渲染器替换 / 图例重建后视图会回到折叠）
+                for layer_id in user_expanded:
+                    index = found.get(layer_id)
+                    if index is not None and not view.isExpanded(index):
+                        view.expand(index)
+            except RuntimeError:  # 视图 / 模型正在销毁
+                continue
 
     def _hook_project_visibility(self) -> None:
         """给工程图层节点挂可见性同步（每个图层只挂一次）。"""
@@ -924,6 +1123,7 @@ class LayerDock(QDockWidget):
             self.btn_view_order.blockSignals(False)
             self.btn_view_source.blockSignals(False)
         self.set_current_layer(self._info_layer_obj)
+        self._schedule_collapse_legends()
 
     def _source_tree_has(self, node) -> bool:
         """节点是不是「按数据源」那棵独立树里的（含其虚拟分组）。"""
@@ -987,21 +1187,84 @@ class LayerDock(QDockWidget):
             return self._order_view
         return self.view
 
+    def _double_click_zone(self, view: QgsLayerTreeView, index) -> str:
+        """双击落点 → ``"symbol"`` / ``"text"`` / ``"other"``。
+
+        用到委托的 ``initStyleOption`` + 样式的子元素矩形，位置与绘制一致；
+        计算失败时按 ``"other"`` 处理（不误开属性表 / 符号选择器）。
+        """
+        try:
+            pos = view.viewport().mapFromGlobal(QCursor.pos())
+            rect = view.visualRect(index)
+            if not rect.isValid() or rect.isEmpty():
+                return "other"
+            option = QStyleOptionViewItem()
+            option.initFrom(view)
+            option.widget = view
+            option.rect = rect
+            delegate = view.itemDelegate()
+            if delegate is not None:
+                delegate.initStyleOption(option, index)
+            # QTreeView 绘制时会预置 decorationSize；手动构造选项时没有，
+            # 图标矩形的宽度会算成 -1（图层行图标就点不中）
+            if option.decorationSize.width() <= 0:
+                side = view.style().pixelMetric(
+                    QStyle.PixelMetric.PM_SmallIconSize, None, view
+                )
+                option.decorationSize = QSize(side, side)
+            style = view.style()
+            symbol_rect = style.subElementRect(
+                QStyle.SubElement.SE_ItemViewItemDecoration, option, view
+            )
+            text_rect = style.subElementRect(
+                QStyle.SubElement.SE_ItemViewItemText, option, view
+            )
+            if symbol_rect.isValid() and symbol_rect.contains(pos):
+                return "symbol"
+            if text_rect.isValid() and text_rect.contains(pos):
+                return "text"
+        except Exception:  # noqa: BLE001 —— 计算落点失败不能拖垮双击
+            return "other"
+        return "other"
+
     def _on_view_double_clicked(self, index) -> None:
-        """双击**图层项** → 打开它的属性表（栅格没有属性表，不发）。
+        """双击：符号 → 符号选择器；图层文字 → 属性表；分类子项 → 该类符号。
 
         注意：双击不再用于就地重命名（那条改成 F2 / 编辑键，见 ``view`` 的
         ``EditKeyPressed``），否则一次双击既开属性表又开改名框。
         """
         from qgis.core import QgsVectorLayer
 
+        view = self._sender_view()
+        # 分类 / 分级的图例子项：双击符号编辑那个类别的符号
         try:
-            node = self._sender_view().index2node(index)
+            legend = view.index2legendNode(index)
+        except Exception:  # noqa: BLE001
+            legend = None
+        if legend is not None and index.parent().isValid():
+            if self._double_click_zone(view, index) != "symbol":
+                return
+            try:
+                layer = legend.layerNode().layer()
+            except Exception:  # noqa: BLE001
+                return
+            if isinstance(layer, QgsVectorLayer):
+                self.legend_symbol_edit_requested.emit(layer, index.row())
+            return
+
+        # 图层行：图标 → 编辑符号；文字 → 属性表；勾选框 / 箭头等不处理
+        try:
+            node = view.index2node(index)
             getter = getattr(node, "layer", None)
             layer = getter() if callable(getter) else None
         except Exception:  # noqa: BLE001 —— 野索引不该把双击拖垮
             return
-        if isinstance(layer, QgsVectorLayer):
+        if not isinstance(layer, QgsVectorLayer):
+            return
+        zone = self._double_click_zone(view, index)
+        if zone == "symbol":
+            self.layer_symbol_edit_requested.emit(layer)
+        elif zone == "text":
             self.attribute_table_requested.emit(layer)
 
     def set_current_layer(self, layer) -> None:

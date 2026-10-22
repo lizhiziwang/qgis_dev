@@ -1420,11 +1420,14 @@ class DataManageDock(QWidget):
         if not issues:
             QMessageBox.information(self, "检查字段结构", "字段结构检查通过")
             return
+        from app.ui.common.modeless import show_modeless
         from app.ui.dialogs.field_check_dialog import FieldCheckDialog
 
-        dialog = FieldCheckDialog(self, name, issues)
-        dialog.exec()
-        dialog.deleteLater()
+        show_modeless(
+            self,
+            ("field_check", path, name),
+            lambda: FieldCheckDialog(self, name, issues),
+        )
 
     def _request_remove_unused_dicts(self, db: dict) -> None:
         """字典分组右键「移除未使用字典」：交回调（确认 + 删表由 MainWindow 做）。"""

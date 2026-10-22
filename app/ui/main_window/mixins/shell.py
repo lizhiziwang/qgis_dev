@@ -383,6 +383,9 @@ class WindowShellMixin:
         self.layer_dock.group_context_menu_requested.connect(self._on_layer_group_context_menu)
         self.layer_dock.blank_context_menu_requested.connect(self._on_layer_tree_blank_context_menu)
         self.layer_dock.attribute_table_requested.connect(self._show_attribute_dock)
+        # 双击图层的符号图标 / 分类图例子项 → 符号选择器（文字双击仍开属性表）
+        self.layer_dock.layer_symbol_edit_requested.connect(self._edit_layer_symbol)
+        self.layer_dock.legend_symbol_edit_requested.connect(self._edit_legend_symbol)
         # 点击图层树即自动设为编辑目标（与 QGIS 桌面一致）：
         # 用户期望点完一层就能在工具条点"开始编辑"
         self.layer_dock.layer_clicked.connect(self._on_layer_clicked_in_dock)
@@ -413,7 +416,10 @@ class WindowShellMixin:
         # Qt 的 addDockWidget 在同一区域默认是**上下堆叠**：两个各占一半高（实测
         # 图层列表只有 406px、浏览器 372px），图层一多就得滚半天。tabify 之后
         # 图层列表独占整条高度，数据浏览器点它的标签页切过去。
-        self.tabifyDockWidget(self.browser_dock, self.layer_dock)
+        # **tab 顺序：图层列表在左、数据浏览器在右**（先 tabify 的排前面）。
+        # 之前传反了，数据浏览器成了第一个标签页 —— 布局自愈 restoreState 丢当前
+        # 标签页时就会默认选中它，看起来像"数据浏览器自动跳上来"。
+        self.tabifyDockWidget(self.layer_dock, self.browser_dock)
         # 默认停在「图层列表」的那次 raise **要等窗口显示之后**再做：在 __init__ 里
         # 直接 raise 会被随后显示的浏览器抢过去（实测标签停在了数据浏览器上）。
         # 真正的 raise 放在 MainWindow.showEvent 里，见 _raise_left_dock_once。

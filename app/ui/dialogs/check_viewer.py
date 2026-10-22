@@ -453,9 +453,16 @@ class CheckViewerDialog(BaseDialog):
             isPass=original.get("isPass"),
             noPassCount=original.get("noPassCount"),
         )
-        dlg = CheckConfigDialog(is_add, self.parent, columns=self._field_names(), check_vo=vo)
-        dlg.save_edit.connect(self._on_save_edit)
-        dlg.exec()
+        from app.ui.common.modeless import show_modeless
+
+        show_modeless(
+            self,
+            ("check_config", vo.id),
+            lambda: CheckConfigDialog(
+                is_add, self.parent, columns=self._field_names(), check_vo=vo
+            ),
+            configure=lambda d: d.save_edit.connect(self._on_save_edit),
+        )
 
     def _field_names(self) -> list[str]:
         if not (self.parent and self.data_source_input.currentText()):

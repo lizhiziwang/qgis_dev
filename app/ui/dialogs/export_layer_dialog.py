@@ -638,10 +638,15 @@ class ExportLayerDialog(BaseDialog):
 
     def _on_pick_condition(self) -> None:
         """「条件…」：属性查询器（只取条件模式，不改图层的定义查询）。"""
-        dialog = QueryBuilderDialog(self._layer, self, apply_to_layer=False)
-        dialog.sqlConfirmed.connect(self._set_condition)
-        dialog.exec()
-        dialog.deleteLater()
+        from app.ui.common.modeless import show_modeless
+
+        show_modeless(
+            self,
+            "export_condition",
+            lambda: QueryBuilderDialog(self._layer, self, apply_to_layer=False),
+            configure=lambda dlg: dlg.sqlConfirmed.connect(self._set_condition),
+            layer=self._layer,
+        )
 
     def _set_condition(self, condition: str) -> None:
         self._expression = (condition or "").strip()
