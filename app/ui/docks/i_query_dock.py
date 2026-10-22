@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from qgis.core import QgsMapLayer, QgsProject
 from qgis.PyQt.QtCore import Qt, pyqtSignal
-from qgis.PyQt.QtGui import QIcon
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -146,9 +145,9 @@ class IQueryDock(QDockWidget):
         layout.addWidget(splitter, 1)
 
         buttons = QHBoxLayout()
-        self.copy_btn = QPushButton(QIcon.fromTheme("edit-copy"), "复制信息")
+        self.copy_btn = QPushButton("复制信息")
         self.copy_btn.clicked.connect(self._copy)
-        self.close_btn = QPushButton(QIcon.fromTheme("window-close"), "关闭")
+        self.close_btn = QPushButton("关闭")
         self.close_btn.clicked.connect(self.close)
         buttons.addWidget(self.copy_btn)
         buttons.addWidget(self.close_btn)
