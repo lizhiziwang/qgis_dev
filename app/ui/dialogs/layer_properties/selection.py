@@ -1,8 +1,10 @@
 """图层属性「选择」页：按几何类型配置**选中要素的高亮样式**。
 
 打开属性页时按当前图层的几何类型（点 / 线 / 面）取系统里对应的高亮样式，预览出来；
-点预览图（交互与「渲染 → 单一符号」一致）弹出符号选择器，改颜色 / 描边后点确定即
-写入 ``SelectionStyleManager`` 并落盘，画布随之立刻刷新（覆盖层订阅了 ``changed``）。
+点预览图（交互与「渲染 → 单一符号」一致）弹出符号选择器，改颜色 / 描边后只在**本页草稿**
+里生效。和其它页一样延迟写回：点图层属性的「确定 / 应用」才写入
+``SelectionStyleManager`` 并落盘（覆盖层订阅 ``changed`` 后重画）；点「取消」丢弃草稿，
+系统高亮保持原样。
 
 选中高亮是**橡皮筋覆盖层**画的，只吃颜色与线宽，所以写回时只取填充色、描边色与
 描边宽度（透明度取颜色自身的 alpha）；形状 / SVG 等其它符号属性不参与高亮绘制。
@@ -149,6 +151,11 @@ class SelectionTab(LayerPropertyTab):
         #: 当前图层几何类型（"point"/"line"/"polygon"；None = 不可配置）
         self._kind: str | None = None
         self._layer_name = ""
+        #: 本页正在编辑的样式（**草稿**）：点「确定 / 应用」才写回管理器；
+        #: 点「取消」直接丢弃，系统高亮保持原样。
+        self._style: HighlightStyle | None = None
+        #: 草稿是否与已生效的样式不同（没改过就不在「应用」时重复写）
+        self._dirty = False
         self._build()
         # 无条件 load：这一页的 load 本身就能处理 None / 非矢量（走降级分支、禁用控件），
         # 所以不必像兄弟页那样先判 `if layer is not None`——否则 layer 为空时控件
@@ -200,8 +207,10 @@ class SelectionTab(LayerPropertyTab):
     # ------------------------------------------------------------- 页协议
 
     def load(self, layer) -> None:
-        """按图层几何类型取系统里那一类的高亮样式并预览。"""
+        """按图层几何类型取系统里那一类的高亮样式并预览（草稿 = 已生效样式）。"""
         self._kind = _geom_kind(layer)
+        self._style = None
+        self._dirty = False
         try:
             self._layer_name = layer.name() if layer is not None else ""
         except Exception:  # noqa: BLE001 —— 悬空图层对象
@@ -215,31 +224,39 @@ class SelectionTab(LayerPropertyTab):
             self.hint_label.setText("当前图层没有几何类型，无法配置选中高亮。")
             return
 
+        manager = SelectionStyleManager.instance()
+        self._style = manager.style(self._kind)
         name = _KIND_NAMES[self._kind]
         self.preview_label.setEnabled(True)
         self.caption_label.setText(f"预览当前选中要素符号样式（{self._layer_name}）")
         self.hint_label.setText(
             f"以上样式作用于系统中**所有「{name}」图层**的选中高亮；"
-            f"点符号预览修改，立即生效。要改其它几何类型，请打开对应类型图层的属性。"
+            f"改完点「确定 / 应用」后生效，点「取消」不修改。"
+            f"要改其它几何类型，请打开对应类型图层的属性。"
         )
         self._refresh_preview()
 
     def apply(self, layer) -> bool:
-        """样式在符号选择器点确定时就已写入并落盘，这里无事可做。"""
+        """点「确定 / 应用」时才把草稿样式写回管理器并落盘（其它页同款延迟写回）。"""
+        if self._kind is None or self._style is None or not self._dirty:
+            return True
+        manager = SelectionStyleManager.instance()
+        manager.set_style(self._kind, self._style)
+        # 已应用的样式成为新基线：之后再点应用/确定不会重复写，之后取消也不回退它
+        self._dirty = False
         return True
 
     # ------------------------------------------------------------- 内部
 
     def _open_symbol_settings(self) -> None:
-        """点预览：打开与「渲染 → 单一符号」相同的符号选择器。"""
+        """点预览：打开与「渲染 → 单一符号」相同的符号选择器（只改本页草稿）。"""
         if self._kind is None:
             return
         from app.ui.dialogs.layer_properties.symbol_selector import (
             SymbolSelectorDialog,
         )
 
-        manager = SelectionStyleManager.instance()
-        base = manager.style(self._kind)
+        base = self._style or SelectionStyleManager.instance().style(self._kind)
         dlg = SymbolSelectorDialog(
             symbol_from_style(self._kind, base), self._kind, self
         )
@@ -249,15 +266,16 @@ class SelectionTab(LayerPropertyTab):
         finally:
             dlg.deleteLater()
         if chosen is not None:
-            manager.set_style(self._kind, style_from_symbol(self._kind, chosen, base))
+            self._style = style_from_symbol(self._kind, chosen, base)
+            self._dirty = True
             self._refresh_preview()
 
     def _refresh_preview(self) -> None:
-        """把当前样式画成该类几何的符号预览。"""
+        """把当前（草稿）样式画成该类几何的符号预览。"""
         if self._kind is None:
             return
         try:
-            style = SelectionStyleManager.instance().style(self._kind)
+            style = self._style or SelectionStyleManager.instance().style(self._kind)
             # 符号先绑到局部变量再用：createSimple 返回的对象可能被 GC 掉，
             # 之后 symbolPreviewPixmap 拿到的是悬垂指针（见 render.py 的同类坑）
             symbol = symbol_from_style(self._kind, style)

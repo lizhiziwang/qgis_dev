@@ -19,11 +19,12 @@ from qgis.core import (
     QgsStyle,
     QgsSymbolLayerUtils,
 )
-from qgis.gui import QgsSymbolSelectorWidget
-from qgis.PyQt.QtCore import QEvent, QSize, Qt
+from qgis.gui import QgsColorButton, QgsSymbolSelectorWidget
+from qgis.PyQt.QtCore import QEvent, QSize, Qt, QTimer
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QButtonGroup,
+    QCheckBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
@@ -63,6 +64,7 @@ from app.ui.dialogs.layer_properties.symbol_libraries import (
     symbols_dir,
 )
 from app.ui.dialogs.layer_properties.style_reference import StyleReferenceDialog
+from app.ui.dialogs.layer_properties.widgets import pick_color
 
 logger = get_logger(__name__)
 
@@ -94,10 +96,26 @@ class SymbolEditorDialog(BaseDialog):
     #: QGIS 内部符号库列表的 objectName（切回顶层符号时会**重建**一个新实例）
     _LIBRARY_NAME = "mStyleItemsListWidget"
 
+    #: 符号编辑器里不显示的两个勾选项（启用符号图层 / 绘制效果）：
+    #: 「启用」还会连带它的数据定义按钮，「绘制效果」整块（勾选 + 效果按钮）都收掉
+    _HIDDEN_CHECKBOX_NAMES = frozenset({"mEnabledCheckBox"})
+    _HIDDEN_CHECKBOX_TEXTS = frozenset(
+        {
+            "enable symbol layer",
+            "启用符号图层",
+            "draw effects",
+            "绘制效果",
+        }
+    )
+    _HIDDEN_EXTRA_WIDGETS = ("mEnabledDDBtn", "mEffectWidget")
+
     def __init__(self, symbol, parent: QWidget | None = None) -> None:
         super().__init__(parent, "符号编辑器")
         self.setMinimumSize(0, 0)
         self.resize(780, 580)
+        self._extras_pending = False
+        # 已绑统一取色框的颜色按钮（QgsColorButton 会被重建，按对象身份记）
+        self._bound_color_buttons: set = set()
         # QgsSymbolSelectorWidget 不接管符号所有权：这里必须一直持有
         self._symbol = symbol.clone() if symbol is not None else None
         layout = QVBoxLayout()
@@ -106,6 +124,8 @@ class SymbolEditorDialog(BaseDialog):
         self.widget = QgsSymbolSelectorWidget(
             self._symbol, QgsStyle.defaultStyle(), None, self
         )
+        # 颜色条右侧留出下拉箭头的空间；数据定义按钮的箭头居中
+        self._style_editor_controls()
         # 只隐藏底部的**符号库列表**（搜索 / 列表 / 保存 / 高级），保留上面的
         # 符号层属性面板（pageFill 等）。以前沿着搜索框往上找容器，会一路隐藏
         # 到整个 scrollArea，把属性面板也一起藏掉（用户看到的空白区）。
@@ -133,7 +153,7 @@ class SymbolEditorDialog(BaseDialog):
     # ------------------------------------------------------------- 符号库隐藏
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802 —— Qt 命名
-        """子树里新出现 / 被重新显示的符号库列表，立即再隐藏。"""
+        """子树里新出现 / 被重新显示的符号库列表立即再隐藏；顺手收掉多余勾选项。"""
         kind = event.type()
         if kind not in (
             QEvent.Type.ChildAdded,
@@ -148,10 +168,14 @@ class SymbolEditorDialog(BaseDialog):
         except RuntimeError:  # 控件已销毁
             inside = False
         if inside:
+            # 「启用符号图层 / 绘制效果」两行随选中的符号层出现 / 复用，每次
+            # 显示过之后都补收一次（延迟到事件栈外，避免在 Show 里直接改布局）
+            self._schedule_hide_extras()
             if kind == QEvent.Type.ChildAdded:
                 child = event.child()
                 if isinstance(child, QWidget):
                     self._hide_symbol_library(child)
+                    self._style_editor_control(child)
             elif (
                 isinstance(obj, QWidget)
                 and obj.objectName() == self._LIBRARY_NAME
@@ -159,6 +183,113 @@ class SymbolEditorDialog(BaseDialog):
                 obj.hide()
                 return True
         return super().eventFilter(obj, event)
+
+    # ------------------------------------------------------- 编辑器控件样式
+
+    def _style_editor_controls(self) -> None:
+        """调整符号编辑器里的颜色条 / 数据定义按钮（构造时调用一次）。"""
+        for button in self.widget.findChildren(QgsColorButton):
+            self._style_editor_control(button)
+        for button in self.widget.findChildren(QToolButton):
+            if button.objectName().endswith("DDBtn"):
+                self._style_editor_control(button)
+
+    def _style_editor_control(self, widget) -> None:
+        """单个控件：颜色条右侧留出箭头位置；数据定义箭头垂直居中。"""
+        if isinstance(widget, QgsColorButton):
+            widget.setStyleSheet(
+                "QgsColorButton { padding-right: 24px; }"
+                "QgsColorButton::menu-indicator {"
+                " subcontrol-position: center right; right: 2px; }"
+            )
+            self._bind_color_button(widget)
+        elif isinstance(widget, QToolButton) and widget.objectName().endswith(
+            "DDBtn"
+        ):
+            widget.setStyleSheet(
+                "QToolButton::menu-indicator {"
+                " subcontrol-position: center right; right: 1px; top: 0px; }"
+            )
+        elif isinstance(widget, QWidget):
+            # 新加进来的属性页容器：里面的控件可能比容器先建好，
+            # 没经过 ChildAdded，这里补刷一遍
+            for button in widget.findChildren(QgsColorButton):
+                self._style_editor_control(button)
+            for button in widget.findChildren(QToolButton):
+                if button.objectName().endswith("DDBtn"):
+                    self._style_editor_control(button)
+
+    # ------------------------------------------------------- 统一取色界面
+
+    def _bind_color_button(self, button: QgsColorButton) -> None:
+        """把 QGIS 自带的取色框换成应用统一的「选择颜色」界面。
+
+        不能换掉按钮的 C++ 类型，只能改它的行为：``SignalOnly`` 让点击不再弹
+        QGIS 的 ``QgsColorDialog``、改发 ``colorClicked``；这里接上自绘取色框，
+        选完再 ``setColor`` 写回（按钮自己的 ``colorChanged`` 会把新颜色应用
+        到符号层）。右侧下拉箭头（复制 / 粘贴颜色等菜单）不受影响。
+        """
+        if button in self._bound_color_buttons:
+            return
+        self._bound_color_buttons.add(button)
+        button.setBehavior(QgsColorButton.Behavior.SignalOnly)
+        button.setColorDialogTitle("选择颜色")
+        # 推迟到事件栈外再弹取色框：在按钮自己的鼠标事件栈里开模态窗 / 回写
+        # 颜色（setColor 会连带刷新符号层）实测会把进程打崩（退出码 127）
+        # ``colorClicked`` 自带一个 QColor 实参，必须用 ``*_`` 吃掉，否则默认参数
+        # 会被信号实参顶掉（拿到的不是按钮）
+        button.colorClicked.connect(
+            lambda *_, b=button: QTimer.singleShot(
+                0, lambda: self._pick_color_for(b)
+            )
+        )
+
+    def _pick_color_for(self, button: QgsColorButton) -> None:
+        """颜色按钮点击：用应用统一的取色框，确定后写回按钮。
+
+        跑在定时器槽里，异常必须自己兜住（未捕获会直接杀进程）。
+        """
+        try:
+            chosen = pick_color(self, button.color())
+            if chosen is not None:
+                button.setColor(chosen)
+        except RuntimeError:  # 按钮 / 窗口已销毁
+            pass
+        except Exception:  # noqa: BLE001 —— 槽里未捕获异常会原生崩溃
+            logger.warning("符号编辑器取色失败", exc_info=True)
+
+    # --------------------------------------------------- 多余的勾选项隐藏
+
+    def _schedule_hide_extras(self) -> None:
+        """把「收勾选项」推迟到事件栈外执行（一帧只排一次）。"""
+        if self._extras_pending:
+            return
+        self._extras_pending = True
+        QTimer.singleShot(0, self._hide_extras_now)
+
+    def _hide_extras_now(self) -> None:
+        self._extras_pending = False
+        try:
+            self._hide_layer_extras()
+        except Exception:  # noqa: BLE001 —— 槽里未捕获异常会原生崩溃
+            logger.warning("隐藏符号编辑器多余控件失败", exc_info=True)
+
+    def _hide_layer_extras(self) -> None:
+        """隐藏「启用符号图层」「绘制效果」两行（这两项在本应用里用不上）。
+
+        勾选框的文案随 QGIS 语言变化，中英文都认；「启用」行的数据定义按钮
+        与「绘制效果」整块（勾选 + 效果按钮）一起收掉，避免剩一个孤零零的图标。
+        """
+        for box in self.widget.findChildren(QCheckBox):
+            text = box.text().replace("&", "").strip().casefold()
+            if (
+                box.objectName() in self._HIDDEN_CHECKBOX_NAMES
+                or text in self._HIDDEN_CHECKBOX_TEXTS
+            ):
+                box.hide()
+        for name in self._HIDDEN_EXTRA_WIDGETS:
+            for widget in self.widget.findChildren(QWidget, name):
+                widget.hide()
 
     def _hide_symbol_library(self, root: QWidget | None = None) -> None:
         """隐藏 QGIS 自带的符号库浏览区；``root`` 为刚新增的子树（可选）。"""

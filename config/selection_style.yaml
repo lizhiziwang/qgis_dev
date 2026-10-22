@@ -2,12 +2,12 @@
 selection_style:
   point:
     stroke_enabled: true
-    stroke_color: '#ffff00'
+    stroke_color: '#55ffff'
     stroke_width: 2.0
     stroke_opacity: 100
     fill_enabled: true
-    fill_color: '#ffff00'
-    fill_opacity: 50
+    fill_color: '#55ffff'
+    fill_opacity: 100
   line:
     stroke_enabled: true
     stroke_color: '#ffff00'
@@ -18,9 +18,9 @@ selection_style:
     fill_opacity: 100
   polygon:
     stroke_enabled: true
-    stroke_color: '#ee4500'
+    stroke_color: '#00ffff'
     stroke_width: 2.0
-    stroke_opacity: 45
-    fill_enabled: true
-    fill_color: '#aaff00'
-    fill_opacity: 25
+    stroke_opacity: 100
+    fill_enabled: false
+    fill_color: '#000000'
+    fill_opacity: 0

@@ -150,6 +150,9 @@ _DEFAULT_FILL = QColor(200, 215, 235)
 _DEFAULT_STROKE = QColor(35, 35, 35)
 _DEFAULT_MARKER = QColor(70, 110, 160)
 
+#: 「无颜色」：全透明。填充 / 描边按钮用它表示不填充 / 不描边
+_NO_COLOR = QColor(0, 0, 0, 0)
+
 #: 符号输出单位 → 中文名（跟在宽度 / 大小输入框后面当后缀）
 _UNIT_NAMES = {
     QgsUnitTypes.RenderUnit.Millimeters: "毫米",
@@ -370,18 +373,6 @@ def _first_line_layer(symbol):
     except Exception:  # noqa: BLE001
         return None
     return None
-
-
-def _ensure_stroke_visible(layer, is_line: bool) -> None:
-    """描边样式是"无"时，把宽度调大说明用户想要一条边 —— 恢复实线。"""
-    if is_line:
-        pen = _call(layer, "penStyle")
-        if pen is not None and pen == Qt.PenStyle.NoPen:
-            _call_setter(layer, "setPenStyle", Qt.PenStyle.SolidLine)
-    else:
-        style = _call(layer, "strokeStyle")
-        if style is not None and style == Qt.PenStyle.NoPen:
-            _call_setter(layer, "setStrokeStyle", Qt.PenStyle.SolidLine)
 
 
 def _renderer_name(renderer) -> str:
@@ -664,9 +655,6 @@ class SymbolParamsWidget(QWidget):
         self._kind = kind
         self._unit = QgsUnitTypes.RenderUnit.Millimeters
         self._loading = False
-        #: 上次回填 / 应用时的描边宽度：用来判断用户是否真的动了宽度
-        #: （只有动宽度才把"无描边"恢复成实线，避免单纯改颜色时冒出边框）
-        self._stroke_width_before = None
         #: 当前符号的模板：右侧控件只改颜色 / 大小 / 线宽，其它属性原样保留
         self._template = None
         root = QVBoxLayout(self)
@@ -762,8 +750,6 @@ class SymbolParamsWidget(QWidget):
                 self._unit = unit
             self._apply_symbol_values(symbol)
             self._sync_units()
-            spin = getattr(self, "stroke_width_spin", None)
-            self._stroke_width_before = spin.value() if spin is not None else None
         finally:
             self._loading = False
 
@@ -774,25 +760,52 @@ class SymbolParamsWidget(QWidget):
             # 面符号的"描边"可能是填充层的 strokeColor，也可能是一条独立的线层
             # （outline-only / 图案填充的边界）——后者用 color / width。
             if not isinstance(symbol_layer, QgsLineSymbolLayer):
-                self._set_color(self.fill_color_btn, _call(symbol_layer, "color"))
+                brush = _call(symbol_layer, "brushStyle")
+                self._set_color_or_none(
+                    self.fill_color_btn,
+                    _call(symbol_layer, "color"),
+                    brush,
+                    Qt.BrushStyle.NoBrush,
+                )
+            else:
+                # 只有轮廓线、没有填充
+                self._set_color(self.fill_color_btn, _NO_COLOR)
             border = _first_line_layer(symbol)
             if border is not None:
-                self._set_color(self.stroke_color_btn, _call(border, "color"))
+                self._set_color_or_none(
+                    self.stroke_color_btn,
+                    _call(border, "color"),
+                    _call(border, "penStyle"),
+                    Qt.PenStyle.NoPen,
+                )
                 self._set_value(self.stroke_width_spin, _call(border, "width"))
             else:
-                self._set_color(
-                    self.stroke_color_btn, _call(symbol_layer, "strokeColor")
+                self._set_color_or_none(
+                    self.stroke_color_btn,
+                    _call(symbol_layer, "strokeColor"),
+                    _call(symbol_layer, "strokeStyle"),
+                    Qt.PenStyle.NoPen,
                 )
                 self._set_value(
                     self.stroke_width_spin, _call(symbol_layer, "strokeWidth")
                 )
         elif self._kind == "line":
-            self._set_color(self.line_color_btn, _call(symbol_layer, "color"))
+            self._set_color_or_none(
+                self.line_color_btn,
+                _call(symbol_layer, "color"),
+                _call(symbol_layer, "penStyle"),
+                Qt.PenStyle.NoPen,
+            )
             self._set_value(self.line_width_spin, _call(symbol_layer, "width"))
         elif self._kind == "point":
-            self._set_color(self.marker_color_btn, _call(symbol_layer, "color"))
+            self._set_color_or_none(
+                self.marker_color_btn, _call(symbol_layer, "color")
+            )
             self._set_value(self.marker_size_spin, _call(symbol_layer, "size"))
-            self._set_color(self.marker_stroke_color_btn, _call(symbol_layer, "strokeColor"))
+            self._set_color_or_none(
+                self.marker_stroke_color_btn,
+                _call(symbol_layer, "strokeColor"),
+            )
             self._set_value(
                 self.marker_stroke_width_spin, _call(symbol_layer, "strokeWidth")
             )
@@ -801,6 +814,21 @@ class SymbolParamsWidget(QWidget):
     def _set_color(button: ColorButton, color) -> None:
         if color is not None:
             button.set_color(color, emit=False)
+
+    @classmethod
+    def _set_color_or_none(
+        cls, button: ColorButton, color, style=None, no_style=None
+    ) -> None:
+        """回填颜色按钮；透明色或 NoBrush / NoPen 都显示为「无颜色」。"""
+        if color is None:
+            return
+        value = QColor(color)
+        if value.alpha() == 0 or (
+            style is not None and no_style is not None and style == no_style
+        ):
+            button.set_color(_NO_COLOR, emit=False)
+        else:
+            button.set_color(value, emit=False)
 
     @staticmethod
     def _set_value(spin: QDoubleSpinBox, value) -> None:
@@ -849,17 +877,13 @@ class SymbolParamsWidget(QWidget):
     def _update_fill(self, symbol) -> None:
         """填充色 / 描边逐层改（不支持的层跳过，其它样式 / 层原样保留）。
 
-        面符号里的**线层**（outline-only 符号、图案填充的边界）用的是
-        ``color`` / ``width``，不是填充层的 ``strokeColor`` / ``strokeWidth``；
-        两种都要改，否则「描边宽度」对这类符号没有效果。
+        透明色（颜色框选「无颜色」）= 无填充 / 无描边：同时把画刷 / 画笔切成
+        NoBrush / NoPen，下次回填颜色按钮才会显示为「无颜色」；再选回普通颜色
+        时恢复实线，颜色才真正生效。
         """
         fill = self.fill_color_btn.color()
         stroke = self.stroke_color_btn.color()
         width = self.stroke_width_spin.value()
-        width_changed = (
-            self._stroke_width_before is not None
-            and abs(width - self._stroke_width_before) > 1e-9
-        )
         try:
             count = symbol.symbolLayerCount()
         except Exception:  # noqa: BLE001
@@ -869,20 +893,40 @@ class SymbolParamsWidget(QWidget):
                 layer = symbol.symbolLayer(index)
             except Exception:  # noqa: BLE001
                 continue
-            is_line = isinstance(layer, QgsLineSymbolLayer)
-            if width_changed and width > 0:
-                _ensure_stroke_visible(layer, is_line)
-            if is_line:
+            if isinstance(layer, QgsLineSymbolLayer):
+                if stroke.alpha() == 0:
+                    _call_setter(layer, "setPenStyle", Qt.PenStyle.NoPen)
+                elif _call(layer, "penStyle") == Qt.PenStyle.NoPen:
+                    _call_setter(layer, "setPenStyle", Qt.PenStyle.SolidLine)
                 _call_setter(layer, "setColor", stroke)
                 _call_setter(layer, "setWidth", width)
                 continue
+            # 填充层
+            if fill.alpha() == 0:
+                _call_setter(layer, "setBrushStyle", Qt.BrushStyle.NoBrush)
+            elif _call(layer, "brushStyle") == Qt.BrushStyle.NoBrush:
+                _call_setter(layer, "setBrushStyle", Qt.BrushStyle.SolidPattern)
             _call_setter(layer, "setColor", fill)
+            if stroke.alpha() == 0:
+                _call_setter(layer, "setStrokeStyle", Qt.PenStyle.NoPen)
+            elif _call(layer, "strokeStyle") == Qt.PenStyle.NoPen:
+                _call_setter(layer, "setStrokeStyle", Qt.PenStyle.SolidLine)
             _call_setter(layer, "setStrokeColor", stroke)
             _call_setter(layer, "setStrokeWidth", width)
-        self._stroke_width_before = width
 
     def _update_line(self, symbol) -> None:
-        _set_layer_prop(symbol, "setColor", self.line_color_btn.color())
+        color = self.line_color_btn.color()
+        if color.alpha() == 0:
+            _set_layer_prop(symbol, "setPenStyle", Qt.PenStyle.NoPen)
+        else:
+            try:
+                for index in range(symbol.symbolLayerCount()):
+                    layer = symbol.symbolLayer(index)
+                    if _call(layer, "penStyle") == Qt.PenStyle.NoPen:
+                        _call_setter(layer, "setPenStyle", Qt.PenStyle.SolidLine)
+            except Exception:  # noqa: BLE001
+                pass
+        _set_layer_prop(symbol, "setColor", color)
         _set_layer_prop(symbol, "setWidth", self.line_width_spin.value())
 
     def _update_marker(self, symbol) -> None:
