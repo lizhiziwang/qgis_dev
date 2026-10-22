@@ -511,6 +511,9 @@ class MapToolsMixin:
             self.addDockWidget(Qt.DockWidgetArea.RightDockWidgetArea, dock)
             dock.setFloating(True)
             self._position_i_query_dock(dock)
+            # 停靠 ↔ 浮动切换后 Qt 6.11 的 savedState 会卡住，之后主窗口改尺寸
+            # 不再重排（同属性表 / 其他 Dock）。挂上布局自愈，拖回 / 拖出时清一次。
+            self.watch_dock_layout(dock)
         return dock
 
     def _position_i_query_dock(self, dock) -> None:

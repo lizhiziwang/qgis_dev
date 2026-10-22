@@ -665,6 +665,14 @@ class PagedAttributeTableModel(QAbstractTableModel):
         self.subset_active = active
         self._reset_and_restart()
 
+    def reset_view(self, filter_str: str, show_ids, subset_active: bool | None = None) -> None:
+        """同图层重开属性表：一次性换筛选与子集并重流（只重开一轮）。"""
+        new_ids = [int(i) for i in show_ids] if show_ids else []
+        self.filter_str = filter_str or "1=1"
+        self.show_ids = new_ids
+        self.subset_active = bool(new_ids) if subset_active is None else bool(subset_active)
+        self._reset_and_restart()
+
     def _reset_and_restart(self) -> None:
         """按当前 ``filter_str`` / ``show_ids`` 重开一轮：重置 → 重算总数 → 重新流式。"""
         self.where = self._build_where()
@@ -2107,6 +2115,41 @@ class PagedAttributeTableWidget(QWidget):
 
     # ------------------------------------------------------------ 刷新 / 缩放到所选
 
+    def reload_content(self, filter_str: str = "1=1", show_ids: list | None = None) -> None:
+        """同一图层再次打开属性表：原地刷新筛选 / 子集。
+
+        不重建 widget/model —— ``QDockWidget.setWidget()`` 只隐藏旧控件、不销毁它，
+        每次重开都新建一份会让旧 model 继续挂在图层信号上并可能和新 model 抢同一
+        数据源的读锁，表现就是第二次打开页面不刷新 / 空白。
+        """
+        ids = [int(i) for i in show_ids] if show_ids else []
+        self.filter_str = filter_str or "1=1"
+        self.show_ids = ids
+        self._preset_ids = ids
+        combo = self.mode_combo
+        combo.blockSignals(True)
+        try:
+            preset_idx = combo.findData("preset")
+            if ids:
+                if preset_idx < 0:
+                    combo.addItem("仅指定要素", "preset")
+                combo.setCurrentIndex(combo.findData("preset"))
+            else:
+                if preset_idx >= 0:
+                    combo.removeItem(preset_idx)
+                combo.setCurrentIndex(combo.findData("all"))
+        finally:
+            combo.blockSignals(False)
+        if self.model is None:
+            return
+        self._suppress_selection_sync = True
+        try:
+            self.model.reset_view(self.filter_str, ids, bool(ids))
+        finally:
+            self._suppress_selection_sync = False
+        self.table_view.scrollToTop()
+        self._refresh_load_state()
+
     def _refresh_table(self) -> None:
         """刷新：按当前筛选 / 显示范围重新读一遍（字段也可能改过，一并重读）。"""
         model = self.model
@@ -3257,6 +3300,9 @@ class AttributeDock(QDockWidget):
     def __init__(self, layer, page_size: int = 50, parent=None, filter_str: str = "1=1", show_ids: Optional[list] = None) -> None:
         title = f"属性表 - {layer.name()}"
         super().__init__(title, parent)
+        # saveState/restoreState 按 objectName 匹配 Dock；空名字会被 Qt 丢弃并告警，
+        # 布局自愈重套时浮动位置就会丢（偶尔落回屏幕左上角）。每个图层一个唯一名字。
+        self.setObjectName(self._object_name_for(layer))
         self.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable | QDockWidget.DockWidgetFeature.DockWidgetMovable | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
         self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.BottomDockWidgetArea)
         self.topParent = parent
@@ -3279,6 +3325,15 @@ class AttributeDock(QDockWidget):
         self._attach_selection_sync()
         self.setMinimumSize(200, 100)
 
+    @staticmethod
+    def _object_name_for(layer) -> str:
+        """属性表 Dock 的唯一 objectName（Qt 的 saveState/restoreState 靠它匹配）。"""
+        try:
+            lid = layer.id()
+        except RuntimeError:
+            lid = id(layer)
+        return f"AttributeDock:{lid}"
+
     def _wire_content_widget(self, widget) -> None:
         """把内容控件的信号接到 Dock 上。
 
@@ -3292,18 +3347,27 @@ class AttributeDock(QDockWidget):
         widget.zoom_to_selection_requested.connect(self._zoom_to_selection)
 
     def add_new_layer(self, layer, parent, filter_str: str, show_ids, page_size: int = 50, title: str = "属性表") -> None:
-        # 先取消旧 widget 的后台流式线程（避免滞留持有图层读锁）
-        if self.content_widget is not None and self.content_widget.model is not None:
-            self.content_widget.model.cancel_stream()
+        same_layer = self.layer is layer
         self.layer = layer
         self.show_ids = list(show_ids) if show_ids else []
-        self.content_widget = PagedAttributeTableWidget(layer, page_size, self, filter_str=filter_str, show_ids=show_ids)
-        self.setWidget(self.content_widget)
-        self._wire_content_widget(self.content_widget)
+        self.setObjectName(self._object_name_for(layer))
+        if same_layer and self.content_widget is not None and not sip.isdeleted(self.content_widget):
+            self.content_widget.reload_content(filter_str, show_ids)
+        else:
+            old_widget = self.content_widget
+            # 先取消旧 widget 的后台流式线程（避免滞留持有图层读锁）
+            if old_widget is not None and old_widget.model is not None:
+                old_widget.model.cancel_stream()
+            self.content_widget = PagedAttributeTableWidget(layer, page_size, self, filter_str=filter_str, show_ids=show_ids)
+            self.setWidget(self.content_widget)
+            self._wire_content_widget(self.content_widget)
+            if old_widget is not None and not sip.isdeleted(old_widget):
+                old_widget.deleteLater()
         # 闪烁件绑定的是**旧图层**，换了图层必须丢掉重建；选中同步也要改挂到新图层
         self._discard_highlighter()
         self._attach_selection_sync()
         self.setWindowTitle(title)
+        self.content_widget.show()
 
     def _on_layers_will_be_removed(self, layer_ids) -> None:
         """本 Dock 正显示的图层即将被删 → 立即关闭（见 ``__init__`` 注释）。

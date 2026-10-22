@@ -19,6 +19,7 @@ from qgis.PyQt.QtGui import (
     QAction,
     QColor,
     QKeySequence,
+    QResizeEvent,
     QShortcut,
 )
 from qgis.PyQt.QtWidgets import QApplication, QDialog, QDockWidget, QToolBar
@@ -462,6 +463,20 @@ class WindowChromeMixin:
         self.heal_stalled_layout()
 
     # ================================================= dock 布局停摆的自愈
+
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 —— Qt 命名
+        """窗口尺寸变了：**只有被标记为可能停摆时**才排一次布局自愈。
+
+        本机 Qt 6.11 的 ``savedState`` 一旦卡住，改窗口大小会早返回、内容不跟着
+        重排。但不能每次 resize 都无条件 ``restoreState``——浮动 Dock 会因此每次
+        都闪一下。需要自愈的操作（如重开属性表）只打标记，由下一次 resize 消费。
+        """
+        super().resizeEvent(event)
+        if getattr(self, "_layout_heal_on_resize", False):
+            self._layout_heal_on_resize = False
+            # 浮动面板不参与：restoreState 会重套它的几何，resize 时看到闪一下
+            if not any(d.isVisible() and d.isFloating() for d in self.findChildren(QDockWidget)):
+                self.schedule_layout_heal()
 
     def watch_dock_layout(self, dock) -> None:
         """Dock 停靠↔浮动 / 换停靠区后登记一次布局自愈。

@@ -16,11 +16,28 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from qgis.core import QgsFeature, QgsMapLayer, QgsVectorLayer
     from qgis.gui import QgsHighlight, QgsMapCanvas, QgsMapToolIdentify
+
+
+#: 单次识别最多返回的要素数。``None`` 表示不限制；需要防止密集图层
+#: 一次命中数万条时，可传正数只取前若干条。
+DEFAULT_MAX_RESULTS = None
+
+#: 识别缓冲半径（屏幕像素）。``None`` 表示沿用 QGIS 默认半径（按物理尺寸
+#: 折算，行为与 QGIS 自带识别一致）；需要收紧命中范围时传正的像素值。
+DEFAULT_SEARCH_RADIUS_PIXELS = None
+
+
+class IdentifyResults(list):
+    """识别结果列表；``truncated`` 为真表示命中数超过上限、只返回了前若干条。"""
+
+    def __init__(self, iterable=(), truncated: bool = False) -> None:
+        super().__init__(iterable)
+        self.truncated = bool(truncated)
 
 
 @dataclass(frozen=True)
@@ -115,11 +132,18 @@ class FeatureIdentifyService:
         y: float,
         mode: Optional["QgsMapToolIdentify.IdentifyMode"] = None,
         layers: Optional[List["QgsMapLayer"]] = None,
-    ) -> List[IdentifyResult]:
+        max_results: Optional[int] = DEFAULT_MAX_RESULTS,
+        search_radius_pixels: Optional[float] = DEFAULT_SEARCH_RADIUS_PIXELS,
+    ) -> IdentifyResults:
         """点击画布坐标 ``(x, y)`` 识别要素。
 
         ``mode`` 默认 ``TopDownAll``（所有图层里所有可识别要素）。
         ``layers`` 非空时只在这些图层里识别（I 查询的「所有图层 / 指定图层」）。
+        ``max_results`` 为最多返回的要素数（默认 :data:`DEFAULT_MAX_RESULTS`）；
+        传 ``None`` 或非正数表示不限制。超过上限时返回的列表
+        :attr:`IdentifyResults.truncated` 为 ``True``。
+        ``search_radius_pixels`` 为识别缓冲半径（屏幕像素，默认
+        :data:`DEFAULT_SEARCH_RADIUS_PIXELS`）；传 ``None`` 沿用 QGIS 默认半径。
         """
         from qgis.gui import QgsMapToolIdentify
         from qgis.core import QgsRasterLayer
@@ -127,12 +151,17 @@ class FeatureIdentifyService:
         if mode is None:
             mode = QgsMapToolIdentify.IdentifyMode.TopDownAll
         tool = QgsMapToolIdentify(canvas)
-        # QGIS 4.x 的 identify(x, y, mode) 要求 int 坐标 + IdentifyMode 枚举，
-        # 传 float / int 都会 TypeError（int 在 Qt6 绑定不再自动转枚举）
-        if layers:
-            results = tool.identify(int(x), int(y), list(layers), mode)
-        else:
-            results = tool.identify(int(x), int(y), mode)
+        restore_radius = self._override_search_radius(tool, canvas, search_radius_pixels)
+        try:
+            # QGIS 4.x 的 identify(x, y, mode) 要求 int 坐标 + IdentifyMode 枚举，
+            # 传 float / int 都会 TypeError（int 在 Qt6 绑定不再自动转枚举）
+            if layers:
+                results = tool.identify(int(x), int(y), list(layers), mode)
+            else:
+                results = tool.identify(int(x), int(y), mode)
+        finally:
+            if restore_radius is not None:
+                restore_radius()
         # ArcGIS MapServer 栅格层：QGIS 的 identifyRaster 只带回要素几何（可高亮），
         # 属性全空 —— 对这类图层先做一次服务端 REST identify 富化（属性 + 几何），
         # 富化成功就顶替原始栅格结果；失败则回退到默认栅格像元分支。
@@ -145,16 +174,25 @@ class FeatureIdentifyService:
             got = self._identify_mapserver_features(canvas, layer, int(x), int(y))
             if got:
                 enriched[id(layer)] = got
-        out: List[IdentifyResult] = []
+        limit = max_results if max_results is not None and max_results > 0 else None
+        out = IdentifyResults()
         done: set = set()
+        truncated = False
         for r in results:
+            if limit is not None and len(out) >= limit:
+                truncated = True
+                break
             layer = r.mLayer
             feature = r.mFeature
             if isinstance(layer, QgsRasterLayer) and id(layer) in enriched:
                 # 该图层已被 REST identify 结果顶替，只放一次
                 if id(layer) not in done:
                     done.add(id(layer))
-                    out.extend(enriched[id(layer)])
+                    for enriched_result in enriched[id(layer)]:
+                        if limit is not None and len(out) >= limit:
+                            truncated = True
+                            break
+                        out.append(enriched_result)
                 continue
             if isinstance(layer, QgsRasterLayer):
                 # 栅格像元：波段值在 QgsMapToolIdentify 结果的 mAttributes
@@ -183,7 +221,37 @@ class FeatureIdentifyService:
             except Exception:  # noqa: BLE001
                 pass
             out.append(IdentifyResult(layer=layer, feature=feature, geometry_wkt=geom_wkt, attributes=attrs))
+        out.truncated = truncated
         return out
+
+    @staticmethod
+    def _override_search_radius(
+        tool, canvas, search_radius_pixels
+    ) -> Optional[Callable[[], None]]:
+        """把识别缓冲半径固定成屏幕像素，返回恢复默认值的回调。
+
+        QGIS 默认半径按物理尺寸折算，缩小后换算成地图单位会非常大，识别会
+        把点击点周围一大片要素都取出来。这里用当前画布的
+        ``mapUnitsPerPixel()`` 把像素半径换算成地图单位，保证任意缩放级别
+        搜索范围都不超过给定像素数。
+        """
+        if search_radius_pixels is None:
+            return None
+        try:
+            radius = max(0.0, float(search_radius_pixels)) * canvas.mapSettings().mapUnitsPerPixel()
+        except (RuntimeError, TypeError, ValueError):
+            return None
+        from qgis.gui import QgsMapToolIdentify
+
+        try:
+            props = QgsMapToolIdentify.IdentifyProperties()
+            props.searchRadiusMapUnits = radius
+            tool.setPropertiesOverrides(props)
+            return tool.restorePropertiesOverrides
+        except AttributeError:
+            # QGIS < 3.42 只有已弃用的 canvas overrides
+            tool.setCanvasPropertiesOverrides(radius)
+            return tool.restoreCanvasPropertiesOverrides
 
     def _identify_mapserver_features(
         self,

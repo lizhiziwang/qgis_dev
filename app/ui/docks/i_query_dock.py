@@ -213,6 +213,7 @@ class IQueryDock(QDockWidget):
 
     def show_results(self, results, location: str = "") -> None:
         """展示一次识别命中的全部结果，默认选中第一条。"""
+        truncated = bool(getattr(results, "truncated", False))
         self._results = list(results or [])
         self.location_label.setText(f"位置: {location}" if location else "位置: -")
         first_item = None
@@ -249,7 +250,14 @@ class IQueryDock(QDockWidget):
                 self.results_tree.setCurrentItem(first_item)
         finally:
             self.results_tree.blockSignals(False)
-        self.results_label.setText(f"识别结果（{total}）")
+        if truncated:
+            self.results_label.setText(f"识别结果（{total}，已达上限）")
+            self.results_label.setToolTip(
+                f"命中要素超过单次上限，仅显示前 {total} 条；请放大地图或缩小识别来源后重试"
+            )
+        else:
+            self.results_label.setText(f"识别结果（{total}）")
+            self.results_label.setToolTip("")
 
         if first_item is not None:
             self._show_result(first_item.data(0, Qt.ItemDataRole.UserRole))
@@ -441,6 +449,7 @@ class IQueryDock(QDockWidget):
         finally:
             self.results_tree.blockSignals(False)
         self.results_label.setText("识别结果（0）")
+        self.results_label.setToolTip("")
         self._clear_result()
 
     def closeEvent(self, event) -> None:

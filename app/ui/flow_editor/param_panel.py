@@ -66,6 +66,7 @@ class ParamPanelDock(QDockWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__("节点参数", parent)
+        self.setObjectName("FlowParamPanelDock")
         self.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetClosable
             | QDockWidget.DockWidgetFeature.DockWidgetMovable

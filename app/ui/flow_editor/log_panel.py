@@ -30,6 +30,7 @@ class LogDock(QDockWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__("运行日志", parent)
+        self.setObjectName("FlowLogDock")
         self.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetClosable
             | QDockWidget.DockWidgetFeature.DockWidgetMovable

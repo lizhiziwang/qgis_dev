@@ -746,6 +746,8 @@ class MirrorCompare(QObject):
 
         # 1) 右侧 dock + 第二画布（独立图层列表，不走树可见性）
         dock = QDockWidget(MIRROR_DOCK_TITLE, self._main_window)
+        # saveState/restoreState 按 objectName 匹配 Dock；空名字会被 Qt 丢弃并告警。
+        dock.setObjectName("MirrorCompareDock")
         mirror_canvas = QgsMapCanvas(dock)
         mirror_canvas.setProject(project)
         mirror_canvas.setDestinationCrs(self._canvas.mapSettings().destinationCrs())

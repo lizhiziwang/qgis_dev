@@ -1672,6 +1672,12 @@ class AppActionsMixin:
             # 复用同一个 Dock 实例（位置记忆留着），关过的就再显示出来
             dock.add_new_layer(layer, self, filter_str, show_ids, 50, f"属性表 - {layer.name()}")
             dock.show()
+            # Qt 6.11 的 savedState 可能被 show/raise/setWidget 卡住：之后主窗口改
+            # 尺寸会早返回、内容不跟着刷新（同 6db7e87 的 dock 拖拽问题）。只打标记，
+            # 由下一次 resize 消费。**浮动面板不标记**：restoreState 会重套浮动
+            # 窗口几何，改变窗口大小时会闪。
+            if not dock.isFloating():
+                self._layout_heal_on_resize = True
         dock.raise_()                        # 抬到当前标签页
         # 仍维护 current_attribute_dock：空间查询等入口拿到"刚打开的这个"
         self.current_attribute_dock = dock

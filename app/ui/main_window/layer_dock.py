@@ -644,6 +644,9 @@ class LayerDock(QDockWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__("图层列表", parent)
+        # saveState/restoreState 按 objectName 匹配 Dock；空名字会被 Qt 丢弃并告警，
+        # 布局自愈重套时就会错位（见 WindowChromeMixin.heal_stalled_layout）。
+        self.setObjectName("LayerDock")
         self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
 
         self.project: QgsProject = QgsProject.instance()

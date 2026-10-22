@@ -2,6 +2,18 @@
 
 from __future__ import annotations
 
-from .service import FeatureIdentifyService, IdentifyResult
+from .service import (
+    DEFAULT_MAX_RESULTS,
+    DEFAULT_SEARCH_RADIUS_PIXELS,
+    FeatureIdentifyService,
+    IdentifyResult,
+    IdentifyResults,
+)
 
-__all__ = ["FeatureIdentifyService", "IdentifyResult"]
+__all__ = [
+    "DEFAULT_MAX_RESULTS",
+    "DEFAULT_SEARCH_RADIUS_PIXELS",
+    "FeatureIdentifyService",
+    "IdentifyResult",
+    "IdentifyResults",
+]

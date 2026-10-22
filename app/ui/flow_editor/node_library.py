@@ -49,6 +49,7 @@ class NodeLibraryDock(QDockWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__("节点库", parent)
+        self.setObjectName("FlowNodeLibraryDock")
         self.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetClosable
             | QDockWidget.DockWidgetFeature.DockWidgetMovable

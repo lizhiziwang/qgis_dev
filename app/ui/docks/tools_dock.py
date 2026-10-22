@@ -308,6 +308,9 @@ class ToolsDock(QDockWidget):
         destroy_on_close: bool = False,
     ) -> None:
         super().__init__(title, parent)
+        # saveState/restoreState 按 objectName 匹配 Dock；空名字会被 Qt 丢弃并告警。
+        # 类名 + 标题保证「分析工具 / 质检」等同类面板各自唯一。
+        self.setObjectName(f"{type(self).__name__}:{title}")
         self.topParent = parent
         #: 本 dock 的分组树（专题面板可传入自己的分组）
         self._groups: list = _TOOL_GROUPS if groups is None else groups

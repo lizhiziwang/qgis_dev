@@ -43,6 +43,8 @@ class ProjectDock(QDockWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__("工程", parent)
+        # saveState/restoreState 按 objectName 匹配 Dock；空名字会被 Qt 丢弃并告警。
+        self.setObjectName("ProjectDock")
         self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea)
         self.setMinimumSize(320, 480)
 

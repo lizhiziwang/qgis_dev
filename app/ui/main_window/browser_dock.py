@@ -22,6 +22,9 @@ class BrowserDock(QDockWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__("数据浏览器", parent)
+        # saveState/restoreState 按 objectName 匹配 Dock；空名字会被 Qt 丢弃并告警，
+        # 布局自愈重套时就会错位（见 WindowChromeMixin.heal_stalled_layout）。
+        self.setObjectName("BrowserDock")
         # 和 LayerDock 一样左右都能停：本面板启动时就是摆在**左侧**的
         # （见 WindowShellMixin._build_docks），只写 Right 的话 Qt 只拦用户拖拽、
         # 不拦代码摆放，于是成了「显示在左边、拖出去却再也拖不回左边」。
