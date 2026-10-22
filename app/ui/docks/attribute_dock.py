@@ -70,6 +70,7 @@ from app.infra.logging import get_logger
 from app.ui.common import tool_icons
 from app.ui.common.feature_highlight import FeatureHighlighter
 from app.ui.common.icons import Icons
+from app.ui.common.modeless import show_modeless
 from app.ui.common.theme import ThemeManager, dock_selection_color
 from app.ui.common.value_format import format_value
 from app.ui.common.widgets import save_file
@@ -2640,9 +2641,13 @@ class PagedAttributeTableWidget(QWidget):
             return
 
     def _filter(self) -> None:
-        dlg = QueryBuilderDialog(self.layer, parent=self)
-        dlg.sqlConfirmed.connect(self._apply_filter)
-        dlg.exec()
+        show_modeless(
+            self,
+            "query_builder",
+            lambda: QueryBuilderDialog(self.layer, parent=self),
+            configure=lambda dlg: dlg.sqlConfirmed.connect(self._apply_filter),
+            layer=self.layer,
+        )
 
     def _export_rows(self) -> List[int]:
         """要导出的行号。
@@ -2840,14 +2845,20 @@ class PagedAttributeTableWidget(QWidget):
         """
         from app.ui.dialogs.field_calculator import FieldCalculatorDialog
 
-        dlg = FieldCalculatorDialog(self.layer, self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        # 计算器可能启动了编辑：同步"保存编辑/停止编辑"按钮可用性
-        self._sync_edit_buttons()
-        # 新增字段 → 列定义刷新；仅更新值 → 可视行重取新值，两者都覆盖
-        if self.model is not None:
-            self.model.reload_fields()
+        def _refresh(_dlg) -> None:
+            # 计算器可能启动了编辑：同步"保存编辑/停止编辑"按钮可用性
+            self._sync_edit_buttons()
+            # 新增字段 → 列定义刷新；仅更新值 → 可视行重取新值，两者都覆盖
+            if self.model is not None:
+                self.model.reload_fields()
+
+        show_modeless(
+            self,
+            "field_calculator",
+            lambda: FieldCalculatorDialog(self.layer, self),
+            on_accepted=_refresh,
+            layer=self.layer,
+        )
 
     def _sync_edit_buttons(self) -> None:
         """按图层编辑态同步"保存编辑/停止编辑"按钮可用性。"""
@@ -2865,10 +2876,17 @@ class PagedAttributeTableWidget(QWidget):
 
     def _organize_columns(self) -> None:
         """弹「组织列」对话框，按勾选结果隐藏未选中的字段列（ID 列恒显示）。"""
-        dlg = OrganizeColumnsDialog(self.layer, self._visible_field_names(), parent=self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._apply_column_visibility(dlg.checked_field_names())
+        show_modeless(
+            self,
+            "organize_columns",
+            lambda: OrganizeColumnsDialog(
+                self.layer, self._visible_field_names(), parent=self
+            ),
+            on_accepted=lambda dlg: self._apply_column_visibility(
+                dlg.checked_field_names()
+            ),
+            layer=self.layer,
+        )
 
     def _apply_column_visibility(self, names) -> None:
         """记录要隐藏的字段名并同步到视图（按字段名存，模型结构不动）。"""
@@ -3224,13 +3242,19 @@ class PagedAttributeTableWidget(QWidget):
                 f"字段「{name}」为系统自维护 / 唯一标识字段，不允许计算。",
             )
             return
-        dlg = FieldCalculatorDialog(self.layer, self, initial_field=name)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        # 计算器可能启动了编辑 / 改了字段：同步按钮并刷新列与值
-        self._sync_edit_buttons()
-        if self.model is not None:
-            self.model.reload_fields()
+        def _refresh(_dlg) -> None:
+            # 计算器可能启动了编辑 / 改了字段：同步按钮并刷新列与值
+            self._sync_edit_buttons()
+            if self.model is not None:
+                self.model.reload_fields()
+
+        show_modeless(
+            self,
+            "field_calculator",
+            lambda: FieldCalculatorDialog(self.layer, self, initial_field=name),
+            on_accepted=_refresh,
+            layer=self.layer,
+        )
 
     def _open_geometry_calculator(self, name: str) -> None:
         """列头菜单「几何计算」：把周长 / 长度 / 面积写进**该列字段**。

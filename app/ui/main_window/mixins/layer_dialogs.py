@@ -10,11 +10,10 @@ from __future__ import annotations
 
 from qgis.core import (
     Qgis,
-    QgsStyle,
+    QgsCategorizedSymbolRenderer,
+    QgsRendererCategory,
+    QgsSingleSymbolRenderer,
     QgsVectorLayer,
-)
-from qgis.gui import (
-    QgsRendererPropertiesDialog,
 )
 from qgis.PyQt.QtWidgets import (
     QDialog,
@@ -25,6 +24,7 @@ from qgis.PyQt.QtWidgets import (
 
 from app.infra.logging import get_logger
 from app.ui.common.icons import Icons
+from app.ui.common.modeless import show_modeless
 from app.ui.dialogs.execute_sql import ExecuteSqlDialog
 from app.ui.dialogs.style_io import (
     StyleOpenDialog,
@@ -49,35 +49,147 @@ class LayerDialogsMixin:
         dlg = ExecuteSqlDialog(self._selected_layer, self)
         dlg.show()
 
-    def _show_style_editor(self, layer) -> None:
-        dlg = QgsRendererPropertiesDialog(layer=layer, style=QgsStyle.defaultStyle(), embedded=False, parent=self)
-        dlg.setWindowTitle(f"图层样式 - {layer.name()}")
-        if dlg.exec():
-            layer.triggerRepaint()
-            self.canvas.refresh()
-
     def _show_render_tab(self, layer) -> None:
-        """头部「打开图层渲染设置」：弹自建 :class:`LayerPropertiesDialog` 并跳到「渲染」tab。
+        """打开图层渲染设置：弹自建 :class:`LayerPropertiesDialog` 并跳到「渲染」tab。
 
-        与 :meth:`_show_style_editor` 的区别：
-
-        - 前者用 QGIS 原生 :class:`QgsRendererPropertiesDialog`（chrome 不随本应用主题）；
-        - 本方法用项目自建的 :class:`LayerPropertiesDialog`（跟随 :class:`ThemeManager`
-          与无边框标题栏），且**入口默认跳到「渲染」页**——避免用户在多个 tab 间再翻。
+        统一使用项目自建的 :class:`LayerPropertiesDialog`（跟随 :class:`ThemeManager`
+        与无边框标题栏），**入口默认跳到「渲染」页**——避免用户在多个 tab 间再翻，
+        也不再使用 QGIS 原生的 ``QgsRendererPropertiesDialog``。
 
         tab 跳转按 tab 文本"渲染"匹配（:class:`LayerPropertiesDialog._TAB_SPECS` 表里
         第 5 个就是「渲染」→ :class:`RenderTab`）。点「确定 / 应用」后由 dialog 内部
         :meth:`_apply_all` 触发 ``triggerRepaint`` + ``canvas.refresh``，本方法不重复触发
         （避免在信号栈内重入画布，参见 :meth:`_show_label_settings` 的同型注释）。
         """
+        if layer is None:
+            return
         from app.ui.dialogs.layer_properties.dialog import LayerPropertiesDialog
 
-        dlg = LayerPropertiesDialog(layer, canvas=self.canvas, parent=self)
-        for i in range(dlg.tabs.count()):
-            if dlg.tabs.tabText(i) == "渲染":
-                dlg.tabs.setCurrentIndex(i)
-                break
-        dlg.exec()
+        dlg = show_modeless(
+            self,
+            ("layer_properties", layer.id()),
+            lambda: LayerPropertiesDialog(layer, canvas=self.canvas, parent=self),
+            on_finished=self._on_layer_properties_finished,
+            configure=self._configure_layer_properties,
+            layer=layer,
+        )
+        self._select_properties_page(dlg, ("渲染", "Render"))
+        self._select_tab_widget_page(dlg, ("渲染", "Render"))
+
+    def _configure_layer_properties(self, dlg) -> None:
+        """新建图层属性窗口时接上「已应用」信号：点「应用」也刷新行首色块。"""
+        try:
+            dlg.applied.connect(self.layer_dock.refresh_symbol_icons)
+        except (AttributeError, TypeError):
+            pass
+
+    def _on_layer_properties_finished(self, _dlg) -> None:
+        """图层属性关闭（确定 / 取消都算）→ 刷新行尾标注开关与行首符号色块。"""
+        try:
+            self.layer_dock.refresh_label_state()
+            self.layer_dock.refresh_symbol_icons()
+        except Exception:  # noqa: BLE001 —— 刷新失败不影响已完成的修改
+            pass
+
+    # --------------------------------------------------- 双击符号编辑
+
+    def _open_symbol_selector(self, symbol, layer):
+        """共用符号选择器：返回选中的符号拷贝，取消返回 ``None``。"""
+        from app.ui.dialogs.layer_properties.render import _geom_kind
+        from app.ui.dialogs.layer_properties.symbol_selector import (
+            SymbolSelectorDialog,
+        )
+
+        kind = _geom_kind(layer)
+        if kind is None or symbol is None:
+            return None
+        dlg = SymbolSelectorDialog(symbol.clone(), kind, self)
+        try:
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return None
+            return dlg.selected_symbol()
+        finally:
+            dlg.deleteLater()
+
+    def _edit_layer_symbol(self, layer) -> None:
+        """双击图层行的符号图标：单一符号弹符号选择器，其它渲染方式打开渲染页。"""
+        if not isinstance(layer, QgsVectorLayer):
+            return
+        renderer = layer.renderer()
+        if not isinstance(renderer, QgsSingleSymbolRenderer):
+            self._show_render_tab(layer)
+            return
+        try:
+            symbol = renderer.symbol()
+        except (RuntimeError, AttributeError):
+            return
+        chosen = self._open_symbol_selector(symbol, layer)
+        if chosen is None:
+            return
+        try:
+            # 原地换符号：保留渲染器与其它配置
+            renderer.setSymbol(chosen.clone())
+            layer.triggerRepaint()
+            self.layer_dock.refresh_symbol_icons()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("双击编辑图层符号失败：%s", exc, exc_info=True)
+
+    def _edit_legend_symbol(self, layer, row: int) -> None:
+        """双击分类图例子项：编辑该类别符号（重建分类渲染器，避免所有权问题）。"""
+        if not isinstance(layer, QgsVectorLayer):
+            return
+        renderer = layer.renderer()
+        if not isinstance(renderer, QgsCategorizedSymbolRenderer):
+            # 分级的图例子项暂不支持直接改，退回渲染页
+            self._show_render_tab(layer)
+            return
+        try:
+            categories = renderer.categories()
+            if not (0 <= row < len(categories)):
+                return
+            category = categories[row]
+            symbol = category.symbol()
+        except Exception:  # noqa: BLE001
+            return
+        chosen = self._open_symbol_selector(symbol, layer)
+        if chosen is None:
+            return
+        try:
+            self._replace_category_symbol(layer, renderer, row, chosen)
+            layer.triggerRepaint()
+            self.layer_dock.refresh_symbol_icons()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("编辑类别符号失败：%s", exc, exc_info=True)
+
+    @staticmethod
+    def _replace_category_symbol(layer, renderer, row: int, chosen) -> None:
+        """用 ``chosen`` 替换第 ``row`` 个类别的符号，重建渲染器后换给图层。
+
+        不调用 ``updateCategorySymbol``：本构建里类别拷贝与渲染器共享符号指针，
+        传进去会双重释放（见 render.py 模块 docstring 的所有权说明）。
+        """
+        copies = renderer.categories()
+        categories = []
+        for index in range(len(copies)):
+            category = copies[index]
+            symbol = category.symbol()
+            if symbol is None:
+                continue
+            categories.append(
+                QgsRendererCategory(
+                    category.value(),
+                    chosen.clone() if index == row else symbol.clone(),
+                    category.label(),
+                    category.renderState(),
+                )
+            )
+        new_renderer = QgsCategorizedSymbolRenderer(
+            renderer.classAttribute(), categories
+        )
+        source = renderer.sourceSymbol()
+        if source is not None:
+            new_renderer.setSourceSymbol(source.clone())
+        layer.setRenderer(new_renderer)
 
     def _show_label_settings(self, layer) -> None:
         """打开标注设置。
@@ -143,6 +255,20 @@ class LayerDialogsMixin:
         except Exception:  # noqa: BLE001
             pass
 
+    @staticmethod
+    def _select_tab_widget_page(dlg, texts: tuple) -> None:
+        """自建图层属性对话框用 QTabWidget 分页：按 tab 文本切页。"""
+        try:
+            tabs = getattr(dlg, "tabs", None)
+            if tabs is None:
+                return
+            for index in range(tabs.count()):
+                if tabs.tabText(index) in texts:
+                    tabs.setCurrentIndex(index)
+                    return
+        except Exception:  # noqa: BLE001
+            pass
+
     def _open_style_file(self, layer) -> None:
 
         dlg = StyleOpenDialog(layer, self)
@@ -150,8 +276,12 @@ class LayerDialogsMixin:
 
     def _save_style(self, layer) -> None:
 
-        dlg = StyleSaveDialog(layer, self)
-        dlg.exec()
+        show_modeless(
+            self,
+            ("style_save", getattr(layer, "id", lambda: id(layer))()),
+            lambda: StyleSaveDialog(layer, self),
+            layer=layer,
+        )
 
     def _export_layer(self, layer) -> None:
         """图层列表右键「导出」：用自建导出对话框（与数据管理一致，多支持四种格式）。"""
@@ -163,21 +293,28 @@ class LayerDialogsMixin:
 
         if layer is None:
             return
-        dlg = ExportLayerDialog(
+
+        def _export(dlg) -> None:
+            spec = dlg.spec()
+            if spec is not None:
+                export_with_progress(
+                    self, layer, spec, load_after=dlg.load_after_export()
+                )
+            else:
+                logger.warning("导出图层：表单不合法，未导出")
+
+        show_modeless(
             self,
+            ("export_layer", layer.id()),
+            lambda: ExportLayerDialog(
+                self,
+                layer=layer,
+                default_dir=default_output_dir(),
+                extra_formats=True,
+            ),
+            on_accepted=_export,
             layer=layer,
-            default_dir=default_output_dir(),
-            extra_formats=True,
         )
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        spec = dlg.spec()
-        if spec is not None:
-            export_with_progress(
-                self, layer, spec, load_after=dlg.load_after_export()
-            )
-        else:
-            logger.warning("导出图层：表单不合法，未导出")
 
     def _open_layer_properties(self, layer) -> None:
         """打开自建图层属性对话框（不再用 QGIS 原生 ``QgsVectorLayerProperties``）。
@@ -191,10 +328,14 @@ class LayerDialogsMixin:
         try:
             from app.ui.dialogs.layer_properties import LayerPropertiesDialog
 
-            dlg = LayerPropertiesDialog(layer, canvas=self.canvas, parent=self)
-            dlg.exec()
-            # 「标注」页可能改了启用状态；图层标注改动不发信号，手动刷新行尾「标注」开关
-            self.layer_dock.refresh_label_state()
+            show_modeless(
+                self,
+                ("layer_properties", layer.id()),
+                lambda: LayerPropertiesDialog(layer, canvas=self.canvas, parent=self),
+                on_finished=self._on_layer_properties_finished,
+                configure=self._configure_layer_properties,
+                layer=layer,
+            )
         except Exception as e:  # noqa: BLE001
             logger.error("打开图层属性失败: %s", e, exc_info=True)
             QMessageBox.warning(self, "失败", str(e))

@@ -298,6 +298,14 @@ def _on_qt_message(mode: Any, context: Any, message: Any) -> None:
         if not _allow(("qt", _as_int(mode), where, text[:_KEY_PREFIX])):
             return
         _logger_qt.log(_qt_level_to_logging(mode), "[Qt] %s %s", where, text)
+        # 字体点数警告很可能是别处传入了 pointSize=-1 的像素字体；
+        # 正常日志只留警告，DEBUG 里补一份 Python 调用栈方便定位来源。
+        if "QFont::setPointSize" in text:
+            import traceback
+
+            _logger_qt.debug(
+                "[Qt] 调用栈：\n%s", "".join(traceback.format_stack(limit=25))
+            )
     except Exception:  # noqa: BLE001
         pass
     finally:

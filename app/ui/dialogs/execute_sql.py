@@ -418,8 +418,15 @@ class ExecuteSqlDialog(BaseDialog):
         pass
 
     def _on_open_query_builder(self) -> None:
-        dlg = QueryBuilderDialog(self.layer, parent=self)
-        dlg.exec()
+        from app.ui.common.modeless import show_modeless
+        from app.ui.dialogs.query_builder import QueryBuilderDialog
+
+        show_modeless(
+            self,
+            "execute_sql_query_builder",
+            lambda: QueryBuilderDialog(self.layer, parent=self),
+            layer=self.layer,
+        )
 
     def sizeHint(self):  # noqa: D401
         return self.minimumSizeHint()

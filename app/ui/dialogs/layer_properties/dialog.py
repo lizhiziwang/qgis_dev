@@ -10,8 +10,8 @@
 
 from __future__ import annotations
 
-from qgis.core import QgsVectorLayer
-from qgis.PyQt.QtCore import QTimer
+from qgis.core import QgsProject, QgsVectorLayer
+from qgis.PyQt.QtCore import QTimer, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QMessageBox,
@@ -39,6 +39,9 @@ _VECTOR_ONLY = frozenset({"条件", "字段", "选择", "标注", "渲染"})
 class LayerPropertiesDialog(BaseDialog):
     """图层属性对话框（常规 / 条件 / 字段 / 选择 / 标注 / 渲染页）。"""
 
+    #: 任一页成功写回图层（点「确定 / 应用」）——宿主据此刷新图层树行首色块等
+    applied = pyqtSignal()
+
     #: (标签名, 页类)；页类为 None → 占位页。
     _TAB_SPECS = (
         ("常规", GeneralTab),
@@ -58,7 +61,18 @@ class LayerPropertiesDialog(BaseDialog):
         self.setMinimumSize(0, 0)
         self.resize(880, 520)
         self._tab_widgets = []
+        # 无模态窗口一直开着时图层可能被删 / 整个工程被关：跟着关掉，别留悬空引用
+        QgsProject.instance().layersWillBeRemoved.connect(
+            self._on_layers_will_be_removed
+        )
         self._build()
+
+    def _on_layers_will_be_removed(self, layer_ids) -> None:
+        try:
+            if self.layer is not None and self.layer.id() in layer_ids:
+                self.close()
+        except (RuntimeError, AttributeError):
+            self.close()
 
     # ------------------------------------------------------------- 构建
 
@@ -125,6 +139,7 @@ class LayerPropertiesDialog(BaseDialog):
             if not ok:
                 return False
         self.setWindowTitle(f"图层属性 - {self.layer.name()}")
+        self.applied.emit()
         # 重绘不能留在按钮 clicked 的信号栈里同步跑——仓库多次记录过这会原生崩溃
         # （见 buffer.py 的 _on_execute 与 layer_actions.py 的 _remove_layer）。
         QTimer.singleShot(0, self._refresh_canvas)

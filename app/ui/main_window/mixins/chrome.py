@@ -176,7 +176,13 @@ class WindowChromeMixin:
         act.setToolTip(tooltip or text)
         if shortcut:
             act.setShortcut(shortcut)
+            # 应用级：焦点在任意控件 / 任意应用内窗口（含非模态工具窗）时都生效
+            act.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         act.triggered.connect(slot)
+        # **也挂到主窗口上**：页签工具条在别的页签下是隐藏的，隐藏工具条里的
+        # QAction 快捷键不会生效（实测）。挂到窗口后，焦点在任何控件上
+        # （包括文本输入框）都能触发。
+        self.addAction(act)
         self._tab_icon_items.append((act, icon_key))
         return act
 
@@ -585,6 +591,17 @@ class WindowChromeMixin:
                 central.y(), expected,
             )
         self._layout_healing = True
+        # ``restoreState`` 会把每个 tab 组的当前页重置成**第一个标签**（实测：
+        # 左栏从「图层列表」跳到「数据浏览器」，看起来像浏览器自己冒出来）。
+        # 先记下当前真正露在前面的 dock（inactive tab 的 visibleRegion 为空），
+        # 恢复布局后再 raise 回来。
+        active_docks: list[QDockWidget] = []
+        for dock in self.findChildren(QDockWidget):
+            try:
+                if dock.isVisible() and not dock.visibleRegion().isEmpty():
+                    active_docks.append(dock)
+            except RuntimeError:
+                continue
         try:
             state = self.saveState()
             if not state.isEmpty():
@@ -593,6 +610,12 @@ class WindowChromeMixin:
             pass  # 窗口销毁流程中，忽略
         finally:
             self._layout_healing = False
+        for dock in active_docks:
+            try:
+                if dock.isVisible():
+                    dock.raise_()
+            except RuntimeError:
+                continue
 
     def _build_status_bar(self) -> None:
         self.status_bar_builder = StatusBar(self)

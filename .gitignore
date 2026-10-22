@@ -24,4 +24,10 @@ config/state/dicts.db
 config/state/dicts.db-wal
 config/state/dicts.db-shm
 
+# 符号库 / 用户符号 / 符号收藏（运行时生成，不入库）
+config/symbols/
+config/symbol_libraries/
+config/state/symbol_favorites.json
+config/state/symbol_libraries.json
+
 .pi/
