@@ -259,7 +259,9 @@ class WindowShellMixin:
 
         工具条挂在画布的父容器上，因此先把画布左上角换算到该容器坐标系，
         再偏移 (4, 3)；画布缩放 / 容器变化时由
-        :meth:`_keep_side_toolbar_on_top` 重算。
+        :meth:`_keep_side_toolbar_on_top` 重算。顺带把画布高度换算成侧栏可用
+        高度交给 :meth:`SideToolBar.fit_to_height`——放不下的按钮会收进底部
+        「更多」小三角菜单，不再被界面裁掉。
         """
         side = getattr(self, "side_toolbar", None)
         widget = getattr(side, "widget", None) if side is not None else None
@@ -273,6 +275,9 @@ class WindowShellMixin:
             # 画布左上角在 host 坐标系里的位置（画布与 host 可能是兄弟/父子，
             # 用全局坐标之差最稳妥）。
             origin = canvas.mapToGlobal(QPoint(0, 0)) - host.mapToGlobal(QPoint(0, 0))
+            # 顶部 / 底部各留 3px：画布太矮时侧栏把放不下的按钮收进底部
+            # 「更多」小三角菜单（见 SideToolBar.fit_to_height），不再被界面盖住。
+            side.fit_to_height(max(0, canvas.height() - 6))
         except RuntimeError:
             return  # 窗口关闭流程中 C++ 对象已销毁
         widget.move(origin.x() + 4, origin.y() + 3)

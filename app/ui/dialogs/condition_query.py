@@ -32,7 +32,7 @@ from typing import TYPE_CHECKING, Any
 
 from qgis.core import QgsExpression, QgsProject, QgsVectorLayer
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import QSize, Qt
 from qgis.PyQt.QtGui import QTextCursor
 from qgis.PyQt.QtWidgets import (
     QApplication,
@@ -150,6 +150,11 @@ def _sort_key(value: object) -> tuple[int, float | str]:
     return (1, str(value))
 
 
+def _compact_row(item: QListWidgetItem, view: QListWidget) -> None:
+    """压缩列表项行高：字体高度 + 3px（约为默认行高的六成）。"""
+    item.setSizeHint(QSize(0, max(16, view.fontMetrics().height() + 3)))
+
+
 class ConditionQueryDialog(BaseDialog):
     """按属性条件选择要素（加入 / 新建 / 移除选择集）。"""
 
@@ -165,7 +170,7 @@ class ConditionQueryDialog(BaseDialog):
         self.setModal(False)
         # 紧凑尺寸：用户反馈原 780×700 太占地方，查询面板只占屏幕一角就够用
         self.setMinimumSize(500, 460)
-        self.resize(600, 520)
+        self.resize(600, 580)
         self._layers = list(layers)
         self._current_layer = self._find_layer(current_layer)
         self._field_entries: list[_FieldEntry] = []
@@ -485,6 +490,7 @@ class ConditionQueryDialog(BaseDialog):
                     f"字段：{name}" + (f"\n别名：{alias}" if alias and alias != name else "")
                     + ("\n（已挂接字典）" if is_domain else "")
                 )
+                _compact_row(item, self.field_list)
                 self.field_list.addItem(item)
 
         if self._field_entries:
@@ -597,10 +603,12 @@ class ConditionQueryDialog(BaseDialog):
             item.setData(Qt.ItemDataRole.UserRole, value)
             if text != code:
                 item.setToolTip(f"代码：{code}")
+            _compact_row(item, self.unique_list)
             self.unique_list.addItem(item)
         if len(self._unique_values) >= _UNIQUE_LIMIT:
             hint = QListWidgetItem(f"（仅显示前 {_UNIQUE_LIMIT} 个唯一值）")
             hint.setFlags(Qt.ItemFlag.NoItemFlags)
+            _compact_row(hint, self.unique_list)
             self.unique_list.addItem(hint)
 
     def _on_unique_clicked(self, item: QListWidgetItem) -> None:

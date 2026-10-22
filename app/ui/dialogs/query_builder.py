@@ -1,18 +1,15 @@
 """SQL 查询构建器 Dialog。
 
 界面与取值逻辑复用 :class:`~app.ui.dialogs.query_builder_widget.QueryBuilderWidget`
-（「图层属性 → 条件」页也用同一套），这里只负责测试条件、写回 ``subsetString``
-或把条件交给调用方（导出等）。
+（「图层属性 → 条件」页也用同一套），这里只负责写回 ``subsetString`` 或把条件
+交给调用方（导出等）。
 
 迁自 :class:`component.QueryBuilder.QueryBuilder`。"""
 
 from __future__ import annotations
 
-import contextlib
-import threading
-
-from qgis.core import QgsFeatureRequest, QgsVectorLayer
-from qgis.PyQt.QtCore import QObject, pyqtSignal
+from qgis.core import QgsVectorLayer
+from qgis.PyQt.QtCore import pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QDialog,
     QHBoxLayout,
@@ -23,43 +20,6 @@ from qgis.PyQt.QtWidgets import (
 
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.dialogs.query_builder_widget import QueryBuilderWidget
-
-
-class _SqlCountWorker(QObject):
-    """后台统计匹配要素数（"测试条件"全表扫描不阻塞主线程）。"""
-
-    counted = pyqtSignal(int)
-    failed = pyqtSignal(str)
-
-    def __init__(self, layer: QgsVectorLayer, cond: str) -> None:
-        super().__init__()
-        self.layer = layer
-        self.cond = cond
-        self._cancel = threading.Event()
-        self._thread: threading.Thread | None = None
-
-    def start(self) -> None:
-        self._thread = threading.Thread(target=self._run, name="sql-count", daemon=True)
-        self._thread.start()
-
-    def cancel(self) -> None:
-        self._cancel.set()
-
-    def _run(self) -> None:
-        try:
-            req = QgsFeatureRequest().setFilterExpression(self.cond)
-            n = 0
-            it = self.layer.getFeatures(req)
-            for _ in it:
-                if self._cancel.is_set():
-                    break
-                n += 1
-            with contextlib.suppress(Exception):
-                it.close()
-            if not self._cancel.is_set():
-                self.counted.emit(n)
-        except Exception as e:  # noqa: BLE001
-            self.failed.emit(str(e))
 
 
 class QueryBuilderDialog(BaseDialog):
@@ -88,7 +48,6 @@ class QueryBuilderDialog(BaseDialog):
         self.setMinimumSize(720, 500)
         self.layer = layer
         self._apply_to_layer = apply_to_layer
-        self._test_worker: _SqlCountWorker | None = None
         self._init_ui()
         self._init_signals()
         if self._apply_to_layer:
@@ -102,14 +61,10 @@ class QueryBuilderDialog(BaseDialog):
         self.widget = QueryBuilderWidget(self.layer, self)
         main.addWidget(self.widget, 1)
 
-        # 底部按钮
+        # 底部按钮（测试条件 / 清除条件已在条件框下方）
         btm = QHBoxLayout()
-        self.test_btn = QPushButton("测试条件")
-        self.clear_btn = QPushButton("清除条件")
         self.ok_btn = QPushButton("确定应用")
         self.cancel_btn = QPushButton("取消")
-        btm.addWidget(self.test_btn)
-        btm.addWidget(self.clear_btn)
         btm.addStretch()
         btm.addWidget(self.ok_btn)
         btm.addWidget(self.cancel_btn)
@@ -118,8 +73,6 @@ class QueryBuilderDialog(BaseDialog):
         self.setLayout(main)
 
     def _init_signals(self) -> None:
-        self.test_btn.clicked.connect(self._test_sql)
-        self.clear_btn.clicked.connect(self._clear_sql)
         self.ok_btn.clicked.connect(self._on_ok)
         self.cancel_btn.clicked.connect(self.reject)
 
@@ -140,51 +93,10 @@ class QueryBuilderDialog(BaseDialog):
         if applied:
             self.widget.set_condition(applied)
 
-    def _test_sql(self) -> None:
-        cond = self.widget.condition()
-        if not cond:
-            QMessageBox.warning(self, "警告", "请输入有效的 SQL 筛选条件！")
-            return
-        error = self.widget.condition_error(cond)
-        if error is not None:
-            QMessageBox.critical(self, "测试失败", error)
-            return
-        # 匹配计数走后台线程：大图层全表扫描不再卡死 UI（按钮禁用直到完成）
-        self.test_btn.setEnabled(False)
-        self.test_btn.setText("查询中…")
-        worker = _SqlCountWorker(self.layer, cond)
-        worker.counted.connect(self._on_sql_counted)
-        worker.failed.connect(self._on_sql_count_failed)
-        self._test_worker = worker
-        worker.start()
-
-    def _reset_test_btn(self) -> None:
-        self._test_worker = None
-        self.test_btn.setEnabled(True)
-        self.test_btn.setText("测试条件")
-
-    def _on_sql_counted(self, n: int) -> None:
-        self._reset_test_btn()
-        QMessageBox.information(self, "测试成功", f"SQL 合法！\n匹配要素：{n}")
-
-    def _on_sql_count_failed(self, msg: str) -> None:
-        self._reset_test_btn()
-        QMessageBox.critical(self, "测试失败", f"查询执行异常！\n{msg}")
-
     def closeEvent(self, event) -> None:
         """关闭对话框时取消仍在后台扫描的计数线程（避免滞留读锁）。"""
-        if self._test_worker is not None:
-            self._test_worker.cancel()
-            self._test_worker = None
+        self.widget.cancel_test()
         super().closeEvent(event)
-
-    def _clear_sql(self) -> None:
-        """清空编辑框与值列表。
-
-        只改本地编辑内容，**不动图层**：提示条仍显示图层当前已应用的条件，
-        真正取消筛选需要留空后点「确定应用」。
-        """
-        self.widget.clear_condition()
 
     def _on_ok(self) -> None:
         cond = self.widget.condition()

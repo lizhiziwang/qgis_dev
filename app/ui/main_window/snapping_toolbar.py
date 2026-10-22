@@ -44,11 +44,11 @@ from qgis.PyQt.QtWidgets import (
     QComboBox,
     QDoubleSpinBox,
     QMainWindow,
-    QToolBar,
     QToolButton,
 )
 
 from app.core.domain.drawing.tools.trace import set_tracing_enabled
+from app.ui.common.ribbon import AlignedToolBar
 
 #: 默认吸附设置（新工程 / 未保存过吸附配置时套用，开箱即用）
 _DEFAULT_TOLERANCE_PX = 12.0
@@ -113,7 +113,7 @@ class QgisSnappingToolbar(QObject):
     # ============================================================== 装配
 
     def _build_toolbar(self) -> None:
-        self.toolbar = QToolBar("磁性捕捉")
+        self.toolbar = AlignedToolBar("磁性捕捉")
         self.toolbar.setObjectName("QgisSnappingToolbar")
 
         # 吸附总开关

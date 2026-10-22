@@ -64,6 +64,8 @@ _GLYPHS: dict[str, str] = {
     "link": "",           # link 高亮依赖链
     "chevron_up": "",     # chevron-up 上一级
     "chevron_down": "",   # chevron-down 下一级
+    # caret-down：侧栏工具放不下时底部「更多」用的小三角（app/ui/main_window/side_toolbar）
+    "caret_down": "\uf0d7",
     "trash": "",          # trash 删除选中
     "file": "",           # file 新建流程
     "folder_open": "",    # folder-open 打开流程
@@ -99,6 +101,7 @@ _GLYPHS: dict[str, str] = {
     "plus_circle": "\uf055",  # plus-circle 新建连接
     "upload": "\uf093",       # upload 导入图层（左栏树节点右键菜单）
     # ---- 属性表 Dock 工具条（app/ui/docks/attribute_dock.py）----
+    "attribute_filter": "\uf0b0",  # filter 漏斗（属性筛选）
     "organize_columns": "\uf0db",  # columns 组织列（字段列显示设置）
     "export_csv": "",        # file-export 导出为 CSV 文件
 }
