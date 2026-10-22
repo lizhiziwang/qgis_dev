@@ -1829,6 +1829,204 @@ def startup_project_qss(t: Theme) -> str:
     """
 
 
+def add_data_qss(t: Theme) -> str:
+    """「添加数据」弹窗 QSS（与启动「打开地图文档」同一套视觉语言）。
+
+    结构：左栏 ``AddDataNav``（最近目录 / 快速访问 / 盘符，分组标题用次要色加粗）、
+    右侧路径栏 ``AddDataPath`` + 类型筛选 ``AddDataFilter`` + 文件树
+    ``AddDataTree``；底部选择摘要与主/次按钮。配色全部取当前主题。
+
+    **文件树不写 ``::branch`` 基规则**：Qt 会因为没有 QSS 分支规则而退回原生
+    分支绘制；一旦写了一条通配的 branch 规则，原生树会额外画连接线（见
+    ``docks`` 里树面板的注释），离屏测试还看不出来，只在真实平台上翻车。
+    """
+    primary = QColor(t.input_focus)
+    hover = primary.darker(112)
+    pressed = primary.darker(126)
+    return f"""
+    QDialog#AddDataDialog {{
+        background-color: {t.window_bg};
+    }}
+    QLabel#AddDataHeading {{
+        color: {t.menu_text};
+        font-size: 18px;
+        font-weight: 600;
+    }}
+    QLabel#AddDataSub {{
+        color: {t.text_secondary};
+        font-size: 12px;
+    }}
+    QListWidget#AddDataNav {{
+        background-color: {t.panel_bg};
+        border: 1px solid {t.border};
+        border-radius: 6px;
+        padding: 4px;
+        outline: none;
+        /* 显式声明字体：全局 QDialog 的 font-size 在弹窗 polish 之后才下发，
+           行高会按旧字体缓存，导致 ::item padding 只加在选中底色上（同
+           StartupNav 的处理）。 */
+        font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+        font-size: 12px;
+    }}
+    QListWidget#AddDataNav::item {{
+        color: {t.menu_text};
+        padding: 6px 8px;
+        border-radius: 4px;
+    }}
+    QListWidget#AddDataNav::item:hover {{
+        background-color: {t.btn_hover};
+    }}
+    QListWidget#AddDataNav::item:selected {{
+        background-color: {t.input_focus};
+        color: #ffffff;
+    }}
+    QTreeWidget#AddDataTree {{
+        background-color: {t.input_bg};
+        alternate-background-color: {t.panel_bg};
+        border: 1px solid {t.border};
+        border-radius: 6px;
+        color: {t.menu_text};
+        outline: none;
+        font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+        font-size: 12px;
+    }}
+    QTreeWidget#AddDataTree::item {{
+        padding: 4px 2px;
+    }}
+    QTreeWidget#AddDataTree::item:hover {{
+        background-color: {t.btn_hover};
+    }}
+    QTreeWidget#AddDataTree::item:selected {{
+        background-color: {t.input_focus};
+        color: #ffffff;
+    }}
+    QTreeWidget#AddDataTree::item:disabled {{
+        color: {t.text_secondary};
+    }}
+    QTreeWidget#AddDataTree QHeaderView::section {{
+        background-color: {t.panel_bg};
+        color: {t.text_secondary};
+        border: none;
+        border-bottom: 1px solid {t.border};
+        padding: 5px 6px;
+    }}
+    QComboBox#AddDataPath {{
+        background-color: {t.input_bg};
+        color: {t.menu_text};
+        border: 1px solid {t.input_border};
+        border-radius: 5px;
+        padding: 2px 6px;
+        min-height: 22px;
+    }}
+    QComboBox#AddDataPath:hover, QComboBox#AddDataPath:focus {{
+        border-color: {t.input_focus};
+    }}
+    QComboBox#AddDataPath QLineEdit {{
+        background: transparent;
+        border: none;
+        color: {t.menu_text};
+        padding: 3px 4px;
+        selection-background-color: {t.input_focus};
+        selection-color: #ffffff;
+    }}
+    QComboBox#AddDataPath::drop-down {{
+        border: none;
+        width: 22px;
+    }}
+    /* 路径下拉树（最近目录 / 快速访问 / 我的电脑） */
+    QComboBox#AddDataPath QTreeView {{
+        background-color: {t.input_bg};
+        color: {t.menu_text};
+        border: 1px solid {t.border};
+        border-radius: 4px;
+        outline: none;
+        selection-background-color: {t.input_focus};
+        selection-color: #ffffff;
+    }}
+    QComboBox#AddDataPath QTreeView::item {{
+        padding: 5px 6px;
+    }}
+    QComboBox#AddDataPath QTreeView::item:hover {{
+        background-color: {t.btn_hover};
+    }}
+    QComboBox#AddDataFilter {{
+        background-color: {t.input_bg};
+        color: {t.menu_text};
+        border: 1px solid {t.input_border};
+        border-radius: 5px;
+        padding: 4px 8px;
+        min-width: 96px;
+    }}
+    QComboBox#AddDataFilter:hover, QComboBox#AddDataFilter:focus {{
+        border-color: {t.input_focus};
+    }}
+    QComboBox#AddDataFilter::drop-down {{
+        border: none;
+        width: 18px;
+    }}
+    QComboBox#AddDataFilter QAbstractItemView {{
+        background-color: {t.input_bg};
+        color: {t.menu_text};
+        border: 1px solid {t.border};
+        selection-background-color: {t.input_focus};
+        selection-color: #ffffff;
+        outline: none;
+    }}
+    QToolButton#AddDataTool {{
+        background-color: transparent;
+        border: 1px solid transparent;
+        border-radius: 5px;
+        padding: 4px;
+    }}
+    QToolButton#AddDataTool:hover {{
+        background-color: {t.btn_hover};
+        border-color: {t.input_border};
+    }}
+    QToolButton#AddDataTool:pressed {{
+        background-color: {t.btn_pressed};
+    }}
+    QToolButton#AddDataTool:disabled {{
+        background-color: transparent;
+        border-color: transparent;
+    }}
+    QLabel#AddDataSummary {{
+        color: {t.text_secondary};
+        font-size: 12px;
+    }}
+    QLabel#AddDataHint {{
+        color: {t.text_secondary};
+        font-size: 12px;
+    }}
+    QPushButton#AddDataPrimary {{
+        background-color: {t.input_focus};
+        color: #ffffff;
+        border: none;
+        border-radius: 5px;
+        padding: 7px 22px;
+        font-size: 13px;
+        font-weight: 600;
+    }}
+    QPushButton#AddDataPrimary:hover {{ background-color: {hover.name()}; }}
+    QPushButton#AddDataPrimary:pressed {{ background-color: {pressed.name()}; }}
+    QPushButton#AddDataPrimary:disabled {{
+        background-color: {t.btn_pressed};
+        color: {t.text_secondary};
+    }}
+    QPushButton#AddDataPrimary:focus {{ outline: none; }}
+    QPushButton#AddDataSecondary {{
+        background-color: transparent;
+        color: {t.menu_text};
+        border: 1px solid {t.input_border};
+        border-radius: 5px;
+        padding: 6px 14px;
+        font-size: 13px;
+    }}
+    QPushButton#AddDataSecondary:hover {{ background-color: {t.btn_hover}; }}
+    QPushButton#AddDataSecondary:pressed {{ background-color: {t.btn_pressed}; }}
+    QPushButton#AddDataSecondary:focus {{ outline: none; }}
+    """
+
+
 def apply_app_theme(theme: Theme) -> None:
     """把全局控件配色设到 QApplication（弹窗 / 右键菜单 / ToolTip 等顶层窗口）。
 

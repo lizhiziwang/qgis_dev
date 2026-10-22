@@ -50,7 +50,6 @@ from app.core.domain.create_data.dict_tables import (
     source_inline_dicts,
 )
 from app.core.util.sublayers import (
-    VECTOR_FILE_FILTER,
     Sublayer,
     geometry_kind_of_layer,
     list_sublayers,
@@ -940,14 +939,13 @@ class ExternalDatasetDialog(BaseDialog):
     两种数据源：
 
     - **工程里的图层**：工程里已经加载的矢量图层（老行为）；
-    - **本地文件**：直接在电脑上挑一份数据。容器型数据源（``.gdb`` 目录 / ``.gpkg`` /
-      ``.sqlite``）挑完会**把里面的图层全列出来**让你再选一个 —— 以前只能选工程里的图层，
-      拿 GDB 里的某一层就得先把它加进工程，现在不用了。
+    - **本地文件**：打开统一的「添加数据」弹窗（盘符 / 最近目录 / GDB / GeoPackage /
+      SQLite / Excel 都能浏览，容器可就地展开、可多选）。选中的数据**只回到本列表**，
+      不会自动加载进地图 —— 这里要的是字段结构 / 导入来源，不是地图图层。
 
     **按几何类型筛**：传了 ``geometry_kind``（``point`` / ``line`` / ``polygon``）就只列
     同类型的图层 —— 「追加数据」往面图层里追加点数据没有意义（还会被库拒掉）。
 
-    GDB 是**目录**，文件对话框选不了，所以「浏览」分两个按钮（文件 / GDB 目录）。
     读文件、列图层、打开图层都在 :mod:`app.core.util.sublayers`（核心层），这里只摆界面。
     """
 
@@ -978,10 +976,8 @@ class ExternalDatasetDialog(BaseDialog):
             layer for layer in vector_layers
             if not self._geometry_kind or geometry_kind_of_layer(layer) == self._geometry_kind
         ]
-        #: 本地文件模式下列出来的子图层
-        self._sublayers: list[Sublayer] = []
-        #: 本地文件模式当前选中的数据文件 / GDB 目录
-        self._source_path = ""
+        #: 本地文件模式下已加入列表的 (容器/文件路径, 子图层)
+        self._entries: list[tuple[str, Sublayer]] = []
         #: 取图层时遇到的失败原因（见 :meth:`selected_layers`）
         self.last_error = ""
         self.setMinimumSize(0, 0)
@@ -1098,7 +1094,7 @@ class ExternalDatasetDialog(BaseDialog):
         return page
 
     def _build_file_page(self) -> QWidget:
-        """本地文件：挑文件 → 列出里面的图层 → 再选一个。"""
+        """本地文件：打开统一「添加数据」弹窗，选中的数据回到下面的图层列表。"""
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.setContentsMargins(0, 0, 0, 0)
@@ -1107,16 +1103,15 @@ class ExternalDatasetDialog(BaseDialog):
         row = QHBoxLayout()
         self.path_edit = QLineEdit()
         self.path_edit.setReadOnly(True)
-        self.path_edit.setPlaceholderText("选一份数据文件（GDB 是文件夹，用右边的按钮选）")
+        self.path_edit.setPlaceholderText("还没选择数据源")
         row.addWidget(self.path_edit, 1)
-        browse_file = QPushButton("浏览文件…")
-        browse_file.setToolTip("Shapefile / GeoPackage / SQLite / GeoJSON / GML / KML …")
-        browse_file.clicked.connect(self._on_browse_file)
-        row.addWidget(browse_file)
-        browse_gdb = QPushButton("浏览 GDB…")
-        browse_gdb.setToolTip("File Geodatabase 是一个文件夹，所以单独一个按钮")
-        browse_gdb.clicked.connect(self._on_browse_gdb)
-        row.addWidget(browse_gdb)
+        browse_button = QPushButton("浏览数据…")
+        browse_button.setToolTip(
+            "打开「添加数据」弹窗：最近目录 / 快速访问 / 盘符，"
+            "GDB / GeoPackage / SQLite / Excel 可就地展开选图层，支持多选"
+        )
+        browse_button.clicked.connect(self._on_browse_data)
+        row.addWidget(browse_button)
         layout.addLayout(row)
 
         layout.addWidget(QLabel("图层（容器数据源里可能有多个，选一个" + ("或按住 Ctrl / Shift 多选" if self._multi else "") + "）"))
@@ -1146,51 +1141,112 @@ class ExternalDatasetDialog(BaseDialog):
         self.source_stack.setCurrentIndex(1 if self.file_radio.isChecked() else 0)
         self._refresh_ok()
 
-    def _on_browse_file(self) -> None:
-        chosen = open_file_dir(self, title="选择数据文件", filter_=VECTOR_FILE_FILTER)
-        if chosen:
-            self._load_source(chosen)
+    def _on_browse_data(self) -> None:
+        """用统一「添加数据」弹窗挑数据；**只取选择结果，不加载到地图**。"""
+        from app.ui.dialogs.add_data_dialog import AddDataDialog
 
-    def _on_browse_gdb(self) -> None:
-        chosen = open_file_dir(self, is_dir=True, title="选择 GDB 文件夹")
-        if chosen:
-            self._load_source(chosen)
+        picker = AddDataDialog(self)
+        accepted = picker.exec()
+        selections = picker.selected_sources() if accepted else []
+        picker.deleteLater()
+        if selections:
+            self._set_sources(selections)
 
-    def _load_source(self, path: str) -> None:
-        """记下数据源并列出里面的图层（单图层文件就一项，直接选中）。
+    def _set_sources(self, selections) -> None:
+        """把「添加数据」的选择展开成图层条目（普通文件先列子图层，再按几何类型筛）。"""
+        entries: list[tuple[str, Sublayer]] = []
+        seen: set[tuple[str, str]] = set()
+        #: 用户选过的全部数据源 / 真正贡献了图层的源（几何过滤后可能一个都没有）
+        all_paths: list[str] = []
+        matched_paths: list[str] = []
+        seen_all: set[str] = set()
+        seen_matched: set[str] = set()
+        had_candidates = False
+        for selection in selections:
+            path = str(getattr(selection, "path", "") or "")
+            sublayer = getattr(selection, "sublayer", None)
+            if not path:
+                continue
+            path_key = os.path.normcase(path)
+            if path_key not in seen_all:
+                seen_all.add(path_key)
+                all_paths.append(path)
+            candidates = [sublayer] if sublayer is not None else list_sublayers(path)
+            if candidates:
+                had_candidates = True
+            for candidate in candidates:
+                if candidate is None:
+                    continue
+                if (
+                    self._geometry_kind
+                    and candidate.geometry_kind != self._geometry_kind
+                ):
+                    continue
+                if path_key not in seen_matched:
+                    seen_matched.add(path_key)
+                    matched_paths.append(path)
+                key = (path_key, candidate.name)
+                if key in seen:
+                    continue
+                seen.add(key)
+                entries.append((path, candidate))
 
-        传了 ``geometry_kind`` 时**只列同类型的** —— 往面图层里追加点数据没有意义。
-        """
-        self._source_path = path
-        self.path_edit.setText(path)
-        everything = list_sublayers(path)
-        if self._geometry_kind:
-            self._sublayers = [
-                sub for sub in everything if sub.geometry_kind == self._geometry_kind
-            ]
-        else:
-            self._sublayers = everything
+        self._entries = entries
+        # 一个源都没匹配上时仍把用户选的路径显示出来，方便对照提示
+        self.path_edit.setText(self._source_summary(matched_paths or all_paths))
         self.sublayer_list.clear()
-        for sublayer in self._sublayers:
-            text = sublayer.name if sublayer.has_geometry else f"{sublayer.name}（无几何）"
+        multiple_sources = len(matched_paths) > 1
+        for path, sublayer in entries:
+            text = (
+                sublayer.name
+                if sublayer.has_geometry
+                else f"{sublayer.name}（无几何）"
+            )
+            if multiple_sources:
+                source_name = os.path.basename(path.rstrip("\\/")) or path
+                text += f"（{source_name}）"
             item = QListWidgetItem(text)
-            item.setData(Qt.ItemDataRole.UserRole, sublayer)
+            item.setData(Qt.ItemDataRole.UserRole, (path, sublayer))
+            item.setToolTip(sublayer.uri)
             self.sublayer_list.addItem(item)
-        if not self._sublayers:
-            kind_label = _KIND_LABELS.get(self._geometry_kind, "")
-            if everything and kind_label:
-                self.file_status.setText(
-                    f"这份数据里没有与目标图层同类型（{kind_label}）的图层：{path}"
-                )
+
+        if entries:
+            if self._multi:
+                # 选择器里已经是多选：这里保持全选，不用再让用户重选一遍
+                for row in range(self.sublayer_list.count()):
+                    self.sublayer_list.item(row).setSelected(True)
             else:
-                self.file_status.setText(
-                    f"这份数据里没有可用的图层（或者打不开）：{path}"
-                    "\nGDB 请选到「.gdb 文件夹」本身；也确认它没被别的程序占用。"
-                )
+                self.sublayer_list.setCurrentRow(0)
+            self.file_status.setText(
+                f"共 {len(entries)} 个图层，选一个"
+                + ("，或按住 Ctrl / Shift 多选。" if self._multi else "即可。")
+            )
+        elif had_candidates:
+            kind_label = _KIND_LABELS.get(self._geometry_kind, "")
+            self.file_status.setText(
+                f"所选数据里没有与目标图层同类型（{kind_label}）的图层。"
+                if kind_label
+                else "所选数据里没有可用的图层。"
+            )
         else:
-            self.sublayer_list.setCurrentRow(0)
-            self.file_status.setText(f"共 {len(self._sublayers)} 个图层，选一个即可。")
+            self.file_status.setText(
+                "所选数据里没有可用的图层（或者打不开）。"
+                "\nGDB 请展开后选到具体图层；也确认它没被别的程序占用。"
+            )
         self._refresh_ok()
+
+    @staticmethod
+    def _source_summary(paths: list[str]) -> str:
+        """路径栏摘要：单个显示完整路径，多个显示名称 + 数量。"""
+        if not paths:
+            return ""
+        if len(paths) == 1:
+            return paths[0]
+        names = "、".join(
+            os.path.basename(path.rstrip("\\/")) or path for path in paths[:3]
+        )
+        suffix = f" 等 {len(paths)} 个" if len(paths) > 3 else ""
+        return f"{names}{suffix}"
 
     def _refresh_ok(self, *_args: object) -> None:
         """没有可复制的东西时「确定」就该是灰的（省得点了才发现没选）。
@@ -1215,13 +1271,18 @@ class ExternalDatasetDialog(BaseDialog):
 
     # --------------------------------------------------------------- 取值
 
+    def _selected_entries(self) -> list[tuple[str, Sublayer]]:
+        """选中的 (数据源路径, 子图层) —— 多选可来自不同容器文件。"""
+        entries: list[tuple[str, Sublayer]] = []
+        for item in self.sublayer_list.selectedItems():
+            data = item.data(Qt.ItemDataRole.UserRole)
+            if isinstance(data, tuple) and len(data) == 2:
+                entries.append(data)
+        return entries
+
     def selected_sublayers(self) -> list[Sublayer]:
         """本地文件模式下选中的子图层（可能多个）。"""
-        return [
-            item.data(Qt.ItemDataRole.UserRole)
-            for item in self.sublayer_list.selectedItems()
-            if item.data(Qt.ItemDataRole.UserRole) is not None
-        ]
+        return [sublayer for _path, sublayer in self._selected_entries()]
 
     def selected_sublayer(self) -> Sublayer | None:
         """本地文件模式下选中的那个子图层（没选返回 ``None``）。"""
@@ -1244,14 +1305,14 @@ class ExternalDatasetDialog(BaseDialog):
             if not layers:
                 self.last_error = "工程里没有可用的矢量图层"
             return layers
-        selected = self.selected_sublayers()
+        selected = self._selected_entries()
         if not selected:
             self.last_error = "请先选择数据文件，再选里面的图层"
             return []
         layers = []
         errors = []
-        for sublayer in selected:
-            layer, error = open_sublayer(self._source_path, sublayer)
+        for path, sublayer in selected:
+            layer, error = open_sublayer(path, sublayer)
             if layer is None:
                 errors.append(f"{sublayer.name}：{error}")
             else:

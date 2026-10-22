@@ -16,17 +16,19 @@ from qgis.core import Qgis
 from qgis.PyQt import sip
 from qgis.PyQt.QtWidgets import QMessageBox
 
+from app.core.util.data_formats import (
+    CONTAINER_EXTS,
+    LARGE_TEXT_VECTOR_EXTS,
+    RASTER_EXTS,
+    TABLE_EXTS,
+    VECTOR_EXTS,
+)
+from app.core.util.sublayers import open_sublayer
 from app.infra.logging import get_logger
 from app.ui.common.widgets import open_file_dir
 
 logger = get_logger(__name__)
 
-
-#: 「添加数据文件」认的栅格扩展名（按扩展名走 GDAL 栅格 provider）
-_RASTER_EXTS = frozenset({
-    ".tif", ".tiff", ".img", ".jpg", ".jpeg", ".png", ".bmp", ".gif",
-    ".dem", ".asc", ".vrt", ".jp2", ".ecw", ".hdf", ".nc", ".mrf",
-})
 
 #: 重设数据源时按「原图层的数据源类型」给的过滤器（同类型文件）
 _RASTER_FILE_FILTER = (
@@ -56,70 +58,78 @@ _VECTOR_ANY_FILTER = (
     "*.db *.csv *.tab *.mif *.fgb *.gpx)"
 )
 
-#: 已知的矢量扩展名。**不在这里、也不在栅格表里的**扩展名（比如 .txt/.dat）：
-#: 先试矢量、再试栅格，都不成才报错
-_VECTOR_HINT_EXTS = frozenset({
-    ".shp", ".geojson", ".json", ".gpkg", ".gml", ".kml", ".sqlite",
-    ".csv", ".tab", ".mif", ".fgb", ".gpx", ".dxf",
-})
-
-#: 多图层容器（一个文件装多个图层）：加载前先把里面的图层列出来让用户挑。
-#: ``.gdb`` 是目录，走 ``load_file`` 的目录分支，不在这里。
-_CONTAINER_VECTOR_EXTS = frozenset({".gpkg", ".sqlite", ".sqlite3", ".db"})
-
 #: 文本 / XML 矢量格式：超过该大小加载可能卡顿甚至 OOM（KML 常见），加载前先提示
-_LARGE_TEXT_VECTOR_EXTS = frozenset({".geojson", ".json", ".kml", ".gml"})
 _LARGE_TEXT_VECTOR_BYTES = 50 * 1024 * 1024
-
-#: 文件对话框的过滤器（矢量 + 栅格）
-_DATA_FILE_FILTER = (
-    "矢量 / 栅格数据 (*.shp *.geojson *.json *.gpkg *.gml *.kml *.sqlite *.csv *.tab *.mif *.fgb *.gpx"
-    " *.tif *.tiff *.img *.jpg *.jpeg *.png *.bmp *.dem *.asc *.vrt *.jp2);;"
-    "矢量文件 (*.shp *.geojson *.json *.gpkg *.gml *.kml *.sqlite *.csv *.tab *.mif *.fgb *.gpx);;"
-    "栅格文件 (*.tif *.tiff *.img *.jpg *.jpeg *.png *.bmp *.dem *.asc *.vrt *.jp2);;"
-    "所有文件 (*)"
-)
 
 
 class FileBrowserMixin:
     """FileBrowserMixin：见模块 docstring。"""
 
     def _on_add_layer(self) -> None:
-        """图层面板「添加图层」按钮：弹出「文件 / GDB」两个入口。
+        """图层面板「添加图层」：打开通用「添加数据」弹窗。
 
-        **为什么要分两个入口**：Qt 的文件对话框**强制模式** —— 文件模式选不中目录
-        （``.gdb`` 是目录），目录模式又选不中文件；实测两种模式的 ``accept()`` 都
-        "只认自己那一类"（选错类型直接 Rejected），一个对话框兼收做不到。
+        弹窗把本机盘符 / 目录、GDB / GeoPackage / SQLite 内部图层放在同一棵树里
+        多选；这里只负责把选中的**数据源**批量交给现有加载逻辑。真正的读盘 /
+        子图层打开仍走 :meth:`load_file` 与 ``open_sublayer``，不另立一套。
         """
-        from qgis.PyQt.QtGui import QCursor
-        from qgis.PyQt.QtWidgets import QMenu
+        from app.ui.dialogs.add_data_dialog import (  # noqa: PLC0415 - 弹窗按需加载，启动期不必拉起整套添加数据 UI
+            AddDataDialog,
+        )
 
-        menu = QMenu(self)
-        act_file = menu.addAction("添加数据文件…（矢量 / 栅格）")
-        act_file.triggered.connect(self._on_open_file)
-        act_gdb = menu.addAction("添加 GDB 数据库…（.gdb 文件夹）")
-        act_gdb.triggered.connect(self._on_open_gdb)
-        menu.exec(QCursor.pos())
+        dialog = AddDataDialog(self)
+        accepted = dialog.exec()
+        sources = dialog.selected_sources() if accepted else []
+        dialog.deleteLater()
+        if sources:
+            self._add_data_sources(sources)
+
+    def _add_data_sources(self, sources) -> None:
+        """批量加载弹窗的选中项（普通文件走 ``load_file``，容器子图层走 ``open_sublayer``）。"""
+        failures: list[str] = []
+        files = 0
+        sublayers = 0
+        for source in sources:
+            if source.sublayer is None:
+                # load_file 自己负责 loading 指示、大文件提示与错误弹窗
+                self.load_file(source.path)
+                files += 1
+                continue
+            self._begin_layer_loading(f"正在加载图层：{source.sublayer.name}")
+            try:
+                layer, error = open_sublayer(source.path, source.sublayer)
+                if layer is None:
+                    logger.warning(
+                        "添加数据：子图层打不开 %s / %s（%s）",
+                        source.path,
+                        source.sublayer.name,
+                        error,
+                    )
+                    failures.append(f"{source.sublayer.name}：{error}")
+                    continue
+                layer.path_c = source.path
+                self._add_layer_to_project(layer)
+                sublayers += 1
+            except Exception as exc:  # noqa: BLE001 —— 批量加载不能因一项失败中断
+                logger.exception("添加数据：加载子图层异常 %s", source.sublayer.name)
+                failures.append(f"{source.sublayer.name}：{exc}")
+            finally:
+                self._end_layer_loading()
+        if files or sublayers:
+            self.canvas.refreshAllLayers()
+            logger.info("添加数据完成：文件 %d 个、数据库子图层 %d 个", files, sublayers)
+        if failures:
+            QMessageBox.warning(
+                self,
+                "部分数据没加载",
+                "以下图层打不开：\n" + "\n".join(failures),
+            )
 
     def _on_open_file(self) -> None:
-        path = open_file_dir(
-            self,
-            is_dir=False,
-            title="选择数据文件",
-            filter_=_DATA_FILE_FILTER,
-        )
-        if path:
-            self.load_file(path)
+        """「文件 → 打开文件」(Ctrl+O)：复用图层面板的「添加数据」弹窗。
 
-    def _on_open_gdb(self) -> None:
-        """选一个 File Geodatabase 文件夹（``.gdb`` 是目录，只能用目录选择器）。"""
-        path = open_file_dir(
-            self,
-            is_dir=True,
-            title="选择 File Geodatabase（选到 .gdb 文件夹本身）",
-        )
-        if path:
-            self.load_file(path)
+        与「添加数据」同一套浏览 / 多选 / 容器展开体验；选中后照常加载到地图。
+        """
+        self._on_add_layer()
 
     def _on_repair_layer_source(self, layer) -> None:
         """图层列表红色感叹号：给一个数据源丢失的图层重设数据源。
@@ -189,7 +199,7 @@ class FileBrowserMixin:
             is_vector
             and not old_is_gdb
             and old_ext
-            and old_ext not in _CONTAINER_VECTOR_EXTS
+            and old_ext not in CONTAINER_EXTS
             and ext != old_ext
         ):
             QMessageBox.warning(
@@ -223,7 +233,7 @@ class FileBrowserMixin:
         #: （保留名称 / 样式 / 树中位置）。跨 provider（SpatiaLite ↔ OGR）在
         #: QGIS 4 里一般能直接换，换不了时这就是兜底。
         replacement = None
-        if is_vector and (os.path.isdir(path) or ext in _CONTAINER_VECTOR_EXTS):
+        if is_vector and (os.path.isdir(path) or ext in CONTAINER_EXTS):
             from app.core.util.sublayers import open_sublayer
             from app.ui.dialogs.sublayer_pick_dialog import SublayerPickDialog
 
@@ -240,7 +250,7 @@ class FileBrowserMixin:
             source = str(new_layer.source() or "")
             provider = str(new_layer.providerType() or "")
             replacement = new_layer
-        elif is_raster or ext in _RASTER_EXTS:
+        elif is_raster or ext in RASTER_EXTS:
             if not is_raster:
                 QMessageBox.warning(
                     self, "重设数据源", "当前是矢量图层，不能改成栅格数据源。"
@@ -488,28 +498,31 @@ class FileBrowserMixin:
         )
 
     def load_file(self, file_path: str) -> None:
-        """加载到项目：矢量（shp/gpkg/geojson/…）、栅格（tif/img/…）、或 GDB 目录。
+        """加载到项目：矢量（shp/gpkg/geojson/…）、栅格（tif/img/…）、表格或 GDB 目录。
 
         **容器型矢量数据源**（``.gdb`` 目录 / ``.gpkg`` / ``.sqlite``）会先弹出里面的
         图层列表，让用户挑一个或多个再加载 —— 以前 gpkg/sqlite 只开第一层、GDB 整库全加，
-        都不是用户要的。
+        都不是用户要的。CSV / Excel 走 OGR 表格驱动，按普通矢量表打开。
         """
 
         ext = os.path.splitext(file_path)[1].lower()
-        if ext in _LARGE_TEXT_VECTOR_EXTS and not self._confirm_large_text_vector(file_path):
+        if ext in LARGE_TEXT_VECTOR_EXTS and not self._confirm_large_text_vector(file_path):
             return
         self._begin_layer_loading(f"正在加载图层：{os.path.basename(file_path)}")
         try:
             if os.path.isdir(file_path):
                 # 目录 → 按 GDB 处理（.gdb 是数据集目录）
                 self._load_gdb(file_path)
-            elif ext in _RASTER_EXTS:
+            elif ext in RASTER_EXTS:
                 self._load_raster(file_path)
-            elif ext in _CONTAINER_VECTOR_EXTS:
+            elif ext in CONTAINER_EXTS:
                 self._load_container(file_path)
+            elif ext in TABLE_EXTS:
+                # CSV / Excel / ODS：OGR 表格驱动直接当矢量表打开
+                self._load_vector(file_path)
             else:
                 # 其余按矢量；扩展名不认识时就"矢量试一次、栅格试一次"
-                if self._load_vector(file_path) is None and ext not in _VECTOR_HINT_EXTS:
+                if self._load_vector(file_path) is None and ext not in VECTOR_EXTS:
                     self._load_raster(file_path)
             self.canvas.refreshAllLayers()
         except Exception as e:  # noqa: BLE001

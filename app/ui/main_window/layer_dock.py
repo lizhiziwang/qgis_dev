@@ -100,7 +100,7 @@ _THEME_ICONS = {
 _HEADER_SPECS = (
     ("btn_view_order", "view_order", None, "按图层顺序展示"),
     ("btn_view_source", "view_source", None, "按数据源展示"),
-    ("btn_add_layer", "add_layer", "add_layer_requested", "添加图层（矢量 / 栅格 / GDB）"),
+    ("btn_add_layer", "add_layer", "add_layer_requested", "添加数据（矢量 / 栅格 / GDB / GeoPackage / SQLite）"),
     ("btn_render_tab", "style", "render_tab_requested", "打开图层渲染设置"),
     ("btn_add_group", "group", "add_group_requested", "添加图层组"),
     ("btn_remove", "remove", "remove_requested", "删除图层/组"),
