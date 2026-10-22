@@ -21,14 +21,15 @@ from qgis.core import (
     QgsVectorLayer,
 )
 from qgis.PyQt.QtCore import QTimer
-from qgis.PyQt.QtWidgets import QMessageBox
+from qgis.PyQt.QtWidgets import QDialog, QMessageBox
 
 from app.core.domain.basemap import add_base_tile_layer
 from app.env.config import AppConfig
 from app.infra.fs.paths import Paths
 from app.infra.logging import get_logger
 from app.ui.common.recent_projects import add_recent
-from app.ui.common.widgets import open_file_dir, save_file
+from app.ui.common.widgets import save_file
+from app.ui.dialogs.startup_project import StartupProjectDialog
 from app.ui.docks.project_dock import ProjectDock
 
 logger = get_logger(__name__)
@@ -349,17 +350,26 @@ class ProjectOpsMixin:
             return False
 
     def _on_open_project(self) -> None:
-        """打开工程：弹文件框选 ``.pgs`` 后读入并刷新画布。"""
+        """打开工程：弹与启动时相同的「打开地图文档」对话框（最近打开 / 浏览）。
 
-        path = open_file_dir(
-            self,
-            is_dir=False,
-            title="打开工程",
-            filter_=_PROJECT_FILTER,
-        )
-        if not path:
-            return
-        self.open_project_path(path)
+        不再直接弹系统文件框：用户想打开的基本都是最近工程，启动对话框里有
+        列表可点；需要找别的文件时走它左侧的「浏览…」。
+        """
+        try:
+            dlg = StartupProjectDialog(
+                self, app_name=getattr(self, "_app_name", None) or "qgis_dev"
+            )
+            if dlg.exec() != QDialog.DialogCode.Accepted:
+                return
+            if dlg.create_new():
+                self._on_new_project()
+                return
+            path = dlg.selected_path()
+            if path:
+                self.open_project_path(path)
+        except Exception as exc:  # noqa: BLE001 —— 槽内异常在本环境会原生崩溃
+            logger.error("打开工程失败: %s", exc, exc_info=True)
+            QMessageBox.warning(self, "打开工程", f"打开工程失败：{exc}")
 
     def open_project_path(self, path: str) -> bool:
         """读入 ``path`` 指定的工程文件并刷新画布；返回是否成功。

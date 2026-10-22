@@ -22,6 +22,7 @@ from qgis.PyQt.QtWidgets import (
 
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.wheel_guard import WheelValueGuard
 from app.ui.dialogs.layer_properties.base import PlaceholderTab
 from app.ui.dialogs.layer_properties.condition import ConditionTab
 from app.ui.dialogs.layer_properties.fields import FieldsTab
@@ -66,6 +67,9 @@ class LayerPropertiesDialog(BaseDialog):
             self._on_layers_will_be_removed
         )
         self._build()
+        # 全页滚轮保护：页面打开时 Qt 会把焦点放到第一个下拉框上，滚轮经过它会
+        # 改值、且页面就再也滚不动（用户报过参数被误改）。这里让滚轮永远滚页面。
+        self._wheel_guard = WheelValueGuard(self, scroll_even_focused=True)
 
     def _on_layers_will_be_removed(self, layer_ids) -> None:
         try:
@@ -108,6 +112,11 @@ class LayerPropertiesDialog(BaseDialog):
         self.setLayout(layout)
 
     # ------------------------------------------------------------- 事件
+
+    def done(self, result: int) -> None:  # noqa: N802 —— Qt 命名
+        """关闭前卸掉应用级滚轮过滤器（对话框随后会被销毁）。"""
+        self._wheel_guard.detach()
+        super().done(result)
 
     def _on_ok(self) -> None:
         """确定：全部写回成功才关闭，失败则保持打开（页内部已提示原因）。"""
