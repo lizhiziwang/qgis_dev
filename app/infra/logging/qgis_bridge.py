@@ -73,6 +73,14 @@ _FORMAT_HTML = 1
 #: 剥 HTML 标签用；只在消息标记为 Html 时生效
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
 
+#: 已知无副作用、不写入日志的 Qt 消息前缀。
+#: ``QFont::setPointSize`` 收到非正数时 Qt 只打印警告并忽略这次设置，字体沿用原大小，
+#: 不会抛异常、不会崩溃；应用内所有 setPointSize 调用都传正数，这条来自 Qt/QGIS
+#: 内部对像素字体的换算，按用户要求不再进入日志。
+_IGNORED_QT_PREFIXES: tuple[str, ...] = (
+    "QFont::setPointSize: Point size <= 0",
+)
+
 #: QGIS ``Qgis.MessageLevel`` 的整数值 → Python 级别（枚举身份比较失效时的回退）
 _QGIS_INT_LEVELS: dict[int, int] = {
     0: logging.DEBUG,     # Info
@@ -295,17 +303,13 @@ def _on_qt_message(mode: Any, context: Any, message: Any) -> None:
     try:
         where = _qt_location(context)
         text = str(message)
+        if text.startswith(_IGNORED_QT_PREFIXES):
+            return
         if not _allow(("qt", _as_int(mode), where, text[:_KEY_PREFIX])):
             return
         _logger_qt.log(_qt_level_to_logging(mode), "[Qt] %s %s", where, text)
-        # 字体点数警告很可能是别处传入了 pointSize=-1 的像素字体；
-        # 正常日志只留警告，DEBUG 里补一份 Python 调用栈方便定位来源。
-        if "QFont::setPointSize" in text:
-            import traceback
-
-            _logger_qt.debug(
-                "[Qt] 调用栈：\n%s", "".join(traceback.format_stack(limit=25))
-            )
+        # 不在这里附带 Python 调用栈：QFont 等警告多在 C++ 绘制 / 布局过程中发出，
+        # 栈顶永远只有 app.exec()，既定位不到来源，又让日志多出十几行噪音。
     except Exception:  # noqa: BLE001
         pass
     finally:
