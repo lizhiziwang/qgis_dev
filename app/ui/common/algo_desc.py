@@ -5,16 +5,27 @@
    即 QGIS 官方中文说明）；
 2. 注册表不可用（如 processing 未初始化）时回退到仓库内兜底文案。
 
-提供 :func:`algorithm_description_html` 返回 HTML 描述串，以及
+提供 :func:`algorithm_description_html` 返回 HTML 描述串，
 :func:`make_description_browser` 返回配置好的 :class:`QTextBrowser`
-（配色由全局 ``app_qss`` 统一负责），工具树与对话框共用同一套展示。
+（配色由全局 ``app_qss`` 统一负责），:func:`make_description_panel` 在浏览器
+外套一层可折叠的「帮助说明」面板；工具树与对话框共用同一套展示。
 """
 
 from __future__ import annotations
 
-from qgis.PyQt.QtWidgets import QTextBrowser
+from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtWidgets import (
+    QHBoxLayout,
+    QLabel,
+    QSizePolicy,
+    QTextBrowser,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+)
 
 from app.infra.logging import get_logger
+from app.ui.common.processing_zh import algorithm_title
 from app.ui.common.theme import THEMES, ThemeManager
 
 logger = get_logger(__name__)
@@ -464,6 +475,12 @@ def algorithm_description_html(code: str) -> str:
     """
     if not code:
         return _hint_html()
+    # GDAL 算法统一用仓库内中文说明：本环境注册表的 help 为空，其他环境即使
+    # 有 help 也可能是英文；优先保证界面是完整中文，不再拼接英文原名。
+    if code.startswith("gdal:"):
+        fallback = _ALGO_FALLBACK_DESC.get(code)
+        if fallback is not None:
+            return fallback
     name = ""
     try:
         from qgis.core import QgsApplication
@@ -474,7 +491,7 @@ def algorithm_description_html(code: str) -> str:
             name = alg.displayName()
             help_html = alg.shortHelpString()
             if help_html:
-                title = f"<h2>{name}</h2>" if name else ""
+                title = f"<h2>{algorithm_title(code, name)}</h2>" if name else ""
                 return title + help_html
     except Exception:  # noqa: BLE001
         logger.warning("读取算法描述失败 code=%s，使用兜底文案", code, exc_info=True)
@@ -487,7 +504,7 @@ def algorithm_description_html(code: str) -> str:
     # 至少把 displayName 渲染出来，避免「裸 code 命令」这种无意义展示。
     if name:
         return (
-            f"<h2>{name}</h2>"
+            f"<h2>{algorithm_title(code, name)}</h2>"
             "<p style='color:gray'>"
             "（该算法的详细说明未随 QGIS 注册表一同装载，"
             "请在对话框中按字段名 / tooltip 查看参数意义。）</p>"
@@ -505,4 +522,88 @@ def make_description_browser(code: str) -> QTextBrowser:
     return browser
 
 
-__all__ = ["algorithm_description_html", "make_description_browser", "HINT_HTML"]
+class DescriptionPanel(QWidget):
+    """可折叠的算法说明面板。
+
+    顶部是「帮助说明」小节标题 + 右侧小箭头按钮，正文为
+    :func:`make_description_browser`。收起时隐藏标题与正文，只留一个贴边的
+    小箭头，把横向空间让回左侧参数区；展开时恢复标题与正常宽度。默认展开，
+    宽度占比由外部布局的 stretch 决定（分析工具对话框统一用参数 3 : 说明 1）。
+    """
+
+    #: 展开时取消宽度限制（Qt 的 QWIDGETSIZE_MAX）
+    _NO_MAX_WIDTH = 16_777_215
+
+    def __init__(self, code: str, parent=None, *, expanded: bool = True) -> None:
+        super().__init__(parent)
+        self._code = code
+        self._expanded = bool(expanded)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+
+        header = QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(4)
+        self.toggle = QToolButton()
+        self.toggle.setAutoRaise(True)
+        self.toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.toggle.setFixedSize(22, 22)
+        self.toggle.setStyleSheet("QToolButton { padding: 0px; }")
+        self.toggle.clicked.connect(self._toggle_expanded)
+        header.addWidget(
+            self.toggle,
+            0,
+            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+        )
+        self.title_label = QLabel("帮助说明")
+        self.title_label.setObjectName("SectionLabel")
+        header.addWidget(self.title_label, 1)
+        layout.addLayout(header)
+
+        self.browser = make_description_browser(code)
+        # 说明正文本身可滚动：纵向用 Ignored，避免它的 sizeHint 撑高整个对话框。
+        self.browser.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Ignored)
+        layout.addWidget(self.browser, 1)
+        # 收起后正文隐藏，底部 stretch 顶住标题行，避免小箭头跑到垂直中间。
+        layout.addStretch(0)
+        self._apply_state(self._expanded)
+
+    def is_expanded(self) -> bool:
+        return self._expanded
+
+    def set_expanded(self, expanded: bool) -> None:
+        self._expanded = bool(expanded)
+        self._apply_state(self._expanded)
+
+    def _toggle_expanded(self, *_args) -> None:
+        self.set_expanded(not self._expanded)
+
+    def _apply_state(self, expanded: bool) -> None:
+        self.title_label.setVisible(expanded)
+        self.browser.setVisible(expanded)
+        self.toggle.setArrowType(
+            Qt.ArrowType.RightArrow if expanded else Qt.ArrowType.LeftArrow
+        )
+        self.toggle.setToolTip("收起帮助说明" if expanded else "展开帮助说明")
+        if expanded:
+            self.setMaximumWidth(self._NO_MAX_WIDTH)
+            self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Expanding)
+        else:
+            self.setMaximumWidth(self.toggle.width() + 8)
+            self.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Preferred)
+        self.updateGeometry()
+
+
+def make_description_panel(code: str, *, expanded: bool = True) -> DescriptionPanel:
+    """构造可折叠的算法说明面板（分析工具对话框右侧统一使用）。"""
+    return DescriptionPanel(code, expanded=expanded)
+
+
+__all__ = [
+    "HINT_HTML",
+    "DescriptionPanel",
+    "algorithm_description_html",
+    "make_description_browser",
+    "make_description_panel",
+]

@@ -26,10 +26,9 @@ from qgis.PyQt.QtWidgets import (
 from app.core.domain.tiles import TileJob, TileService
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
-from app.ui.common.algo_desc import make_description_browser
-from app.ui.common.widgets import CenteredCheckDelegate
+from app.ui.common.algo_desc import make_description_panel
 from app.ui.common.base_dialog import BaseDialog
-from app.ui.common.widgets import open_file_dir
+from app.ui.common.widgets import CenteredCheckDelegate, open_file_dir
 
 logger = get_logger(__name__)
 
@@ -66,7 +65,7 @@ class VectorTileDialog(BaseDialog):
         main.addWidget(param_panel, stretch=3)
 
         # 右侧算法描述（与工具树共用同一套描述逻辑，见 algo_desc）
-        main.addWidget(make_description_browser(self.dia_type), stretch=2)
+        main.addWidget(make_description_panel(self.dia_type), stretch=1)
         layout.addLayout(main, stretch=1)
 
         # 进度 + 按钮
@@ -78,8 +77,8 @@ class VectorTileDialog(BaseDialog):
         b_l.addWidget(self.loading, stretch=2)
 
         bottom = QHBoxLayout()
-        bottom.addWidget(QPushButton("Advanced"))
-        bottom.addWidget(QPushButton("Run as Batch Process..."))
+        bottom.addWidget(QPushButton("高级"))
+        bottom.addWidget(QPushButton("批量处理…"))
         bottom.addStretch()
         bottom.addWidget(QPushButton("取消"))
         execute = QPushButton("执行")
@@ -92,6 +91,7 @@ class VectorTileDialog(BaseDialog):
         layout.addLayout(b_l)
 
         self.setLayout(layout)
+        self.fit_height_to_content(getattr(self, "_param_content", param_panel), extra=40)
 
     def _init_parameters_panel(self, parent) -> None:
         layout = QVBoxLayout(parent)
@@ -172,6 +172,7 @@ class VectorTileDialog(BaseDialog):
         sl.addLayout(row)
 
         sl.addStretch()
+        self._param_content = content
         scroll.setWidget(content)
         layout.addWidget(scroll)
 

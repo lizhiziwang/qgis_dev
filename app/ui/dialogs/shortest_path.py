@@ -45,8 +45,8 @@ from app.core.domain.shortestpath.service import build_shortest_path_params
 from app.core.domain.shortestpath.task import ShortestPathFeedback, ShortestPathRunnerTask
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
-from app.ui.common.algo_desc import make_description_browser
-from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.algo_desc import make_description_panel
+from app.ui.common.base_dialog import BaseDialog, make_scrollable
 
 if TYPE_CHECKING:
     from qgis.gui import QgsMapTool
@@ -92,9 +92,9 @@ class ShortestPathDialog(BaseDialog):
         main = QHBoxLayout()
         param_panel = QWidget()
         self._init_parameters_panel(param_panel)
-        main.addWidget(param_panel, stretch=3)
+        main.addWidget(make_scrollable(param_panel), stretch=3)
         # 右侧算法描述：processing 注册表取真实 help，注册表不可用时走 algo_desc 兜底
-        main.addWidget(make_description_browser("native:shortestpathpointtopoint"), stretch=2)
+        main.addWidget(make_description_panel("native:shortestpathpointtopoint"), stretch=1)
         layout.addLayout(main, stretch=1)
 
         b_l = QVBoxLayout()
@@ -122,6 +122,7 @@ class ShortestPathDialog(BaseDialog):
         layout.addLayout(b_l)
 
         self.setLayout(layout)
+        self.fit_height_to_content(param_panel)
 
     def _init_parameters_panel(self, parent) -> None:
         layout = QVBoxLayout(parent)
