@@ -177,12 +177,16 @@ def repair_gaps_interactive(
     parent=None,
     *,
     hint: Callable[[str], None] | None = None,
+    on_done: Callable[[tuple[int, int] | None], None] | None = None,
 ) -> tuple[int, int] | None:
     """检出 → 弹窗分配目标面 → 执行。
 
+    弹窗是**无模态**的：本函数检出缝隙后立即返回 ``None``，真正的执行结果通过
+    ``on_done((改动要素数, 填补缝隙数))`` 回调；用户取消时回调 ``None``。
+
     :param canvas: 画布；传入后弹窗会在用户选目标面时于地图上高亮闪烁该要素
-    :return: ``(改动要素数, 填补缝隙数)``；用户取消 / 执行失败返回 ``None``；
-        没检出缝隙返回 ``(0, 0)``（不弹窗）。
+    :param on_done: 异步结果回调（无模态窗口关闭后触发）
+    :return: 没检出缝隙返回 ``(0, 0)``（不弹窗）；弹窗已打开 / 取消返回 ``None``
     """
     say = hint or (lambda text: None)
     if layer is None or layer.type() != layer.VectorLayer:
@@ -196,12 +200,42 @@ def repair_gaps_interactive(
         return (0, 0)
 
     # 延迟 import：对话框只在真正有缝隙时才需要，也避免 UI 模块间的循环引用
+    from app.ui.common.modeless import show_modeless
     from app.ui.dialogs.gap_repair import GapRepairDialog
 
-    dialog = GapRepairDialog(layer, targets, canvas=canvas, parent=parent)
-    if dialog.exec() != QDialog.DialogCode.Accepted:
-        return None
-    return apply_gap_repair(layer, targets, dialog.assignments(), hint=hint)
+    done = False
+
+    def _apply(dialog) -> None:
+        nonlocal done
+        done = True
+        try:
+            if not layer.isEditable():
+                say("图层已退出编辑态，补缝未执行")
+                if on_done is not None:
+                    on_done(None)
+                return
+            result = apply_gap_repair(
+                layer, targets, dialog.assignments(), hint=hint
+            )
+        except Exception as exc:  # noqa: BLE001 —— 图层在弹窗期间被改坏/删掉
+            say(f"补缝失败：{exc}")
+            result = None
+        if on_done is not None:
+            on_done(result)
+
+    def _finished(_dialog) -> None:
+        if not done and on_done is not None:
+            on_done(None)
+
+    show_modeless(
+        parent,
+        ("gap_repair", layer.id()),
+        lambda: GapRepairDialog(layer, targets, canvas=canvas, parent=parent),
+        on_accepted=_apply,
+        on_finished=_finished,
+        layer=layer,
+    )
+    return None
 
 
 __all__ = [

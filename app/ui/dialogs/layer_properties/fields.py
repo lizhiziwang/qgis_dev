@@ -44,6 +44,7 @@ from qgis.PyQt.QtWidgets import (
 from app.infra.logging import get_logger
 from app.ui.dialogs.layer_properties.add_field_dialog import AddFieldDialog
 from app.ui.dialogs.layer_properties.base import LayerPropertyTab
+from app.ui.common.modeless import show_modeless
 from app.ui.common.widgets import CenteredCheckDelegate
 from app.ui.tools.feature_attrs import field_alias, readonly_field_indices
 
@@ -528,24 +529,29 @@ class FieldsTab(LayerPropertyTab):
                 "图层处于编辑状态，请先保存 / 停止编辑后再添加字段。",
             )
             return
-        dlg = AddFieldDialog(self)
-        if dlg.exec() != AddFieldDialog.DialogCode.Accepted:
-            return
-        spec = dlg.field_spec()
-        if spec is None:
-            QMessageBox.warning(self, "添加字段", "字段名不能为空")
-            return
-        new_name = spec["name"]
-        # 重名校验：图层里已有 + 表格里已有 pending
-        existing = {self.table.item(r, 1).text() for r in range(self.table.rowCount())
-                    if self.table.item(r, 1)}
-        if new_name in existing:
-            QMessageBox.warning(
-                self, "添加字段",
-                f"字段名「{new_name}」已存在（与图层字段或已添加的 pending 行冲突）",
-            )
-            return
-        self._append_pending_row(spec)
+        def _add(dlg) -> None:
+            spec = dlg.field_spec()
+            if spec is None:
+                QMessageBox.warning(self, "添加字段", "字段名不能为空")
+                return
+            new_name = spec["name"]
+            # 重名校验：图层里已有 + 表格里已有 pending
+            existing = {self.table.item(r, 1).text() for r in range(self.table.rowCount())
+                        if self.table.item(r, 1)}
+            if new_name in existing:
+                QMessageBox.warning(
+                    self, "添加字段",
+                    f"字段名「{new_name}」已存在（与图层字段或已添加的 pending 行冲突）",
+                )
+                return
+            self._append_pending_row(spec)
+
+        show_modeless(
+            self,
+            ("add_field", id(self)),
+            lambda: AddFieldDialog(self),
+            on_accepted=_add,
+        )
 
     # ------------------------------------------------------------- 行操作
 
@@ -660,38 +666,69 @@ class FieldsTab(LayerPropertyTab):
 
     def _edit_pending_row(self, row: int, spec: dict) -> None:
         """pending 行「更新」：打开字段对话框改定义，替换该行。"""
-        dlg = AddFieldDialog(self, initial=spec)
-        if dlg.exec() != AddFieldDialog.DialogCode.Accepted:
-            return
-        new_spec = dlg.field_spec()
-        if new_spec is None:
-            QMessageBox.warning(self, "编辑字段", "字段名不能为空")
-            return
-        others = {
-            self.table.item(r, 1).text()
-            for r in range(self.table.rowCount())
-            if r != row and self.table.item(r, 1)
-        }
-        if new_spec["name"] in others:
-            QMessageBox.warning(self, "编辑字段", f"字段名「{new_spec['name']}」已存在")
-            return
+        def _apply(dlg) -> None:
+            new_spec = dlg.field_spec()
+            if new_spec is None:
+                QMessageBox.warning(self, "编辑字段", "字段名不能为空")
+                return
+            # 无模态窗口开着时表格可能被改：按原字段名重新定位 pending 行
+            target_row = row
+            item = self.table.item(target_row, 1)
+            if item is None or item.text() != spec.get("name"):
+                target_row = next(
+                    (
+                        r
+                        for r in range(self.table.rowCount())
+                        if self.table.item(r, 1)
+                        and self.table.item(r, 1).text() == spec.get("name")
+                    ),
+                    -1,
+                )
+            if target_row < 0:
+                QMessageBox.information(
+                    self, "编辑字段", "该 pending 字段已不存在，修改未应用。"
+                )
+                return
+            others = {
+                self.table.item(r, 1).text()
+                for r in range(self.table.rowCount())
+                if r != target_row and self.table.item(r, 1)
+            }
+            if new_spec["name"] in others:
+                QMessageBox.warning(
+                    self, "编辑字段", f"字段名「{new_spec['name']}」已存在"
+                )
+                return
 
-        cb_item = self.table.item(row, 0)
-        cb_item.setData(
-            Qt.ItemDataRole.UserRole, {"pending": True, "spec": new_spec}
+            cb_item = self.table.item(target_row, 0)
+            cb_item.setData(
+                Qt.ItemDataRole.UserRole, {"pending": True, "spec": new_spec}
+            )
+            self.table.item(target_row, 1).setText(new_spec["name"])
+            self.table.item(target_row, 1).setData(
+                Qt.ItemDataRole.UserRole, new_spec["name"]
+            )
+            self.table.item(target_row, 2).setText(new_spec.get("alias") or "")
+            self.table.item(target_row, 3).setText(new_spec["type_name"])
+            length = new_spec.get("length", 0)
+            self.table.item(target_row, 4).setText(
+                str(length) if length > 0 else ""
+            )
+            precision = new_spec.get("precision", 0)
+            self.table.item(target_row, 5).setText(
+                str(precision) if precision > 0 else ""
+            )
+            self._rename_combo_item(
+                spec["name"], new_spec["name"], new_spec.get("alias") or ""
+            )
+            self._apply_filter(self.search_edit.text())
+
+        show_modeless(
+            self,
+            ("edit_field", id(self), row, spec.get("name")),
+            lambda: AddFieldDialog(self, initial=spec),
+            on_accepted=_apply,
         )
-        self.table.item(row, 1).setText(new_spec["name"])
-        self.table.item(row, 1).setData(Qt.ItemDataRole.UserRole, new_spec["name"])
-        self.table.item(row, 2).setText(new_spec.get("alias") or "")
-        self.table.item(row, 3).setText(new_spec["type_name"])
-        length = new_spec.get("length", 0)
-        self.table.item(row, 4).setText(str(length) if length > 0 else "")
-        precision = new_spec.get("precision", 0)
-        self.table.item(row, 5).setText(str(precision) if precision > 0 else "")
-        self._rename_combo_item(
-            spec["name"], new_spec["name"], new_spec.get("alias") or ""
-        )
-        self._apply_filter(self.search_edit.text())
 
     # ------------------------------------------------------------- 小工具
 

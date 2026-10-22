@@ -494,8 +494,8 @@ class LayerActionsMixin:
             self._add_remove_all_layers_action(menu)
 
     def _add_remove_all_layers_action(self, menu: QMenu) -> None:
-        """追加「移除所有图层」（不额外加分隔线，位置由调用方决定）。"""
-        act_remove_all = menu.addAction("移除所有图层")
+        """追加「移除所有」（不额外加分隔线，位置由调用方决定）。"""
+        act_remove_all = menu.addAction("移除所有")
         act_remove_all.setIcon(Icons.remove())
         act_remove_all.triggered.connect(self._remove_all_layers)
 
@@ -548,9 +548,9 @@ class LayerActionsMixin:
         （见 :meth:`_choose_edit_layer`）。
 
         布局贴近 QGIS 原生图层面板：缩放至图层 / 放大至选中要素 → 打开属性表 /
-        执行SQL（仅矢量）→ 重命名 / 复制图层 → 样式（含复制/粘贴样式）→ 移到
-        分组 → 关闭/打开所有图层 → 移除 / 移除所有图层 → 导出 / 属性 →
-        置顶 / 上移 / 下移 / 置底。
+        图层属性 → 渲染样式（编辑 / 导入 / 保存 / 复制粘贴）→ 导出数据 / 执行SQL
+        （仅矢量）→ 重命名 / 复制图层 → 移到分组 → 关闭/打开所有图层 →
+        移除 / 移除所有 → 置顶 / 上移 / 下移 / 置底。
         """
         if layer is None:
             return
@@ -567,30 +567,25 @@ class LayerActionsMixin:
             act_sel = QAction("放大至选中要素", self)
             act_sel.triggered.connect(lambda: self._zoom_to_selection(self._selected_layer))
             menu.addAction(act_sel)
-        # 属性表 / SQL（栅格没有要素/表，不显示）
+        # 打开属性表 / 图层属性 / 导出数据 / SQL（栅格没有要素表，只留图层属性）
+        menu.addSeparator()
         if is_vector:
-            menu.addSeparator()
             act_attr = QAction("打开属性表", self)
             act_attr.triggered.connect(self._open_attribute_table)
             menu.addAction(act_attr)
-            act_sql = QAction("执行SQL", self)
-            act_sql.triggered.connect(self._open_execute_sql)
-            menu.addAction(act_sql)
-        # 重命名 / 复制图层
-        menu.addSeparator()
-        act_rename = QAction("重命名", self)
-        act_rename.triggered.connect(lambda: self._rename_layer(self._selected_layer))
-        menu.addAction(act_rename)
-        act_dup = QAction("复制图层", self)
-        act_dup.triggered.connect(lambda: self._duplicate_layer(self._selected_layer))
-        menu.addAction(act_dup)
-        # 样式
-        sub_style = menu.addMenu("样式")
+        act_props = QAction("图层属性", self)
+        act_props.triggered.connect(lambda: self._open_layer_properties(self._selected_layer))
+        menu.addAction(act_props)
+        # 渲染样式：紧跟在图层属性下面。编辑样式跳到图层属性的「渲染」页；
+        # 导入样式 = 从外部 QGIS 样式文件导入。
+        sub_style = menu.addMenu("渲染样式")
         if is_vector:
             edit_style = QAction("编辑样式", self)
-            edit_style.triggered.connect(lambda: self._show_style_editor(self._selected_layer))
+            edit_style.triggered.connect(
+                lambda: self._show_render_tab(self._selected_layer)
+            )
             sub_style.addAction(edit_style)
-        open_style = QAction("打开样式配置", self)
+        open_style = QAction("导入样式", self)
         open_style.triggered.connect(lambda: self._open_style_file(self._selected_layer))
         sub_style.addAction(open_style)
         save_style = QAction("保存样式", self)
@@ -604,6 +599,21 @@ class LayerActionsMixin:
         paste_style.setEnabled(bool(getattr(self, "_style_clipboard", None)))
         paste_style.triggered.connect(lambda: self._paste_layer_style(self._selected_layer))
         sub_style.addAction(paste_style)
+        if is_vector:
+            act_export = QAction("导出数据", self)
+            act_export.triggered.connect(lambda: self._export_layer(self._selected_layer))
+            menu.addAction(act_export)
+            act_sql = QAction("执行SQL", self)
+            act_sql.triggered.connect(self._open_execute_sql)
+            menu.addAction(act_sql)
+        # 重命名 / 复制图层
+        menu.addSeparator()
+        act_rename = QAction("重命名", self)
+        act_rename.triggered.connect(lambda: self._rename_layer(self._selected_layer))
+        menu.addAction(act_rename)
+        act_dup = QAction("复制图层", self)
+        act_dup.triggered.connect(lambda: self._duplicate_layer(self._selected_layer))
+        menu.addAction(act_dup)
         # 工程分组：移动图层归属（创建工程后才显示）
         if getattr(self, "_data_group", None) is not None and getattr(self, "_ref_group", None) is not None:
             menu.addSeparator()
@@ -615,21 +625,13 @@ class LayerActionsMixin:
             menu.addAction(act_to_data)
         # 关闭 / 打开所有图层
         self._add_all_layers_actions(menu, include_remove=False)
-        # 移除 / 移除所有 / 导出 / 属性
+        # 移除 / 移除所有
         menu.addSeparator()
         act_remove = QAction("移除", self)
         act_remove.setIcon(Icons.remove())
         act_remove.triggered.connect(lambda: self._remove_layer(self._selected_layer, confirm=True))
         menu.addAction(act_remove)
         self._add_remove_all_layers_action(menu)
-        if is_vector:
-            # 导出走 QgsVectorLayerSaveAsDialog，仅矢量
-            act_export = QAction("导出", self)
-            act_export.triggered.connect(lambda: self._export_layer(self._selected_layer))
-            menu.addAction(act_export)
-        act_props = QAction("属性", self)
-        act_props.triggered.connect(lambda: self._open_layer_properties(self._selected_layer))
-        menu.addAction(act_props)
         # 顺序操作放菜单最后
         self._add_node_move_actions(menu, node)
         menu.exec(global_pos)

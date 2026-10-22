@@ -28,8 +28,9 @@ class FindFeatureTool(QgsMapToolIdentify):
     def canvasReleaseEvent(self, event) -> None:  # noqa: N802 —— QGIS 命名
         # Qt6 下 QgsMapMouseEvent 不再有 x()/y()，用 pixelPoint() 取画布像素坐标
         point = event.pixelPoint()
+        # 只展示第一条，取到一条就停，避免密集图层白读其余要素的属性/几何
         results = self.identify_service.identify(
-            self.canvas, point.x(), point.y(), self.IdentifyMode.TopDownAll
+            self.canvas, point.x(), point.y(), self.IdentifyMode.TopDownAll, max_results=1
         )
         if not results:
             return

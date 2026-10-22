@@ -24,6 +24,7 @@ from qgis.PyQt.QtGui import (
     QColor,
     QDesktopServices,
     QKeySequence,
+    QResizeEvent,
     QShortcut,
 )
 from qgis.PyQt.QtWidgets import QApplication, QDialog, QDockWidget, QMessageBox, QToolBar
@@ -195,7 +196,13 @@ class WindowChromeMixin:
         act.setToolTip(tooltip or text)
         if shortcut:
             act.setShortcut(shortcut)
+            # 应用级：焦点在任意控件 / 任意应用内窗口（含非模态工具窗）时都生效
+            act.setShortcutContext(Qt.ShortcutContext.ApplicationShortcut)
         act.triggered.connect(slot)
+        # **也挂到主窗口上**：页签工具条在别的页签下是隐藏的，隐藏工具条里的
+        # QAction 快捷键不会生效（实测）。挂到窗口后，焦点在任何控件上
+        # （包括文本输入框）都能触发。
+        self.addAction(act)
         self._tab_icon_items.append((act, icon_key))
         return act
 
@@ -610,6 +617,20 @@ class WindowChromeMixin:
 
     # ================================================= dock 布局停摆的自愈
 
+    def resizeEvent(self, event: QResizeEvent) -> None:  # noqa: N802 —— Qt 命名
+        """窗口尺寸变了：**只有被标记为可能停摆时**才排一次布局自愈。
+
+        本机 Qt 6.11 的 ``savedState`` 一旦卡住，改窗口大小会早返回、内容不跟着
+        重排。但不能每次 resize 都无条件 ``restoreState``——浮动 Dock 会因此每次
+        都闪一下。需要自愈的操作（如重开属性表）只打标记，由下一次 resize 消费。
+        """
+        super().resizeEvent(event)
+        if getattr(self, "_layout_heal_on_resize", False):
+            self._layout_heal_on_resize = False
+            # 浮动面板不参与：restoreState 会重套它的几何，resize 时看到闪一下
+            if not any(d.isVisible() and d.isFloating() for d in self.findChildren(QDockWidget)):
+                self.schedule_layout_heal()
+
     def watch_dock_layout(self, dock) -> None:
         """Dock 停靠↔浮动 / 换停靠区后登记一次布局自愈。
 
@@ -617,6 +638,10 @@ class WindowChromeMixin:
         dock 拖拽的过程中同步发出来的，此刻布局处在拖拽中间态——这时套
         ``restoreState`` 会把其它浮动 dock 的位置一起搅乱甚至让它们消失。所以这里只
         排一个延迟任务，等鼠标松开、事件循环空下来再执行。
+
+        拖拽结束后**无条件**重套一次布局（``force=True``）：Qt 的 bug 是
+        ``savedState`` 没被清掉，即使当前几何看起来正常，下一次改窗口大小仍会
+        早返回、内容不跟着刷新（见 :meth:`heal_stalled_layout`）。
         """
         if dock is None:
             return
@@ -627,11 +652,26 @@ class WindowChromeMixin:
                 logger.warning("挂接 Dock 布局信号失败: %s", type(dock).__name__, exc_info=True)
 
     def schedule_layout_heal(self) -> None:
-        """把自愈排到「鼠标已松开」之后（拖拽还在进行时反复重排会更乱）。"""
-        if QApplication.mouseButtons() != Qt.MouseButton.NoButton:
-            QTimer.singleShot(80, self.schedule_layout_heal)
+        """把自愈排到「鼠标已松开」之后（拖拽还在进行时反复重排会更乱）。
+
+        用标志位合并同一次拖拽里连续发出的信号，避免排队出多次 ``restoreState``；
+        而且始终经 ``QTimer`` 异步执行，绝不在 Dock 信号处理途中同步重套布局。
+        ``restoreState`` 自己也可能触发 ``dockLocationChanged``，正在重套时直接
+        忽略，避免自激成死循环。
+        """
+        if getattr(self, "_layout_healing", False):
             return
-        self.heal_stalled_layout()
+        if getattr(self, "_layout_heal_scheduled", False):
+            return
+        self._layout_heal_scheduled = True
+        QTimer.singleShot(80, self._run_layout_heal)
+
+    def _run_layout_heal(self) -> None:
+        if QApplication.mouseButtons() != Qt.MouseButton.NoButton:
+            QTimer.singleShot(80, self._run_layout_heal)
+            return
+        self._layout_heal_scheduled = False
+        self.heal_stalled_layout(force=True)
 
     def _expected_central_top(self) -> int:
         """按「菜单容器 + 可见的顶部工具条」算中央区应有的顶边（实测严丝合缝）。
@@ -649,8 +689,8 @@ class WindowChromeMixin:
                 top = max(top, tb.geometry().bottom() + 1)
         return top
 
-    def heal_stalled_layout(self) -> None:
-        """中央区顶边跟顶部实际占用对不上时，重套一次 dock 布局把它救回来。
+    def heal_stalled_layout(self, *, force: bool = False) -> None:
+        """重套一次 dock 布局，清掉 Qt 卡住的 ``savedState``。
 
         **救的是什么**：拖 dock 出浮动之后，``QMainWindowLayout`` 会停止重排——
         工具条按 tab 正确显隐，但中央容器几何再也不更新：切 tab 在工具条下方留一条
@@ -661,9 +701,10 @@ class WindowChromeMixin:
             if (savedState.isValid() || (restoredState && isInApplyState))
                 return;
 
-        拖 dock 时 Qt 用 ``savedState`` 存布局快照，正常由 ``animationFinished()``
-        清掉；本项目跑的 Qt 6.11.0 上（见 QTBUG-147209，6.8/6.11 的回归）拖出成浮动
-        之后它不再被清，于是 ``setGeometry()`` 永远早返回。
+        拖 dock 时 Qt 用 ``savedState`` 存布局快照，正常应在拖拽开始 / 结束时清掉；
+        本项目跑的 Qt 6.11.x 上（见 QTBUG-147209，6.8/6.11 的回归，官方在
+        ``QDockWidgetPrivate::startDrag/endDrag`` 里改为 ``ClearSavedState`` 修复）
+        拖出成浮动之后它不再被清，于是 ``setGeometry()`` 永远早返回。
 
         **为什么这么救**：实测（``.tmp/verify_nudge.py``）能解开的只有
         ``saveState()`` 走一圈 ``restoreState()`` —— 让 Qt 重新套一遍布局状态，顺带把
@@ -671,28 +712,57 @@ class WindowChromeMixin:
         浮动状态 / 位置 / 尺寸、以及画布几何**逐项不变**。
         网上另外几种绕法（加个假 dock 再删、``layout().invalidate() + activate()``、
         ``resizeDocks()``、±1px 改窗口尺寸）在本仓库实测**全都无效**，别再试。
+
+        :param force: 跳过「顶边对不上」的判定，无条件重套。Dock 拖拽刚结束时必须
+            传 ``True``：此时几何可能还是对的，但 ``savedState`` 已经卡住，不主动清掉
+            的话下一次拖窗口边缘改大小就会复现「主界面不刷新」。
         """
         central = self.centralWidget()
         if central is None:
             return
-        try:
-            expected = self._expected_central_top()
-        except RuntimeError:
-            return  # 窗口销毁流程中，忽略
-        if expected < 0:
-            return  # 顶区有 dock，_expected_central_top 不适用
-        if abs(central.y() - expected) <= 1:
-            return
-        logger.warning(
-            "顶部布局停摆：中央区 y=%s，按顶部实际占用应为 %s，重套一次 dock 布局",
-            central.y(), expected,
-        )
+        if getattr(self, "_layout_healing", False):
+            return  # restoreState 触发的重入，忽略
+        if force:
+            logger.debug("Dock 拖拽结束，主动重套一次布局以清除 Qt savedState")
+        else:
+            try:
+                expected = self._expected_central_top()
+            except RuntimeError:
+                return  # 窗口销毁流程中，忽略
+            if expected < 0:
+                return  # 顶区有 dock，_expected_central_top 不适用
+            if abs(central.y() - expected) <= 1:
+                return
+            logger.warning(
+                "顶部布局停摆：中央区 y=%s，按顶部实际占用应为 %s，重套一次 dock 布局",
+                central.y(), expected,
+            )
+        self._layout_healing = True
+        # ``restoreState`` 会把每个 tab 组的当前页重置成**第一个标签**（实测：
+        # 左栏从「图层列表」跳到「数据浏览器」，看起来像浏览器自己冒出来）。
+        # 先记下当前真正露在前面的 dock（inactive tab 的 visibleRegion 为空），
+        # 恢复布局后再 raise 回来。
+        active_docks: list[QDockWidget] = []
+        for dock in self.findChildren(QDockWidget):
+            try:
+                if dock.isVisible() and not dock.visibleRegion().isEmpty():
+                    active_docks.append(dock)
+            except RuntimeError:
+                continue
         try:
             state = self.saveState()
             if not state.isEmpty():
                 self.restoreState(state)
         except RuntimeError:
             pass  # 窗口销毁流程中，忽略
+        finally:
+            self._layout_healing = False
+        for dock in active_docks:
+            try:
+                if dock.isVisible():
+                    dock.raise_()
+            except RuntimeError:
+                continue
 
     def _build_status_bar(self) -> None:
         self.status_bar_builder = StatusBar(self)

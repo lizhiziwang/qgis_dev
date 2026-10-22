@@ -828,6 +828,7 @@ def app_qss(t: Theme) -> str:
         font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
         font-size: 12px;
     }}
+    QDockWidget > QWidget {{ background-color: {t.window_bg}; }}
     /* 滚动区：**viewport 必须显式透明**。QScrollArea 的 viewport 是个 QWidget，
        默认按调色板的 Base/Window 色（浅色）自绘 —— 深色主题下就在弹窗里留下一大块
        浅灰，而里面的字段标签用主题文字色（浅色）画上去，直接看不见了（用户报
@@ -1145,6 +1146,23 @@ def app_qss(t: Theme) -> str:
         border-color: {t.input_focus};
     }}
     QTreeView::indicator:checked {{
+        border: 1px solid {t.input_focus};
+        background: {t.input_bg};
+        image: url({_check_url(t.input_focus)});
+    }}
+    /* 「样式引用」的符号分组勾选框：QListWidget 没有 indicator 规则时是平台原生
+       方块，与节点列表（QTreeView）不一致；这里套同一套画法。 */
+    QListWidget#SymbolStyleReferenceList::indicator {{
+        width: 14px;
+        height: 14px;
+        border: 1px solid {t.input_border};
+        border-radius: 2px;
+        background: {t.input_bg};
+    }}
+    QListWidget#SymbolStyleReferenceList::indicator:hover {{
+        border-color: {t.input_focus};
+    }}
+    QListWidget#SymbolStyleReferenceList::indicator:checked {{
         border: 1px solid {t.input_focus};
         background: {t.input_bg};
         image: url({_check_url(t.input_focus)});

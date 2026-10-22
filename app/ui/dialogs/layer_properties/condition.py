@@ -10,12 +10,7 @@
 from __future__ import annotations
 
 from qgis.core import QgsVectorLayer
-from qgis.PyQt.QtWidgets import (
-    QHBoxLayout,
-    QMessageBox,
-    QPushButton,
-    QVBoxLayout,
-)
+from qgis.PyQt.QtWidgets import QMessageBox, QVBoxLayout
 
 from app.infra.logging import get_logger
 from app.ui.dialogs.layer_properties.base import LayerPropertyTab
@@ -41,18 +36,9 @@ class ConditionTab(LayerPropertyTab):
         self.widget = QueryBuilderWidget(self._layer, self)
         root.addWidget(self.widget, 1)
 
-        buttons = QHBoxLayout()
-        self.clear_btn = QPushButton("清除条件", self)
-        self.clear_btn.setToolTip("清空条件；点「确定 / 应用」后恢复显示全部要素")
-        self.clear_btn.clicked.connect(self._clear_condition)
-        buttons.addWidget(self.clear_btn)
-        buttons.addStretch(1)
-        root.addLayout(buttons)
-
     def _sync_enabled(self) -> None:
         is_vector = isinstance(self._layer, QgsVectorLayer)
         self.widget.setEnabled(is_vector)
-        self.clear_btn.setEnabled(is_vector)
 
     def _refresh_status(self) -> None:
         if not isinstance(self._layer, QgsVectorLayer):
@@ -71,10 +57,6 @@ class ConditionTab(LayerPropertyTab):
         else:
             text = f"图层当前显示全部要素：{count_text}。{hint}"
         self.widget.set_applied_text(text)
-
-    def _clear_condition(self) -> None:
-        self.widget.clear_condition()
-        self._refresh_status()
 
     def load(self, layer) -> None:
         self._layer = layer

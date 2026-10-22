@@ -101,6 +101,8 @@ class OnlineBasemapDock(QDockWidget):
         on_reorder_groups: Optional[Callable[[list[str]], bool]] = None,
     ) -> None:
         super().__init__("在线底图", parent)
+        # saveState/restoreState 按 objectName 匹配 Dock；空名字会被 Qt 丢弃并告警。
+        self.setObjectName("OnlineBasemapDock")
         self._on_add: Optional[Callable[[OnlineBasemapDef], bool]] = on_add
         #: 右键「添加在线底图」模板 → 持久化回调（MainWindow 写 app.yaml 后刷新树）
         self._on_add_template: Optional[Callable[[OnlineBasemapDef], bool]] = on_add_template

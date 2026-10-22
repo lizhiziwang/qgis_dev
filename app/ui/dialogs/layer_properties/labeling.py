@@ -10,10 +10,11 @@
 
 「翻译字段」组（单选）：把所选字段的值翻成别的文本再当标注。
 
-- **使用字典**：暂未实现，固定置灰（字典数据后续从服务端拉取 JSON）。
-- **使用转义**：用「设置转义值…」弹窗里配的「值 → 文本」对照表，生成
-  ``coalesce(map_get(map(...), to_string(字段)), 字段)`` 表达式，未命中的值
-  回退原值。
+- **使用字典**：字段挂接了**属性域（ValueMap）或字典**时可用，生成
+  ``coalesce(map_get(map(...), to_string(字段)), 字段)`` 表达式，把代码显示成
+  字典名称；没有字典的字段置灰。
+- **使用转义**：用「设置转义值…」弹窗里配的「值 → 文本」对照表，生成同样的
+  映射表达式，未命中的值回退原值。
 
 两种方式互斥，也可都不选（不翻译）；且只有「标注内容」选了真实字段后
 才可用，否则置灰。翻译配置存在图层自定义属性 ``label_translate`` 里（JSON），
@@ -92,8 +93,10 @@ _EXPR = "__expr__"
 #: 图层自定义属性：标注「翻译字段」配置（JSON，随工程保存）
 _TRANSLATE_PROP = "label_translate"
 
-#: 「使用字典」暂未实现：字典数据后续从服务端拉取 JSON
-_DICT_TOOLTIP = "字典数据后续从服务端拉取，暂未实现"
+#: 「使用字典」：字段挂了属性域 / 字典时，把代码显示成名称
+_DICT_TOOLTIP = "按字段挂接的字典 / 属性域把代码显示为名称"
+#: 字段没有字典时「使用字典」的提示
+_DICT_UNAVAILABLE_TOOLTIP = "当前字段没有挂接字典或属性域"
 
 #: 「使用转义」拉取字段去重值的上限（大图层防止弹窗卡死）
 _VALUE_LIMIT = 2000
@@ -528,6 +531,10 @@ class LabelingTab(LayerPropertyTab):
         self._groups: list[QGroupBox] = []
         #: 「使用转义」的值映射：``{原值: 翻译结果}``
         self._translate_map: dict[str, str] = {}
+        #: 字段名 → ``{代码: 名称}``（属性域 / 本地字典；按需拉取并缓存）
+        self._dict_labels_cache: dict[str, dict[str, str]] = {}
+        #: 上次同步翻译状态时的字段：字段变化且带字典时默认勾选「使用字典」
+        self._last_translate_field: str | None = None
         self._build()
         if layer is not None:
             self.load(layer)
@@ -648,9 +655,10 @@ class LabelingTab(LayerPropertyTab):
         rl.setSpacing(4)
 
         self.translate_dict_radio = QRadioButton("使用字典", row)
-        # 暂未实现（后续从服务端拉取字典 JSON），固定置灰
-        self.translate_dict_radio.setEnabled(False)
-        self.translate_dict_radio.setToolTip(_DICT_TOOLTIP)
+        # 与「使用转义」互斥，但允许再点一下取消（= 不翻译），所以手动管互斥
+        self.translate_dict_radio.setAutoExclusive(False)
+        self.translate_dict_radio.setToolTip(_DICT_UNAVAILABLE_TOOLTIP)
+        self.translate_dict_radio.toggled.connect(self._on_translate_dict_toggled)
         rl.addWidget(self.translate_dict_radio)
 
         escape_row = QHBoxLayout()
@@ -796,6 +804,7 @@ class LabelingTab(LayerPropertyTab):
     def load(self, layer) -> None:
         """从 ``layer`` 重填控件。"""
         self._layer = layer
+        self._dict_labels_cache.clear()
         if not isinstance(layer, QgsVectorLayer):
             self.mode_combo.blockSignals(True)
             self.mode_combo.clear()
@@ -899,8 +908,11 @@ class LabelingTab(LayerPropertyTab):
                 self._translate_map = {str(k): str(v) for k, v in raw_map.items()}
             # 标注内容里回显原始字段：settings.fieldName 存的是翻译后的表达式
             self.content_selector.set_value(str(cfg["field"]), False)
-            if cfg.get("mode") == "escape":
-                self._set_translate_radios("escape")
+            if cfg.get("mode") in ("escape", "dict"):
+                self._set_translate_radios(str(cfg["mode"]))
+        # 强制让最后一次同步把当前字段当作"新选中的字段"：
+        # 没有保存过翻译配置时，带字典的字段要默认勾选「使用字典」
+        self._last_translate_field = None
         self._sync_translate_state()
 
     # ------------------------------------------------------------- 交互
@@ -943,39 +955,103 @@ class LabelingTab(LayerPropertyTab):
     # -- 翻译字段 -----------------------------------------------------
 
     def _translate_mode(self) -> str:
-        """当前翻译方式：``escape`` / ``""``（不翻译）。字典暂未实现。"""
+        """当前翻译方式：``dict`` / ``escape`` / ``""``（不翻译）。"""
         field, is_expr = self.content_selector.value()
         if not field or is_expr:
             return ""
+        if self.translate_dict_radio.isChecked() and self._field_labels(field):
+            return "dict"
         return "escape" if self.translate_escape_radio.isChecked() else ""
 
+    def _field_labels(self, field: str) -> dict[str, str]:
+        """字段的「代码 → 名称」：属性域（ValueMap）优先，其次本地 / 系统字典。"""
+        if not field:
+            return {}
+        cached = self._dict_labels_cache.get(field)
+        if cached is not None:
+            return cached
+        labels: dict[str, str] = {}
+        try:
+            # 复用渲染页的同一套取值逻辑（ValueMap / load_field_dict）
+            from app.ui.dialogs.layer_properties.render import _field_value_labels
+
+            labels = _field_value_labels(self._layer, field)
+        except Exception:  # noqa: BLE001 —— 读不到字典就按没有处理
+            logger.warning("读取字段「%s」字典失败", field, exc_info=True)
+        self._dict_labels_cache[field] = labels
+        return labels
+
     def _set_translate_radios(self, mode) -> None:
-        """静默设置「使用转义」单选（``None`` = 不选，即不翻译）。"""
-        self.translate_escape_radio.blockSignals(True)
-        self.translate_escape_radio.setChecked(mode == "escape")
-        self.translate_escape_radio.blockSignals(False)
+        """静默设置翻译方式（``None`` = 两个都不选，即不翻译）。"""
+        for radio, checked in (
+            (self.translate_dict_radio, mode == "dict"),
+            (self.translate_escape_radio, mode == "escape"),
+        ):
+            radio.blockSignals(True)
+            radio.setChecked(checked)
+            radio.blockSignals(False)
+
+    def _on_translate_dict_toggled(self, checked: bool) -> None:
+        if checked:
+            self.translate_escape_radio.blockSignals(True)
+            self.translate_escape_radio.setChecked(False)
+            self.translate_escape_radio.blockSignals(False)
+        self._sync_translate_state()
 
     def _on_translate_escape_toggled(self, checked: bool) -> None:
+        if checked:
+            self.translate_dict_radio.blockSignals(True)
+            self.translate_dict_radio.setChecked(False)
+            self.translate_dict_radio.blockSignals(False)
         self._sync_translate_state()
 
     def _sync_translate_state(self, *_) -> None:
-        """按「有没有选字段」与当前选项，刷新启用态与提示。"""
+        """按「有没有选字段」「字段有没有字典」刷新启用态与提示。"""
         field, is_expr = self.content_selector.value()
         has_field = bool(field) and not is_expr
-        # 「使用字典」暂未实现，始终禁用
-        self.translate_dict_radio.setEnabled(False)
+        labels = self._field_labels(field) if has_field else {}
+        has_dict = bool(labels)
+        field_changed = field != self._last_translate_field
+        self._last_translate_field = field
+
+        # 选中带字典 / 属性域的字段时默认使用字典（用户之后仍可手动取消；
+        # 取消后同一字段不会再被强行勾上，换字段才重新默认）
+        if (
+            has_field
+            and has_dict
+            and field_changed
+            and not self.translate_dict_radio.isChecked()
+            and not self.translate_escape_radio.isChecked()
+        ):
+            self._set_translate_radios("dict")
+
+        self.translate_dict_radio.setEnabled(has_field and has_dict)
+        self.translate_dict_radio.setToolTip(
+            _DICT_TOOLTIP if has_dict else _DICT_UNAVAILABLE_TOOLTIP
+        )
         self.translate_escape_radio.setEnabled(has_field)
+        if not has_dict and self.translate_dict_radio.isChecked():
+            self._set_translate_radios(None)
         if not has_field and self.translate_escape_radio.isChecked():
             self._set_translate_radios(None)
         self.translate_set_btn.setEnabled(
             has_field and self.translate_escape_radio.isChecked()
         )
+
         if not has_field:
             self.translate_hint.setText("先在「标注内容」里选一个字段")
+        elif self.translate_dict_radio.isChecked() and has_dict:
+            self.translate_hint.setText(
+                f"按字典显示：{len(labels)} 个代码会转换成名称"
+            )
         elif self.translate_escape_radio.isChecked():
             count = len([v for v in self._translate_map.values() if str(v).strip()])
             self.translate_hint.setText(
                 f"已配置 {count} 条转义值" if count else "尚未配置转义值"
+            )
+        elif has_dict:
+            self.translate_hint.setText(
+                "该字段挂接了字典 / 属性域，可勾选「使用字典」"
             )
         else:
             self.translate_hint.setText("")
@@ -996,6 +1072,11 @@ class LabelingTab(LayerPropertyTab):
         mode = self._translate_mode()
         if not mode or is_expr or not field:
             return field, is_expr
+        if mode == "dict":
+            mapping = self._field_labels(field)
+            if not mapping:
+                return field, is_expr
+            return _build_translate_expression(field, mapping), True
         return _build_translate_expression(field, self._translate_map), True
 
     def _save_translate_config(self, layer) -> None:
@@ -1009,9 +1090,11 @@ class LabelingTab(LayerPropertyTab):
                 logger.warning("清除翻译配置失败", exc_info=True)
             return
         cfg: dict[str, object] = {"mode": mode, "field": field}
-        cfg["map"] = {
-            k: v for k, v in self._translate_map.items() if str(v).strip()
-        }
+        cfg["map"] = (
+            {k: v for k, v in self._translate_map.items() if str(v).strip()}
+            if mode == "escape"
+            else {}
+        )
         try:
             layer.setCustomProperty(
                 _TRANSLATE_PROP, json.dumps(cfg, ensure_ascii=False)
@@ -1090,6 +1173,11 @@ class LabelingTab(LayerPropertyTab):
 
     def _read_format(self, tf):
         font = tf.font()
+        # 像素单位字体（pointSize = -1）不要再往下传：QGIS 某些路径会拿
+        # pointSize 去调 QFont::setPointSize(-1)，触发 Qt 警告。
+        # 实际渲染字号用下面的 tf.setSize / sizeUnit，这里补一个合法点数即可。
+        if font.pointSizeF() <= 0:
+            font.setPointSizeF(max(1.0, float(self.font_size_spin.value() or 10.0)))
         font.setFamily(self.font_combo.currentFont().family())
         font.setBold(self.bold_check.isChecked())
         font.setItalic(self.italic_check.isChecked())

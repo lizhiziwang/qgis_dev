@@ -110,6 +110,8 @@ class FeatureInfoDock(QDockWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__("要素详情", parent)
+        # saveState/restoreState 按 objectName 匹配 Dock；空名字会被 Qt 丢弃并告警。
+        self.setObjectName("FeatureInfoDock")
         self.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetClosable
             | QDockWidget.DockWidgetFeature.DockWidgetMovable

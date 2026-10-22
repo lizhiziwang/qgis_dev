@@ -48,6 +48,7 @@ from app.core.util.local_layer_loader import (
 from app.infra.fs.state import load_state, save_state
 from app.infra.logging import get_logger
 from app.server.cli import main as server_main
+from app.ui.common.modeless import show_modeless
 from app.ui.dialogs.add_connection import AddConnectionDialog
 from app.ui.dialogs.check_viewer import CheckViewerDialog
 from app.ui.dialogs.condition_query import ConditionQueryDialog
@@ -1119,14 +1120,23 @@ class AppActionsMixin:
                 owner, "导出数据", f"导出失败：打不开「{name}」\n{error}"
             )
             return
-        dialog = ExportLayerDialog(owner, layer=layer, default_dir=default_output_dir())
-        accepted = dialog.exec()
-        spec = dialog.spec() if accepted else None
-        load_after = dialog.load_after_export()
-        dialog.deleteLater()
-        if spec is None:
-            return
-        export_with_progress(owner, layer, spec, load_after=load_after)
+        def _export(dlg) -> None:
+            spec = dlg.spec()
+            if spec is None:
+                return
+            export_with_progress(
+                owner, layer, spec, load_after=dlg.load_after_export()
+            )
+
+        show_modeless(
+            owner,
+            ("export_layer", layer.id()),
+            lambda: ExportLayerDialog(
+                owner, layer=layer, default_dir=default_output_dir()
+            ),
+            on_accepted=_export,
+            layer=layer,
+        )
 
     def _on_dm_delete_layer(self, db: dict, category: str, name: str) -> None:
         """数据管理左树右键「删除图层」：删库内数据表 + 注册信息 + 移出工程图层。
@@ -1532,15 +1542,33 @@ class AppActionsMixin:
             QMessageBox.information(self, "提示", "请先加载至少一个栅格图层")
             return
 
-        dlg = SwipeCompareDialog(self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        base, compare, orientation = dlg.selected_params()
-        if base is None or compare is None:
-            return
-        self._swipe_tool = SwipeTool(self.canvas, base, compare, orientation, parent=self)
-        self.canvas.setMapTool(self._swipe_tool)
-        self.tool_bar_builder.set_active("swipe")
+        def _start_swipe(dlg) -> None:
+            base, compare, orientation = dlg.selected_params()
+            layer_ids = self.project.mapLayers()
+            if (
+                base is None
+                or compare is None
+                or sip.isdeleted(base)
+                or sip.isdeleted(compare)
+                or base.id() not in layer_ids
+                or compare.id() not in layer_ids
+            ):
+                QMessageBox.information(
+                    self, "提示", "所选栅格图层已被移除，请重新选择"
+                )
+                return
+            self._swipe_tool = SwipeTool(
+                self.canvas, base, compare, orientation, parent=self
+            )
+            self.canvas.setMapTool(self._swipe_tool)
+            self.tool_bar_builder.set_active("swipe")
+
+        show_modeless(
+            self,
+            "swipe_params",
+            lambda: SwipeCompareDialog(self),
+            on_accepted=_start_swipe,
+        )
 
     def _on_qmap_compare(self) -> None:
         """地图对比：会话激活时再点即停止；否则弹窗选择图层 + 模式后启动。
@@ -1562,29 +1590,46 @@ class AppActionsMixin:
             self._set_qmap_compare_active(False)
             return
 
-        dlg = QMapCompareDialog(self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            self._set_qmap_compare_active(False)
-            return
-        layers, mode, lens_shape, lens_rate = dlg.selected()
-        if not layers:
-            self._set_qmap_compare_active(False)
-            return
-        if mode == "mirror":
+        def _start_compare(dlg) -> None:
+            layers, mode, lens_shape, lens_rate = dlg.selected()
+            current = self.project.mapLayers()
+            layers = [
+                layer
+                for layer in (layers or [])
+                if not sip.isdeleted(layer) and layer.id() in current
+            ]
+            if not layers:
+                QMessageBox.information(
+                    self, "提示", "所选图层已被移除，请重新选择"
+                )
+                self._set_qmap_compare_active(False)
+                return
+            if mode == "mirror":
+                session = MirrorCompare(self, self.canvas, parent=self)
+                session.start(layers)
+            else:
+                session = CompareMask(self.project, parent=self, canvas=self.canvas)
+                session.start(layers, mode, lens_shape, lens_rate)
+            self._qmap_compare_session = session
+            # 地图对比无地图工具：会话存活期间顶部 / 左侧工具条按钮独立常亮（再点停止）
+            self._set_qmap_compare_active(True)
+            self.messageBar.pushMessage(
+                "地图对比已启动，再点「地图对比」停止",
+                level=Qgis.MessageLevel.Info,
+                duration=3,
+            )
 
-            session = MirrorCompare(self, self.canvas, parent=self)
-            session.start(layers)
-        else:
+        def _compare_finished(_dlg) -> None:
+            session = getattr(self, "_qmap_compare_session", None)
+            if session is None or not session.is_active:
+                self._set_qmap_compare_active(False)
 
-            session = CompareMask(self.project, parent=self, canvas=self.canvas)
-            session.start(layers, mode, lens_shape, lens_rate)
-        self._qmap_compare_session = session
-        # 地图对比无地图工具：会话存活期间顶部 / 左侧工具条按钮独立常亮（再点停止）
-        self._set_qmap_compare_active(True)
-        self.messageBar.pushMessage(
-            "地图对比已启动，再点「地图对比」停止",
-            level=Qgis.MessageLevel.Info,
-            duration=3,
+        show_modeless(
+            self,
+            "qmap_params",
+            lambda: QMapCompareDialog(self),
+            on_accepted=_start_compare,
+            on_finished=_compare_finished,
         )
 
     def _set_qmap_compare_active(self, active: bool) -> None:
@@ -1672,6 +1717,12 @@ class AppActionsMixin:
             # 复用同一个 Dock 实例（位置记忆留着），关过的就再显示出来
             dock.add_new_layer(layer, self, filter_str, show_ids, 50, f"属性表 - {layer.name()}")
             dock.show()
+            # Qt 6.11 的 savedState 可能被 show/raise/setWidget 卡住：之后主窗口改
+            # 尺寸会早返回、内容不跟着刷新（同 6db7e87 的 dock 拖拽问题）。只打标记，
+            # 由下一次 resize 消费。**浮动面板不标记**：restoreState 会重套浮动
+            # 窗口几何，改变窗口大小时会闪。
+            if not dock.isFloating():
+                self._layout_heal_on_resize = True
         dock.raise_()                        # 抬到当前标签页
         # 仍维护 current_attribute_dock：空间查询等入口拿到"刚打开的这个"
         self.current_attribute_dock = dock

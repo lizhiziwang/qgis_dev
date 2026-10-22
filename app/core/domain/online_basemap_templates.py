@@ -58,9 +58,19 @@ ONLINE_BASEMAP_PRESETS: list[OnlineBasemapDef] = [
         }
     ),
     OnlineBasemapDef.from_dict(
+            {
+                "group": "天地图",
+                "name": "天地图·影像标注",
+                "url": _td_url("cia"),
+                "referer": _TIANDITU_REFERER,
+                "zmin": 0,
+                "zmax": 18,
+            }
+        ),
+    OnlineBasemapDef.from_dict(
         {
             "group": "天地图",
-            "name": "天地图·标注",
+            "name": "天地图·矢量标注",
             "url": _td_url("cva"),
             "referer": _TIANDITU_REFERER,
             "zmin": 0,

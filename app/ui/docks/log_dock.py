@@ -103,6 +103,9 @@ class LogDock(QDockWidget):
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__("日志信息", parent)
+        # saveState/restoreState 按 objectName 匹配 Dock；空名字会被 Qt 丢弃并告警。
+        self.setObjectName("LogDock")
+        self.param = {"size": 500, "level": "ALL", "filter": ""}
         self.param = {
             "size": 500,
             "level": "ALL",

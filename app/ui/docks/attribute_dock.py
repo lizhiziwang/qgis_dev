@@ -70,6 +70,7 @@ from app.infra.logging import get_logger
 from app.ui.common import tool_icons
 from app.ui.common.feature_highlight import FeatureHighlighter
 from app.ui.common.icons import Icons
+from app.ui.common.modeless import show_modeless
 from app.ui.common.theme import ThemeManager, dock_selection_color
 from app.ui.common.value_format import format_value
 from app.ui.common.widgets import save_file
@@ -663,6 +664,14 @@ class PagedAttributeTableModel(QAbstractTableModel):
             return
         self.show_ids = new_ids
         self.subset_active = active
+        self._reset_and_restart()
+
+    def reset_view(self, filter_str: str, show_ids, subset_active: bool | None = None) -> None:
+        """同图层重开属性表：一次性换筛选与子集并重流（只重开一轮）。"""
+        new_ids = [int(i) for i in show_ids] if show_ids else []
+        self.filter_str = filter_str or "1=1"
+        self.show_ids = new_ids
+        self.subset_active = bool(new_ids) if subset_active is None else bool(subset_active)
         self._reset_and_restart()
 
     def _reset_and_restart(self) -> None:
@@ -1739,9 +1748,9 @@ class PagedAttributeTableWidget(QWidget):
         self._icon_items.append((self.delete_btn, "trash"))
         self.delete_btn.clicked.connect(self._delete_selected_features)
         self.filter_btn = QPushButton()
-        self.filter_btn.setIcon(Icons.filter())
         self.filter_btn.setToolTip("属性筛选")
         self.filter_btn.setFixedSize(26, 26)
+        self._icon_items.append((self.filter_btn, "attribute_filter"))
         self.calc_btn = QPushButton()
         self.calc_btn.setObjectName("fieldCalcBtn")
         self.calc_btn.setIcon(Icons.field_calc())
@@ -2106,6 +2115,41 @@ class PagedAttributeTableWidget(QWidget):
         self.row_edit.setText(str(max(0, min(int(row), model.rowCount() - 1)) + 1))
 
     # ------------------------------------------------------------ 刷新 / 缩放到所选
+
+    def reload_content(self, filter_str: str = "1=1", show_ids: list | None = None) -> None:
+        """同一图层再次打开属性表：原地刷新筛选 / 子集。
+
+        不重建 widget/model —— ``QDockWidget.setWidget()`` 只隐藏旧控件、不销毁它，
+        每次重开都新建一份会让旧 model 继续挂在图层信号上并可能和新 model 抢同一
+        数据源的读锁，表现就是第二次打开页面不刷新 / 空白。
+        """
+        ids = [int(i) for i in show_ids] if show_ids else []
+        self.filter_str = filter_str or "1=1"
+        self.show_ids = ids
+        self._preset_ids = ids
+        combo = self.mode_combo
+        combo.blockSignals(True)
+        try:
+            preset_idx = combo.findData("preset")
+            if ids:
+                if preset_idx < 0:
+                    combo.addItem("仅指定要素", "preset")
+                combo.setCurrentIndex(combo.findData("preset"))
+            else:
+                if preset_idx >= 0:
+                    combo.removeItem(preset_idx)
+                combo.setCurrentIndex(combo.findData("all"))
+        finally:
+            combo.blockSignals(False)
+        if self.model is None:
+            return
+        self._suppress_selection_sync = True
+        try:
+            self.model.reset_view(self.filter_str, ids, bool(ids))
+        finally:
+            self._suppress_selection_sync = False
+        self.table_view.scrollToTop()
+        self._refresh_load_state()
 
     def _refresh_table(self) -> None:
         """刷新：按当前筛选 / 显示范围重新读一遍（字段也可能改过，一并重读）。"""
@@ -2597,9 +2641,13 @@ class PagedAttributeTableWidget(QWidget):
             return
 
     def _filter(self) -> None:
-        dlg = QueryBuilderDialog(self.layer, parent=self)
-        dlg.sqlConfirmed.connect(self._apply_filter)
-        dlg.exec()
+        show_modeless(
+            self,
+            "query_builder",
+            lambda: QueryBuilderDialog(self.layer, parent=self),
+            configure=lambda dlg: dlg.sqlConfirmed.connect(self._apply_filter),
+            layer=self.layer,
+        )
 
     def _export_rows(self) -> List[int]:
         """要导出的行号。
@@ -2797,14 +2845,20 @@ class PagedAttributeTableWidget(QWidget):
         """
         from app.ui.dialogs.field_calculator import FieldCalculatorDialog
 
-        dlg = FieldCalculatorDialog(self.layer, self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        # 计算器可能启动了编辑：同步"保存编辑/停止编辑"按钮可用性
-        self._sync_edit_buttons()
-        # 新增字段 → 列定义刷新；仅更新值 → 可视行重取新值，两者都覆盖
-        if self.model is not None:
-            self.model.reload_fields()
+        def _refresh(_dlg) -> None:
+            # 计算器可能启动了编辑：同步"保存编辑/停止编辑"按钮可用性
+            self._sync_edit_buttons()
+            # 新增字段 → 列定义刷新；仅更新值 → 可视行重取新值，两者都覆盖
+            if self.model is not None:
+                self.model.reload_fields()
+
+        show_modeless(
+            self,
+            "field_calculator",
+            lambda: FieldCalculatorDialog(self.layer, self),
+            on_accepted=_refresh,
+            layer=self.layer,
+        )
 
     def _sync_edit_buttons(self) -> None:
         """按图层编辑态同步"保存编辑/停止编辑"按钮可用性。"""
@@ -2822,10 +2876,17 @@ class PagedAttributeTableWidget(QWidget):
 
     def _organize_columns(self) -> None:
         """弹「组织列」对话框，按勾选结果隐藏未选中的字段列（ID 列恒显示）。"""
-        dlg = OrganizeColumnsDialog(self.layer, self._visible_field_names(), parent=self)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        self._apply_column_visibility(dlg.checked_field_names())
+        show_modeless(
+            self,
+            "organize_columns",
+            lambda: OrganizeColumnsDialog(
+                self.layer, self._visible_field_names(), parent=self
+            ),
+            on_accepted=lambda dlg: self._apply_column_visibility(
+                dlg.checked_field_names()
+            ),
+            layer=self.layer,
+        )
 
     def _apply_column_visibility(self, names) -> None:
         """记录要隐藏的字段名并同步到视图（按字段名存，模型结构不动）。"""
@@ -3181,13 +3242,19 @@ class PagedAttributeTableWidget(QWidget):
                 f"字段「{name}」为系统自维护 / 唯一标识字段，不允许计算。",
             )
             return
-        dlg = FieldCalculatorDialog(self.layer, self, initial_field=name)
-        if dlg.exec() != QDialog.DialogCode.Accepted:
-            return
-        # 计算器可能启动了编辑 / 改了字段：同步按钮并刷新列与值
-        self._sync_edit_buttons()
-        if self.model is not None:
-            self.model.reload_fields()
+        def _refresh(_dlg) -> None:
+            # 计算器可能启动了编辑 / 改了字段：同步按钮并刷新列与值
+            self._sync_edit_buttons()
+            if self.model is not None:
+                self.model.reload_fields()
+
+        show_modeless(
+            self,
+            "field_calculator",
+            lambda: FieldCalculatorDialog(self.layer, self, initial_field=name),
+            on_accepted=_refresh,
+            layer=self.layer,
+        )
 
     def _open_geometry_calculator(self, name: str) -> None:
         """列头菜单「几何计算」：把周长 / 长度 / 面积写进**该列字段**。
@@ -3257,6 +3324,9 @@ class AttributeDock(QDockWidget):
     def __init__(self, layer, page_size: int = 50, parent=None, filter_str: str = "1=1", show_ids: Optional[list] = None) -> None:
         title = f"属性表 - {layer.name()}"
         super().__init__(title, parent)
+        # saveState/restoreState 按 objectName 匹配 Dock；空名字会被 Qt 丢弃并告警，
+        # 布局自愈重套时浮动位置就会丢（偶尔落回屏幕左上角）。每个图层一个唯一名字。
+        self.setObjectName(self._object_name_for(layer))
         self.setFeatures(QDockWidget.DockWidgetFeature.DockWidgetClosable | QDockWidget.DockWidgetFeature.DockWidgetMovable | QDockWidget.DockWidgetFeature.DockWidgetFloatable)
         self.setAllowedAreas(Qt.DockWidgetArea.LeftDockWidgetArea | Qt.DockWidgetArea.RightDockWidgetArea | Qt.DockWidgetArea.BottomDockWidgetArea)
         self.topParent = parent
@@ -3279,6 +3349,15 @@ class AttributeDock(QDockWidget):
         self._attach_selection_sync()
         self.setMinimumSize(200, 100)
 
+    @staticmethod
+    def _object_name_for(layer) -> str:
+        """属性表 Dock 的唯一 objectName（Qt 的 saveState/restoreState 靠它匹配）。"""
+        try:
+            lid = layer.id()
+        except RuntimeError:
+            lid = id(layer)
+        return f"AttributeDock:{lid}"
+
     def _wire_content_widget(self, widget) -> None:
         """把内容控件的信号接到 Dock 上。
 
@@ -3292,18 +3371,27 @@ class AttributeDock(QDockWidget):
         widget.zoom_to_selection_requested.connect(self._zoom_to_selection)
 
     def add_new_layer(self, layer, parent, filter_str: str, show_ids, page_size: int = 50, title: str = "属性表") -> None:
-        # 先取消旧 widget 的后台流式线程（避免滞留持有图层读锁）
-        if self.content_widget is not None and self.content_widget.model is not None:
-            self.content_widget.model.cancel_stream()
+        same_layer = self.layer is layer
         self.layer = layer
         self.show_ids = list(show_ids) if show_ids else []
-        self.content_widget = PagedAttributeTableWidget(layer, page_size, self, filter_str=filter_str, show_ids=show_ids)
-        self.setWidget(self.content_widget)
-        self._wire_content_widget(self.content_widget)
+        self.setObjectName(self._object_name_for(layer))
+        if same_layer and self.content_widget is not None and not sip.isdeleted(self.content_widget):
+            self.content_widget.reload_content(filter_str, show_ids)
+        else:
+            old_widget = self.content_widget
+            # 先取消旧 widget 的后台流式线程（避免滞留持有图层读锁）
+            if old_widget is not None and old_widget.model is not None:
+                old_widget.model.cancel_stream()
+            self.content_widget = PagedAttributeTableWidget(layer, page_size, self, filter_str=filter_str, show_ids=show_ids)
+            self.setWidget(self.content_widget)
+            self._wire_content_widget(self.content_widget)
+            if old_widget is not None and not sip.isdeleted(old_widget):
+                old_widget.deleteLater()
         # 闪烁件绑定的是**旧图层**，换了图层必须丢掉重建；选中同步也要改挂到新图层
         self._discard_highlighter()
         self._attach_selection_sync()
         self.setWindowTitle(title)
+        self.content_widget.show()
 
     def _on_layers_will_be_removed(self, layer_ids) -> None:
         """本 Dock 正显示的图层即将被删 → 立即关闭（见 ``__init__`` 注释）。

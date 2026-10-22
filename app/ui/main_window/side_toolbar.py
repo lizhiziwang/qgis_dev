@@ -52,6 +52,13 @@
   :meth:`set_active` 与顶部工具条同步；会话型工具「分屏」独立常亮
   （:meth:`set_session_active`）；其余按钮为一次性动作，不高亮。
 
+高度不足时自动收起：本工具条贴着画布左上角向下排，窗口太矮 / 画布被压扁时
+底部按钮会超出画布可视区域被界面盖住。主窗口每次摆放侧栏都会把可用高度传给
+:meth:`fit_to_height`，放不下的按钮隐藏，底部留一个向下小三角（``caret_down``）
+的「更多」按钮；点它弹出**单列**面板列出被收起的工具，按钮沿用侧栏样式
+（图标在上、文字在下），点击与点原按钮等价（检查态 / 图标 / 提示都沿用原按钮）；
+面板优先显示在小三角下方，下方空间不足时贴着小三角上沿向上展开。
+
 图标用 Font Awesome（见 :mod:`app.ui.common.tool_icons`），随主题变色
 （:meth:`apply_theme`）。
 """
@@ -61,9 +68,17 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from qgis.core import Qgis
-from qgis.PyQt.QtCore import QSize, Qt
+from qgis.PyQt.QtCore import QPoint, QSize, Qt, QTimer
 from qgis.PyQt.QtGui import QFont
-from qgis.PyQt.QtWidgets import QFrame, QSizePolicy, QToolButton, QVBoxLayout, QWidget
+from qgis.PyQt.QtWidgets import (
+    QFrame,
+    QMenu,
+    QSizePolicy,
+    QToolButton,
+    QVBoxLayout,
+    QWidget,
+    QWidgetAction,
+)
 
 from app.ui.common import tool_icons
 from app.ui.common.frosted import FrostedPanel
@@ -83,6 +98,8 @@ _TOOL_KEYS = frozenset({
 #: 图标 key 别名：按钮的**高亮 key** 与顶部工具条区分（``side_zoom`` 独立高亮），
 #: 但图标复用 ``zoom_in`` 的那张，外观不变。
 _ICON_ALIAS = {"side_zoom": "zoom_in", "spatial_query": "space_query_polygon"}
+#: 按钮提示文案覆盖（默认用按钮文字）；「缩放」说明单击放大 / Shift 单击缩小。
+_TOOLTIPS = {"side_zoom": "点击地图放大，按住shift键点击地图缩小"}
 #: 会话型工具 key（独立常亮，不受地图工具切换影响；与顶部工具条同 key）。
 #: 「定位」也归这里：点开气泡 → 按钮保持高亮表示"气泡在显示"，
 #: 关闭气泡（再点同按钮或气泡上的 ×）→ 按钮弹起，与分屏会话同一套高亮逻辑。
@@ -90,6 +107,10 @@ _ICON_ALIAS = {"side_zoom": "zoom_in", "spatial_query": "space_query_polygon"}
 _SESSION_KEYS = frozenset({"qmap_compare", "coord_locate", "extent_clip"})
 #: 侧栏图标逻辑边长（原型左侧工具列 44×36 按钮 / 17px 图标）
 _ICON = 17
+#: 「更多」按钮高度：只放一个向下小三角，比普通按钮矮，像工具条的折叠条
+_MORE_HEIGHT = 22
+#: 「更多」菜单的向下小三角（Font Awesome caret-down）
+_MORE_ICON = "caret_down"
 
 
 class SideToolBar:
@@ -106,6 +127,12 @@ class SideToolBar:
         #: 工具 key → 按钮（高亮 / 主题刷新用）
         self._actions: dict[str, QToolButton] = {}
         self._icon_items: list[tuple[QToolButton, str]] = []
+        #: 按视觉顺序排列的按钮 / 分隔线（高度不足时按前缀收起）
+        self._entries: list[QWidget] = []
+        #: 底部「更多」三角按钮（只在有按钮放不下时显示）
+        self._more_btn: QToolButton | None = None
+        #: 上次 fit_to_height 的 (可用高度, 控件是否可见)；避免画布重绘时反复重排
+        self._fit_key: tuple[int, bool] | None = None
         self.build(callbacks)
 
     # ------------------------------------------------------------ 装配
@@ -124,6 +151,8 @@ class SideToolBar:
         layout.setSpacing(2)
 
         color = ThemeManager.instance().current().input_focus
+        self._entries = []
+        self._fit_key = None
         # (文本, 图标 key, 分组后是否加分隔线)；callbacks 缺 key → 占位工具
         for text, key, separator_after in [
             ("选择", "select_point", False),
@@ -149,8 +178,16 @@ class SideToolBar:
             btn = self._make_button(text, key, callbacks, color)
             btn.setFixedWidth(45)
             layout.addWidget(btn, 0, Qt.AlignmentFlag.AlignHCenter)
+            self._entries.append(btn)
             if separator_after:
-                layout.addWidget(self._separator())
+                separator = self._separator()
+                layout.addWidget(separator)
+                self._entries.append(separator)
+
+        more = self._make_more_button(color)
+        layout.addWidget(more, 0, Qt.AlignmentFlag.AlignHCenter)
+        more.hide()
+        self._more_btn = more
 
         layout.addStretch(1)
         # 窄条 + 两行文案会顶高按钮：压掉 app_qss 给 QToolButton 的 3px 上下内边距
@@ -181,7 +218,7 @@ class SideToolBar:
         font.setPointSize(8)  # 这里改字号，pt单位；或者 setPixelSize(10) 像素单位
         btn.setFont(font)
 
-        btn.setToolTip(text)
+        btn.setToolTip(_TOOLTIPS.get(key, text))
         icon_key = _ICON_ALIAS.get(key, key)
         btn.setIcon(tool_icons.icon(icon_key, color, _ICON))
         btn.setIconSize(QSize(_ICON, _ICON))
@@ -197,6 +234,194 @@ class SideToolBar:
         )
         self._icon_items.append((btn, icon_key))
         return btn
+
+    def _make_more_button(self, color: str) -> QToolButton:
+        """建底部「更多」按钮：只有一个小三角，点开列出被收起的工具。"""
+        btn = QToolButton()
+        btn.setObjectName("SideTool_More")
+        btn.setToolTip("更多工具")
+        btn.setIcon(tool_icons.icon(_MORE_ICON, color, _ICON))
+        btn.setIconSize(QSize(_ICON, _ICON))
+        btn.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonIconOnly)
+        btn.setAutoRaise(True)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.setFixedWidth(45)
+        btn.setFixedHeight(_MORE_HEIGHT)
+        btn.clicked.connect(self._show_more_menu)
+        self._icon_items.append((btn, _MORE_ICON))
+        return btn
+
+    # ------------------------------------------------------------ 高度自适应
+
+    def fit_to_height(self, available_height: int) -> None:
+        """按可用高度收起放不下的按钮，底部留一个「更多」小三角。
+
+        本工具条从画布左上角向下排列，画布被压矮时底部按钮会被界面遮挡。
+        这里只保留放得进 ``available_height`` 的前缀，其余隐藏；有隐藏项时
+        显示「更多」按钮，点击弹出菜单列出被收起的工具。
+
+        :param available_height: 工具条可用的竖直空间（逻辑像素）
+        """
+        widget = self.widget
+        more = self._more_btn
+        if widget is None or more is None:
+            return
+        available = max(0, int(available_height))
+        # 画布重绘 / 范围变化会高频触发摆放；高度没变且已显示过就不必重排。
+        # 可见状态也纳入 key：首次在 show() 前算出的尺寸在真正显示后再校准一次。
+        key = (available, widget.isVisible())
+        if key == self._fit_key:
+            return
+        self._fit_key = key
+
+        layout = widget.layout()
+        if layout is None:
+            return
+        margins = layout.contentsMargins()
+        spacing = layout.spacing()
+        heights = [entry.sizeHint().height() for entry in self._entries]
+        top = margins.top()
+        bottom = margins.bottom()
+        more_height = more.sizeHint().height()
+
+        def content_height(count: int) -> int:
+            """前 ``count`` 项的高度（含项间距）。"""
+            if count <= 0:
+                return 0
+            return sum(heights[:count]) + spacing * (count - 1)
+
+        natural = top + bottom + content_height(len(heights))
+        if natural <= available:
+            for entry in self._entries:
+                entry.show()
+            more.hide()
+            widget.setFixedHeight(natural)
+            return
+
+        # 给「更多」按钮和它与最后一个可见按钮的间距留出空间。
+        budget = available - top - bottom - more_height - spacing
+        visible_count = 0
+        for index in range(len(heights)):
+            if content_height(index + 1) > budget:
+                break
+            visible_count = index + 1
+        # 收起后末尾不能留下一条孤零零的分隔线。
+        while visible_count > 0 and isinstance(self._entries[visible_count - 1], QFrame):
+            visible_count -= 1
+        for index, entry in enumerate(self._entries):
+            entry.setVisible(index < visible_count)
+        more.show()
+        height = top + bottom + content_height(visible_count) + more_height
+        if visible_count > 0:
+            height += spacing
+        widget.setFixedHeight(height)
+
+    def _show_more_menu(self) -> None:
+        """弹出「更多」面板：用与侧栏一致的按钮列出被收起的工具。"""
+        widget = self.widget
+        more = self._more_btn
+        if widget is None or more is None:
+            return
+        hidden = [entry for entry in self._entries if not entry.isVisible()]
+        if not any(isinstance(entry, QToolButton) for entry in hidden):
+            return
+        menu = QMenu(widget)
+        menu.setObjectName("SideToolBarMoreMenu")
+        # QMenu 只当弹出容器用：去掉它自己的底 / 边框，让里面的 FrostedPanel 透出
+        # 背后地图（与侧栏同一套毛玻璃底）；否则会盖上一层不透明的菜单底色。
+        menu.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        menu.setWindowFlags(
+            menu.windowFlags() | Qt.WindowType.FramelessWindowHint | Qt.WindowType.NoDropShadowWindowHint
+        )
+        menu.setStyleSheet(
+            "QMenu { background: transparent; border: none; padding: 0px; }"
+            "QMenu::item { padding: 0px; background: transparent; }"
+        )
+        canvas = getattr(self.main_window, "canvas", None)
+        panel = FrostedPanel(canvas, parent=menu)
+        panel.setObjectName("SideToolBarMorePanel")
+        panel.setFixedWidth(52)
+        # 与侧栏按钮同一套内边距 / 圆角；配色与悬停态继续走全局 QSS。
+        panel.setStyleSheet(f"QToolButton {{ padding: 0px; border-radius: {TOOLBAR_BUTTON_RADIUS}px; }}")
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(2, 4, 2, 4)
+        layout.setSpacing(2)
+
+        added = False
+        separator_pending = False
+        for entry in hidden:
+            if isinstance(entry, QFrame):
+                # 分组线只在两个被收起按钮之间保留，避免面板首尾出现空分隔。
+                separator_pending = added
+                continue
+            if not isinstance(entry, QToolButton):
+                continue
+            if separator_pending:
+                layout.addWidget(self._separator())
+                separator_pending = False
+            layout.addWidget(self._make_more_panel_button(entry, menu), 0, Qt.AlignmentFlag.AlignHCenter)
+            added = True
+
+        action = QWidgetAction(menu)
+        action.setDefaultWidget(panel)
+        menu.addAction(action)
+        menu.ensurePolished()
+        menu.adjustSize()
+        menu.exec(self._more_panel_position(menu, more))
+        # 每次点击都新建菜单，用完交给事件循环回收（挂在本控件上不会自己消失）。
+        menu.deleteLater()
+
+    @staticmethod
+    def _more_panel_position(menu: QMenu, more: QToolButton) -> QPoint:
+        """「更多」面板位置：优先显示在小三角下方，下方空间不足时翻到上方。"""
+        origin = more.mapToGlobal(QPoint(0, 0))
+        size = menu.sizeHint()
+        screen = more.screen()
+        if screen is not None:
+            available = screen.availableGeometry()
+            left, top = available.left(), available.top()
+            right, bottom = left + available.width(), top + available.height()
+        else:
+            left = top = 0
+            right = bottom = 1 << 30
+
+        x = origin.x() + more.width() + 2
+        panel_bottom = origin.y() + more.height()
+        if bottom - panel_bottom >= size.height() + 2:
+            y = panel_bottom + 2
+        else:
+            # 下方放不下：面板底边贴着小三角上沿向上展开。
+            y = origin.y() - 2 - size.height()
+        x = max(left, min(x, right - size.width()))
+        y = max(top, min(y, bottom - size.height()))
+        return QPoint(x, y)
+
+    def _make_more_panel_button(self, source: QToolButton, menu: QMenu) -> QToolButton:
+        """按侧栏按钮的样式复制一个「更多」面板项，点击后执行原按钮的功能。"""
+        button = QToolButton()
+        button.setObjectName(f"SideMore_{source.objectName()}")
+        button.setText(source.text())
+        button.setFont(source.font())
+        button.setToolTip(source.toolTip())
+        button.setIcon(source.icon())
+        button.setIconSize(source.iconSize())
+        button.setToolButtonStyle(source.toolButtonStyle())
+        button.setAutoRaise(True)
+        button.setFixedWidth(45)
+        if source.isCheckable():
+            button.setCheckable(True)
+            button.setChecked(source.isChecked())
+        # 先收起面板，再触发原按钮：原回调可能弹模态对话框，避免在菜单事件里重入。
+        button.clicked.connect(
+            lambda _checked=False, original=source, popup=menu: self._activate_more_panel_item(original, popup)
+        )
+        return button
+
+    @staticmethod
+    def _activate_more_panel_item(source: QToolButton, menu: QMenu) -> None:
+        """「更多」面板项点击：关闭面板后执行原按钮的动作。"""
+        menu.close()
+        QTimer.singleShot(0, source.click)
 
     @staticmethod
     def _separator() -> QFrame:
