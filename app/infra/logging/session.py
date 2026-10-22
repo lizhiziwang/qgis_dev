@@ -38,6 +38,7 @@ from typing import Any
 from .config import LogConfig
 from .operation import attach_filter
 from .redaction import attach_redaction
+from .user_context import current_log_user, log_host, log_os
 
 logger = logging.getLogger(__name__)
 
@@ -152,6 +153,33 @@ def current_session() -> SessionLog | None:
     return _current
 
 
+def list_sessions(directory: Path) -> list[SessionLog]:
+    """列出目录里已有的会话，按会话 id（即启动时间）从新到旧。
+
+    会话 id 自带时间前缀，按名字倒序就是时间倒序。只认 ``<id>.*`` 里 id 符合
+    命名规则的文件——日志目录里可能有用户自己放的东西，不能一起当成会话。
+    纯文本 / JSONL 缺一个也照样列出（轮转或手工清理后可能只剩一种）。
+    """
+    directory = Path(directory)
+    ids: set[str] = set()
+    with contextlib.suppress(OSError):
+        for path in directory.iterdir():
+            if not path.is_file():
+                continue
+            session_id = path.name.partition(".")[0]
+            if _ID_PATTERN.match(session_id):
+                ids.add(session_id)
+    return [
+        SessionLog(
+            session_id=session_id,
+            directory=directory,
+            text_path=directory / f"{session_id}{_TEXT_SUFFIX}",
+            jsonl_path=directory / f"{session_id}{_JSONL_SUFFIX}",
+        )
+        for session_id in sorted(ids, reverse=True)
+    ]
+
+
 def reset() -> None:
     """测试 / 重装用：摘掉会话 handler 并关文件。
 
@@ -204,14 +232,25 @@ class _JsonlFormatter(logging.Formatter):
     """一条记录 = 一行 JSON（多行 traceback 也压进同一个对象里）。
 
     字段名短但明确，方便 ``jq`` 直接读：
-    ``{"ts":"…","level":"ERROR","logger":"app…","func":"run","file":"service.py",
-    "line":122,"pid":1,"thread":2,"op":"op3","msg":"…","exc":{"type":"…","msg":"…","stack":"…"}}``
+    ``{"ts":"…","level":"ERROR","user":"…","user_id":"…","host":"…","os":"…",
+    "logger":"app…","func":"run","file":"service.py","line":122,"pid":1,
+    "thread":2,"op":"op3","msg":"…","exc":{"type":"…","msg":"…","stack":"…"}}``
+
+    ``user`` / ``user_id`` / ``host`` / ``os`` 用来区分多人回传的同名日志，也是结构化
+    排查时"这条是谁在什么机器上触发的"的依据。它们取自进程级上下文
+    （:mod:`app.infra.logging.user_context`），登录前那几行为空，这是正常的。
     """
 
     def format(self, record: logging.LogRecord) -> str:
+        user_id, user_name = current_log_user()
         payload: dict[str, Any] = {
             "ts": _timestamp(record.created),
             "level": record.levelname,
+            # 登录失败 / 尚未登录时为空串；展示层统一显示为 ``-``
+            "user": user_name,
+            "user_id": user_id,
+            "host": log_host(),
+            "os": log_os(),
             "logger": record.name,
             "func": record.funcName,
             "file": os.path.basename(record.pathname),
@@ -296,4 +335,11 @@ def _prune(session_dir: Path, keep: int, current_id: str) -> None:
                 old.unlink()
 
 
-__all__ = ["SESSION_DIR_NAME", "SessionLog", "current_session", "install", "reset"]
+__all__ = [
+    "SESSION_DIR_NAME",
+    "SessionLog",
+    "current_session",
+    "install",
+    "list_sessions",
+    "reset",
+]

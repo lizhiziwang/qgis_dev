@@ -5,10 +5,11 @@
 接管它的绘制，下拉按钮的行为跟着变得不可靠（补 ``::drop-down`` 也没修好）。与其
 继续跟 ``QStyleSheetStyle`` 较劲，不如照 QGIS 的样子自己拼一个：
 
-- 文本框：日期以 ``yyyy-MM-dd`` 显示，**× 挂在文本框里面**（``QLineEdit`` 自带的
-  清除按钮，有内容才出现），不占额外的地方；
+- 文本框：日期以 ``yyyy-MM-dd`` 显示，**× 嵌在文本框里面**（鼠标悬停且有内容时
+  才出现，不常驻占宽度）；
 - **没有上下微调箭头**（不是 ``QDateEdit``，自然就没有）；
-- 右端一个 ▼ 按钮，点开一个 ``QCalendarWidget`` 弹窗选日期。
+- ▼ 作为 ``QLineEdit`` 的 trailing action **嵌在文本框右端**，点开一个
+  ``QCalendarWidget`` 弹窗选日期；× 与 ▼ 并排紧凑排列，互不重叠。
 
 空值约定与 :mod:`app.ui.dialogs.attribute_entry` 一致：空文本 = NULL。
 """
@@ -17,8 +18,17 @@ from __future__ import annotations
 
 from typing import Optional
 
-from qgis.PyQt.QtCore import QDate, QDateTime, QPoint, QTime, Qt
-from qgis.PyQt.QtGui import QIcon, QPixmap
+from qgis.PyQt.QtCore import (
+    QDate,
+    QDateTime,
+    QEvent,
+    QPoint,
+    QPointF,
+    QTime,
+    Qt,
+    pyqtSignal,
+)
+from qgis.PyQt.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 from qgis.PyQt.QtWidgets import (
     QCalendarWidget,
     QFrame,
@@ -27,7 +37,6 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QPushButton,
     QTimeEdit,
-    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -49,7 +58,12 @@ class DatePickerField(QWidget):
     :param mode: ``"date"`` / ``"datetime"`` / ``"time"``。**日期时间与时间也必须
         走这里** —— 它们原来用的 ``QDateTimeEdit`` / ``QTimeEdit`` 同样带着那两个
         上下微调箭头、且日历点不开（用户实报：「修改时间」字段还是老样子）。
+
+    ``valueChanged`` 在值被修改后发出（手输、× 清空、日历 /「当前时间」选择、
+    ``set_value`` 程序化写入都会触发），供需要即时响应的界面使用。
     """
+
+    valueChanged = pyqtSignal()
 
     def __init__(self, value: Optional[QDate] = None, parent: Optional[QWidget] = None,
                  *, mode: str = "date") -> None:
@@ -62,31 +76,41 @@ class DatePickerField(QWidget):
         self._popup: Optional[QFrame] = None
         self._calendar: Optional[QCalendarWidget] = None
         #: 正在程序化写文本（见 :meth:`_sync_text`）：用来区分"用户键入/点 ×"
-        #: 与"我们自己刷新显示"，**不能用 blockSignals**（会连 QLineEdit 内部
-        #: 刷新清除按钮的信号一起挡掉，× 就再也不出现了）
+        #: 与"我们自己刷新显示"
         self._syncing = False
+        #: 鼠标是否停在文本框上：清除 × 只在悬停时出现，不占常驻布局宽度
+        self._hovered = False
 
         layout = QHBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
 
         self._edit = QLineEdit(self)
-        # × 在文本框**内部**（与 QGIS 一致：清空日期而不是另挂一个按钮）
-        self._edit.setClearButtonEnabled(True)
+        # 清除按钮不用 Qt 原生的：原生 × 只要有内容就常驻，文本框会一直为它
+        # 留出宽度。这里改成自己加的 trailing action，悬停时才显示。
+        self._edit.setClearButtonEnabled(False)
         self._edit.setPlaceholderText("（空）")
         self._edit.editingFinished.connect(self._on_text_committed)
         layout.addWidget(self._edit, 1)
 
-        self._button = QToolButton(self)
-        self._button.setObjectName("DatePickerButton")
-        self._button.setCursor(Qt.CursorShape.ArrowCursor)
-        self._button.setToolTip("选择日期")
-        self._button.setIcon(self._arrow_icon())
-        self._button.clicked.connect(self._toggle_popup)
-        layout.addWidget(self._button)
+        # 两个 trailing action 都嵌在文本框内部。QLineEdit 把先加的排在更右侧，
+        # 所以先加 ▼、后加 ×：▼ 贴右边缘，× 紧挨在它左边，悬停时才显示。
+        self._arrow_action = self._edit.addAction(
+            self._arrow_icon(), QLineEdit.ActionPosition.TrailingPosition
+        )
+        self._arrow_action.setToolTip("选择日期")
+        self._arrow_action.triggered.connect(self._toggle_popup)
+
+        self._close_action = self._edit.addAction(
+            self._close_icon(), QLineEdit.ActionPosition.TrailingPosition
+        )
+        self._close_action.setToolTip("清空")
+        self._close_action.setVisible(False)
+        self._close_action.triggered.connect(self._edit.clear)
 
         # × 清空 → 记成空值（不能只清文本，否则 _date 里还留着旧值）
         self._edit.textChanged.connect(self._on_text_changed)
+        self._edit.installEventFilter(self)
         self.set_date(value)
 
     # ------------------------------------------------------------ 对外
@@ -126,6 +150,7 @@ class DatePickerField(QWidget):
                 time = value.time() if hasattr(value, "time") else None
             self._time = QTime(time) if isinstance(time, QTime) and time.isValid() else None
         self._sync_text()
+        self.valueChanged.emit()
 
     def set_date(self, value) -> None:
         """兼容旧调用：整值写一遍（时间部分一并按 ``value`` 重置）。"""
@@ -153,13 +178,26 @@ class DatePickerField(QWidget):
             self._syncing = False
 
     def _on_text_changed(self, text: str) -> None:
-        # 程序化刷新（_sync_text）跳过：那次改的只是显示，值已经是最新的
-        if self._syncing:
-            return
-        # × 清空时 textChanged 会发空串：此刻把值也清成 NULL
-        if not text.strip():
+        # 程序化刷新（_sync_text）只改显示，值已经是最新的，不要再清值
+        if not self._syncing and not text.strip():
             self._date = None
             self._time = None
+            self.valueChanged.emit()
+        self._update_clear_action()
+
+    def eventFilter(self, watched, event) -> bool:
+        """清除 × 只在鼠标经过文本框时出现，避免常驻占用输入宽度。"""
+        if watched is self._edit:
+            if event.type() == QEvent.Type.Enter:
+                self._hovered = True
+                self._update_clear_action()
+            elif event.type() == QEvent.Type.Leave:
+                self._hovered = False
+                self._close_action.setVisible(False)
+        return super().eventFilter(watched, event)
+
+    def _update_clear_action(self) -> None:
+        self._close_action.setVisible(self._hovered and bool(self._edit.text()))
 
     def _on_text_committed(self) -> None:
         """手输的文本在编辑结束时解析；解析不了就退回原值。"""
@@ -182,6 +220,7 @@ class DatePickerField(QWidget):
             if parsed.isValid() and parsed > NULL_DATE:
                 self._date = parsed
         self._sync_text()   # 非法输入 → 恢复成上一次的合法值
+        self.valueChanged.emit()
 
     def _arrow_icon(self) -> QIcon:
         """复用主题生成的下三角 PNG（与组合框同一个箭头，风格一致）。"""
@@ -195,6 +234,36 @@ class DatePickerField(QWidget):
         except Exception:  # noqa: BLE001 —— 取不到图就用系统默认箭头，不影响功能
             pass
         return self.style().standardIcon(self.style().StandardPixmap.SP_ArrowDown)
+
+    def _close_icon(self) -> QIcon:
+        """文本框内的清除 ×：细线叉号，颜色随主题。"""
+        color = "#666666"
+        try:
+            from app.ui.common.theme import ThemeManager
+
+            color = ThemeManager.instance().current().menu_text
+        except Exception:  # noqa: BLE001 —— 取不到主题就用中性灰，不影响功能
+            pass
+        icon = QIcon()
+        for px in (14, 28):
+            pm = QPixmap(px, px)
+            pm.fill(Qt.GlobalColor.transparent)
+            painter = QPainter(pm)
+            painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+            pen = QPen(QColor(color))
+            pen.setWidthF(max(1.0, px * 0.11))
+            pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            margin = px * 0.3
+            painter.drawLine(
+                QPointF(margin, margin), QPointF(px - margin, px - margin)
+            )
+            painter.drawLine(
+                QPointF(px - margin, margin), QPointF(margin, px - margin)
+            )
+            painter.end()
+            icon.addPixmap(pm)
+        return icon
 
     def _toggle_popup(self) -> None:
         if self._popup is not None and self._popup.isVisible():
@@ -352,6 +421,7 @@ class DatePickerField(QWidget):
         if self._with_time:
             self._time = now.time()
         self._sync_text()
+        self.valueChanged.emit()
         self._hide_popup()
 
     def _on_calendar_date_only(self, picked: QDate) -> None:
@@ -364,6 +434,7 @@ class DatePickerField(QWidget):
         if picked.isValid() and picked > NULL_DATE:
             self._date = picked
             self._sync_text()
+            self.valueChanged.emit()
         self._hide_popup()
 
     def _on_popup_confirmed(self) -> None:
@@ -371,6 +442,7 @@ class DatePickerField(QWidget):
             self._time = self._time_edit.time()
         if self._date is not None or self._time is not None:
             self._sync_text()
+            self.valueChanged.emit()
         self._hide_popup()
 
 
