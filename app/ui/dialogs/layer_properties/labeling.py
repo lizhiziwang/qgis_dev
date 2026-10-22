@@ -1,12 +1,10 @@
 """图层属性「标注」页。
 
 仿 QGIS 原生图层属性 → 标注（Labels）：以「标注模式」为总开关，下面按
-标注模版 / 内容 / 翻译字段 / 文本 / 文本描边 / 放置 / 渲染 分组。
+内容 / 翻译字段 / 文本 / 文本描边 / 放置 / 渲染 分组。
 
-「标注模版」组从工程（内嵌样式，缺失时退回 QGIS 全局样式库）读取现成的
-:class:`QgsPalLayerSettings` 模版；工程里一个都没有时，下拉里只放一个
-「无标注」默认项。选中某个模版即把它的设置套进下面的控件（仍需点
-「确定 / 应用」才真正写回图层）。
+「标注内容」组独占整行（字段 / 表达式并排时要够宽），其余分组按两列上下
+排布，避免每组独占一行后右侧大片留白、内容被拉到需要滚动才能看完。
 
 「翻译字段」组（单选）：把所选字段的值翻成别的文本再当标注。
 
@@ -26,8 +24,8 @@
 三种模式：
 
 - **无标注**：``layer.setLabelsEnabled(False)``，但**保留**已有 labeling 配置，
-  方便再切回单一标注时恢复（QGIS 的「取消即不生效」语义）。此模式下除
-  「标注模版」组外，后面的设置分组整体隐藏（不是灰掉）。
+  方便再切回单一标注时恢复（QGIS 的「取消即不生效」语义）。此模式下后面的设置
+  分组整体隐藏（不是灰掉）。
 - **单一标注**：用页面上的值重建 :class:`QgsPalLayerSettings`，包成
   :class:`QgsVectorLayerSimpleLabeling` 写回。
 - **基于规则标注**：本页不编辑规则，只切换启用状态；规则本身请在 QGIS 规则
@@ -45,9 +43,7 @@ import json
 
 from qgis.core import (
     QgsPalLayerSettings,
-    QgsProject,
     QgsRuleBasedLabeling,
-    QgsStyle,
     QgsUnitTypes,
     QgsVectorLayer,
     QgsVectorLayerSimpleLabeling,
@@ -64,6 +60,7 @@ from qgis.PyQt.QtWidgets import (
     QFontComboBox,
     QFormLayout,
     QFrame,
+    QGridLayout,
     QGroupBox,
     QHBoxLayout,
     QHeaderView,
@@ -204,59 +201,6 @@ def _mode_of(layer) -> str:
     if isinstance(lab, QgsVectorLayerSimpleLabeling):
         return "single"
     return "none"
-
-
-def _template_styles() -> list:
-    """标注模版的两个来源：工程内嵌样式、QGIS 全局默认样式。
-
-    与 QGIS 自身一致：工程启用内嵌样式（``.qgz`` 里存了样式库）时以工程为准；
-    工程没有内嵌样式时就退回用户全局样式库 ``QgsStyle.defaultStyle()``。
-    """
-    styles = []
-    try:
-        project_settings = QgsProject.instance().styleSettings()
-        project_style = (
-            project_settings.projectStyle() if project_settings is not None else None
-        )
-        if project_style is not None:
-            styles.append(project_style)
-    except Exception:  # noqa: BLE001
-        logger.warning("读取工程样式库失败", exc_info=True)
-    try:
-        default_style = QgsStyle.defaultStyle()
-        if default_style is not None and all(default_style is not s for s in styles):
-            styles.append(default_style)
-    except Exception:  # noqa: BLE001
-        logger.warning("读取全局样式库失败", exc_info=True)
-    return styles
-
-
-def _project_label_templates() -> list[tuple[str, QgsPalLayerSettings]]:
-    """工程里可用的标注模版 ``(名称, 设置)``，工程样式优先、按名去重。
-
-    ``QgsStyle.labelSettings(名称)`` 对不存在的名称会返回默认设置而不是空，
-    所以这里只遍历 ``labelSettingsNames()`` 里真实存在的名称。
-    """
-    templates: list[tuple[str, QgsPalLayerSettings]] = []
-    seen: set[str] = set()
-    for style in _template_styles():
-        try:
-            names = style.labelSettingsNames()
-        except Exception:  # noqa: BLE001
-            logger.warning("读取标注模版列表失败", exc_info=True)
-            continue
-        for name in names:
-            if name in seen:
-                continue
-            seen.add(name)
-            try:
-                # 复制一份，别把样式库里的对象直接挂到控件上
-                templates.append(
-                    (name, QgsPalLayerSettings(style.labelSettings(name)))
-                )
-            except Exception:  # noqa: BLE001
-                logger.warning("读取标注模版「%s」失败", name, exc_info=True)
-    return templates
 
 
 def _quote_expr_str(text) -> str:
@@ -527,7 +471,7 @@ class LabelingTab(LayerPropertyTab):
     def __init__(self, layer=None, parent=None) -> None:
         super().__init__(parent)
         self._layer = layer
-        #: 需要随「标注模式」一起启停/显隐的设置分组（不含「标注模版」组）
+        #: 需要随「标注模式」一起启停/显隐的设置分组
         self._groups: list[QGroupBox] = []
         #: 「使用转义」的值映射：``{原值: 翻译结果}``
         self._translate_map: dict[str, str] = {}
@@ -562,20 +506,36 @@ class LabelingTab(LayerPropertyTab):
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         content = QWidget(scroll)
-        column = QVBoxLayout(content)
-        column.setContentsMargins(0, 0, 0, 0)
-        column.setSpacing(10)
+        grid = QGridLayout(content)
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(10)
+        grid.setVerticalSpacing(6)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
 
-        # 「标注模版」组始终可见：它是总入口，选中模版即把设置套进下面的控件
-        self._build_template_group(column)
-        self._build_content_group(column)
-        self._build_translate_group(column)
-        self._build_text_group(column)
-        self._build_buffer_group(column)
-        self._build_placement_group(column)
-        self._build_render_group(column)
+        # 「标注内容」独占一行：选了表达式后 combo / 表达式框 / ε 按钮并排，
+        # 挤在半宽列里会被压得没法用
+        self._build_content_group(grid, 0, 0, col_span=2)
 
-        column.addStretch(1)
+        # 其余分组分两列往下排（按高度配平，左列多一组「翻译字段」）
+        left = QVBoxLayout()
+        left.setContentsMargins(0, 0, 0, 0)
+        left.setSpacing(8)
+        right = QVBoxLayout()
+        right.setContentsMargins(0, 0, 0, 0)
+        right.setSpacing(8)
+        self._build_translate_group(left)
+        self._build_text_group(left)
+        self._build_placement_group(left)
+        self._build_buffer_group(right)
+        self._build_render_group(right)
+        left.addStretch(1)
+        right.addStretch(1)
+        grid.addLayout(left, 1, 0)
+        grid.addLayout(right, 1, 1)
+        # 内容不足一屏时把多余高度留在底部，不摊给各组
+        grid.setRowStretch(2, 1)
+
         scroll.setWidget(content)
         root.addWidget(scroll, 1)
 
@@ -584,15 +544,25 @@ class LabelingTab(LayerPropertyTab):
         form.setLabelAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
+        form.setContentsMargins(10, 6, 10, 6)
         form.setHorizontalSpacing(8)
-        form.setVerticalSpacing(8)
+        form.setVerticalSpacing(6)
         return form
 
-    def _form_group(self, title: str, layout) -> QFormLayout:
-        """建一个带表单布局的分组，登记进 ``_groups``，返回 form 供填行。"""
+    def _form_group(
+        self, title: str, layout, row=None, col=None, col_span: int = 1
+    ) -> QFormLayout:
+        """建一个带表单布局的分组，登记进 ``_groups``，返回 form 供填行。
+
+        ``row`` / ``col`` 都给时放进网格（``col_span`` 可跨列）；否则按顺序
+        加进列布局。
+        """
         box = QGroupBox(title, self)
         form = self._new_form(box)
-        layout.addWidget(box)
+        if row is None or col is None:
+            layout.addWidget(box)
+        else:
+            layout.addWidget(box, row, col, 1, col_span)
         self._groups.append(box)
         return form
 
@@ -616,28 +586,10 @@ class LabelingTab(LayerPropertyTab):
         spin.setValue(value)
         return spin
 
-    def _build_template_group(self, layout) -> None:
-        """「标注模版」组：从工程样式库读现成模版，选中即套用。
-
-        这一组不进 ``_groups``，因此不受「标注模式」显隐控制，始终可见。
-        """
-        box = QGroupBox("标注模版", self)
-        self.template_group = box
-        form = self._new_form(box)
-        layout.addWidget(box)
-
-        self.template_combo = QComboBox(box)
-        self.template_combo.setMinimumWidth(220)
-        self.template_combo.setToolTip("选择工程里的标注模版，套用到当前图层")
-        self.template_combo.currentIndexChanged.connect(self._on_template_changed)
-        form.addRow("模版", self.template_combo)
-
-        self.template_hint = QLabel("", box)
-        self.template_hint.setObjectName("PropHint")
-        form.addRow("", self.template_hint)
-
-    def _build_content_group(self, layout) -> None:
-        form = self._form_group("标注内容", layout)
+    def _build_content_group(
+        self, layout, row: int, col: int, col_span: int = 1
+    ) -> None:
+        form = self._form_group("标注内容", layout, row, col, col_span)
         self.content_selector = _FieldExpressionSelector(self)
         form.addRow("标注字段", self.content_selector)
 
@@ -649,41 +601,39 @@ class LabelingTab(LayerPropertyTab):
         """
         form = self._form_group("翻译字段", layout)
 
-        row = QWidget(self)
-        rl = QVBoxLayout(row)
+        row_w = QWidget(self)
+        rl = QHBoxLayout(row_w)
         rl.setContentsMargins(0, 0, 0, 0)
-        rl.setSpacing(4)
+        rl.setSpacing(8)
 
-        self.translate_dict_radio = QRadioButton("使用字典", row)
+        self.translate_dict_radio = QRadioButton("使用字典", row_w)
         # 与「使用转义」互斥，但允许再点一下取消（= 不翻译），所以手动管互斥
         self.translate_dict_radio.setAutoExclusive(False)
         self.translate_dict_radio.setToolTip(_DICT_UNAVAILABLE_TOOLTIP)
         self.translate_dict_radio.toggled.connect(self._on_translate_dict_toggled)
         rl.addWidget(self.translate_dict_radio)
 
-        escape_row = QHBoxLayout()
-        escape_row.setContentsMargins(0, 0, 0, 0)
-        escape_row.setSpacing(6)
-        self.translate_escape_radio = QRadioButton("使用转义", row)
+        self.translate_escape_radio = QRadioButton("使用转义", row_w)
         # 关掉 autoExclusive：再点一下可取消（= 不翻译）
         self.translate_escape_radio.setAutoExclusive(False)
         self.translate_escape_radio.setToolTip("按下面配置的「值 → 文本」对照表翻译")
         self.translate_escape_radio.toggled.connect(self._on_translate_escape_toggled)
-        escape_row.addWidget(self.translate_escape_radio)
-        self.translate_set_btn = QPushButton("设置转义值…", row)
+        rl.addWidget(self.translate_escape_radio)
+
+        self.translate_set_btn = QPushButton("设置转义值…", row_w)
         self.translate_set_btn.setObjectName("RowActionBtn")
         self.translate_set_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.translate_set_btn.clicked.connect(self._on_edit_translate_values)
-        escape_row.addWidget(self.translate_set_btn)
-        escape_row.addStretch(1)
-        rl.addLayout(escape_row)
+        rl.addWidget(self.translate_set_btn)
+        rl.addStretch(1)
 
-        form.addRow("翻译方式", row)
+        form.addRow("翻译方式", row_w)
 
         self.translate_hint = QLabel("", self)
         self.translate_hint.setObjectName("PropHint")
         self.translate_hint.setWordWrap(True)
-        form.addRow("", self.translate_hint)
+        # 单控件行（不占标签列）：隐藏时整行高度归零，不在组里留一条空行
+        form.addRow(self.translate_hint)
 
         # 「标注内容」变化（选字段 / 切表达式）时同步启用态
         self.content_selector.combo.currentIndexChanged.connect(
@@ -702,6 +652,12 @@ class LabelingTab(LayerPropertyTab):
         fr.setContentsMargins(0, 0, 0, 0)
         fr.setSpacing(6)
         self.font_combo = QFontComboBox(font_row)
+        # 字号 / 单位控件的最小宽度不小，字体下拉别按最长字体名撑开整行
+        self.font_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self.font_combo.setMinimumContentsLength(8)
+        self.font_combo.setMinimumWidth(100)
         fr.addWidget(self.font_combo, 1)
         self.font_size_spin = self._new_size_spin(font_row, 0.1, 9999.0, 10.0)
         fr.addWidget(self.font_size_spin)
@@ -712,7 +668,7 @@ class LabelingTab(LayerPropertyTab):
         style_row = QWidget(self)
         sr = QHBoxLayout(style_row)
         sr.setContentsMargins(0, 0, 0, 0)
-        sr.setSpacing(8)
+        sr.setSpacing(6)
         sr.addWidget(QLabel("颜色", style_row))
         self.text_color_btn = ColorButton(QColor(0, 0, 0), style_row)
         sr.addWidget(self.text_color_btn)
@@ -735,22 +691,28 @@ class LabelingTab(LayerPropertyTab):
         self.buffer_check = QCheckBox("绘制文本描边", self)
         form.addRow("", self.buffer_check)
 
-        row = QWidget(self)
-        rl = QHBoxLayout(row)
-        rl.setContentsMargins(0, 0, 0, 0)
-        rl.setSpacing(6)
-        self.buffer_size_spin = self._new_size_spin(row, 0.0, 100.0, 1.0)
-        rl.addWidget(self.buffer_size_spin)
-        self.buffer_unit_combo = self._new_unit_combo(row)
-        rl.addWidget(self.buffer_unit_combo)
-        rl.addWidget(QLabel("颜色", row))
-        self.buffer_color_btn = ColorButton(QColor(255, 255, 255), row)
-        rl.addWidget(self.buffer_color_btn)
-        rl.addWidget(QLabel("不透明度", row))
-        self.buffer_opacity_spin = self._new_opacity_spin(row)
-        rl.addWidget(self.buffer_opacity_spin)
-        rl.addStretch(1)
-        form.addRow("大小", row)
+        size_row = QWidget(self)
+        srl = QHBoxLayout(size_row)
+        srl.setContentsMargins(0, 0, 0, 0)
+        srl.setSpacing(6)
+        self.buffer_size_spin = self._new_size_spin(size_row, 0.0, 100.0, 1.0)
+        srl.addWidget(self.buffer_size_spin)
+        self.buffer_unit_combo = self._new_unit_combo(size_row)
+        srl.addWidget(self.buffer_unit_combo)
+        srl.addStretch(1)
+        form.addRow("大小", size_row)
+
+        color_row = QWidget(self)
+        crl = QHBoxLayout(color_row)
+        crl.setContentsMargins(0, 0, 0, 0)
+        crl.setSpacing(6)
+        self.buffer_color_btn = ColorButton(QColor(255, 255, 255), color_row)
+        crl.addWidget(self.buffer_color_btn)
+        crl.addWidget(QLabel("不透明度", color_row))
+        self.buffer_opacity_spin = self._new_opacity_spin(color_row)
+        crl.addWidget(self.buffer_opacity_spin)
+        crl.addStretch(1)
+        form.addRow("颜色", color_row)
 
     def _build_placement_group(self, layout) -> None:
         form = self._form_group("放置", layout)
@@ -758,16 +720,16 @@ class LabelingTab(LayerPropertyTab):
         _fill_enum_combo(self.placement_combo, _PLACEMENTS)
         form.addRow("放置方式", self.placement_combo)
 
-        row = QWidget(self)
-        rl = QHBoxLayout(row)
+        row_w = QWidget(self)
+        rl = QHBoxLayout(row_w)
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(6)
-        self.dist_spin = self._new_size_spin(row, 0.0, 100000.0, 0.0)
+        self.dist_spin = self._new_size_spin(row_w, 0.0, 100000.0, 0.0)
         rl.addWidget(self.dist_spin)
-        self.dist_unit_combo = self._new_unit_combo(row)
+        self.dist_unit_combo = self._new_unit_combo(row_w)
         rl.addWidget(self.dist_unit_combo)
         rl.addStretch(1)
-        form.addRow("距离", row)
+        form.addRow("距离", row_w)
 
     def _build_render_group(self, layout) -> None:
         form = self._form_group("渲染", layout)
@@ -775,24 +737,31 @@ class LabelingTab(LayerPropertyTab):
         self.scale_check.toggled.connect(self._on_scale_toggled)
         form.addRow("", self.scale_check)
 
-        row = QWidget(self)
-        rl = QHBoxLayout(row)
+        row_w = QWidget(self)
+        rl = QHBoxLayout(row_w)
         rl.setContentsMargins(0, 0, 0, 0)
         rl.setSpacing(6)
-        rl.addWidget(QLabel("最小 1:", row))
-        self.min_scale_edit = QLineEdit(row)
+        rl.addWidget(QLabel("最小 1:", row_w))
+        self.min_scale_edit = QLineEdit(row_w)
         self.min_scale_edit.setPlaceholderText("0")
         rl.addWidget(self.min_scale_edit)
-        rl.addWidget(QLabel("最大 1:", row))
-        self.max_scale_edit = QLineEdit(row)
+        rl.addWidget(QLabel("最大 1:", row_w))
+        self.max_scale_edit = QLineEdit(row_w)
         self.max_scale_edit.setPlaceholderText("0")
         rl.addWidget(self.max_scale_edit)
-        form.addRow("比例尺范围", row)
+        form.addRow("比例尺范围", row_w)
 
         self.display_all_check = QCheckBox("显示所有标注（含冲突）", self)
-        form.addRow("", self.display_all_check)
         self.obstacle_check = QCheckBox("要素作为标注障碍物", self)
-        form.addRow("", self.obstacle_check)
+        # 两个勾选项挤一行，省一段纵向空间
+        checks = QWidget(self)
+        cl = QHBoxLayout(checks)
+        cl.setContentsMargins(0, 0, 0, 0)
+        cl.setSpacing(10)
+        cl.addWidget(self.display_all_check)
+        cl.addWidget(self.obstacle_check)
+        cl.addStretch(1)
+        form.addRow(checks)
 
         self.zindex_spin = QDoubleSpinBox(self)
         self.zindex_spin.setRange(0.0, 9999.0)
@@ -811,12 +780,9 @@ class LabelingTab(LayerPropertyTab):
             self.mode_combo.blockSignals(False)
             self.mode_combo.setEnabled(False)
             self.hint_label.setText("仅矢量图层支持标注")
-            self.template_group.setVisible(False)
             self._apply_mode_state("none")
             return
 
-        self.template_group.setVisible(True)
-        self._populate_templates()
         self.mode_combo.setEnabled(True)
         self.content_selector._layer = layer
         self.content_selector.set_fields(layer.fields())
@@ -839,25 +805,6 @@ class LabelingTab(LayerPropertyTab):
         self._load_settings(_current_settings(layer))
         self._load_translate(layer)
         self._on_mode_changed()
-
-    def _populate_templates(self) -> None:
-        """按工程样式库重填模版下拉；一个都没有就只放默认的「无标注」。"""
-        self.template_combo.blockSignals(True)
-        try:
-            self.template_combo.clear()
-            templates = _project_label_templates()
-            for name, settings in templates:
-                self.template_combo.addItem(name, settings)
-            if templates:
-                # 不预选：图层当前设置未必对应某个具名模版，空着即「自定义」
-                self.template_combo.setCurrentIndex(-1)
-                self.template_hint.setText("")
-            else:
-                self.template_combo.addItem("无标注", None)
-                self.template_combo.setCurrentIndex(0)
-                self.template_hint.setText("工程中没有标注模版，默认无标注")
-        finally:
-            self.template_combo.blockSignals(False)
 
     def _load_settings(self, settings: QgsPalLayerSettings) -> None:
         self.content_selector.set_value(settings.fieldName, settings.isExpression)
@@ -927,26 +874,6 @@ class LabelingTab(LayerPropertyTab):
         for box in self._groups:
             box.setVisible(show)
             box.setEnabled(editable)
-
-    def _on_template_changed(self, *_) -> None:
-        """选中模版 → 把它的设置套进控件（仍需点确定/应用才写回图层）。"""
-        settings = self.template_combo.currentData()
-        if settings is None:
-            self._select_mode("none")
-            return
-        try:
-            self._load_settings(QgsPalLayerSettings(settings))
-        except Exception:  # noqa: BLE001
-            logger.warning("套用标注模版失败", exc_info=True)
-            return
-        self._sync_translate_state()
-        self._select_mode("single")
-
-    def _select_mode(self, mode: str) -> None:
-        idx = self.mode_combo.findData(mode)
-        if idx >= 0:
-            self.mode_combo.setCurrentIndex(idx)
-        self._apply_mode_state(self.mode_combo.currentData())
 
     def _on_scale_toggled(self, checked: bool) -> None:
         self.min_scale_edit.setEnabled(checked)
@@ -1055,6 +982,8 @@ class LabelingTab(LayerPropertyTab):
             )
         else:
             self.translate_hint.setText("")
+        # 没有提示时整行收起：空 QLabel 也会占一行高度
+        self.translate_hint.setVisible(bool(self.translate_hint.text()))
 
     def _on_edit_translate_values(self) -> None:
         field, is_expr = self.content_selector.value()

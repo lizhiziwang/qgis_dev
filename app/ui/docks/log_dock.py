@@ -6,25 +6,29 @@
 除查看 / 查询 / 保存之外，这里还是**导出诊断包**的入口（见
 :meth:`LogDock._on_export_diagnostics`）：用户报错之后该发什么给我们，就在这一排
 按钮里，不必再去 logs/ 目录里猜哪个文件有用。
+
+固定显示文本日志（``app.log``，跨运行累积）。默认勾选「当前会话」，按本次运行
+的开始时间自动过滤，时间控件隐藏；取消勾选后显示全部累积日志，时间范围恢复为
+手动选择。级别 / 文本 / 条数条件两种状态下通用。
 """
 
 from __future__ import annotations
 
-import base64
 import os
 import re
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
-from urllib.parse import urlencode
 
-from qgis.PyQt.QtCore import Qt, QTimer, QUrl
-from qgis.PyQt.QtGui import QDesktopServices, QTextCursor
+from qgis.PyQt.QtCore import Qt, QTimer
+from qgis.PyQt.QtGui import QTextCursor
 from qgis.PyQt.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDockWidget,
     QHBoxLayout,
+    QLabel,
     QLineEdit,
     QMessageBox,
     QPushButton,
@@ -39,24 +43,59 @@ from app.infra.fs.io import write_text
 from app.infra.logging import (
     active_log_config,
     build_diagnostics_package,
+    current_session,
     get_logger,
     render_log_html,
 )
+from app.ui.common.date_field import DatePickerField
 from app.ui.common.project_report import snapshot_text
 from app.ui.common.widgets import open_file_dir
 
 logger = get_logger(__name__)
 
-#: 问题反馈页面（当前用户信息以 base64 编码放在 query 里，见 :meth:`LogDock._on_feedback`）
-FEEDBACK_URL = "http://182.108.40.116:9003/cs-feedback/"
-
 _LEVEL_TAG_RE = re.compile(r">([A-Z]+)</")
+#: 日志行行首时间戳（与 ``LogConfig.date_format`` 一致），固定 19 字符，可直接按字符串比较。
+_TIMESTAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}")
 
 
 def _line_has_level(line: str, level: str) -> bool:
     if level == "ALL":
         return True
     return any(m.group(1) == level for m in _LEVEL_TAG_RE.finditer(line))
+
+
+def _line_in_time_range(line: str, start: str, end: str) -> bool:
+    """日志行时间戳是否落在 ``[start, end]``（含端点）内。
+
+    时间戳格式固定为 ``YYYY-MM-DD HH:MM:SS``，定长且高位在前，按字符串比较
+    与按时间比较等价。``start`` / ``end`` 为空表示该端不限。没有时间戳的行
+    （旧格式 / 外部写入）在启用时间过滤时视为不匹配。
+    """
+    if not _TIMESTAMP_RE.match(line):
+        return False
+    ts = line[:19]
+    if start and ts < start:
+        return False
+    if end and ts > end:
+        return False
+    return True
+
+
+def _filter_lines_by_time(lines: list[str], start: str, end: str) -> list[str]:
+    """按时间过滤，并把**没有时间戳的续行归到上一条记录**。
+
+    异常堆栈由 ``logging.Formatter`` 追加在记录后面，每行都没有时间戳（也不带
+    级别标签）。若逐行判断，时间过滤会把堆栈整段丢掉——恰恰是排查最需要的部分。
+    所以只在遇到新的时间戳行时重新决定是否保留，续行跟随上一条记录。
+    """
+    kept: list[str] = []
+    in_range = False
+    for line in lines:
+        if _TIMESTAMP_RE.match(line):
+            in_range = _line_in_time_range(line, start, end)
+        if in_range:
+            kept.append(line)
+    return kept
 
 
 class LogDock(QDockWidget):
@@ -67,13 +106,23 @@ class LogDock(QDockWidget):
         # saveState/restoreState 按 objectName 匹配 Dock；空名字会被 Qt 丢弃并告警。
         self.setObjectName("LogDock")
         self.param = {"size": 500, "level": "ALL", "filter": ""}
+        self.param = {
+            "size": 500,
+            "level": "ALL",
+            "filter": "",
+            #: 时间过滤开关与闭区间端点（``YYYY-MM-DD HH:MM:SS``）；关闭时忽略端点
+            "time_enabled": False,
+            "time_start": "",
+            "time_end": "",
+        }
         self.txt: Optional[QTextBrowser] = None
         self.auto_scroll = True
         self.setAllowedAreas(Qt.DockWidgetArea.BottomDockWidgetArea)
         self._init_ui()
+        # _init_ui 已按默认勾选应用了「当前会话」时间条件，首次加载就用它
         self._load_log_file()
-        # 自动刷新：dock 可见且日志文件有新写入时才重载（用 mtime 去抖）。
-        # 手动「刷新日志」也会更新 _last_mtime，避免下一次定时 tick 重复重载。
+        # 自动刷新：dock 可见且数据源有新写入时才重载（用 mtime 去抖）。
+        # 手动「刷新日志」也会更新 mtime，避免下一次定时 tick 重复重载。
         self._last_mtime = self._file_mtime()
         self._timer = QTimer(self)
         self._timer.setInterval(2000)
@@ -86,70 +135,103 @@ class LogDock(QDockWidget):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(0)
         layout.addWidget(self._build_button_bar())
-        layout.addWidget(self._build_text(), 1)
+        layout.addWidget(self._build_content(), 1)
         self.setWidget(container)
+        # 控件都建好后才能应用初始状态（默认勾选「当前会话」→ 隐藏时间控件）
+        self.current_session_check.toggled.connect(self._on_current_session_toggled)
+        self._set_time_controls_visible(False)
+        self._apply_session_time_param()
 
     def _build_button_bar(self) -> QWidget:
         bar = QWidget()
-        h = QHBoxLayout(bar)
+        row = QHBoxLayout(bar)
+        row.setContentsMargins(5, 5, 5, 5)
+        row.setSpacing(6)
+
+        # 查询文本输入不占满整行，把宽度留给后面的时间范围与操作按钮
         self.search_line = QLineEdit()
         self.search_line.setPlaceholderText("查询文本")
-        h.addWidget(self.search_line)
+        self.search_line.setMaximumWidth(130)
+        row.addWidget(self.search_line)
+
+        # 日期范围：沿用属性录入的日期控件（可点日历 /「当前时间」），
+        # 留空表示该端不限；两端都不填时不做日期过滤。
+        # 勾选「当前会话」时这两组控件隐藏，时间范围由会话自动决定。
+        self.time_label = QLabel("时间")
+        row.addWidget(self.time_label)
+        self.start_time = DatePickerField(mode="date")
+        self.start_time.setFixedWidth(120)
+        self.start_time.setToolTip("起始日期（含），留空表示不限")
+        row.addWidget(self.start_time)
+        self.time_dash = QLabel("-")
+        row.addWidget(self.time_dash)
+        self.end_time = DatePickerField(mode="date")
+        self.end_time.setFixedWidth(120)
+        self.end_time.setToolTip("结束日期（含），留空表示不限")
+        row.addWidget(self.end_time)
+        # 选完时间立即按当前条件重查，不必再点一次「查询」
+        self.start_time.valueChanged.connect(self._on_time_changed)
+        self.end_time.valueChanged.connect(self._on_time_changed)
 
         self.level_combo = QComboBox()
-        self.level_combo.addItems(["ALL", "INFO", "DEBUG", "ERROR", "WARNING"])
+        self.level_combo.addItems(["ALL", "INFO", "DEBUG", "ERROR", "WARNING", "CRITICAL"])
         self.level_combo.setCurrentIndex(0)
-        h.addWidget(self.level_combo)
+        row.addWidget(self.level_combo)
 
         self.size_combo = QComboBox()
         self.size_combo.addItems(["50", "100", "500", "1000", "无限制"])
         self.size_combo.setCurrentIndex(2)
-        h.addWidget(self.size_combo)
+        row.addWidget(self.size_combo)
 
         query = QPushButton("查询")
         query.clicked.connect(self._on_search)
-        h.addWidget(query)
+        row.addWidget(query)
 
-        h.addSpacerItem(QSpacerItem(40, 20, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum))
+        # 默认只看本次运行：按会话开始时间过滤，时间控件随勾选状态显隐
+        self.current_session_check = QCheckBox("当前会话")
+        self.current_session_check.setChecked(True)
+        self.current_session_check.setToolTip(
+            "只显示本次运行开始之后的日志，时间范围自动确定；\n"
+            "取消勾选可查看全部累积日志，并手动选择时间范围"
+        )
+        row.addWidget(self.current_session_check)
 
-        clear = QPushButton("清空日志")
-        clear.clicked.connect(self._on_clear)
-        h.addWidget(clear)
+        row.addSpacerItem(
+            QSpacerItem(40, 20, QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        )
+
+        self.clear_btn = QPushButton("清空日志")
+        self.clear_btn.setToolTip("清空累积日志 app.log；会话日志与诊断包不受影响")
+        self.clear_btn.clicked.connect(self._on_clear)
+        row.addWidget(self.clear_btn)
         refresh = QPushButton("刷新日志")
         refresh.clicked.connect(self._on_refresh)
-        h.addWidget(refresh)
+        row.addWidget(refresh)
         save = QPushButton("保存日志")
+        save.setToolTip("把当前筛选后的日志另存为 .log")
         save.clicked.connect(self._on_save)
-        h.addWidget(save)
+        row.addWidget(save)
         export = QPushButton("导出诊断包")
         export.setToolTip(
             "把本次运行的日志、崩溃记录、环境 / 工程 / 配置快照打成一个 zip（凭据已打码），\n"
             "用于反馈问题。"
         )
         export.clicked.connect(self._on_export_diagnostics)
-        h.addWidget(export)
-        feedback = QPushButton("反馈")
-        feedback.setToolTip("在浏览器中打开问题反馈页面（自动带上当前登录用户信息）。")
-        feedback.clicked.connect(self._on_feedback)
-        h.addWidget(feedback)
-        h.addSpacing(10)
+        row.addWidget(export)
+        row.addSpacing(10)
         self.auto_btn = QPushButton("自动滚动")
         self.auto_btn.setCheckable(True)
         self.auto_btn.setChecked(True)
-        self.auto_btn.clicked.connect(lambda: setattr(self, "auto_scroll", self.auto_btn.isChecked()))
-        h.addWidget(self.auto_btn)
-        h.setSpacing(8)
-        h.setContentsMargins(5, 5, 5, 5)
+        self.auto_btn.clicked.connect(
+            lambda: setattr(self, "auto_scroll", self.auto_btn.isChecked())
+        )
+        row.addWidget(self.auto_btn)
         return bar
 
-    def _build_text(self) -> QWidget:
-        wrapper = QWidget()
-        qh = QHBoxLayout(wrapper)
-        qh.setContentsMargins(0, 0, 0, 0)
-        qh.setSpacing(0)
+    def _build_content(self) -> QWidget:
+        """文本日志视图。"""
         self.txt = QTextBrowser()  # 配色由主窗体 window_qss / app_qss 统一负责
-        qh.addWidget(self.txt)
-        return wrapper
+        return self.txt
 
     # ---------------------------------------------------------- 行为
 
@@ -171,7 +253,13 @@ class LogDock(QDockWidget):
             self.txt.setHtml("")
             return
         with open(path, encoding="utf-8") as f:
-            raw = [line.strip() for line in f.readlines() if _line_has_level(line, p["level"])]
+            lines = [line.strip() for line in f if line.strip()]
+        # 时间过滤先做（原始行行首就是时间戳），再按级别 / 文本筛选，最后截取条数。
+        if p.get("time_enabled"):
+            lines = _filter_lines_by_time(
+                lines, p.get("time_start", ""), p.get("time_end", "")
+            )
+        raw = [line for line in lines if _line_has_level(line, p["level"])]
         rendered = [render_log_html(line) for line in raw]
         if p["filter"]:
             rendered = [line for line in rendered if p["filter"] in line]
@@ -196,8 +284,43 @@ class LogDock(QDockWidget):
         except OSError:
             return 0.0
 
+    def _on_current_session_toggled(self, checked: bool) -> None:
+        """勾选当前会话：时间范围由会话决定，日期控件隐藏；取消则恢复手动选择。"""
+        self._set_time_controls_visible(not checked)
+        self._on_search()
+
+    def _set_time_controls_visible(self, visible: bool) -> None:
+        for widget in (self.time_label, self.start_time, self.time_dash, self.end_time):
+            widget.setVisible(visible)
+
+    def _current_session_start(self) -> str:
+        """本次运行的起始时间（``YYYY-MM-DD HH:MM:SS``）。
+
+        会话 id 前 15 位就是启动时间（``20261022-133554-p6208``）。取不到会话
+        时返回空串，调用方据此不做时间过滤——总比拿一个猜的时间把日志筛没了强。
+        """
+        session = current_session()
+        if session is None:
+            return ""
+        try:
+            started = datetime.strptime(session.session_id[:15], "%Y%m%d-%H%M%S")
+        except ValueError:
+            return ""
+        return started.strftime("%Y-%m-%d %H:%M:%S")
+
+    def _apply_session_time_param(self) -> None:
+        """把「当前会话」的时间条件写进查询参数。
+
+        只设开始时间、不设结束时间：会话还在进行，之后写入的日志也应继续显示
+        （自动刷新直接用这份参数，固定 ``end=now`` 会把新日志挡在外面）。
+        """
+        start = self._current_session_start()
+        self.param["time_enabled"] = bool(start)
+        self.param["time_start"] = start
+        self.param["time_end"] = ""
+
     def _auto_reload(self) -> None:
-        """定时 tick：dock 不可见或日志未变化时跳过，避免无谓重绘。"""
+        """定时 tick：dock 不可见或数据源未变化时跳过，避免无谓重绘。"""
         if not self.isVisible():
             return
         mtime = self._file_mtime()
@@ -211,31 +334,63 @@ class LogDock(QDockWidget):
         self.param["filter"] = self.search_line.text()
         size_txt = self.size_combo.currentText()
         self.param["size"] = -1 if size_txt == "无限制" else int(size_txt)
+        if self.current_session_check.isChecked():
+            # 时间范围由本次运行决定，隐藏的日期控件不参与查询
+            self._apply_session_time_param()
+            self._on_refresh()
+            return
+        start_date = self.start_time.value()
+        end_date = self.end_time.value()
+        # 界面只选到年月日；查询时开始取当天 00:00:00、结束取当天 23:59:59，
+        # 保证所选日期当天的日志都包含在内。
+        start = f"{start_date.toString('yyyy-MM-dd')} 00:00:00" if start_date is not None else ""
+        end = f"{end_date.toString('yyyy-MM-dd')} 23:59:59" if end_date is not None else ""
+        if start and end and start > end:
+            QMessageBox.warning(self, "时间查询", "开始日期不能晚于结束日期，请重新选择。")
+            return
+        self.param["time_enabled"] = bool(start or end)
+        self.param["time_start"] = start
+        self.param["time_end"] = end
         self._on_refresh()
+
+    def _on_time_changed(self) -> None:
+        """日期控件值变化后即时刷新；区间暂时颠倒时先不查（等用户改好）。"""
+        start_date = self.start_time.value()
+        end_date = self.end_time.value()
+        if start_date is not None and end_date is not None and start_date > end_date:
+            return
+        self._on_search()
 
     def _on_clear(self) -> None:
         mb = QMessageBox(self)
         mb.setWindowTitle("日志")
-        mb.setText("是否清除当前日志信息")
+        mb.setText("是否清除当前日志信息？")
         mb.setIcon(QMessageBox.Icon.Warning)
         mb.addButton(QMessageBox.StandardButton.Ok)
         mb.addButton(QMessageBox.StandardButton.Cancel)
         if mb.exec() == QMessageBox.StandardButton.Ok:
+            # 只清累积的 app.log。会话日志（session/*.log、*.jsonl）是诊断包的
+            # 核心证据，清空日志不应连带清掉；会话文件自己的清理由 ``session_keep``
+            # 在每次启动时负责。
             write_text(self._log_path(), "")
-            self._on_refresh()
+            self._load_log_file(self.param)
+            self._last_mtime = self._file_mtime()
 
     def _on_refresh(self) -> None:
         self._load_log_file(self.param)
         self._last_mtime = self._file_mtime()
 
     def _on_save(self) -> None:
-
         path = open_file_dir(self, is_dir=True, title="选择保存目录")
         if not path:
             return
-        file_name = f"{datetime.now().strftime('%Y%m%d%H%M%S')}.log"
+        stamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        file_name = f"{stamp}.log"
         full = os.path.join(path, file_name)
-        write_text(full, self.txt.toPlainText())
+        ok = write_text(full, self.txt.toPlainText())
+        if not ok:
+            QMessageBox.warning(self, "保存失败", f"日志保存失败：\n{full}")
+            return
         QMessageBox.information(self, "保存成功", f"日志已保存到\n{full}")
 
     def _on_export_diagnostics(self) -> None:
@@ -271,61 +426,6 @@ class LogDock(QDockWidget):
             f"共 {len(package.entries)} 个文件、{size_kb:.0f} KB，凭据已打码。"
             f"\n请把它发给技术支持。",
         )
-
-    def _on_feedback(self) -> None:
-        """打开浏览器反馈页面，query 里带上 base64 编码的当前用户 id / 用户名。
-
-        用户信息取自本次登录会话（主窗口的 ``_auth_result``，见
-        :meth:`ChromeMixin._apply_user_info_to_titlebar`）：``user_id`` 是
-        ``currentUserByToken`` 返回的 ``userId``，``user_name`` 优先姓名、退而账号。
-        没登录（如非启动路径构造窗口）时两个参数为空串，页面仍可正常打开。
-
-        base64 结果可能含 ``+`` / ``/`` / ``=``，必须再 URL 编码一次，
-        否则 ``+`` 到服务端会被解成空格、base64 就坏了。
-        """
-        user_id, user_name = self._feedback_identity()
-        if not user_id and not user_name:
-            logger.warning("打开反馈页面时没有当前登录用户信息")
-        query = urlencode(
-            {
-                "user_id": _b64(user_id),
-                "user_name": _b64(user_name),
-            }
-        )
-        url = f"{FEEDBACK_URL}?{query}"
-        if not QDesktopServices.openUrl(QUrl(url)):
-            logger.error("打开反馈页面失败 url=%s", url)
-            QMessageBox.warning(self, "反馈", f"无法打开浏览器，请手动访问：\n{url}")
-
-    def _feedback_identity(self) -> tuple[str, str]:
-        """当前登录用户的 ``(user_id, user_name)``；没有会话时返回两个空串。
-
-        用户对象挂在主窗口的 ``_auth_result.user`` 上（:class:`CurrentUser`），
-        ``userId`` 不在具名字段里，只能从 ``raw`` 取——服务端各环境字段名
-        略有差异，这里按常见别名依次找。
-        """
-        parent = self.parent()
-        result = getattr(parent, "_auth_result", None) if parent is not None else None
-        if result is None:
-            return "", ""
-        user = getattr(result, "user", None)
-        fallback_name = (getattr(result, "username", "") or "").strip()
-        if user is None:
-            return "", fallback_name
-        raw = user.raw if isinstance(user.raw, dict) else {}
-        user_id = ""
-        for key in ("userId", "user_id", "userGuid", "id"):
-            value = raw.get(key)
-            if value:
-                user_id = str(value).strip()
-                break
-        user_name = (user.name or user.account or fallback_name).strip()
-        return user_id, user_name
-
-
-def _b64(text: str) -> str:
-    """UTF-8 文本 → 标准 base64 字符串（空串仍是空串）。"""
-    return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
 def add_log_dock(parent) -> LogDock:

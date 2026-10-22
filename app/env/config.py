@@ -29,6 +29,8 @@ class AppConfig:
     logging: "LoggingConfig"
     server: "ServerConfig"
     auth: "AuthConfig"
+    #: 「帮助」菜单配置（app.help 段）；旧配置没有该段时取默认值。
+    help: "HelpConfig" = field(default_factory=lambda: HelpConfig())
 
     @classmethod
     def from_file(cls, path: Path) -> "AppConfig":
@@ -37,17 +39,19 @@ class AppConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AppConfig":
+        app = data.get("app", {})
         return cls(
             env=data.get("env", "dev"),
-            app_name=data.get("app", {}).get("name", "qgis_dev"),
-            language=data.get("app", {}).get("language", "zh-Hans"),
-            crs=data.get("app", {}).get("crs", "EPSG:4490"),
+            app_name=app.get("name", "qgis_dev"),
+            language=app.get("language", "zh-Hans"),
+            crs=app.get("crs", "EPSG:4490"),
             map=MapConfig.from_dict(data.get("map", {})),
             qgis=QgisConfig.from_dict(data.get("qgis", {})),
             paths=PathsConfig.from_dict(data.get("paths", {})),
             logging=LoggingConfig.from_dict(data.get("logging", {})),
             server=ServerConfig.from_dict(data.get("server", {})),
             auth=AuthConfig.from_dict(data.get("auth", {})),
+            help=HelpConfig.from_dict(app.get("help", {})),
         )
 
 
@@ -78,6 +82,31 @@ class PathsConfig:
             resource=_to_path(data.get("resource")),
             log=_to_path(data.get("log")),
             tmp=_to_path(data.get("tmp")),
+        )
+
+
+@dataclass(frozen=True)
+class HelpConfig:
+    """「帮助」菜单配置（``config/app.yaml`` → ``app.help``）。
+
+    - ``manual_path``：使用手册 Word 文档路径。相对路径按项目根目录解析，
+      也可写绝对路径（如 ``D:/document/使用手册.docx``）。
+    - ``manual_url``：在线使用文档地址。非空时优先于 ``manual_path``
+      （后续从本地 Word 换成在线文档时只改配置，不改代码）。
+    - ``feedback_url``：在线问题反馈地址。为空时使用内置反馈页面。
+    """
+
+    manual_path: Optional[Path] = None
+    manual_url: str = ""
+    feedback_url: str = ""
+
+    @classmethod
+    def from_dict(cls, data: Optional[dict[str, Any]]) -> "HelpConfig":
+        data = data or {}
+        return cls(
+            manual_path=_to_path(data.get("manual_path")),
+            manual_url=(data.get("manual_url") or "").strip(),
+            feedback_url=(data.get("feedback_url") or "").strip(),
         )
 
 
