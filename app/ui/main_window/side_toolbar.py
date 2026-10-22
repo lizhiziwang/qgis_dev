@@ -163,7 +163,7 @@ class SideToolBar:
             ("前视图", "view_prev", False),
             ("后视图", "view_next", False),
             ("清除", "clear_selection", True),
-            ("属性", "identify", False),
+            ("i查询", "identify", False),
             ("条件查询", "condition_query", False),
             ("空间查询", "spatial_query", False),
             ("选择屏蔽", "select_mask", False),

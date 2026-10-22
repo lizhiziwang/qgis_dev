@@ -58,7 +58,7 @@ class IQueryDock(QDockWidget):
     closed = pyqtSignal()
 
     def __init__(self, parent=None) -> None:
-        super().__init__("I查询", parent)
+        super().__init__("i查询", parent)
         self.setObjectName("IQueryDock")
         self.setFeatures(
             QDockWidget.DockWidgetFeature.DockWidgetClosable

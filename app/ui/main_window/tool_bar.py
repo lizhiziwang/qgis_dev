@@ -40,7 +40,7 @@ _TOOL_GROUPS: list[tuple[str, list[tuple[str, str]]]] = [
             ("取消选择", "clear_selection"),
         ],
     ),
-    ("查询", [("属性", "identify")]),
+    ("查询", [("i查询", "identify")]),
     # 质检按钮已按用户要求从「通用」页签隐藏（质检入口保留在「质检」页签）
     ("分析", [("分析", "analyse")]),
     ("对比", [("卷帘对比", "swipe"), ("地图对比", "qmap_compare")]),

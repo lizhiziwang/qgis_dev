@@ -30,6 +30,7 @@ if TYPE_CHECKING:
     from qgis.core import (
         QgsCoordinateReferenceSystem,
         QgsGeometry,
+        QgsPointXY,
         QgsProject,
         QgsVectorLayer,
     )
@@ -96,4 +97,68 @@ def intersect_features(
     return fids
 
 
-__all__ = ["intersect_features"]
+def features_containing_point(
+    layer: QgsVectorLayer | None,
+    point: QgsPointXY | None,
+    source_crs: QgsCoordinateReferenceSystem | None,
+    project: QgsProject | None = None,
+) -> list[int]:
+    """返回**包含** ``point`` 的要素 ID 列表（仅边界相接不算包含）。
+
+    点选工具不能直接用容差矩形求交：两个共用边界的面会同时与矩形相交，
+    点 A 的边缘就会把 B 也算成命中。这里先按点击点本身做精确判定，
+    只有点落在面内部时才算命中；点/线要素或点空白处再由调用方退回容差框。
+
+    Parameters
+    ----------
+    layer:
+        目标矢量图层。
+    point:
+        点击位置（``source_crs`` 坐标系下的点）。
+    source_crs:
+        ``point`` 自身的坐标系；若与 ``layer.crs()`` 不同，会先做转换。
+    project:
+        :class:`QgsProject` 实例，用于 datum 转换上下文。``None`` 时用
+        :meth:`QgsProject.instance`。
+    """
+    from qgis.core import (  # 延迟 import
+        QgsCoordinateTransform,
+        QgsFeatureRequest,
+        QgsGeometry,
+        QgsProject,
+        QgsRectangle,
+    )
+
+    if layer is None or not layer.isValid():
+        return []
+    if point is None:
+        return []
+    if source_crs is None:
+        source_crs = layer.crs()
+
+    point_geom = QgsGeometry.fromPointXY(point)
+    if source_crs != layer.crs():
+        project = project or QgsProject.instance()
+        xform = QgsCoordinateTransform(source_crs, layer.crs(), project)
+        point_geom.transform(xform)
+        if point_geom.isEmpty():
+            return []
+
+    # 点几何的 bbox 面积为 0；个别 provider 对零面积过滤矩形会退化成
+    # 「不过滤」或直接不返回，扩一个极小量不影响 contains 的精确判定。
+    bbox = QgsRectangle(point_geom.boundingBox())
+    bbox.grow(1e-9)
+
+    request = QgsFeatureRequest().setFilterRect(bbox)
+    request.setNoAttributes()
+    fids: list[int] = []
+    for feature in layer.getFeatures(request):
+        feature_geom = feature.geometry()
+        if feature_geom is None or feature_geom.isEmpty():
+            continue
+        if feature_geom.contains(point_geom):
+            fids.append(feature.id())
+    return fids
+
+
+__all__ = ["features_containing_point", "intersect_features"]

@@ -2,9 +2,11 @@
 
 通用工具条上的「点选」「框选」两个按钮激活的交互工具：
 
-- :class:`PointSelectTool` —— 单击：选中落在点击位置附近（默认 10px 容差）
-  的要素；**多个图形叠压时只选最上面的那一个**（与 QGIS 的"点一下就选中你
-  看到的那块"一致）；光标为**箭头**（对齐 QGIS 的选择手感）；
+- :class:`PointSelectTool` —— 单击：**先选包含点击点的要素**（面内部），没有
+  要素包含该点时才退回点击位置附近（默认 5px 容差）；这样点中两个面的公共
+  边界附近时，不会因为容差框越界而选中另一侧的面。**多个图形叠压时只选最上面
+  的那一个**（与 QGIS 的"点一下就选中你看到的那块"一致）；光标为**箭头**
+  （对齐 QGIS 的选择手感）；
 - :class:`RectSelectTool` —— 左键拖拽画矩形，松开时选中矩形内的要素；
   光标为**十字**（提示正在拖框）。可传 ``on_select_complete`` 回调，拖框收尾后
   调用一次（主窗口据此弹「选择集」面板）；点选没有这个边界，不调用。
@@ -21,6 +23,9 @@
 
 点选在多个图形叠压时只取**最顶层**那一个；框选取范围内全部。
 
+点选的命中顺序：先找**包含点击点**的要素（边界相接不算），找不到再退回
+容差框。公共边两侧的面都与容差框相交，只靠矩形求交无法区分用户点的是哪一侧。
+
 注意：本 QGIS 构建里 ``QgsVectorLayer.select()`` 是**追加**语义，替换必须
 显式 ``selectByIds(fids, Qgis.SelectBehavior.SetSelection)``。
 
@@ -28,8 +33,9 @@
 选中要素整层删除（每层一个撤销步骤，可整体 ``Ctrl+Z`` 撤销；未处于编辑态的
 图层即使有选中也不动）。两个工具都继承 :meth:`SelectFeatureToolBase.keyPressEvent`。
 
-空间过滤复用 :func:`app.core.domain.check.query.intersect_features`
-（走 provider 的空间过滤 + 精确相交）；几何坐标从画布 CRS 变换到各图层 CRS。
+空间过滤复用 :func:`app.core.domain.check.query.intersect_features`（框选）与
+:func:`app.core.domain.check.query.features_containing_point`（点选精确包含），
+都走 provider 的空间过滤；几何坐标从画布 CRS 变换到各图层 CRS。
 """
 
 from __future__ import annotations
@@ -54,7 +60,7 @@ from qgis.core import (
 )
 from qgis.gui import QgsMapTool, QgsRubberBand
 
-from app.core.domain.check.query import intersect_features
+from app.core.domain.check.query import features_containing_point, intersect_features
 from app.core.domain.check.space_index import clear_spatial_index
 from app.infra.logging import get_logger
 
@@ -93,21 +99,14 @@ class SelectFeatureToolBase(QgsMapTool):
 
     # -------------------------------------------------- 核心
 
-    def _select_geometry(
-        self, geom: "QgsGeometry", behavior: Qgis.SelectBehavior, *, topmost_only: bool = False
-    ) -> None:
-        """在画布可见矢量图层上，按 ``geom`` 选中要素（逐层处理选中集）。
+    def _select_geometry(self, geom: "QgsGeometry", behavior: Qgis.SelectBehavior) -> None:
+        """在画布可见矢量图层上，按 ``geom`` 选中要素（框选用）。
 
         ``behavior`` 取 :class:`Qgis.SelectBehavior`：
         - ``SetSelection`` —— 替换（默认）：每层只保留本次命中的要素，
           无命中的层清空；
         - ``AddToSelection`` —— Ctrl 追加：把命中要素并进现有选中，
           点空白处不清空。
-
-        ``topmost_only=True``（点选用）时**只选叠压在最上面的那一个**：按
-        :meth:`_selectable_layers` 的顺序（``canvas.layers()``，索引 0 画在最上）
-        取第一个有命中的图层，层内取命中的最后一个 fid（后添加的要素画在上层）
-        ——与各编辑工具的命中约定一致。框选不传这个参数，仍选中范围内的全部要素。
 
         ``geom`` 位于画布 CRS；与图层 CRS 不同时由
         :func:`intersect_features` 内部做坐标变换。
@@ -124,15 +123,6 @@ class SelectFeatureToolBase(QgsMapTool):
             if fids:
                 fids = self._keep_visible(layer, fids)
             hits.append((layer, fids))
-
-        if topmost_only:
-            topmost = next(((layer, fids) for layer, fids in hits if fids), None)
-            for layer, fids in hits:
-                if topmost is not None and layer is topmost[0]:
-                    layer.selectByIds([fids[-1]], behavior)
-                elif behavior == Qgis.SelectBehavior.SetSelection:
-                    layer.removeSelection()
-            return
 
         for layer, fids in hits:
             if fids:
@@ -244,10 +234,11 @@ class SelectFeatureToolBase(QgsMapTool):
 
 
 class PointSelectTool(SelectFeatureToolBase):
-    """点选：单击选中落在点击位置附近（默认 10px 容差）的要素。"""
+    """点选：优先选中包含点击点的要素，未命中再按 5px 容差兜底。"""
 
-    #: 点击容差（像素）：把点击点扩成小矩形再求交，点 / 线 / 面要素都能命中。
-    TOLERANCE_PX = 10
+    #: 点击容差（像素）：点/线要素或点空白处时，把点击点扩成小矩形再求交。
+    #: 5px 是 ArcMap 官方建议的 3–5px 上限（其默认值为 3px）。
+    TOLERANCE_PX = 5
 
     def __init__(self, canvas: "QgsMapCanvas", visible_filter_getter=None) -> None:
         super().__init__(canvas, visible_filter_getter=visible_filter_getter)
@@ -258,7 +249,18 @@ class PointSelectTool(SelectFeatureToolBase):
     def canvasReleaseEvent(self, event) -> None:  # noqa: N802 —— QGIS 命名
         if event.button() != Qt.MouseButton.LeftButton:
             return
-        map_pt = self._map_point(event)
+        self._select_point(self._map_point(event), self._selection_behavior(event))
+
+    def _select_point(self, map_pt: "QgsPointXY", behavior: Qgis.SelectBehavior) -> None:
+        """点选：先按点击点做精确包含判定，未命中再退回容差框。
+
+        容差矩形会同时压到公共边两侧的面，直接取 ``fids[-1]`` 就会出现
+        「点 A 的边缘却选中 B」。这里按图层自上而下找命中：先看哪个要素
+        **包含**点击点（边界相接不算），只有点/线要素或点空白处（含正好
+        点在公共边上）才用容差框兜底。
+        """
+        project = self.canvas.project() or QgsProject.instance()
+        source_crs = self.canvas.mapSettings().destinationCrs()
         tol = self.TOLERANCE_PX * self.canvas.mapSettings().mapUnitsPerPixel()
         rect = QgsRectangle(
             map_pt.x() - tol,
@@ -266,9 +268,30 @@ class PointSelectTool(SelectFeatureToolBase):
             map_pt.x() + tol,
             map_pt.y() + tol,
         )
-        self._select_geometry(
-            QgsGeometry.fromRect(rect), self._selection_behavior(event), topmost_only=True
-        )
+        tolerance_geom = QgsGeometry.fromRect(rect)
+
+        layers = self._selectable_layers()
+        hit_layer: Optional["QgsVectorLayer"] = None
+        hit_fids: list[int] = []
+        for layer in layers:
+            fids = features_containing_point(layer, map_pt, source_crs, project)
+            if fids:
+                fids = self._keep_visible(layer, fids)
+            if not fids:
+                # 点不在任何要素内部：退回容差框（点 / 线要素、点空白处）
+                fids = intersect_features(layer, tolerance_geom, source_crs, project)
+                fids = self._keep_visible(layer, fids)
+            if fids:
+                hit_layer, hit_fids = layer, fids
+                break
+
+        for layer in layers:
+            if layer is hit_layer:
+                # 层内叠压仍按「后添加的要素画在上层」取最后一个命中
+                layer.selectByIds([hit_fids[-1]], behavior)
+            elif behavior == Qgis.SelectBehavior.SetSelection:
+                # 点空白处 / 替换语义：清掉其余图层的旧选择
+                layer.removeSelection()
 
 
 class RectSelectTool(SelectFeatureToolBase):
