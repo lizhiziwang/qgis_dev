@@ -22,6 +22,8 @@
   服务入口用 ``@log_operation("缓冲区生成")`` 加一行即可
 - :mod:`app.infra.logging.session` —— 会话日志（一次运行一份纯文本 + JSONL），
   装配后调 :func:`install_session_logging` / :func:`current_session`
+- :mod:`app.infra.logging.user_context` —— JSONL 里附带的当前登录用户 / 主机名 /
+  操作系统，登录成功后调 :func:`set_log_user`
 - :mod:`app.infra.logging.redaction` —— 回传前的凭据打码（``tk=`` / ``password=`` …），
   操作快照与诊断包共用同一份规则
 - :mod:`app.infra.logging.environment` —— 构建 / 环境快照（``BUILD`` 日志行与诊断包里的
@@ -49,7 +51,8 @@
 8. **会话自包含**：一次运行另写一份 ``logs/session/<id>.log`` + ``<id>.jsonl``
    （见 :mod:`app.infra.logging.session`）。``app.log`` 是跨运行累积且会轮转的，
    用户回传时要的是"他这一次"的完整时间线；纯文本给人读，JSONL 给我用 ``jq`` 精确
-   切段（按 ``op`` 捞整段、按 ``exc.type`` 归类）。
+   切段（按 ``op`` 捞整段、按 ``exc.type`` 归类）。JSONL 每条还带 ``user`` /
+   ``user_id`` / ``host`` / ``os``，多人回传的日志靠它区分。
 9. **回传的一律是打码过的**：凭据（XYZ 底图的 ``tk=``、目标库密码、``config/app.yaml``
    里的真实天地图 key）在**写日志时**（:mod:`app.infra.logging.redaction` 的
    ``RedactionFilter``）与**导出诊断包时**各过一道，规则只有一份。启动时还会把
@@ -78,10 +81,11 @@ from .redaction import (
     register_secrets,
 )
 from .renderer import log_to_html, render_log_html
-from .session import SessionLog, current_session
+from .session import SessionLog, current_session, list_sessions
 from .session import install as install_session_logging
 from .sink import _RootSink, active_log_config
 from .styles import LogStyle
+from .user_context import current_log_user, log_host, log_os, set_log_user
 
 __all__ = [
     "REDACTED",
@@ -97,6 +101,7 @@ __all__ = [
     "build_diagnostics_package",
     "build_snapshot",
     "collect_secret_values",
+    "current_log_user",
     "current_op_id",
     "current_session",
     "get_logger",
@@ -104,10 +109,14 @@ __all__ = [
     "install_qgis_log_bridge",
     "install_session_logging",
     "known_secrets",
+    "list_sessions",
+    "log_host",
     "log_operation",
+    "log_os",
     "log_to_html",
     "redact",
     "register_secrets",
     "render_log_html",
+    "set_log_user",
     "setup_logger",
 ]

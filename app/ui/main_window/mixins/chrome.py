@@ -1,7 +1,7 @@
 """顶部 chrome、状态栏与主题。
 
 标题栏/模式切换、主题 QSS 应用、用户信息、状态栏与图层加载指示，
-以及顶部各工具条（通用/编辑/文件/查看/质检）与 Tab 切换器。
+以及顶部各工具条（通用/编辑/文件/查看/质检/帮助）与 Tab 切换器。
 
 由 :class:`~app.ui.main_window.main_window.MainWindow` 多继承组合，方法只依赖
 ``self`` 上的共享状态。
@@ -9,21 +9,27 @@
 
 from __future__ import annotations
 
+import base64
+from pathlib import Path
+from urllib.parse import urlencode
+
 from qgis.core import Qgis
 from qgis.gui import (
     QgsMapToolPan,
     QgsMapToolZoom,
 )
-from qgis.PyQt.QtCore import QSize, Qt, QTimer
+from qgis.PyQt.QtCore import QSize, Qt, QTimer, QUrl
 from qgis.PyQt.QtGui import (
     QAction,
     QColor,
+    QDesktopServices,
     QKeySequence,
     QResizeEvent,
     QShortcut,
 )
-from qgis.PyQt.QtWidgets import QApplication, QDialog, QDockWidget, QToolBar
+from qgis.PyQt.QtWidgets import QApplication, QDialog, QDockWidget, QMessageBox, QToolBar
 
+from app.env.config import HelpConfig
 from app.infra.logging import get_logger
 from app.infra.shortcuts import DEFAULT_SHORTCUTS, effective_sequences, load_overrides
 from app.ui.common import tool_icons
@@ -34,6 +40,7 @@ from app.ui.common.theme import (
     toolbar_qss,
     window_qss,
 )
+from app.ui.dialogs.about import AboutDialog
 from app.ui.main_window.draw_toolbar import DigitizingToolbar
 from app.ui.main_window.snapping_toolbar import QgisSnappingToolbar
 from app.ui.main_window.status_bar import StatusBar
@@ -46,8 +53,19 @@ from app.ui.tools.pan_zoom import ZoomClickTool
 
 logger = get_logger(__name__)
 
-#: 文件 / 查看 / 质检页签的 Ribbon 图标逻辑边长（与「通用」工具条一致）
+#: 文件 / 查看 / 质检 / 帮助页签的 Ribbon 图标逻辑边长（与「通用」工具条一致）
 _TAB_ICON = 20
+
+#: 使用手册默认路径（相对项目根 / 便携包根）；``app.help.manual_path`` 未配置时用它。
+_DEFAULT_MANUAL_PATH = "docs/使用手册.docx"
+
+#: 内置在线问题反馈页面；``app.help.feedback_url`` 未配置时用它。
+_DEFAULT_FEEDBACK_URL = "http://182.108.40.116:9003/cs-feedback/"
+
+
+def _b64(text: str) -> str:
+    """UTF-8 文本 → 标准 base64 字符串（空串仍是空串）。"""
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
 class WindowChromeMixin:
@@ -135,6 +153,7 @@ class WindowChromeMixin:
         self._file_toolbar = self._build_file_toolbar()
         self._view_toolbar = self._build_view_toolbar()
         self._quality_toolbar = self._build_quality_toolbar()
+        self._help_toolbar = self._build_help_toolbar()
 
         #: tab 索引 → 该 tab 下应显示的工具条列表（切换时互斥显示）
         self._tab_toolbars: dict[int, list] = {}
@@ -147,6 +166,7 @@ class WindowChromeMixin:
             ]),
             ("通用", [self.tool_bar]),
             ("质检", [self._quality_toolbar]),
+            ("帮助", [self._help_toolbar]),
         ):
             self._tab_toolbars[tab_bar.addTab(label)] = toolbars
             for tb in toolbars:
@@ -454,6 +474,133 @@ class WindowChromeMixin:
             "质检", "QualityTabToolbar", [("分析", [act_check])]
         )
 
+    # ===================================================== 帮助页签
+
+    def _build_help_toolbar(self) -> QToolBar:
+        """「帮助」tab：使用手册 / 问题反馈 / 关于（与其它页签同为 Ribbon 布局）。"""
+        self._act_manual = self._tab_action(
+            "使用手册",
+            "manual",
+            self._on_open_manual,
+            tooltip="打开使用手册（本地 Word 文档或在线文档）",
+        )
+        self._act_feedback = self._tab_action(
+            "问题反馈",
+            "feedback",
+            self._on_feedback,
+            tooltip="打开在线问题反馈页面",
+        )
+        self._act_about = self._tab_action(
+            "关于",
+            "about",
+            self._on_about,
+            tooltip="查看应用名称与版本信息",
+        )
+        return self._build_ribbon_tab_toolbar(
+            "帮助",
+            "HelpTabToolbar",
+            [
+                ("文档", [self._act_manual]),
+                ("支持", [self._act_feedback, self._act_about]),
+            ],
+        )
+
+    def _help_config(self) -> HelpConfig:
+        """``app.help`` 配置；配置文件读取失败时退回默认值。"""
+        loader = getattr(self, "_load_map_config", None)
+        cfg = loader() if callable(loader) else None
+        help_cfg = getattr(cfg, "help", None) if cfg is not None else None
+        return help_cfg if isinstance(help_cfg, HelpConfig) else HelpConfig()
+
+    def _on_open_manual(self) -> None:
+        """打开使用手册：优先在线地址，否则打开 ``app.help.manual_path`` 指向的文档。"""
+        help_cfg = self._help_config()
+        if help_cfg.manual_url:
+            self._open_help_url(help_cfg.manual_url, "使用手册")
+            return
+        raw = help_cfg.manual_path or Path(_DEFAULT_MANUAL_PATH)
+        path = raw if raw.is_absolute() else Path(self._paths.project_root) / raw
+        if not path.is_file():
+            logger.warning("使用手册不存在：%s", path)
+            QMessageBox.information(
+                self,
+                "使用手册",
+                f"未找到使用手册文件：\n{path}\n\n"
+                "请将文档放到该路径，或在 config/app.yaml 的 "
+                "app.help.manual_path 中配置实际路径。",
+            )
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
+            logger.error("打开使用手册失败：%s", path)
+            QMessageBox.warning(
+                self,
+                "使用手册",
+                f"无法打开使用手册：\n{path}\n\n请确认已安装可打开该文档的程序。",
+            )
+            return
+        logger.info("打开使用手册：%s", path)
+
+    def _on_feedback(self) -> None:
+        """打开浏览器反馈页面，query 里带上 base64 编码的当前用户 id / 用户名。
+
+        地址优先取 ``app.help.feedback_url``，未配置时用内置地址。用户信息取自
+        本次登录会话（``_auth_result``）：``user_id`` 是 ``currentUserByToken``
+        返回的 ``userId``，``user_name`` 优先姓名、退而账号。没登录（如非启动
+        路径构造窗口）时两个参数为空串，页面仍可正常打开。
+
+        base64 结果可能含 ``+`` / ``/`` / ``=``，必须再 URL 编码一次，
+        否则 ``+`` 到服务端会被解成空格、base64 就坏了。
+        """
+        base = self._help_config().feedback_url or _DEFAULT_FEEDBACK_URL
+        user_id, user_name = self._feedback_identity()
+        if not user_id and not user_name:
+            logger.warning("打开反馈页面时没有当前登录用户信息")
+        query = urlencode(
+            {
+                "user_id": _b64(user_id),
+                "user_name": _b64(user_name),
+            }
+        )
+        separator = "&" if "?" in base else "?"
+        url = f"{base}{separator}{query}"
+        if not QDesktopServices.openUrl(QUrl(url)):
+            logger.error("打开反馈页面失败 url=%s", url)
+            QMessageBox.warning(self, "问题反馈", f"无法打开浏览器，请手动访问：\n{url}")
+
+    def _feedback_identity(self) -> tuple[str, str]:
+        """当前登录用户的 ``(user_id, user_name)``；没有会话时返回两个空串。
+
+        用户对象挂在 ``_auth_result.user`` 上（:class:`CurrentUser`），
+        ``userId`` 不在具名字段里，只能从 ``raw`` 取——服务端各环境字段名
+        略有差异，这里按常见别名依次找。
+        """
+        result = getattr(self, "_auth_result", None)
+        if result is None:
+            return "", ""
+        user = getattr(result, "user", None)
+        fallback_name = (getattr(result, "username", "") or "").strip()
+        if user is None:
+            return "", fallback_name
+        raw = user.raw if isinstance(user.raw, dict) else {}
+        user_id = ""
+        for key in ("userId", "user_id", "userGuid", "id"):
+            value = raw.get(key)
+            if value:
+                user_id = str(value).strip()
+                break
+        user_name = (user.name or user.account or fallback_name).strip()
+        return user_id, user_name
+
+    def _on_about(self) -> None:
+        """关于：展示应用名称与版本。"""
+        AboutDialog(self, app_name=self._app_name).exec()
+
+    def _open_help_url(self, url: str, title: str) -> None:
+        """用系统默认浏览器打开帮助类链接；失败时弹窗给出可手动访问的地址。"""
+        if not QDesktopServices.openUrl(QUrl(url)):
+            logger.error("打开%s页面失败：%s", title, url)
+            QMessageBox.warning(self, title, f"无法打开浏览器，请手动访问：\n{url}")
+
     def _on_tab_changed(self, index: int) -> None:
         """tab 切换：只显示当前 tab 对应的工具条，其余隐藏（模拟"换工具栏"）。
 
@@ -675,7 +822,7 @@ class WindowChromeMixin:
         tbb = getattr(self, "tool_bar_builder", None)
         if tbb is not None:
             tbb.apply_theme(theme)
-        # 文件 / 查看 / 质检页签的 Ribbon 按钮图标与组名颜色
+        # 文件 / 查看 / 质检 / 帮助页签的 Ribbon 按钮图标与组名颜色
         for act, key in getattr(self, "_tab_icon_items", []):
             act.setIcon(tool_icons.icon(key, theme.input_focus, _TAB_ICON))
         for ribbon in getattr(self, "_ribbon_tab_toolbars", []):

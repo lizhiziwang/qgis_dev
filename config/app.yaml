@@ -11,7 +11,16 @@ app:
   name: 图斑核实平台 V1.0
   language: zh-Hans       # i18n
   crs: EPSG:4490          # 默认坐标系（中国 2000）
-
+  # 「帮助」菜单（顶部最后一个页签）
+  help:
+    # 使用手册：Word 文档路径。相对路径按“项目根目录 / 便携包根目录”解析，
+    # 也可写绝对路径（如 D:/document/使用手册.docx）。
+    manual_path: docs/使用手册.docx
+    # 在线使用文档地址：填写后优先于 manual_path（后续换在线文档只改这里）。
+    manual_url: ""
+    # 在线问题反馈地址：留空时使用内置反馈页面（cs-feedback）。
+    feedback_url: ""
+    
 # 【已废弃】启动登录已改为授权服务器鉴权，本段不再参与校验，仅为 AppConfig
 # 兼容保留。授权服务器地址按本文件顶部的 env 选段（dev / prod…）：见
 # app/core/auth/config.py 的 PROFILES，加一个环境 = 在那里加一段 + 把这里的

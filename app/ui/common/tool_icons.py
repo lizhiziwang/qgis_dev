@@ -100,6 +100,10 @@ _GLYPHS: dict[str, str] = {
     "cat_data": "\uf15b",     # file 注册数据表叶子
     "plus_circle": "\uf055",  # plus-circle 新建连接
     "upload": "\uf093",       # upload 导入图层（左栏树节点右键菜单）
+    # ---- 顶部「帮助」页签（app/ui/main_window/mixins/chrome.py）----
+    "manual": "",      # book 使用手册
+    "feedback": "",    # comments 问题反馈
+    "about": "",       # info-circle 关于
     # ---- 属性表 Dock 工具条（app/ui/docks/attribute_dock.py）----
     "attribute_filter": "\uf0b0",  # filter 漏斗（属性筛选）
     "organize_columns": "\uf0db",  # columns 组织列（字段列显示设置）

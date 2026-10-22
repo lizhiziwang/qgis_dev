@@ -49,6 +49,7 @@ from app.infra.logging import (
     install_qgis_log_bridge,
     install_session_logging,
     register_secrets,
+    set_log_user,
 )
 from app.infra.logging.config import LogConfig
 from app.infra.logging.environment import as_json
@@ -370,6 +371,8 @@ def _run_login_dialog(cfg: AppConfig) -> AuthResult | None:
     logger.info("授权服务器校验通过 username=%s", dlg.username())
     # 登记给业务接口工具（app.core.util.service_client.request()），后续自动带 token 头
     set_session_token(result.token)
+    # 先按账号登记日志用户：后面拉用户详情失败时，「用户」列至少还有个可辨认的账号
+    set_log_user(result.username, result.username)
     return _with_current_user(server, result)
 
 
@@ -392,6 +395,8 @@ def _with_current_user(server: AuthServerConfig, result: AuthResult) -> AuthResu
         user.account or result.username,
         user.organize_line() or "未返回单位/部门",
     )
+    # 会话 JSONL 的「用户」列要的是人看得懂的名字，账号单独落到 user_id
+    set_log_user(user.account or result.username, user.display_name())
     if user.need_reset_password:
         logger.warning("服务端提示该账号需要重置密码：%s", user.account or result.username)
     # AuthResult 是 frozen 的，用 replace 挂上用户信息（其余字段原样保留）
