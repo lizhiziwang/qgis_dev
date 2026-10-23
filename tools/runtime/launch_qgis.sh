@@ -78,6 +78,11 @@ if ! mkdir -p "$TMP_DIR" 2>/dev/null || [ ! -w "$TMP_DIR" ]; then
 fi
 export QGIS_DEV_PATHS_LOG="$LOG_DIR"
 export QGIS_DEV_PATHS_TMP="$TMP_DIR"
+# 日志模块（app.infra.logging.config / crash）只认 QGIS_DEV_LOG_DIR，且它在
+# import 期就会建目录——早于 bootstrap 把 PATHS_LOG 换算成 LOG_DIR。打包后
+# __file__ 在 _internal/ 下，不导出这一项会去 /opt/qgis_app/_internal/logs 建
+# 目录，deb 安装（root:root 755）的普通用户直接 PermissionError 起不来。
+export QGIS_DEV_LOG_DIR="$LOG_DIR"
 
 # 更新暂存 / 备份 / 日志统一放每用户目录（不往 /opt 写）
 export QGIS_DEV_UPDATE_DIR="${QGIS_DEV_UPDATE_DIR:-$USER_DATA_HOME/updates}"
