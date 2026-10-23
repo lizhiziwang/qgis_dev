@@ -182,6 +182,12 @@ class FieldsTab(LayerPropertyTab):
     def __init__(self, layer=None, parent=None) -> None:
         super().__init__(parent)
         self._layer = layer
+        #: 上次从图层读入时 combo 选中的字段。apply 只在用户改过选择时才写回：
+        #: 打开图层属性后什么都不改直接点「确定」不应改动工程内容（否则会多出
+        #: 一条“未保存”提示）；原显示表达式不是裸字段名时也不会被首字段覆盖。
+        self._initial_display_field = None
+        #: 用户是否动过主显示字段下拉（activated 只在用户选择时发，重填不发）
+        self._display_touched = False
         self._build()
         if layer is not None:
             self.load(layer)
@@ -259,6 +265,7 @@ class FieldsTab(LayerPropertyTab):
         self.display_combo = QComboBox(bot)
         self.display_combo.setMinimumWidth(220)
         make_field_combo_searchable(self.display_combo)
+        self.display_combo.activated.connect(self._on_display_field_activated)
         bot_layout.addWidget(self.display_combo, 1)
         self.count_label = QLabel("字段个数: —", bot)
         self.count_label.setObjectName("PropValue")
@@ -275,6 +282,7 @@ class FieldsTab(LayerPropertyTab):
             self.count_label.setText("字段个数: —")
             self.display_combo.clear()
             self.add_btn.setEnabled(False)
+            self._initial_display_field = None
             return
         # 编辑状态下不允许改 schema（添加字段）→ 置灰「添加字段」按钮
         editable = bool(layer.isEditable())
@@ -488,7 +496,14 @@ class FieldsTab(LayerPropertyTab):
             for i in range(self.display_combo.count()):
                 if self.display_combo.itemData(i) == current_expr:
                     self.display_combo.setCurrentIndex(i)
-                    return
+                    break
+        # 记下读入时的选择，apply 据此判断用户是否真的改过
+        self._initial_display_field = self.display_combo.currentData()
+        self._display_touched = False
+
+    def _on_display_field_activated(self, _index: int) -> None:
+        """用户在下拉里选过主显示字段；重填控件走 setCurrentIndex，不会触发这里。"""
+        self._display_touched = True
 
     # ------------------------------------------------------------- 交互
 
@@ -824,10 +839,13 @@ class FieldsTab(LayerPropertyTab):
                     name_item.setData(Qt.ItemDataRole.UserRole, new_name)
                 _set_field_alias_on_layer(layer, new_name, new_alias)
 
-            # 3) 写主显示字段：combo 的 itemData 存的就是字段名
+            # 3) 写主显示字段：combo 的 itemData 存的就是字段名；用户没选过且选择
+            #    没变就不动，避免“打开属性页直接确定”也把工程置脏
             name = self.display_combo.currentData()
-            if name:
+            if name and (self._display_touched or name != self._initial_display_field):
                 layer.setDisplayExpression(name)
+                self._initial_display_field = name
+                self._display_touched = False
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("应用字段属性失败: %s", exc, exc_info=True)
