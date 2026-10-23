@@ -586,6 +586,9 @@ def _make_base_tile_callback(cfg: AppConfig):
         if layer is None:
             logger.warning("未加载配置底图（未启用或图层无效）")
         else:
+            # 记住启动底图的 id：打开工程前判断“是否有数据”时要排除它，
+            # 否则仅加载了底图也会被当成用户数据而弹出保存提示。
+            window._startup_base_layer_id = layer.id()
             logger.info("已加载配置底图：%s", layer.name())
             _zoom_to_base_tile(window, layer)
 
