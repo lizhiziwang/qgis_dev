@@ -1530,7 +1530,6 @@ class AppActionsMixin:
         except OSError:
             return False
 
-    @staticmethod
     def _on_swipe(self) -> None:
         """卷帘对比：分屏会话已存续则直接恢复（不弹窗）；否则弹窗选栅格激活。
 
