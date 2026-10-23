@@ -704,6 +704,10 @@ class LayerDock(QDockWidget):
             | QgsLayerTreeModel.AllowLegendChangeState
         )
         self.source_view = self._make_view(self.source_model, order=False)
+        # 图例子项也是"插入行"：插完再安排一次折叠对账。只有 singleShot(0)
+        # 时可能早于模型插入图例，首次切换到数据源视图就会默认展开（用户报过）
+        for tree_model in (self.model, self.source_model):
+            tree_model.rowsInserted.connect(self._on_tree_rows_inserted)
 
         self.view_stack = QStackedWidget(self)
         self.view_stack.addWidget(self._order_view)
@@ -890,6 +894,10 @@ class LayerDock(QDockWidget):
         self._legend_collapse_pending = True
         QTimer.singleShot(0, self._collapse_new_legends)
 
+    def _on_tree_rows_inserted(self, *_args) -> None:
+        """模型插入行（图例子项也是行）→ 安排一次图例折叠对账。"""
+        self._schedule_collapse_legends()
+
     @staticmethod
     def _layer_id_of_index(view, index):
         """视图索引 → 图层 id；组 / 图例子项返回 ``None``。"""
@@ -920,14 +928,19 @@ class LayerDock(QDockWidget):
             self._legend_user_expanded[key].discard(layer_id)
 
     def _collapse_new_legends(self) -> None:
-        """新出现的图例子项默认折叠；用户手动展开过的图层保持展开。
+        """图例默认折叠；用户手动展开过的图层保持展开。
 
-        分类 / 分级图层的图例子项是 QgsLayerTreeView **自动展开**的，这里只在
-        第一次看到某个图层的图例时折叠一次（记录在 ``_legend_initialized``）。
-        图层渲染器被替换 / 图例重建后，视图可能丢掉展开状态，所以每次都用
-        ``_legend_user_expanded`` 把用户手动展开的图层重新展开。
+        分类 / 分级图层的图例子项会被 QgsLayerTreeView **自动展开**。这里每次
+        对账都按 ``_legend_user_expanded`` 处理：没手动展开就折叠，手动展开过
+        就保留。
+
+        以前只在「第一次看到某个图层」时折叠（``_legend_initialized`` 命中就
+        跳过）—— 数据源视图重建后是**新的节点**，模型会再次自动展开图例，而
+        缓存里已经有这个图层，于是不再折叠，看起来就是"默认展开了符号图例"
+        （用户报过）。改成每次对账都强制到目标状态。
         """
         self._legend_collapse_pending = False
+        pruned_any = False
         for key, view in (
             ("order", self._order_view),
             ("source", self.source_view),
@@ -935,11 +948,24 @@ class LayerDock(QDockWidget):
             proxy = view.model()
             if proxy is None:
                 continue
+            # QgsLayerTreeView 会把模型包一层 QgsLayerTreeProxyModel：视图操作
+            # （isExpanded/index2node）用 proxy 索引，removeLegendFromLayer 这类
+            # 模型方法必须落到 sourceModel 上（proxy 没有这个方法）
+            source_model = proxy
+            source_getter = getattr(proxy, "sourceModel", None)
+            if callable(source_getter):
+                try:
+                    source = source_getter()
+                except RuntimeError:
+                    source = None
+                if source is not None:
+                    source_model = source
             initialized = self._legend_initialized[key]
             user_expanded = self._legend_user_expanded[key]
-            found: dict[str, object] = {}
+            pruned = False
 
             def walk(parent) -> None:
+                nonlocal pruned
                 for row in range(proxy.rowCount(parent)):
                     index = proxy.index(row, 0, parent)
                     try:
@@ -949,28 +975,86 @@ class LayerDock(QDockWidget):
                     if isinstance(node, QgsLayerTreeLayer):
                         try:
                             layer_id = str(node.layerId())
+                            rows = proxy.rowCount(index)
                         except RuntimeError:
                             continue
-                        found[layer_id] = index
-                        if proxy.rowCount(index) <= 0:
+                        source_index = index
+                        mapper = getattr(proxy, "mapToSource", None)
+                        if source_model is not proxy and callable(mapper):
+                            try:
+                                source_index = mapper(index)
+                            except Exception:  # noqa: BLE001
+                                source_index = index
+                        if (
+                            rows == 1
+                            and source_index.isValid()
+                            and self._is_empty_legend_child(source_model, source_index)
+                        ):
+                            # 空图例（XYZ 瓦片等）：去掉唯一的空子项，否则视图会
+                            # 画出展开箭头，点开却什么都没有（用户报过天地图）
+                            try:
+                                source_model.removeLegendFromLayer(node)
+                                pruned = True
+                            except (RuntimeError, AttributeError):
+                                pass
                             continue
-                        if layer_id in initialized:
+                        if rows <= 0:
+                            # 图例子项还没插入；rowsInserted 会再安排一轮对账
                             continue
                         initialized.add(layer_id)
-                        if view.isExpanded(index):
+                        if layer_id in user_expanded:
+                            if not view.isExpanded(index):
+                                view.expand(index)
+                        elif view.isExpanded(index):
                             view.collapse(index)
                     elif isinstance(node, QgsLayerTreeGroup):
                         walk(index)
 
             try:
                 walk(QModelIndex())
-                # 恢复用户手动展开的图层（渲染器替换 / 图例重建后视图会回到折叠）
-                for layer_id in user_expanded:
-                    index = found.get(layer_id)
-                    if index is not None and not view.isExpanded(index):
-                        view.expand(index)
             except RuntimeError:  # 视图 / 模型正在销毁
                 continue
+            if pruned:
+                # QgsLayerTreeProxyModel 不会把 sourceModel 的图例删除同步到
+                # 自己的行映射：sourceModel.rowCount 已经是 0，proxy.rowCount
+                # 仍是 1，视图照样画展开箭头（实测）。必须让代理重建一次。
+                self._invalidate_proxy(proxy)
+                pruned_any = True
+        if pruned_any:
+            # 代理重建可能把展开状态一并重置，再对账一次恢复用户手动展开
+            self._schedule_collapse_legends()
+
+    @staticmethod
+    def _invalidate_proxy(proxy) -> None:
+        """让代理模型重建行映射（source 的图例增删不一定转发 rowsRemoved）。"""
+        for name in ("invalidate", "invalidateRowsFilter", "invalidateFilter"):
+            method = getattr(proxy, name, None)
+            if not callable(method):
+                continue
+            try:
+                method()
+                return
+            except Exception:  # noqa: BLE001
+                continue
+
+    @staticmethod
+    def _is_empty_legend_child(model, layer_index) -> bool:
+        """图例只有一个子项且文字 / 图标都为空 → 视为"没有图例"。
+
+        正常的单一符号矢量图例是嵌在父行里的（``rowCount == 0``）；分类 /
+        分级图例的子项有文字或色块；XYZ 瓦片这类图层则会建一个**空**子项，
+        视图因此多出一个展开箭头。
+        """
+        try:
+            child = model.index(0, 0, layer_index)
+            text = model.data(child, Qt.ItemDataRole.DisplayRole)
+            icon = model.data(child, Qt.ItemDataRole.DecorationRole)
+        except RuntimeError:
+            return False
+        # 有的实现返回"空 QIcon / 空 QPixmap"而不是 None
+        if icon is not None and hasattr(icon, "isNull") and icon.isNull():
+            icon = None
+        return not text and icon is None
 
     def _hook_project_visibility(self) -> None:
         """给工程图层节点挂可见性同步（每个图层只挂一次）。"""

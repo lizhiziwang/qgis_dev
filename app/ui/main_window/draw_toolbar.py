@@ -6,8 +6,10 @@
   开始编辑 / 停止编辑 / 保存编辑 / 撤销 / 重做 / 合并 / 节点编辑 / 属性录入 /
   线分割 / 面分割 / 挖洞 / 补洞 / 分解 / 补缝 / 边界修改 / 移动要素 /
   删除 / 要素分割 ｜ 添加点 / 添加线 / 添加面
-- 「开始编辑」**恒可用**：点击弹出图层选择框（:attr:`_edit_layer_chooser`，
-  由 :class:`MainWindow` 注入），选中图层即成为编辑目标并进入编辑态——
+- 「开始编辑」**恒可用**：已经选过编辑目标时直接对该图层开编辑；没有目标时才
+  弹图层选择框（:attr:`_edit_layer_chooser`，由 :class:`MainWindow` 注入）。
+  编辑目标由工具条最左侧的「当前编辑图层」下拉框展示和切换——下拉框**只读**
+  ``edit_layer``、不持有自己的状态，切换统一走 ``_apply_edit_target``。
   不再依赖图层树右键 / 点击预设编辑图层（那些入口已移除）。
 - 几何类型按当前 layer 启用对应按钮（点 layer 只能点，线 layer 只能线）；
   **编辑类工具一律要求「先选中图形 + 图层处于编辑态」**——它们作用的正是选中的
@@ -53,10 +55,10 @@
 
 ::
 
-    [未编辑] --start_edit_fun(弹窗选层)--> [编辑中]
+    [未编辑] --开始编辑(有目标) / 下拉框选层--> [编辑中]
         ^                                        |
         +----------------stop_edit_fun-----------+
-        编辑中再点「开始编辑」→ 重新弹窗换层，继续 [编辑中]
+    编辑中从下拉框换层 → 停旧层（脏则询问）→ 新层自动进编辑，会话连续
 
 :attr:`editing_state_changed` 信号在状态切换时发出，供 :class:`MainWindow`
 同步磁性捕捉等其它工具条。
@@ -82,6 +84,7 @@ from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QObject, QSize, Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QAction, QColor
 from qgis.PyQt.QtWidgets import (
+    QComboBox,
     QDialog,
     QMainWindow,
     QMessageBox,
@@ -220,6 +223,10 @@ class DigitizingToolbar(QObject):
         #: 编辑」/ 切图层停旧层 / 关工程等）结束编辑时不走 :meth:`stop_edit_fun`，
         #: 靠本钩子统一清工具并复位状态（见 :meth:`_on_editing_stopped`）。
         self._edit_stop_hook_layer = None
+        #: 已提示过「选数据了但图层没在编辑」：避免每次改选中都弹同一条提示
+        self._not_editing_hint_shown = False
+        #: 正在处理"编辑目标被隐藏"的退出流程（防止弹窗/重显可见性时重入）
+        self._handling_hidden_target = False
         #: 已挂 ``selectionChanged`` 的图层 id 集合（工程级监听，见
         #: :meth:`_connect_selection_hook`）；工程量少，用集合去重即可。
         self._selection_hooked: dict[str, bool] = {}
@@ -253,6 +260,10 @@ class DigitizingToolbar(QObject):
         # Ribbon 风格：图标在上 + 小字标签在下；按钮按编辑态/几何类型启用/禁用
         self.digitizing_toolbar.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextUnderIcon)
         self.digitizing_toolbar.setIconSize(QSize(_ICON, _ICON))
+
+        # ---- 当前编辑图层（最左侧）：下拉框是 edit_layer 的显示器 + 切换入口。
+        #      必须先于按钮加入，才能出现在工具条最左端 ----
+        self._build_edit_layer_combo()
 
         # ---- 编辑操作 ----
         self.start_edit = QAction("开始编辑", self.digitizing_toolbar)
@@ -446,12 +457,15 @@ class DigitizingToolbar(QObject):
             "copy_to": self.copy_to_action,
         }
 
-        self.digitizing_toolbar.addAction(self.add_point_action)
-        self.digitizing_toolbar.addAction(self.add_line_action)
-        self.digitizing_toolbar.addAction(self.add_polygon_action)
-
-        # 按组挂到工具条：组间加竖分隔线，组名由 RibbonToolBar 画在每组按钮下方
+        # 按组挂到工具条：组间加竖分隔线，组名由 RibbonToolBar 画在每组按钮下方。
+        # 第一组是下拉框（已经在 _build_edit_layer_combo 里 addWidget 加入），
+        # 组名「当前编辑图层」与后面的「编辑 / 几何 / 分割」同一条基线。
+        # 组名会随编辑状态动态变成「当前编辑图层（编辑中）」（见
+        # _update_edit_layer_combo_state / RibbonToolBar.set_group_name），
+        # 所以这里保留动作列表对象，供按身份定位该组。
+        self._edit_layer_group_actions = [self._edit_layer_combo_action]
         tool_groups: list[tuple[str, list[QAction]]] = [
+            ("当前编辑图层", self._edit_layer_group_actions),
             (
                 "编辑",
                 [
@@ -498,6 +512,10 @@ class DigitizingToolbar(QObject):
         ]
         for idx, (_group_name, acts) in enumerate(tool_groups):
             for act in acts:
+                # 下拉框的 action 已由 addWidget 加入；再 addAction 会把它挪到
+                # 工具条末尾（Qt 会重排），必须跳过
+                if act is self._edit_layer_combo_action:
+                    continue
                 self.digitizing_toolbar.addAction(act)
             if idx != len(tool_groups) - 1:
                 self.digitizing_toolbar.addSeparator()
@@ -537,6 +555,476 @@ class DigitizingToolbar(QObject):
         # 挂到主窗口
         self.main_window.addToolBar(self.digitizing_toolbar)
 
+    # ============================================================== 编辑图层下拉框
+
+    def _build_edit_layer_combo(self) -> None:
+        """工具条最左侧的「当前编辑图层」下拉框。
+
+        它**只读** ``edit_layer``，不保存第二份状态：显示由
+        :meth:`sync_edit_layer_combo` 从真实目标重画；用户选择时交给
+        :meth:`_on_edit_layer_activated` 走 ``_apply_edit_target`` 统一落地。
+
+        布局：下拉框作为一个独立分组加入工具条，QToolBar 把它在按钮行里垂直
+        居中；组名「当前编辑图层」和「编辑 / 几何 / 分割」一样由
+        :class:`RibbonToolBar` 画在下方的组名带里。
+        """
+        combo = QComboBox(self.digitizing_toolbar)
+        combo.setObjectName("EditLayerComboBox")
+        combo.setFixedWidth(150)
+        combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        combo.setMinimumContentsLength(8)
+        # index=-1 时显示这个占位（Qt 5.15+ / Qt6 支持）
+        combo.setPlaceholderText("未选择编辑图层")
+        # 用 activated（只在用户选择时发）而不是 currentIndexChanged，
+        # 避免同步列表时程序性 setCurrentIndex 触发一次假的"切换"
+        combo.activated.connect(self._on_edit_layer_activated)
+        self.edit_layer_combo = combo
+        # addWidget 返回的 QAction 就是这一组的"按钮"；组名由 RibbonToolBar
+        # 依据它的几何画在下方（见 tool_groups 的第一组）
+        self._edit_layer_combo_action = self.digitizing_toolbar.addWidget(combo)
+
+        #: 已挂 nameChanged 的图层 id（工程级，随候选增删同步）
+        self._combo_name_hooked: set[str] = set()
+        #: 已挂 visibilityChanged 的树节点（按 C++ 指针去重）
+        self._combo_visibility_hooked: set[int] = set()
+        #: 当前挂了 addedChildren/removedChildren 的图层树根（读工程后根对象可能换）
+        self._combo_tree_root = None
+        try:
+            project = QgsProject.instance()
+            project.layersAdded.connect(self._on_combo_project_layers_changed)
+            project.layersRemoved.connect(self._on_combo_project_layers_changed)
+            # 工程读入**完成**后图层树才是最终顺序：读的过程中 layersAdded
+            # 会连续触发，但组/图层的最终排序还没成型；不在这里补一次，
+            # 首次打开工程后下拉框顺序会停在"读了一半"的树序，直到下次
+            # 增删图层才自愈（用户报过）。readProject 在读取完成后发。
+            project.readProject.connect(self._on_combo_project_read)
+            self._connect_combo_tree_hooks()
+        except Exception:  # noqa: BLE001 —— 画布桩 / 旧构建降级
+            logger.exception("连接工程图层增删信号失败（编辑图层下拉框不会自动刷新）")
+
+        self.sync_edit_layer_combo()
+
+    def _connect_combo_tree_hooks(self) -> None:
+        """把根组的 ``addedChildren`` / ``removedChildren`` 接到下拉框刷新。
+
+        图层在面板里上下移动不会发工程级 ``layersAdded/Removed``；根组信号能
+        覆盖顶层重排。读工程后 ``layerTreeRoot()`` 可能换成新对象，所以这个
+        方法在初始化与 ``readProject`` 后都会调用。
+        """
+        try:
+            root = QgsProject.instance().layerTreeRoot()
+        except RuntimeError:
+            return
+        if root is None or root is self._combo_tree_root:
+            # 根没换也可能新增了图层 / 组：补挂可见性信号
+            self._hook_combo_visibility()
+            return
+        old = self._combo_tree_root
+        if old is not None and not sip.isdeleted(old):
+            for signal_name in ("addedChildren", "removedChildren"):
+                try:
+                    getattr(old, signal_name).disconnect(self._on_combo_project_layers_changed)
+                except Exception:  # noqa: BLE001 —— 旧根可能已销毁
+                    pass
+        # 根对象换了：旧树节点已销毁，可见性去重集合重置
+        self._combo_visibility_hooked.clear()
+        try:
+            root.addedChildren.connect(self._on_combo_project_layers_changed)
+            root.removedChildren.connect(self._on_combo_project_layers_changed)
+            self._combo_tree_root = root
+        except Exception:  # noqa: BLE001
+            logger.exception("连接图层树根节点信号失败（下拉框不会跟随图层重排）")
+        self._hook_combo_visibility()
+
+    def _hook_combo_visibility(self) -> None:
+        """给图层树根 / 组 / 图层挂 ``visibilityChanged`` → 刷新编辑列表。
+
+        编辑列表只列可见图层，所以可见性一变化就要重画。注意**组勾选不会给
+        子图层逐个发 visibilityChanged**（实测），必须把组节点自己也挂上，
+        再用有效可见性（``node.isVisible()``）重算。
+        """
+        try:
+            root = QgsProject.instance().layerTreeRoot()
+            if root is None:
+                return
+            nodes = [root, *root.findGroups(), *root.findLayers()]
+        except RuntimeError:
+            return
+        for node in nodes:
+            try:
+                key = int(sip.unwrapinstance(node))
+            except (TypeError, RuntimeError):
+                continue
+            if key in self._combo_visibility_hooked:
+                continue
+            try:
+                node.visibilityChanged.connect(self._on_combo_visibility_changed)
+                self._combo_visibility_hooked.add(key)
+            except (RuntimeError, AttributeError):
+                continue
+
+    @staticmethod
+    def _tree_node_visible(layer) -> bool:
+        """图层在图层树里的**有效**可见性（不存在于树里按不可见）。"""
+        if layer is None or sip.isdeleted(layer):
+            return False
+        try:
+            node = QgsProject.instance().layerTreeRoot().findLayer(layer.id())
+        except (AttributeError, RuntimeError):
+            return False
+        if node is None:
+            return False
+        try:
+            return bool(node.isVisible())
+        except RuntimeError:
+            return False
+
+    def _on_combo_visibility_changed(self, *_args) -> None:
+        """任何图层 / 组显隐变化 → 刷新编辑列表。
+
+        隐藏的普通图层直接移出列表；**隐藏的是当前编辑目标**时不做"自动保持
+        显示"，而是按用户要求退出编辑：有未保存修改先问保存 / 放弃 / 取消，
+        然后清空编辑目标（图层保持隐藏）。
+        """
+        try:
+            self._hook_combo_visibility()
+            layer = self._current_layer()
+            if layer is not None and not self._tree_node_visible(layer):
+                self._detach_hidden_edit_target(layer)
+            self.sync_edit_layer_combo()
+            # 组勾选 / 取消退出后重新显示目标等场景，有效可见性可能晚一拍；
+            # 再推迟一次刷新，避免列表少了刚显示出来的图层（实测组显隐）
+            QTimer.singleShot(0, self.sync_edit_layer_combo)
+        except Exception:  # noqa: BLE001 —— Qt 槽抛异常会直接杀进程
+            logger.exception("图层显隐变化后刷新编辑列表失败")
+
+    def _detach_hidden_edit_target(self, layer) -> None:
+        """编辑目标被隐藏：退出编辑（有改动先问保存）并清空编辑目标。
+
+        - 有未保存修改：弹「保存 / 放弃 / 取消」；取消 → 恢复图层显示并继续编辑；
+        - 无修改 / 已退出编辑：直接清空目标（图层保持隐藏）；
+        - 保存失败：重新显示图层并提示，保持编辑态，避免静默丢数据。
+        """
+        if self._handling_hidden_target:
+            return
+        self._handling_hidden_target = True
+        try:
+            keep_visible = False
+            if layer.isEditable():
+                if layer.isModified():
+                    box = QMessageBox(self.main_window)
+                    box.setWindowTitle("隐藏编辑图层")
+                    box.setIcon(QMessageBox.Icon.Warning)
+                    box.setText(f"图层「{layer.name()}」已隐藏，且还有未保存的修改。")
+                    box.setInformativeText("退出编辑前请先处理这些修改：")
+                    save_btn = box.addButton("保存", QMessageBox.ButtonRole.AcceptRole)
+                    drop_btn = box.addButton("放弃", QMessageBox.ButtonRole.DestructiveRole)
+                    cancel_btn = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+                    box.setDefaultButton(save_btn)
+                    box.setEscapeButton(cancel_btn)
+                    box.exec()
+                    clicked = box.clickedButton()
+                    if clicked is cancel_btn or clicked is None:
+                        # 取消 / 关窗：不退出编辑，把图层恢复显示（否则编辑目标
+                        # 会处于"隐藏但仍在编辑"的矛盾状态）
+                        keep_visible = True
+                    elif clicked is save_btn:
+                        try:
+                            layer.commitChanges(stopEditing=True)
+                        except Exception:  # noqa: BLE001
+                            logger.exception("隐藏编辑图层时保存失败: %s", layer.name())
+                        if layer.isEditable():
+                            QMessageBox.warning(
+                                self.main_window,
+                                "保存失败",
+                                "保存编辑失败，图层仍在编辑状态，已重新显示。\n"
+                                f"失败原因：\n{self._commit_error_text(layer)}",
+                            )
+                            keep_visible = True
+                    else:
+                        # 放弃：回滚并结束编辑（rollBack 会发 editingStopped）
+                        try:
+                            layer.rollBack()
+                        except Exception:  # noqa: BLE001
+                            logger.exception("隐藏编辑图层时回滚失败: %s", layer.name())
+                        if layer.isEditable():
+                            keep_visible = True
+                else:
+                    # 没有改动：直接结束编辑，不弹保存框
+                    try:
+                        layer.commitChanges(stopEditing=True)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("隐藏编辑图层时结束编辑失败: %s", layer.name())
+                    if layer.isEditable():
+                        keep_visible = True
+
+            if keep_visible:
+                ensure = getattr(self.main_window, "_ensure_layer_visible", None)
+                if callable(ensure):
+                    try:
+                        ensure(layer)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("恢复编辑图层可见性失败")
+                return
+
+            # 编辑会话已结束（或本来就没编辑）：切到下一个可见可编辑图层。
+            # 用户要求：隐藏当前目标后自动切到另一个；一个都没有才清空目标。
+            next_layer = self._first_visible_candidate(exclude=layer)
+            if next_layer is not None:
+                applier = getattr(self.main_window, "_apply_edit_target", None)
+                switched = False
+                if callable(applier):
+                    try:
+                        switched = bool(applier(next_layer, announce=False))
+                    except Exception:  # noqa: BLE001
+                        logger.exception("切换到备用编辑图层失败")
+                if not switched:
+                    try:
+                        self.main_window.edit_layer = next_layer
+                        switched = True
+                    except Exception:  # noqa: BLE001
+                        logger.exception("切换到备用编辑图层失败（直接赋值）")
+                if switched:
+                    self._toast(
+                        f"编辑图层「{layer.name()}」已隐藏并退出编辑，"
+                        f"已切换到「{next_layer.name()}」",
+                        level="info",
+                    )
+                else:
+                    try:
+                        self.main_window.edit_layer = None
+                    except Exception:  # noqa: BLE001
+                        logger.exception("清空已隐藏的编辑图层失败")
+            else:
+                try:
+                    self.main_window.edit_layer = None
+                except Exception:  # noqa: BLE001 —— 宿主不是主窗口时忽略
+                    logger.exception("清空已隐藏的编辑图层失败")
+                self._toast(
+                    f"编辑图层「{layer.name()}」已隐藏，当前无可编辑图层",
+                    level="info",
+                )
+            QTimer.singleShot(0, self.sync_edit_layer_combo)
+        finally:
+            self._handling_hidden_target = False
+
+    def _first_visible_candidate(self, exclude=None):
+        """当前可见可编辑图层里的第一个（排除 ``exclude`` 自己）。"""
+        try:
+            candidates = self._combo_candidate_layers()
+        except Exception:  # noqa: BLE001
+            logger.exception("读取备用编辑图层失败")
+            return None
+        excluded_id = None
+        if exclude is not None and not sip.isdeleted(exclude):
+            try:
+                excluded_id = exclude.id()
+            except RuntimeError:
+                excluded_id = None
+        for cand in candidates:
+            try:
+                cand_id = cand.id()
+            except RuntimeError:
+                continue
+            if excluded_id is not None and cand_id == excluded_id:
+                continue
+            return cand
+        return None
+
+    def _on_combo_project_read(self, *_args) -> None:
+        """工程读取完成：重连可能换掉的根节点，并按最终图层树顺序刷新下拉框。"""
+        try:
+            self._connect_combo_tree_hooks()
+            self.sync_edit_layer_combo()
+        except Exception:  # noqa: BLE001 —— Qt 槽抛异常会直接杀进程
+            logger.exception("工程读取后刷新编辑图层下拉框失败")
+
+    def sync_edit_layer_combo(self) -> None:
+        """按真实状态重画下拉框：候选图层、当前目标、编辑中标记。
+
+        所有刷新入口（edit_layer 赋值、图层增删 / 改名、编辑开始 / 结束、
+        下拉框切换完成）都只调这一个方法；它不持有任何自己的状态。
+        """
+        combo = getattr(self, "edit_layer_combo", None)
+        if combo is None or sip.isdeleted(combo):
+            return
+        layer = self._current_layer()
+        if layer is not None and (sip.isdeleted(layer) or not layer.isValid()):
+            layer = None
+        candidates = self._combo_candidate_layers()
+        # 编辑列表默认选中一个：没有目标（首次启动 / 读工程 / 上一个目标被隐藏且
+        # 没有可切换的）时，自动选第一个可见可编辑图层。只选目标，不开始编辑。
+        if layer is None and candidates:
+            try:
+                self.main_window.edit_layer = candidates[0]
+            except Exception:  # noqa: BLE001 —— 宿主不是主窗口时忽略
+                logger.exception("默认选择编辑图层失败")
+            layer = self._current_layer()
+            if layer is not None and (sip.isdeleted(layer) or not layer.isValid()):
+                layer = None
+        # 没有任何可见可编辑图层：明确显示"无可编辑图层"，而不是"未选择"
+        combo.setPlaceholderText("无可编辑图层" if not candidates else "未选择编辑图层")
+
+        was_blocked = combo.blockSignals(True)
+        try:
+            wanted = [c.id() for c in candidates]
+            existing = [combo.itemData(i) for i in range(combo.count())]
+            if wanted != existing:
+                combo.clear()
+                for cand in candidates:
+                    combo.addItem(cand.name(), cand.id())
+            # 顺序没变也要刷新文字：图层可能被改名
+            for i, cand in enumerate(candidates):
+                if i < combo.count():
+                    combo.setItemText(i, cand.name())
+            combo.setCurrentIndex(combo.findData(layer.id()) if layer is not None else -1)
+        finally:
+            combo.blockSignals(was_blocked)
+
+        self._sync_combo_name_hooks(candidates)
+        self._update_edit_layer_combo_state(layer)
+
+    def _combo_candidate_layers(self) -> "list[QgsVectorLayer]":
+        """下拉框候选：与「开始编辑」选层弹窗同一套过滤（可见 + 可添加要素）。"""
+        layers = None
+        getter = getattr(self.main_window, "_editable_layers", None)
+        if callable(getter):
+            try:
+                layers = list(getter())
+            except Exception:  # noqa: BLE001
+                logger.exception("读取可编辑图层清单失败")
+        if layers is None:
+            # 测试桩 / 非主窗口宿主：退回工程里全部矢量图层
+            try:
+                layers = [
+                    lyr
+                    for lyr in QgsProject.instance().mapLayers().values()
+                    if isinstance(lyr, QgsVectorLayer)
+                ]
+            except RuntimeError:
+                layers = []
+        return [
+            lyr
+            for lyr in layers
+            if lyr is not None
+            and not sip.isdeleted(lyr)
+            and lyr.isValid()
+            and self._tree_node_visible(lyr)
+        ]
+
+    def _sync_combo_name_hooks(self, candidates) -> None:
+        """给新出现的候选图层挂 ``nameChanged``，改名时刷新下拉框文字。"""
+        hooked = getattr(self, "_combo_name_hooked", None)
+        if hooked is None:
+            hooked = self._combo_name_hooked = set()
+        live: set[str] = set()
+        for layer in candidates:
+            layer_id = layer.id()
+            live.add(layer_id)
+            if layer_id in hooked:
+                continue
+            try:
+                layer.nameChanged.connect(self._on_combo_layer_name_changed)
+                hooked.add(layer_id)
+            except Exception:  # noqa: BLE001 —— 图层收尾 / 桩对象
+                logger.warning("连接图层 nameChanged 失败: %s", layer.name(), exc_info=True)
+        # 已移除的图层不再跟踪（C++ 对象销毁时连接会自动断开）
+        hooked.intersection_update(live)
+
+    def _update_edit_layer_combo_state(self, layer: "QgsVectorLayer | None") -> None:
+        """刷新编辑状态的表达：组名 + tooltip。
+
+        组名动态显示「当前编辑图层（编辑中）」/「当前编辑图层」，与
+        「编辑 / 几何 / 分割」同一套画法；tooltip 再补充具体图层名。
+        """
+        combo = getattr(self, "edit_layer_combo", None)
+        if combo is None or sip.isdeleted(combo):
+            return
+        editing = bool(
+            layer is not None and not sip.isdeleted(layer) and layer.isEditable()
+        )
+        group_actions = getattr(self, "_edit_layer_group_actions", None)
+        toolbar = getattr(self, "digitizing_toolbar", None)
+        if group_actions is not None and isinstance(toolbar, RibbonToolBar):
+            try:
+                toolbar.set_group_name(
+                    group_actions,
+                    "当前编辑图层（编辑中）" if editing else "当前编辑图层",
+                )
+            except Exception:  # noqa: BLE001 —— 组名刷新失败不该影响编辑操作
+                logger.exception("刷新编辑图层组名失败")
+        if layer is None:
+            combo.setToolTip("未选择编辑图层：从下拉框选择要编辑的图层")
+        elif editing:
+            combo.setToolTip(f"正在编辑：{layer.name()}")
+        else:
+            combo.setToolTip(f"编辑目标：{layer.name()}（尚未开始编辑）")
+
+    def _on_combo_layer_name_changed(self, *_args) -> None:
+        """图层改名 → 刷新下拉框文字（槽里兜异常，避免 Qt 直接杀进程）。"""
+        try:
+            self.sync_edit_layer_combo()
+        except Exception:  # noqa: BLE001
+            logger.exception("图层改名后刷新编辑图层下拉框失败")
+
+    def _on_combo_project_layers_changed(self, *_args) -> None:
+        """图层增删 / 顺序变化：候选和顺序都变了，重画；删掉的是目标就清目标。
+
+        正常删除走 ``layer_actions._remove_layer`` 会先停编辑再清 ``edit_layer``；
+        这里兜住脚本 / 其它入口直接 ``removeMapLayer`` 的情况，避免工具条和
+        按钮状态继续引用已销毁的 C++ 对象。槽里统一兜异常（Qt 槽抛异常会
+        直接结束进程）。
+        """
+        try:
+            self._hook_combo_visibility()
+            layer = self._current_layer()
+            if layer is not None and sip.isdeleted(layer):
+                try:
+                    self.main_window.edit_layer = None
+                except Exception:  # noqa: BLE001 —— 宿主不是主窗口时忽略
+                    logger.exception("清理已删除的编辑图层目标失败")
+            self.sync_edit_layer_combo()
+        except Exception:  # noqa: BLE001
+            logger.exception("工程图层变化后刷新编辑图层下拉框失败")
+
+    def _on_edit_layer_activated(self, index: int) -> None:
+        """用户从下拉框选了图层：按「是否正在编辑」决定要不要立刻开编辑。
+
+        - 当前没有编辑会话 → 只切目标（不提示「已选 X 为编辑图层」，等用户点
+          「开始编辑」时再提示）；
+        - 当前正在编辑 → 停旧层（脏 buffer 由 ``_apply_edit_target`` 弹
+          保存/放弃/取消）→ 新目标开始编辑，会话连续；因为会自动进入编辑，
+          这时才提示「已选 X 为编辑图层」。
+        """
+        try:
+            layer_id = self.edit_layer_combo.itemData(index)
+            layer = QgsProject.instance().mapLayer(layer_id) if layer_id else None
+            if layer is None or sip.isdeleted(layer) or not layer.isValid():
+                self.sync_edit_layer_combo()
+                return
+            prev = self._current_layer()
+            if layer is prev:
+                return
+            was_editing = bool(
+                prev is not None and not sip.isdeleted(prev) and prev.isEditable()
+            )
+            applier = getattr(self.main_window, "_apply_edit_target", None)
+            # 未编辑时只是"预选目标"：不提示「已选 X 为编辑图层」，等用户点
+            # 「开始编辑」再提示；编辑中切层会自动进入编辑，才提示。
+            if not callable(applier) or not applier(layer, announce=was_editing):
+                # 用户取消 / 旧图层保存失败：回显真实目标，不能停在下拉框的假选择上
+                self.sync_edit_layer_combo()
+                return
+            if was_editing or layer.isEditable():
+                # 失败（数据源锁等）由 _ensure_editing 自己弹提示并保持真实状态
+                self._ensure_editing(layer)
+            self.sync_edit_layer_combo()
+        except Exception:  # noqa: BLE001 —— Qt 槽里抛异常会直接杀进程
+            logger.exception("切换编辑图层失败")
+            self.sync_edit_layer_combo()
+
     def _apply_icons(self) -> None:
         """按当前主题强调色重刷编辑工具图标（主题切换时也调）。"""
         theme = ThemeManager.instance().current()
@@ -562,6 +1050,8 @@ class DigitizingToolbar(QObject):
         :param layer: 新目标图层；为 None 时按当前 getter 的值处理。
         """
         target = layer if layer is not None else self._current_layer()
+        # 目标变了：新图层重新允许提示一次「选了数据但没开始编辑」
+        self._not_editing_hint_shown = False
         if target is None:
             self._disconnect_edit_stop_hook()
             self._refresh_button_states()
@@ -590,12 +1080,18 @@ class DigitizingToolbar(QObject):
     # ============================================================== 编辑器菜单回调
 
     def start_edit_fun(self) -> None:
-        """开始编辑：先弹窗选择目标图层（若有 chooser），再真正
-        ``layer.startEditing()`` 并切换按钮状态。
+        """开始编辑：直接对「当前编辑图层」（下拉框显示的图层）开编辑。
+
+        只有还没选过目标图层时才弹选层框（首次使用 / 工程里刚加数据）。
+        目标已经由下拉框 / 上次编辑记忆下来时，不再重复弹窗 —— 否则用户在
+        下拉框选完层，点开始编辑又被问一遍，两个入口互相打架。
+        开始编辑成功后提示「已选 X 为编辑图层」（下拉框预选阶段刻意不提示）。
         """
         layer = self._current_layer()
         chooser = self._edit_layer_chooser
-        if chooser is not None:
+        #: 选层框路径会在 _apply_edit_target 里提示；已有目标的路径这里补提示
+        announced = False
+        if layer is None and chooser is not None:
             # 弹窗选层（纯选择，见 main_window._choose_edit_layer）；取消返回
             # None → 不做任何事
             layer = chooser()
@@ -607,13 +1103,25 @@ class DigitizingToolbar(QObject):
                 applier = getattr(self.main_window, "_apply_edit_target", None)
                 # 旧编辑图层有未提交改动时 applier 会弹「保存/放弃/取消」；
                 # 用户选了取消 → 整个换层中止，别再往下进编辑态
-                if callable(applier) and not applier(layer):
-                    self._refresh_button_states()
-                    return
+                if callable(applier):
+                    if not applier(layer):
+                        self._refresh_button_states()
+                        return
+                    announced = True
         if layer is None or layer.type() != layer.VectorLayer:
             return
         if not self._ensure_editing(layer):
             return
+        if not announced:
+            # 下拉框预先选好目标（未编辑时不提示），真正点「开始编辑」后才提示
+            announcer = getattr(self.main_window, "_announce_edit_layer", None)
+            if callable(announcer):
+                try:
+                    announcer(layer)
+                except Exception:  # noqa: BLE001 —— 提示失败不该影响编辑
+                    logger.exception("提示编辑图层失败")
+            else:
+                self._toast(f"已选 {layer.name()} 为编辑图层")
 
     def _ensure_editing(self, layer: QgsVectorLayer) -> bool:
         """确保 ``layer`` 进入编辑态并同步工具条状态机。
@@ -626,21 +1134,45 @@ class DigitizingToolbar(QObject):
 
         :returns: 是否处于（已进入）编辑态。
         """
-        # 挂停编钩子：本工具条开始的编辑，不管之后由谁结束都能兜底清理工具
+        # 挂停编 / 起编钩子：本工具条开始的编辑，不管之后由谁结束都能兜底清理
         self._connect_edit_stop_hook(layer)
+        # 目标图层可能是下拉框预选的隐藏图层：画布上看不到要素，点选工具也只
+        # 查可见图层，会表现为"拖节点没反应 / 选中不了 / 分割按钮不亮"。
+        # 真正进入编辑前先把它（和所在组）显示出来。
+        ensure_visible = getattr(self.main_window, "_ensure_layer_visible", None)
+        if callable(ensure_visible):
+            try:
+                if ensure_visible(layer):
+                    bar = getattr(self.main_window, "messageBar", None)
+                    if bar is not None:
+                        bar.pushMessage(
+                            f"编辑图层「{layer.name()}」原为隐藏，已自动显示",
+                            level=Qgis.MessageLevel.Info,
+                            duration=3,
+                        )
+            except Exception:  # noqa: BLE001 —— 显示失败不该挡住编辑
+                logger.exception("确保编辑图层可见失败: %s", layer.name())
         if layer.isEditable():
+            # 第三方 / 其它入口先开了编辑：只补齐状态机，不重复发信号
             if not self._editing:
                 self._editing = True
-                self._refresh_button_states()
+                self.editing_state_changed.emit(True)
+            self._refresh_button_states()
+            self.sync_edit_layer_combo()
             return True
 
         ok = layer.startEditing()
         if not ok:
             QMessageBox.warning(self.main_window, "警告", "无法开始编辑！")
+            self.sync_edit_layer_combo()
             return False
-        self._editing = True
+        # editingStarted 钩子通常已经把 _editing 置 True 并发过信号；这里只兜底
+        # 钩子没接上的情况，避免同一状态发两次 editing_state_changed(True)
+        if not self._editing:
+            self._editing = True
+            self.editing_state_changed.emit(True)
         self._refresh_button_states()
-        self.editing_state_changed.emit(True)
+        self.sync_edit_layer_combo()
         return True
 
     def stop_edit_fun(self) -> None:
@@ -660,6 +1192,9 @@ class DigitizingToolbar(QObject):
         脱节（按钮可用性由 ``layer.isEditable()`` 推导，会话没结束就一直是可用）。
         此时弹窗告知失败原因并保持「编辑中」状态一致，用户可修正后重试，或再次
         点「停止编辑」选「否」放弃。
+
+        **是否询问保存看 ``layer.isModified()``，不是 ``editBuffer()``**：后者从
+        ``startEditing()`` 成功起就非空，什么都不改也会弹保存框（实测）。
         """
         layer = self._current_layer()
         logger.info(
@@ -675,7 +1210,7 @@ class DigitizingToolbar(QObject):
             return
 
         try:
-            if layer.editBuffer() is not None:
+            if layer.isModified():
                 reply = QMessageBox.warning(
                     self.main_window,
                     "警告",
@@ -717,8 +1252,14 @@ class DigitizingToolbar(QObject):
                     # commitChanges(stopEditing=True)。
                     layer.rollBack()
             else:
-                # 无未提交改动：不必问保存，直接结束编辑；工具照常退出
+                # 没有任何未提交改动：不必问保存，直接结束编辑；工具照常退出。
+                # 判据必须是 isModified() 而不是 editBuffer() —— 后者从
+                # startEditing() 成功起就非空，什么都不改也会弹保存框（实测）。
                 self.clear_draw_tool()
+                try:
+                    layer.commitChanges(stopEditing=True)
+                except Exception:  # noqa: BLE001
+                    logger.exception("停止编辑（无改动）提交异常: layer=%s", layer.name())
         finally:
             if layer is not None and layer.isEditable():
                 # 提交失败 / 异常（或回滚失败）→ 会话仍在：保持「编辑中」状态机
@@ -764,18 +1305,47 @@ class DigitizingToolbar(QObject):
         # 这里在 _editing 复位后再刷，保证退出编辑态时按钮一定是禁用+未勾选)
         self.clear_draw_tool()
         self._editing = False
+        self._not_editing_hint_shown = False
         self._refresh_button_states()
         # 只在确实从「编辑中」切走时发信号：停编路径里 :meth:`_on_editing_stopped`
         # 兜底可能已先复位过（commitChanges/rollBack 同步触发 editingStopped），
         # 避免重复发 False 造成二次状态切换
         if was_editing:
             self.editing_state_changed.emit(False)
+        # 编辑态真实变化：下拉框的「编辑中」标记必须跟着走（外部停编也走这里）
+        self.sync_edit_layer_combo()
 
     def _save_edits(self) -> None:
-        """仅保存编辑，不停止。"""
+        """仅保存编辑，不停止。
+
+        ``commitChanges`` 失败（唯一约束 / 数据源锁 / 字段类型等）时**必须告诉
+        用户**：静默失败会让用户以为已经落盘，实际改动还留在编辑缓冲里，直到
+        某次停止编辑 / 关工程才暴露。
+        """
         layer = self._current_layer()
-        if layer is not None and layer.isEditable():
-            layer.commitChanges(stopEditing=False)
+        if layer is None or not layer.isEditable():
+            return
+        if not layer.isModified():
+            self._toast("没有需要保存的修改", level="info")
+            return
+        try:
+            saved = layer.commitChanges(stopEditing=False)
+        except Exception:  # noqa: BLE001 —— 数据源异常按保存失败处理
+            logger.exception("保存编辑异常: layer=%s", layer.name())
+            saved = False
+        if saved:
+            self._toast("编辑内容已保存")
+        else:
+            QMessageBox.warning(
+                self.main_window,
+                "保存失败",
+                "保存编辑失败，更改尚未写入数据源，仍处于编辑状态！\n"
+                "请修正问题后重新保存，或点击「停止编辑」选择「否」放弃更改。\n\n"
+                f"失败原因：\n{self._commit_error_text(layer)}",
+            )
+        # 保存成功会清空撤销栈（canUndoChanged 也会触发刷新），这里统一再刷一次；
+        # 失败时编辑态未变，按钮状态同样不能因「做过一次保存」而漂移
+        self._refresh_button_states()
 
     # ============================================================== 添加要素菜单回调
 
@@ -910,6 +1480,7 @@ class DigitizingToolbar(QObject):
             self.canvas,
             editing_layer_getter=self._editing_layer_getter,
             hint=self._tool_hint,
+            visible_filter_getter=getattr(self.main_window, "display_filter_for", None),
         )
         self._activate_map_tool(self.feature_edit_tool)
         self._mark_active("feature")
@@ -1900,12 +2471,12 @@ class DigitizingToolbar(QObject):
         )
 
     def _connect_edit_stop_hook(self, layer: QgsVectorLayer | None) -> None:
-        """把 ``layer`` 的 ``editingStopped`` 接到本工具条的兜底清理。
+        """把 ``layer`` 的 ``editingStarted`` / ``editingStopped`` 接到本工具条。
 
-        属性表 Dock「停止编辑」/ 切图层停旧层 / 关工程等外部入口结束编辑时只
-        调各自的 commit/rollBack，不经过 :meth:`stop_edit_fun`——QGIS 在
-        提交/回滚结束编辑时发 ``editingStopped``，本工具条在信号里统一解除
-        激活工具并复位按钮状态，避免「属性框取消后再停编，绘制工具仍挂在画布」。
+        属性表 Dock「开始 / 停止编辑」/ 切图层停旧层 / 关工程等外部入口不经过
+        :meth:`stop_edit_fun`——QGIS 在进入 / 结束编辑时发对应信号，本工具条在
+        信号里统一补状态、解除激活工具、刷新按钮和下拉框，避免「外部停编后
+        绘制工具仍挂在画布」「下拉框的编辑中标记不更新」。
 
         未编辑的图层也照连：之后由外部开启再结束编辑同样能兜底。先断开上一
         图层再连当前图层，同一时刻只挂一个钩子。
@@ -1918,28 +2489,49 @@ class DigitizingToolbar(QObject):
         if layer is None or layer.type() != layer.VectorLayer:
             return
         try:
+            layer.editingStarted.connect(self._on_editing_started)
             layer.editingStopped.connect(self._on_editing_stopped)
             self._edit_stop_hook_layer = layer
-            logger.debug("已挂接图层 editingStopped 钩子: %s", layer.name())
+            logger.debug("已挂接图层编辑状态钩子: %s", layer.name())
         except Exception:
             self._edit_stop_hook_layer = None
-            logger.exception("连接图层 editingStopped 钩子失败: %s", layer.name())
+            try:
+                layer_name = layer.name()
+            except RuntimeError:
+                layer_name = "<已销毁>"
+            logger.exception("连接图层编辑状态钩子失败: %s", layer_name)
 
     def _disconnect_edit_stop_hook(self) -> None:
-        """断开当前图层的 ``editingStopped`` 钩子（目标切换 / 钩子已触发）。"""
+        """断开当前图层的 ``editingStarted`` / ``editingStopped`` 钩子。"""
         # 撤销栈信号与停编钩子同生命周期：一并断开（选中集钩子不归这里管）
         self._disconnect_undo_stack()
         layer = self._edit_stop_hook_layer
         self._edit_stop_hook_layer = None
         if layer is None:
             return
+        # 数据源重设 / 删图层时 wrapper 可能已经指向被删除的 C++ 对象：
+        # 此时再访问任何方法都会抛 RuntimeError（包括 name()），提前收手
+        if sip.isdeleted(layer):
+            return
         try:
-            layer.editingStopped.disconnect(self._on_editing_stopped)
-        except Exception:
-            # 图层销毁 / 信号已被触发自动断开等场景会抛异常，属正常收尾
-            logger.warning(
-                "断开图层 editingStopped 钩子失败(收尾场景属正常): %s", layer.name(), exc_info=True
-            )
+            layer_name = layer.name()
+        except RuntimeError:
+            return
+        for signal in ("editingStarted", "editingStopped"):
+            try:
+                getattr(layer, signal).disconnect(
+                    self._on_editing_started
+                    if signal == "editingStarted"
+                    else self._on_editing_stopped
+                )
+            except Exception:
+                # 图层销毁 / 信号已被触发自动断开等场景会抛异常，属正常收尾
+                logger.warning(
+                    "断开图层 %s 钩子失败(收尾场景属正常): %s",
+                    signal,
+                    layer_name,
+                    exc_info=True,
+                )
 
     def _connect_selection_hook(self, layer: QgsVectorLayer | None) -> None:
         """把工程内**所有矢量图层**的 ``selectionChanged`` 接到按钮状态重算。
@@ -1974,10 +2566,15 @@ class DigitizingToolbar(QObject):
         except Exception:  # noqa: BLE001
             return
         # 编辑图层未必在工程里（临时图层 / 测试桩），但它一定得被监听，
-        # 否则它的选中变化推不动按钮状态
+        # 否则它的选中变化推不动按钮状态。图层刚被 removeMapLayer 删掉时
+        # wrapper 可能已指向销毁的 C++ 对象，任何方法（含 id()）都会抛
+        # RuntimeError —— 必须过滤，否则 slots 里抛异常会直接杀进程。
         current = self._current_layer()
-        if isinstance(current, QgsVectorLayer):
-            layers[current.id()] = current
+        if isinstance(current, QgsVectorLayer) and not sip.isdeleted(current):
+            try:
+                layers[current.id()] = current
+            except RuntimeError:
+                pass
         # 先摘掉已不在工程里的（图层可能已销毁，断开抛异常属正常收尾）
         for layer_id in list(self._selection_hooked):
             if layer_id in layers:
@@ -2031,11 +2628,36 @@ class DigitizingToolbar(QObject):
         是这类调用一律 ``QTimer.singleShot(0, ...)`` 推迟出栈（见 ``swipe.py``
         / ``merge_geometry.py`` 的 docstring）。按钮状态仍立即刷新，不受影响。
         """
+        self._maybe_hint_edit_layer_not_editing()
         if self._active_kind in _SELECTION_REQUIRED_KINDS:
             layer = self._current_layer()
             if layer is None or not layer.selectedFeatureIds():
                 QTimer.singleShot(0, self._clear_tool_if_still_no_selection)
         self._refresh_button_states()
+
+    def _maybe_hint_edit_layer_not_editing(self) -> None:
+        """选了编辑图层的数据、但该图层没在编辑 → 提示先点「开始编辑」。
+
+        分割 / 节点编辑等按钮的可用性 = 编辑态 + 选中；只选中不编辑时按钮仍是
+        灰的，用户容易误以为选择没生效。每个"未编辑"阶段只提示一次。
+        """
+        if self._not_editing_hint_shown:
+            return
+        layer = self._current_layer()
+        if layer is None or layer.type() != layer.VectorLayer or layer.isEditable():
+            return
+        try:
+            has_selection = bool(layer.selectedFeatureIds())
+        except RuntimeError:
+            return
+        if not has_selection:
+            return
+        self._not_editing_hint_shown = True
+        self._toast(
+            "当前编辑图层未处于编辑状态：请先点「开始编辑」，"
+            "分割 / 节点编辑等工具才会可用",
+            level="info",
+        )
 
     def _clear_tool_if_still_no_selection(self) -> None:
         """推迟执行的「失去选中即退出工具」：执行时重新校验，不误清新选中的工具。"""
@@ -2045,14 +2667,41 @@ class DigitizingToolbar(QObject):
         if layer is None or not layer.selectedFeatureIds():
             self.clear_draw_tool()
 
+    def _on_editing_started(self) -> None:
+        """任意入口开始编辑的兜底：补齐 ``_editing`` 标志并刷新按钮 / 下拉框。
+
+        「属性录入」自动开编辑、属性表 Dock 的「开始编辑」、脚本直接
+        ``startEditing()`` 都会走到这里；不补的话工具条的 ``_editing`` 会与
+        真实 ``isEditable()`` 脱节，后续停编可能少发一次状态信号。
+        信号只在「从无到有」时发，避免与 :meth:`_ensure_editing` 重复。
+        """
+        layer = self._current_layer()
+        if (
+            layer is None
+            or layer.type() != layer.VectorLayer
+            or not layer.isEditable()
+        ):
+            return
+        was_editing = self._editing
+        self._editing = True
+        self._not_editing_hint_shown = False
+        self._refresh_button_states()
+        self.sync_edit_layer_combo()
+        if not was_editing:
+            self.editing_state_changed.emit(True)
+
     def _on_editing_stopped(self) -> None:
         """任意入口结束编辑的兜底：解除激活工具并复位工具条状态。
 
         commitChanges / rollBack 结束编辑时会同步发 ``editingStopped``（含
         :meth:`stop_edit_fun` 自己走的提交路径）；这里统一处理后，后续
         :meth:`_exit_editing_state` 因 ``_editing`` 已复位而不会重复发信号。
+
+        **不在这里断开编辑状态钩子**：编辑目标在停编后仍然保留，用户可能从
+        属性表 Dock 等入口再次开始编辑 —— 钩子一断，``editingStarted`` /
+        下一次 ``editingStopped`` 就收不到了（下拉框的“编辑中”标记会失灵）。
+        钩子只在切换目标（``set_edit_target``）或图层销毁时解除。
         """
-        self._disconnect_edit_stop_hook()
         layer = self._current_layer()
         logger.info(
             "editingStopped 钩子触发(外部停编兜底): layer=%s active_tool=%s mapTool=%s",

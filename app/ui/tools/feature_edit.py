@@ -75,11 +75,16 @@ class FeatureEditTool(QgsMapTool):
         canvas,
         editing_layer_getter: Callable[[], QgsVectorLayer | None] = lambda: None,
         hint: Callable[[str], None] | None = None,
+        visible_filter_getter=None,
     ) -> None:
         super().__init__(canvas)
         self.canvas = canvas
         self._layer_getter = editing_layer_getter
         self._hint = hint or (lambda text: None)
+        #: 渲染级可见性判定（选择屏蔽 / 范围裁剪）：``(layer) -> callable(fid)``
+        #: 或 None。命中后只取当前可见的要素——否则会载入屏幕上根本看不见的
+        #: 图形，用户表现为"点了没反应/拖了不更新"。
+        self._visible_filter_getter = visible_filter_getter
         #: 正在编辑的图层（锁定；切换图层时清空状态，防跨层 fid 误改）
         self._layer: QgsVectorLayer | None = None
         #: 正在编辑的要素 fid
@@ -264,6 +269,22 @@ class FeatureEditTool(QgsMapTool):
         )
         # 过滤已删除/失效的要素（空间索引缓存可能含已删 fid）
         fids = [fid for fid in fids if layer.getFeature(fid).isValid()]
+        # 选择屏蔽 / 范围裁剪是**渲染级**过滤：图形在数据里但屏幕上不显示。
+        # 节点编辑要跟着过滤走，否则会载入看不见的要素（拖拽后像"没更新"）
+        if fids and self._visible_filter_getter is not None:
+            try:
+                keep = self._visible_filter_getter(layer)
+            except Exception:  # noqa: BLE001 —— 取过滤失败按不过滤处理
+                logger.exception("节点编辑：取图层可见性过滤失败")
+                keep = None
+            if keep is not None:
+                visible = [fid for fid in fids if keep(fid)]
+                if not visible:
+                    self._hint(
+                        "点击的图形被「选择屏蔽 / 范围裁剪」隐藏，无法编辑；"
+                        "请先在工具栏取消屏蔽 / 裁剪"
+                    )
+                fids = visible
         return fids[-1] if fids else None  # 后添加的要素通常绘制在上层
 
     # -------------------------------------------------- 顶点编辑动作

@@ -145,12 +145,16 @@ class RibbonToolBar(AlignedToolBar):
         self.update()
 
     def _apply_button_widths(self) -> None:
-        """把所有按钮固定成同一宽度，避免文字长短导致按钮宽窄不一。"""
+        """把所有**按钮**固定成同一宽度，避免文字长短导致按钮宽窄不一。
+
+        只处理 ``QToolButton``：工具条里也可能用 ``addWidget`` 放下拉框等自定义
+        控件（如「当前编辑图层」），它们有自己的宽度，不能被压成 54px。
+        """
         for act in self.actions():
             if act.isSeparator():
                 continue
             widget = self.widgetForAction(act)
-            if widget is not None:
+            if isinstance(widget, QToolButton):
                 widget.setFixedWidth(BUTTON_WIDTH)
 
     def showEvent(self, event) -> None:
@@ -163,9 +167,37 @@ class RibbonToolBar(AlignedToolBar):
         self._group_color = QColor(color)
         self.update()
 
+    def set_group_name(self, actions: list[QAction], name: str) -> None:
+        """把某一组（按 ``set_groups`` 里同一动作列表对象识别）的组名换成 ``name``。
+
+        用于组名跟随状态变化的场景（如「当前编辑图层（编辑中）」）。动作列表
+        必须是 ``set_groups`` 时传入的**同一个 list 对象**，避免靠动作相等性猜。
+        """
+        for index, (_old_name, group_actions) in enumerate(self._groups):
+            if group_actions is not actions:
+                continue
+            if _old_name != name:
+                self._groups[index] = (name, group_actions)
+                self.update()
+            return
+
     def paintEvent(self, event) -> None:
         super().paintEvent(event)
         if not self._groups:
+            return
+        # 组名共用同一条基线：组里可能放比按钮矮的自定义控件（如下拉框），
+        # 若按各组自身底边画，下拉框那组的组名会比其他组高出一截。统一取
+        # 本行最低的可见控件底边，保证「当前编辑图层」和「编辑 / 几何 / 分割」
+        # 在同一水平线上。
+        baseline = None
+        for act in self.actions():
+            if act.isSeparator():
+                continue
+            widget = self.widgetForAction(act)
+            if widget is not None and widget.isVisible():
+                bottom = widget.geometry().bottom()
+                baseline = bottom if baseline is None else max(baseline, bottom)
+        if baseline is None:
             return
         painter = QPainter(self)
         painter.setPen(self._group_color)
@@ -182,8 +214,8 @@ class RibbonToolBar(AlignedToolBar):
                 continue
             left = min(r.left() for r in rects)
             right = max(r.right() for r in rects)
-            # 组名紧贴在按钮下方（按钮由 QToolBar 垂直居中，故按实际几何取底边）
-            band = QRect(left, max(r.bottom() for r in rects) + 2, right - left + 1, GROUP_BAND)
+            # 组名紧贴在按钮行下方（下拉框本身在行内垂直居中，不影响基线）
+            band = QRect(left, baseline + 2, right - left + 1, GROUP_BAND)
             painter.drawText(
                 band,
                 int(Qt.AlignmentFlag.AlignHCenter | Qt.AlignmentFlag.AlignVCenter),

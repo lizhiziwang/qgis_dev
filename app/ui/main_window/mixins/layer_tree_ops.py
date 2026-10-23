@@ -14,6 +14,7 @@ from typing import Optional
 
 from qgis.core import (
     Qgis,
+    QgsLayerTreeGroup,
     QgsRasterLayer,
     QgsVectorDataProvider,
     QgsVectorLayer,
@@ -28,8 +29,90 @@ from qgis.PyQt.QtWidgets import (
 )
 
 
+from app.infra.logging import get_logger
+
+logger = get_logger(__name__)
+
+
 class LayerTreeOpsMixin:
     """LayerTreeOpsMixin：见模块 docstring。"""
+
+    @property
+    def edit_layer(self) -> "Optional[QgsVectorLayer]":
+        """当前编辑目标图层（**唯一真源**）。
+
+        工具条按钮、捕捉当前层、撤销栈钩子、下拉框都从这里派生。赋值统一走
+        setter：除了记录引用，还把停编钩子 / 捕捉目标 / 下拉框一次性同步过去，
+        避免某个入口只改了 ``edit_layer`` 却漏掉联动（数据源重设时就是这种情况）。
+        """
+        return getattr(self, "_edit_layer", None)
+
+    @edit_layer.setter
+    def edit_layer(self, layer: "Optional[QgsVectorLayer]") -> None:
+        if getattr(self, "_edit_layer", None) is layer:
+            return
+        self._edit_layer = layer
+        toolbar = getattr(self, "digitizing_toolbar", None)
+        if toolbar is not None:
+            try:
+                toolbar.set_edit_target(layer)
+                # 下拉框只显示不持有状态：每次目标变化都从 edit_layer 重新渲染
+                syncer = getattr(toolbar, "sync_edit_layer_combo", None)
+                if callable(syncer):
+                    syncer()
+            except Exception:  # noqa: BLE001 —— 窗口收尾阶段工具条可能已销毁
+                try:
+                    layer_name = layer.name() if layer is not None else None
+                except RuntimeError:
+                    layer_name = "<已销毁>"
+                logger.exception("同步编辑工具条失败: layer=%s", layer_name)
+        snap_tb = getattr(self, "snapping_toolbar", None)
+        if snap_tb is not None:
+            try:
+                snap_tb.set_current_layer(layer)
+            except Exception:  # noqa: BLE001 —— 同上
+                logger.exception("同步捕捉工具条失败")
+
+    def _editable_layers(self) -> "list[QgsVectorLayer]":
+        """工程中**当前可见**且可添加要素的矢量图层，按图层树显示顺序返回。
+
+        下拉框 / 选层弹窗都只列可见图层：隐藏图层在画布上既看不到要素，
+        点选工具也只查可见图层，选中它作为编辑目标后会出现「节点编辑拖了
+        没反应、选中不了、分割按钮不亮」——直接不让它进列表最省事。
+        可见性变化时由工具条的下拉框刷新（见 ``DigitizingToolbar`` 的
+        ``visibilityChanged`` 钩子）。
+
+        不能直接遍历 ``project.mapLayers()``：它底层是 ``QMap<QString, layer>``，
+        按图层 id（UUID）排序，看起来就是乱序（用户报过「下拉框图层顺序是乱的」）。
+        ``layerTreeRoot().findLayers()`` 返回的才是图层面板里从上到下的顺序。
+        """
+        editable = {
+            layer.id(): layer
+            for layer in self.project.mapLayers().values()
+            if isinstance(layer, QgsVectorLayer)
+            and not layer.readOnly()
+            and bool(
+                layer.dataProvider()
+                and layer.dataProvider().capabilities()
+                & QgsVectorDataProvider.Capability.AddFeatures
+            )
+        }
+        ordered: list[QgsVectorLayer] = []
+        root = self.project.layerTreeRoot()
+        if root is not None:
+            try:
+                for node in root.findLayers():
+                    layer = node.layer()
+                    if layer is None or layer.id() not in editable:
+                        continue
+                    # isVisible() 是**有效**可见性（含祖先组），组被关掉也算隐藏
+                    if not node.isVisible():
+                        continue
+                    ordered.append(editable.pop(layer.id()))
+            except Exception:  # noqa: BLE001 —— 图层树异常时退回工程顺序
+                logger.exception("按图层树顺序整理可编辑图层失败")
+        # 不在图层树里 / 隐藏的图层不进编辑列表（"编辑列表只显示可见图层"）
+        return ordered
 
     def _choose_edit_layer(self) -> "Optional[QgsVectorLayer]":
         """「开始编辑」的选层弹窗：列出工程中可添加要素的矢量图层供选择。
@@ -42,20 +125,10 @@ class LayerTreeOpsMixin:
         编辑图层入口已收敛到这里——图层树右键「设为编辑图层」与点击自动预设
         均已移除。
         """
-        candidates = [
-            layer
-            for layer in self.project.mapLayers().values()
-            if isinstance(layer, QgsVectorLayer)
-            and not layer.readOnly()
-            and bool(
-                layer.dataProvider()
-                and layer.dataProvider().capabilities()
-                & QgsVectorDataProvider.Capability.AddFeatures
-            )
-        ]
+        candidates = self._editable_layers()
         if not candidates:
             QMessageBox.information(
-                self, "提示", "工程中没有可编辑的矢量图层，请先加载数据"
+                self, "提示", "工程中没有可见且可编辑的矢量图层，请先勾选显示图层"
             )
             return None
         # 默认高亮：当前编辑图层 → 图层树选中项 → 第一个
@@ -97,7 +170,9 @@ class LayerTreeOpsMixin:
         dlg.exec()
         return picked
 
-    def _apply_edit_target(self, layer: "Optional[QgsVectorLayer]") -> bool:
+    def _apply_edit_target(
+        self, layer: "Optional[QgsVectorLayer]", *, announce: bool = True
+    ) -> bool:
         """把 ``layer`` 设为编辑目标图层并联动工具条 / 磁性捕捉。
 
         仅指定目标（记录 ``self.edit_layer`` + 刷新按钮），不进入编辑态；真正的
@@ -107,6 +182,10 @@ class LayerTreeOpsMixin:
         **旧图层有未提交修改时会先问「保存 / 放弃 / 取消」**（见
         :meth:`_confirm_switch_with_changes`）—— 直接 ``stop(save=False)`` 会把用户
         刚改的东西静悄悄丢掉，那是数据损失，不能默默做。
+
+        :param announce: 是否提示「已选 X 为编辑图层」。下拉框在**未编辑**状态下
+            只切目标时传 ``False``（用户还要再点「开始编辑」，提示留到那时）；
+            编辑中切层会自动进入编辑，照常提示。
 
         :returns: 是否已切到 ``layer``。用户在提示里选了「取消」→ ``False``，
             调用方**不要**接着进编辑态（否则等于绕过了用户的选择）。
@@ -121,18 +200,53 @@ class LayerTreeOpsMixin:
                     return False
             self.editing_service.stop(prev, save=False)
 
+        # 赋值即完成联动：setter 会同步工具条（含下拉框）、停编钩子和捕捉目标
         self.edit_layer = layer
-        if hasattr(self, "digitizing_toolbar"):
-            self.digitizing_toolbar.set_edit_target(layer)
-        snap_tb = getattr(self, "snapping_toolbar", None)
-        if snap_tb is not None:
-            snap_tb.set_current_layer(layer)
+        # 下拉框 / 选层框列的是"可编辑"图层，不区分显隐。选到隐藏图层时画布上
+        # 看不到要素，点选工具也只查可见图层（canvas.layers()）→ 表现为
+        # "节点编辑拖了没反应、选中不了、分割按钮不亮"。选中目标时顺手显示它。
+        shown = self._ensure_layer_visible(layer)
+        if announce:
+            self._announce_edit_layer(layer, shown=shown)
+        return True
+
+    def _ensure_layer_visible(self, layer: "QgsVectorLayer") -> bool:
+        """让编辑目标在画布上可见（连同祖先组），返回是否做了改动。"""
+        if layer is None:
+            return False
+        try:
+            root = self.project.layerTreeRoot()
+            node = root.findLayer(layer.id())
+        except (AttributeError, RuntimeError):
+            return False
+        if node is None:
+            return False
+        try:
+            if node.isVisible():
+                return False
+            parent = node.parent()
+            while isinstance(parent, QgsLayerTreeGroup) and parent is not root:
+                if not parent.itemVisibilityChecked():
+                    parent.setItemVisibilityChecked(True)
+                parent = parent.parent()
+            if not node.itemVisibilityChecked():
+                node.setItemVisibilityChecked(True)
+        except RuntimeError:
+            return False
+        return True
+
+    def _announce_edit_layer(
+        self, layer: "QgsVectorLayer", *, shown: bool = False
+    ) -> None:
+        """「已选 X 为编辑图层」提示（切层 / 开始编辑共用同一句文案）。"""
+        text = f"已选 {layer.name()} 为编辑图层"
+        if shown:
+            text += "（该图层原为隐藏，已自动显示）"
         self.messageBar.pushMessage(
-            f"已选 {layer.name()} 为编辑图层",
+            text,
             level=Qgis.MessageLevel.Info,
             duration=3,
         )
-        return True
 
     def _confirm_switch_with_changes(self, layer: "QgsVectorLayer") -> bool:
         """旧编辑图层有未提交改动 → 问「保存 / 放弃 / 取消」。

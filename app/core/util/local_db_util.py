@@ -9,6 +9,7 @@ import math
 import os
 import re
 import shutil
+import struct
 import uuid
 from collections.abc import Iterable
 from contextlib import suppress
@@ -24,6 +25,7 @@ import pysqlite3 as sqlite3
 try:
     from app.core.util.gpkg_geom import (
         GpkgGeomError,
+        blob_xy_envelope,
         decompress_blob,
         encode_geometry,
         wkb_geometry_kind,
@@ -32,6 +34,7 @@ try:
 except ImportError:
     from gpkg_geom import (  # type: ignore[no-redef]
         GpkgGeomError,
+        blob_xy_envelope,
         decompress_blob,
         encode_geometry,
         wkb_geometry_kind,
@@ -298,6 +301,59 @@ def _to_wkt(geom: Any) -> str | None:
     return None
 
 
+def _register_gpkg_geometry_functions(conn: sqlite3.Connection) -> None:
+    """给 GPKG 连接注册 rtree 触发器需要的 ``ST_IsEmpty`` / ``ST_Min*`` 函数。
+
+    GDAL/OGR 写出的 GeoPackage 会带 ``rtree_<表>_geom_insert`` 之类的触发器，
+    插入几何时调用 ``ST_IsEmpty`` / ``ST_MinX`` / ``ST_MaxX`` / ``ST_MinY`` /
+    ``ST_MaxY`` 维护空间索引。我们是纯 sqlite 连接（刻意不加载 mod_spatialite，
+    见 ``__init__`` 的说明），没有这些函数，往这类库里追加要素会直接报
+    ``no such function: ST_IsEmpty``。
+
+    只注册 GPKG 二进制（``GP`` 头）的读取实现，服务于触发器；本工程自己建的
+    gpkg 表没有 rtree 触发器，这些函数不会被调用。
+    """
+    def _as_blob(value) -> bytes | None:
+        if isinstance(value, memoryview):
+            value = value.tobytes()
+        return bytes(value) if isinstance(value, (bytes, bytearray)) else None
+
+    def _is_empty(value) -> int:
+        blob = _as_blob(value)
+        # 非 GPKG 几何 / 空值：按空处理，避免触发器对 NULL 调 ST_MinX
+        if blob is None or len(blob) < 8 or blob[:2] != b"GP":
+            return 1
+        # GPKG flags bit4 = empty-geometry 标记
+        return 1 if blob[3] & 0x10 else 0
+
+    def _envelope(value):
+        blob = _as_blob(value)
+        if blob is None or len(blob) < 40 or blob[:2] != b"GP" or blob[3] & 0x10:
+            return None
+        env_type = (blob[3] >> 1) & 0x07
+        if env_type:
+            # 头里带 envelope（GDAL 与 gpkg_geom.encode_* 都带）：O(1) 直读。
+            # 头字节序由 flags bit0 决定；前 4 个 double 恒为 minx/maxx/miny/maxy
+            fmt = "<" if blob[3] & 0x01 else ">"
+            try:
+                minx, maxx, miny, maxy = struct.unpack_from(fmt + "dddd", blob, 8)
+                return minx, miny, maxx, maxy
+            except struct.error:
+                return None
+        # 头里没 envelope：解析 WKB 现算（慢路径，只为兼容少数第三方写入方）
+        return blob_xy_envelope(blob)
+
+    def _minmax(value, index: int) -> float:
+        env = _envelope(value)
+        return float(env[index]) if env is not None else 0.0
+
+    conn.create_function("ST_IsEmpty", 1, _is_empty)
+    conn.create_function("ST_MinX", 1, lambda value: _minmax(value, 0))
+    conn.create_function("ST_MinY", 1, lambda value: _minmax(value, 1))
+    conn.create_function("ST_MaxX", 1, lambda value: _minmax(value, 2))
+    conn.create_function("ST_MaxY", 1, lambda value: _minmax(value, 3))
+
+
 class local_db_util:
     def __init__(
         self,
@@ -377,6 +433,10 @@ class local_db_util:
                 self.has_spatialite = True
             except (sqlite3.OperationalError, AttributeError):
                 pass
+        else:
+            # 第三方 GDAL 写出的 gpkg 带 rtree 触发器，插入时要调 ST_IsEmpty /
+            # ST_MinX 等；纯 sqlite 连接没有这些函数（见 helper 的说明）
+            _register_gpkg_geometry_functions(self.conn)
 
         # 新建的库自动初始化 schema;已有库不动,避免覆盖业务数据
         if self.is_new:

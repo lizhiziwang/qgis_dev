@@ -43,6 +43,7 @@ from qgis.core import (
 )
 
 from app.core.util.local_db_util import local_db_util
+from app.core.util.ogr_fields import provider_id_field_indices
 from app.infra.logging import get_logger, log_operation
 
 logger = get_logger(__name__)
@@ -170,36 +171,6 @@ def unique_table_name(db_path: str, wanted: str, *, taken: Iterable[str] = ()) -
 # ----------------------------------------------------------------- private
 
 
-#: 驱动自己维护的 FID 列名（``fid`` / ``ogc_fid``）：导入时不当普通属性复制
-#: （见 :func:`_provider_id_field_indices`）。``objectid`` 不在内 —— 那是 GDB 里
-#: 用户能看到、往往也想保留的业务标识。
-_PROVIDER_ID_NAMES = frozenset({"fid", "ogc_fid"})
-
-
-def _provider_id_field_indices(layer: QgsVectorLayer) -> set[int]:
-    """数据源**自己维护**的 FID 字段下标（主键 + 整数 + 名字是 fid/ogc_fid）：导入时跳过。
-
-    我们自己建的 gpkg 表带 ``fid INTEGER PRIMARY KEY``（没有它 QGIS 的 OGR provider
-    不暴露删除 / 改值能力，见 ``local_db_util.create_vector_table`` 的说明）。把这种表
-    再导入到别的库时，**不能把 fid 当普通属性复制过去**：目标表里再有一列叫 fid 的
-    普通列，就会挡住它自己的整型主键，结果又是一张不能编辑的表。
-    """
-    indices: set[int] = set()
-    try:
-        primary_keys = set(layer.primaryKeyAttributes())
-        fields = layer.fields()
-    except RuntimeError:  # 图层已销毁
-        return indices
-    for index in primary_keys:
-        try:
-            name = fields.at(index).name().strip().lower()
-        except (IndexError, KeyError):
-            continue
-        if name in _PROVIDER_ID_NAMES:
-            indices.add(index)
-    return indices
-
-
 def _import_to_local(
     layer: QgsVectorLayer,
     db: dict,
@@ -276,7 +247,7 @@ def _import_to_local(
     total_features = layer.featureCount() if layer.featureCount() >= 0 else 0
     rows: list[dict] = []
     # 驱动自己的 FID 列（我们 gpkg 表上的 ``fid`` 主键）：不复制到目标表
-    skip_fields = _provider_id_field_indices(layer)
+    skip_fields = provider_id_field_indices(layer)
     skipped_invalid = 0
     # **字段对象只取一次**：``layer.fields()`` 每次都要跨 C++ 边界创建包装对象，
     # 逐要素逐字段调用是导入大图层时最没必要的开销之一；属性也按**下标**取，
@@ -550,7 +521,7 @@ def _build_columns(layer: QgsVectorLayer) -> list[tuple[str, str]]:
     }
     columns: list[tuple[str, str]] = []
     seen: set[str] = set()
-    skip_fields = _provider_id_field_indices(layer)
+    skip_fields = provider_id_field_indices(layer)
     for index, fld in enumerate(layer.fields()):
         if index in skip_fields:  # 驱动自己的 FID 列，不当普通属性导入
             continue

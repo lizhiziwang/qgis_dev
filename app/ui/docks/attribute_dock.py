@@ -2502,6 +2502,20 @@ class PagedAttributeTableWidget(QWidget):
         # 编辑会拿 QGIS 写锁，后台流式读锁会阻塞编辑：先取消流式
         if self.model is not None:
             self.model.cancel_stream()
+        # 先让主窗口把这个图层落成「当前编辑图层」：工具条的停编钩子 / 撤销栈 /
+        # 捕捉目标 / 下拉框都从 edit_layer 派生。旧编辑图层有未保存改动时主窗口
+        # 会弹「保存 / 放弃 / 取消」，用户选取消 → 这里也不能继续开编辑。
+        win = self.window()
+        applier = getattr(win, "_apply_edit_target", None)
+        if callable(applier):
+            try:
+                if not applier(self.layer):
+                    self._refresh_edit_buttons()
+                    return
+            except Exception:  # noqa: BLE001 —— 切换失败不能把整个表格拖死
+                logger.exception("属性表开始编辑前切换编辑图层失败")
+                self._refresh_edit_buttons()
+                return
         self.editing_service.start(self.layer)
         self._refresh_edit_buttons()
 

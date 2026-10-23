@@ -11,7 +11,9 @@
   它按目标 SRID 解释你给的 WKT。源图层坐标系与目标不同时必须先转，否则数据"进去了，
   位置全错"。
 - **字段按同名匹配**（大小写不敏感）。源里多出来的字段不导、目标里缺的列留空，
-  结果里把两边都列出来 —— 用户得知道哪些字段没跟上。
+  结果里把两边都列出来 —— 用户得知道哪些字段没跟上。**数据源自己维护的 FID
+  （GPKG 的 ``fid`` 等）不参与匹配**：它由目标库自增分配，复制过去会撞目标主键
+  （见 :mod:`app.core.util.ogr_fields`）。
 - **几何类型单多部件要对得上**：目标列是单部件类型（如 ``POLYGON``）时，源里的多部件
   要素会让整批回滚（``batch_add_vector_data`` 的约定）；错误原样报给用户。
 - 整批是一个事务：任一行失败就全部回滚，不会留下半批数据。
@@ -24,6 +26,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from app.core.util.local_db_util import local_db_util, table_geometry_column
+from app.core.util.ogr_fields import PROVIDER_ID_NAMES, provider_id_field_indices
 from app.infra.logging import get_logger
 
 if TYPE_CHECKING:
@@ -243,13 +246,30 @@ def _table_exists(db, table: str) -> bool:
 
 
 def _table_columns(db, table: str, geometry_column: str = "") -> list[str]:
-    """目标表的真实列名（不含几何列）。"""
+    """目标表的真实列名（不含几何列，也不含由数据源自增的主键列）。
+
+    主键列（``fid INTEGER PRIMARY KEY`` 这类）必须排除：追加时让目标库自己分配
+    FID，而不是把源图层的 FID 写进去 —— 两边都从 1 开始时必然撞
+    ``UNIQUE constraint failed: 表名.fid``（导入点位数据到已有图层时踩过）。
+    """
     rows = db.cursor.execute(f'PRAGMA table_info("{table}")').fetchall()
-    return [
-        str(row[1])
-        for row in rows
-        if str(row[1]) and str(row[1]).lower() != str(geometry_column or "").lower()
-    ]
+    columns: list[str] = []
+    for row in rows:
+        name = str(row[1] or "")
+        if not name:
+            continue
+        if geometry_column and name.lower() == str(geometry_column).lower():
+            continue
+        try:
+            is_pk = int(row[5] or 0) != 0
+        except (TypeError, ValueError):
+            is_pk = False
+        # 只排除「名字是 fid/ogc_fid 的整型主键」；业务主键（TEXT PRIMARY KEY 等）
+        # 仍按同名匹配复制，不在这里一刀切
+        if is_pk and name.lower() in PROVIDER_ID_NAMES:
+            continue
+        columns.append(name)
+    return columns
 
 
 def _table_srid(db, table: str) -> int:
@@ -272,11 +292,19 @@ def _table_srid(db, table: str) -> int:
 
 
 def _match_fields(layer: QgsVectorLayer, target_columns: list[str]) -> tuple[dict[str, str], list[str]]:
-    """源字段 → 目标列（大小写不敏感同名匹配）。返回 ``({源字段: 目标列}, [没匹配上的源字段])``。"""
+    """源字段 → 目标列（大小写不敏感同名匹配）。返回 ``({源字段: 目标列}, [没匹配上的源字段])``。
+
+    源图层里由数据源自己维护的 FID 字段（GPKG 的 ``fid`` 等）**不参与匹配**：
+    它不是业务属性，写进目标主键列只会撞 UNIQUE；也不该出现在「被跳过的字段」
+    里让用户以为丢了数据。
+    """
     by_lower = {column.lower(): column for column in target_columns}
     matched: dict[str, str] = {}
     skipped: list[str] = []
-    for field in layer.fields():
+    provider_ids = provider_id_field_indices(layer)
+    for index, field in enumerate(layer.fields()):
+        if index in provider_ids:
+            continue
         target = by_lower.get(field.name().lower())
         if target is None:
             skipped.append(field.name())
