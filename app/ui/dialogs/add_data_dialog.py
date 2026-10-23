@@ -56,6 +56,7 @@ from qgis.PyQt.QtWidgets import (
 
 from app.core.util.data_formats import (
     EXCEL_EXTS,
+    GDB_SUFFIX,
     KIND_CONTAINER,
     KIND_DIR,
     KIND_GDB,
@@ -65,6 +66,8 @@ from app.core.util.data_formats import (
     classify_entry,
     format_label,
     is_multi_layer_source,
+    is_valid_gdb_dir,
+    resolve_gdb_dir,
     suffix_of,
 )
 from app.core.util.sublayers import Sublayer, list_sublayers
@@ -994,11 +997,22 @@ class AddDataDialog(BaseDialog):
         item.setData(0, _ROLE_LOADED, True)
         path = str(item.data(0, _ROLE_PATH) or "")
         item.takeChildren()
+
+        # 解压得到的目录常出现「外层 xxx.gdb / 内层 xxx.gdb」：外层没有
+        # gdb、*.gdbtable，直接交给 OGR 只会得到一条没有细节的“无法打开”。
+        # 唯一内层库可以确定时自动下钻；多个候选则不猜。
+        actual_path = path
+        resolved = None
+        if suffix_of(path) == GDB_SUFFIX:
+            resolved = resolve_gdb_dir(path)
+            if resolved:
+                actual_path = resolved
+
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         try:
-            sublayers = list_sublayers(path)
+            sublayers = list_sublayers(actual_path)
         except Exception:
-            logger.warning("添加数据：列子图层失败 %s", path, exc_info=True)
+            logger.warning("添加数据：列子图层失败 %s", actual_path, exc_info=True)
             sublayers = []
         finally:
             QApplication.restoreOverrideCursor()
@@ -1007,15 +1021,29 @@ class AddDataDialog(BaseDialog):
             child = QTreeWidgetItem(["（没有可读取的图层）"])
             child.setFlags(Qt.ItemFlag.NoItemFlags)
             child.setForeground(0, QBrush(QColor(self._theme.text_secondary)))
-            if suffix_of(path) == ".gdb":
-                child.setToolTip(
-                    0,
-                    "GDB 打不开时通常是缺少 ESRI FileGDB 驱动；"
-                    "可改用 GeoPackage / Shapefile，或先导出为该格式。",
-                )
+            if suffix_of(path) == GDB_SUFFIX:
+                if resolved is None and not is_valid_gdb_dir(path):
+                    tooltip = (
+                        "所选目录里没有 gdb / *.gdbtable 文件，不是可读取的 "
+                        "File Geodatabase。若它是解压得到的外层文件夹，"
+                        "请展开并选择里面的 .gdb。"
+                    )
+                    hint = (
+                        f"「{item.text(0)}」不是有效的 GDB 目录；"
+                        "如果里面还有一层 .gdb，请展开选择内层库。"
+                    )
+                elif actual_path != path:
+                    tooltip = f"已自动读取内层库：{actual_path}"
+                    hint = f"内层库「{os.path.basename(actual_path)}」中没有读到可加载的图层。"
+                else:
+                    tooltip = "File Geodatabase 中没有要素类或表。"
+                    hint = "GDB 可以读取，但其中没有要素类或表。"
+                child.setToolTip(0, tooltip)
+            else:
+                hint = "没有读到可加载的图层。"
             item.addChild(child)
             item.setExpanded(True)
-            self._set_hint("没有读到可加载的图层；GDB 若缺 ESRI FileGDB 驱动，请改用 GeoPackage / Shapefile")
+            self._set_hint(hint)
             return
 
         for sublayer in sublayers:
@@ -1025,17 +1053,24 @@ class AddDataDialog(BaseDialog):
                 else "属性表"
             )
             child = QTreeWidgetItem([sublayer.name, kind_text, "", ""])
-            child.setData(0, _ROLE_PATH, path)
+            # 子图层指向真正读取的库：外层目录下钻时不能继续把外层路径传下去
+            child.setData(0, _ROLE_PATH, actual_path)
             child.setData(0, _ROLE_KIND, KIND_SUBLAYER)
             child.setData(0, _ROLE_SUBLAYER, sublayer)
-            child.setData(0, _ROLE_CONTAINER, path)
+            child.setData(0, _ROLE_CONTAINER, actual_path)
             child.setIcon(0, self._icon_for_sublayer(sublayer))
             child.setToolTip(0, sublayer.uri)
             item.addChild(child)
         item.setExpanded(True)
-        self._set_hint(
-            f"已展开「{item.text(0)}」共 {len(sublayers)} 个图层；勾选后可与文件一起添加"
-        )
+        if actual_path != path:
+            self._set_hint(
+                f"「{item.text(0)}」是外层目录，已自动读取内层库"
+                f"「{os.path.basename(actual_path)}」：共 {len(sublayers)} 个图层"
+            )
+        else:
+            self._set_hint(
+                f"已展开「{item.text(0)}」共 {len(sublayers)} 个图层；勾选后可与文件一起添加"
+            )
 
     def _on_selection_changed(self) -> None:
         self._update_summary()

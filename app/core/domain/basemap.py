@@ -49,7 +49,7 @@ from __future__ import annotations
 import json
 import re
 from typing import TYPE_CHECKING, Optional
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlsplit
 
 from app.env.config import (
     BaseTileConfig,
@@ -70,6 +70,17 @@ _REFERER_HOST = "tianditu.gov.cn"
 #: URL 判等用的 key 归一占位符：老配置内嵌的真实 tk 与 ``{tk}`` 模板判等时归一
 _KEY_PLACEHOLDER = "{tk}"
 _KEY_PARAM = re.compile(r"tk=[^&\s]+")
+
+#: 国内在线底图的 host 后缀（天地图 / 高德）。这类服务只覆盖中国，但 XYZ /
+#: WMTS 图层自报的 extent 是整个地球；定位与「全图」时改用中国范围，避免一按
+#: 全图就缩到世界范围。需要支持其它国内图源时在这里加 host 即可。
+DOMESTIC_BASEMAP_HOSTS = ("tianditu.gov.cn", "autonavi.com")
+
+#: 中国全图范围（WGS84 经纬度）：西 73°、南 18°（含海南）、东 135°、北 54°。
+CHINA_EXTENT_WGS84 = (73.0, 18.0, 135.0, 54.0)
+
+#: 从 QGIS 图层 source（连接串 / 参数串）里抠 URL；遇到分隔符即截断，host 已足够
+_URL_IN_SOURCE = re.compile(r"https?://[^\s'&]+", re.IGNORECASE)
 
 
 def apply_key_placeholders(url: str, keys: Optional[MapKeysConfig]) -> str:
@@ -95,6 +106,48 @@ def canonical_basemap_url(url: str) -> str:
     不同导致去重/置灰失配——归一后再比较两边一致。只用于判等，不改存储 url。
     """
     return _KEY_PARAM.sub("tk=" + _KEY_PLACEHOLDER, url)
+
+
+def is_domestic_basemap_source(source: str) -> bool:
+    """图层数据源是否来自国内在线底图（天地图 / 高德等）。
+
+    ``source`` 可能是裸 URL，也可能是 QGIS 连接串（``type=xyz&url=...``、
+    ``format='PNG32' ... url='...'``）或已 percent 编码的地址；先解一层编码，
+    再从中抠出 URL 按 host 判断（子域如 ``t0.tianditu.gov.cn`` 也算）。
+    """
+    text = unquote(source or "")
+    urls = _URL_IN_SOURCE.findall(text) or [text]
+    for url in urls:
+        try:
+            host = (urlsplit(url).hostname or "").lower()
+        except ValueError:
+            continue
+        if any(host == known or host.endswith("." + known) for known in DOMESTIC_BASEMAP_HOSTS):
+            return True
+    return False
+
+
+def domestic_basemap_extent(dest_crs, project=None):
+    """国内在线底图的默认定位范围：中国范围，已换算到 ``dest_crs``。
+
+    天地图 / 高德的 XYZ、WMTS 图层自身 ``extent()`` 是整个世界，但服务实际只
+    覆盖中国；「全图」和「缩放至该图层」用它替代世界范围（见
+    :data:`CHINA_EXTENT_WGS84`）。源范围固定为 EPSG:4326，转换失败由调用方处理。
+    """
+    from qgis.core import (
+        QgsCoordinateReferenceSystem,
+        QgsCoordinateTransform,
+        QgsProject,
+        QgsRectangle,
+    )
+
+    extent = QgsRectangle(*CHINA_EXTENT_WGS84)
+    source_crs = QgsCoordinateReferenceSystem("EPSG:4326")
+    if dest_crs is not None and dest_crs != source_crs:
+        project = project if project is not None else QgsProject.instance()
+        transform = QgsCoordinateTransform(source_crs, dest_crs, project)
+        extent = transform.transformBoundingBox(extent)
+    return extent
 
 
 def build_xyz_uri(tile: BaseTileConfig, keys: Optional[MapKeysConfig] = None) -> str:
@@ -456,6 +509,8 @@ def _mask_url(url: str) -> str:
 
 
 __all__ = [
+    "CHINA_EXTENT_WGS84",
+    "DOMESTIC_BASEMAP_HOSTS",
     "add_base_tile_layer",
     "apply_key_placeholders",
     "build_arcgis_feature_uri",
@@ -466,5 +521,7 @@ __all__ = [
     "build_wmts_uri",
     "build_xyz_uri",
     "canonical_basemap_url",
+    "domestic_basemap_extent",
     "install_referer_preprocessor",
+    "is_domestic_basemap_source",
 ]

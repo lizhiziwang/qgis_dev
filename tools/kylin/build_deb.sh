@@ -26,10 +26,16 @@ if [ ! -d "$PORTABLE" ] || [ ! -x "$PORTABLE/qgis_dev" ]; then
     exit 1
 fi
 
-# 版本号：优先参数，其次 pyproject.toml
+# 版本号：优先参数；其次产物根的 build_info.json（与本次 PyInstaller 产物严格同源）；
+# 最后才回退源码版本。.deb 的 Version 必须是 Debian 格式（rc → ~rc）。
 VERSION="${1:-}"
 if [ -z "$VERSION" ]; then
-    VERSION=$(grep -m1 '^version' "$PROJECT_ROOT/pyproject.toml" | sed -E 's/.*= *"([^"]+)".*/\1/')
+    if [ -f "$PORTABLE/build_info.json" ]; then
+        BUILT_VERSION=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["version"])' "$PORTABLE/build_info.json")
+        VERSION=$(python3 "$PROJECT_ROOT/tools/version.py" --format deb --input-version "$BUILT_VERSION")
+    else
+        VERSION=$(python3 "$PROJECT_ROOT/tools/version.py" --format deb)
+    fi
 fi
 # 架构：优先参数，其次本机（交叉打包时用参数指定）
 ARCH="${2:-}"
@@ -61,12 +67,19 @@ rm -rf "$ROOT"
 mkdir -p \
     "$ROOT/DEBIAN" \
     "$ROOT/${APP_DIR}" \
+    "$ROOT/usr/local/lib/qgis_dev" \
     "$ROOT/usr/share/applications" \
     "$ROOT/usr/share/icons/hicolor/512x512/apps" \
     "$ROOT/usr/share/icons/hicolor/256x256/apps"
 
 echo "== 复制便携包 → $ROOT${APP_DIR}"
 cp -a "$PORTABLE/." "$ROOT${APP_DIR}/"
+
+# 自动更新提权程序：root:root 0755，固定路径（客户端 UpdaterLauncher 只认这个
+# 位置）。普通用户经 pkexec 启动它；它自己重新验签清单后才替换 /opt/qgis_app。
+echo "== 安装更新器 → /usr/local/lib/qgis_dev/qgis-dev-updater"
+install -m 0755 "$PROJECT_ROOT/tools/linux/qgis-dev-updater" \
+    "$ROOT/usr/local/lib/qgis_dev/qgis-dev-updater"
 
 # 应用可写目录（logs / .tmp）预创建并放开权限，普通用户也能跑。
 # 先清掉便携包调试/测试残留（旧日志为 root:root，会导致普通用户 PermissionError）
@@ -88,7 +101,7 @@ Priority: optional
 Architecture: $ARCH
 Maintainer: zsh <zsh@example.com>
 Installed-Size: $(du -sk "$ROOT${APP_DIR}" | cut -f1)
-Depends: libc6 (>= 2.31), libstdc++6 (>= 9), libx11-6, libxcb1, libgl1, libegl1, libfontconfig1, libfreetype6
+Depends: libc6 (>= 2.31), libstdc++6 (>= 9), libx11-6, libxcb1, libgl1, libegl1, libfontconfig1, libfreetype6, python3
 Recommends: fonts-noto-cjk, fonts-wqy-zenhei
 Description: 图斑核实平台（PyQGIS 桌面 GIS 应用）
  基于 PyQGIS 的桌面 GIS 应用，含图斑质检、绘制、查询、
@@ -101,6 +114,11 @@ cat > "$ROOT/DEBIAN/postinst" <<'EOF'
 set -e
 chmod 755 /opt/qgis_app/launch_qgis.sh
 chmod 755 /opt/qgis_app/qgis_dev
+# 自动更新提权程序由 root 所有、不可被普通用户改写（pkexec 安全边界）
+if [ -f /usr/local/lib/qgis_dev/qgis-dev-updater ]; then
+    chown root:root /usr/local/lib/qgis_dev/qgis-dev-updater
+    chmod 755 /usr/local/lib/qgis_dev/qgis-dev-updater
+fi
 # 日志/临时目录放开写权限（含旧文件），普通用户可写
 chmod -R a+rwX /opt/qgis_app/logs /opt/qgis_app/.tmp 2>/dev/null || true
 update-desktop-database /usr/share/applications 2>/dev/null || true

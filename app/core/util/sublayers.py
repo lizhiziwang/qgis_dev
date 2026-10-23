@@ -24,6 +24,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from app.core.util.data_formats import (
+    GDB_SUFFIX,
+    resolve_gdb_dir,
+    suffix_of,
+)
 from app.infra.logging import get_logger
 
 if TYPE_CHECKING:
@@ -116,11 +121,24 @@ def _kind_from_name(text: str) -> str:
 def list_sublayers(path: str) -> list[Sublayer]:
     """列出 ``path`` 里的所有图层（按名字排序）；读不出来返回空表。
 
-    GDB 是**目录**，传它的目录路径即可（``querySublayers`` 认）。
+    GDB 是**目录**，传它的目录路径即可（``querySublayers`` 认）。如果传进来的是
+    “外层 xxx.gdb”，而真正的库在唯一子目录里，会自动下钻一层（见
+    :func:`~app.core.util.data_formats.resolve_gdb_dir`）。
     """
     if not Path(path).exists():
         logger.info("列子图层：路径不存在 %s", path)
         return []
+    if suffix_of(path) == GDB_SUFFIX:
+        resolved = resolve_gdb_dir(path)
+        if resolved is None:
+            logger.warning(
+                "列子图层：%s 不是有效的 File Geodatabase（没有 gdb / .gdbtable 文件）",
+                path,
+            )
+            return []
+        if resolved != path:
+            logger.info("列子图层：%s 是外层目录，改用内层库 %s", path, resolved)
+        path = resolved
     found = _query_sublayers(path)
     if not found:
         found = _data_provider_sublayers(path)

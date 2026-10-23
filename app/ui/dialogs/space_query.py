@@ -108,8 +108,10 @@ class SpaceQueryDialog(BaseDialog):
 
         # 按钮
         bb = QDialogButtonBox()
-        bb.addButton("确认", QDialogButtonBox.AcceptRole)
-        bb.addButton("取消", QDialogButtonBox.RejectRole)
+        # Qt6（PyQt6）不再暴露 QDialogButtonBox.AcceptRole 这类未限定枚举别名；
+        # qgis.PyQt shim 在 Qt5 下也支持 ButtonRole 作用域写法。
+        bb.addButton("确认", QDialogButtonBox.ButtonRole.AcceptRole)
+        bb.addButton("取消", QDialogButtonBox.ButtonRole.RejectRole)
         bb.accepted.connect(self._on_query)
         bb.rejected.connect(self.close)
         layout.addWidget(bb)

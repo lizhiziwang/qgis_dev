@@ -101,8 +101,12 @@ def _filter_lines_by_time(lines: list[str], start: str, end: str) -> list[str]:
 class LogDock(QDockWidget):
     """日志面板。"""
 
-    def __init__(self, parent: Optional[QWidget] = None) -> None:
+    def __init__(self, parent: Optional[QWidget] = None, feedback_url: str = "") -> None:
         super().__init__("日志信息", parent)
+        # 反馈页地址由 config/app.yaml 的 services.feedback_url 提供（bootstrap 读取），
+        # 不在 UI 层硬编码，换网关只改配置。
+        url = feedback_url.strip()
+        self._feedback_url = url.rstrip("/") + "/" if url else ""
         # saveState/restoreState 按 objectName 匹配 Dock；空名字会被 Qt 丢弃并告警。
         self.setObjectName("LogDock")
         self.param = {"size": 500, "level": "ALL", "filter": ""}
@@ -176,11 +180,14 @@ class LogDock(QDockWidget):
         self.level_combo = QComboBox()
         self.level_combo.addItems(["ALL", "INFO", "DEBUG", "ERROR", "WARNING", "CRITICAL"])
         self.level_combo.setCurrentIndex(0)
+        # 级别 / 行数切换后立即按新条件重查，不必再点一次「查询」
+        self.level_combo.currentIndexChanged.connect(self._on_search)
         row.addWidget(self.level_combo)
 
         self.size_combo = QComboBox()
         self.size_combo.addItems(["50", "100", "500", "1000", "无限制"])
         self.size_combo.setCurrentIndex(2)
+        self.size_combo.currentIndexChanged.connect(self._on_search)
         row.addWidget(self.size_combo)
 
         query = QPushButton("查询")
@@ -219,12 +226,10 @@ class LogDock(QDockWidget):
         export.clicked.connect(self._on_export_diagnostics)
         row.addWidget(export)
         row.addSpacing(10)
-        self.auto_btn = QPushButton("自动滚动")
-        self.auto_btn.setCheckable(True)
+        self.auto_btn = QCheckBox("自动滚动")
         self.auto_btn.setChecked(True)
-        self.auto_btn.clicked.connect(
-            lambda: setattr(self, "auto_scroll", self.auto_btn.isChecked())
-        )
+        self.auto_btn.setToolTip("勾选后日志刷新时自动滚动到最新一条")
+        self.auto_btn.toggled.connect(self._on_auto_scroll_toggled)
         row.addWidget(self.auto_btn)
         return bar
 
@@ -283,6 +288,12 @@ class LogDock(QDockWidget):
             return os.path.getmtime(self._log_path())
         except OSError:
             return 0.0
+
+    def _on_auto_scroll_toggled(self, checked: bool) -> None:
+        """勾选状态同时驱动滚动行为；重新勾选时立即回到最新日志。"""
+        self.auto_scroll = checked
+        if checked and self.txt is not None:
+            self.txt.moveCursor(QTextCursor.MoveOperation.End)
 
     def _on_current_session_toggled(self, checked: bool) -> None:
         """勾选当前会话：时间范围由会话决定，日期控件隐藏；取消则恢复手动选择。"""
@@ -426,6 +437,61 @@ class LogDock(QDockWidget):
             f"共 {len(package.entries)} 个文件、{size_kb:.0f} KB，凭据已打码。"
             f"\n请把它发给技术支持。",
         )
+
+    def _on_feedback(self) -> None:
+        """打开浏览器反馈页面，query 里带上 base64 编码的当前用户 id / 用户名。
+
+        用户信息取自本次登录会话（主窗口的 ``_auth_result``，见
+        :meth:`ChromeMixin._apply_user_info_to_titlebar`）：``user_id`` 是
+        ``currentUserByToken`` 返回的 ``userId``，``user_name`` 优先姓名、退而账号。
+        没登录（如非启动路径构造窗口）时两个参数为空串，页面仍可正常打开。
+
+        base64 结果可能含 ``+`` / ``/`` / ``=``，必须再 URL 编码一次，
+        否则 ``+`` 到服务端会被解成空格、base64 就坏了。
+        """
+        user_id, user_name = self._feedback_identity()
+        if not user_id and not user_name:
+            logger.warning("打开反馈页面时没有当前登录用户信息")
+        query = urlencode(
+            {
+                "user_id": _b64(user_id),
+                "user_name": _b64(user_name),
+            }
+        )
+        url = f"{FEEDBACK_URL}?{query}"
+        if not QDesktopServices.openUrl(QUrl(url)):
+            logger.error("打开反馈页面失败 url=%s", url)
+            QMessageBox.warning(self, "反馈", f"无法打开浏览器，请手动访问：\n{url}")
+
+    def _feedback_identity(self) -> tuple[str, str]:
+        """当前登录用户的 ``(user_id, user_name)``；没有会话时返回两个空串。
+
+        用户对象挂在主窗口的 ``_auth_result.user`` 上（:class:`CurrentUser`），
+        ``userId`` 不在具名字段里，只能从 ``raw`` 取——服务端各环境字段名
+        略有差异，这里按常见别名依次找。
+        """
+        parent = self.parent()
+        result = getattr(parent, "_auth_result", None) if parent is not None else None
+        if result is None:
+            return "", ""
+        user = getattr(result, "user", None)
+        fallback_name = (getattr(result, "username", "") or "").strip()
+        if user is None:
+            return "", fallback_name
+        raw = user.raw if isinstance(user.raw, dict) else {}
+        user_id = ""
+        for key in ("userId", "user_id", "userGuid", "id"):
+            value = raw.get(key)
+            if value:
+                user_id = str(value).strip()
+                break
+        user_name = (user.name or user.account or fallback_name).strip()
+        return user_id, user_name
+
+
+def _b64(text: str) -> str:
+    """UTF-8 文本 → 标准 base64 字符串（空串仍是空串）。"""
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
 def add_log_dock(parent) -> LogDock:

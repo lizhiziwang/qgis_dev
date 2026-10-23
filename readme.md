@@ -58,8 +58,11 @@ qgis_dev/
 ├── tools/                      # 构建 / 打包
 │   ├── pyinstaller.spec        #   统一 PyInstaller spec（Win/Linux 共用，QGIS 路径读 config）
 │   ├── protect_cython.py       #   Cython 原生编译保护：Qt-free 模块 → .pyd/.so + manifest
-│   ├── build_windows.ps1       #   Windows 打包：清理 → 编译保护 → PyInstaller → 复制 QGIS 运行时
+│   ├── build_windows.ps1       #   Windows 打包：清理 → 编译保护 → PyInstaller → 复制 QGIS 运行时 → 安装包
 │   ├── build_linux.sh          #   Linux 打包
+│   ├── installer/              #   Windows 安装包（Inno Setup 6）
+│   │   ├── installer.iss       #     安装脚本：用户目录、快捷方式、卸载、保留用户配置
+│   │   └── ChineseSimplified.isl #   安装界面简体中文
 │   ├── runtime/                #   便携启动器
 │   │   ├── start_runtime.bat   #     与 app.exe 同目录，设 QGIS 环境后启动（打包会复制进产物）
 │   │   └── launch_qgis.sh
@@ -123,28 +126,41 @@ mypy --strict app/infra app/env
 
 ### 目标：绿色便携，目标机免装 QGIS
 
-打包产物 `dist/app/` 是**自包含便携包**：QGIS 运行时（`proj.db`、`qgis` python 包、`etc/`、`plugins/`、`i18n/`、核心 DLL、Qt 平台插件）全部打进目录，目标机器**无需安装 QGIS**。
+打包产物 `dist/app/` 是**自包含便携包**：QGIS 运行时（Windows 为 `proj.db`、`etc/`、`plugins/`、`i18n/`、`providers/`、`platforms/`；Linux 为 conda 风格迷你前缀 `share/qgis` + `lib/qgis/plugins`）、`qgis` python 包、核心 DLL / `.so`、Qt 平台插件全部打进目录，目标机器**无需安装 QGIS**。
 
 ### 产物目录结构
 
-根目录只保留 6 项，其余全部收进 `_internal/`（PyInstaller 6 标准布局）：
+根目录只保留入口 / 启动器 / 配置 / 运行时等少数几项，其余全部收进 `_internal/`（PyInstaller 6 标准布局）。Windows 与 Linux **顶层结构一致**，只有入口文件名和 `runtime/` 内部布局按平台不同：
 
 ```
 dist/app/
-├── app.exe                     入口
-├── start_runtime.bat           启动器（显式设 QGIS 环境；双击 app.exe 也可）
+├── app.exe                     入口（Windows）
+├── qgis_dev                    入口（Linux；不能叫 app，见 spec 注释）
+├── start_runtime.bat           启动器（Windows，显式设 QGIS 环境；双击 app.exe 也可）
+├── launch_qgis.sh              启动器（Linux，显式设 QGIS 环境）
 ├── config/                     应用配置（明文，可直接改）
 ├── resource/                   应用资源（明文，可直接改）
-├── logs/                       运行日志（运行时生成）
+├── build_info.json             构建指纹（版本 / buildId / channel）
+├── logs/ .tmp/                 运行时生成（deb 安装包会预创建）
 ├── runtime/                    QGIS 运行时数据（可整体替换 / 升级）
-│   ├── etc/ i18n/ plugins/ providers/ platforms/
-│   ├── proj.db
-│   └── resources/srs.db
-└── _internal/                  Python 运行时 + 全部依赖库 + 业务 .pyd
+│   ├── Windows：etc/ i18n/ plugins/ providers/ platforms/
+│   │            proj.db resources/srs.db
+│   └── Linux：  share/{qgis,proj,gdal}/
+│                lib/{qgis/plugins,gdalplugins,qt6/plugins}/
+│                bin/（gdal_translate 等 processing 调用的命令行工具）
+└── _internal/                  Python 运行时 + 全部依赖库 + 业务 .pyd/.so
     ├── python312.dll  base_library.zip
     ├── qgis/ osgeo/ numpy/ PyQt6/ ...（第三方包）
     └── app/**/*.pyd            编译保护后的业务代码
 ```
+
+> Linux 的 `runtime/` 不是 Windows 那样的扁平目录：QGIS 在 Linux 上把
+> `pkgDataPath` / `pluginPath` 等硬编码成 `<prefix>/share/qgis`、
+> `<prefix>/lib/qgis/plugins`，所以它被组装成一个「迷你 conda 前缀」，
+> 由 `QgisRuntime.for_system` 接管（`QGIS_PREFIX=dist/app/runtime`）。
+> Python 依赖库统一平铺在 `_internal/`（PyInstaller 保证该目录在动态库搜索
+> 路径上，子目录不保证），避免根目录出现几百个 `.so`，也避免
+> `LD_LIBRARY_PATH` 触发 bootstrap 重新 exec。
 
 ### 构建命令
 
@@ -157,32 +173,61 @@ bash tools/build_linux.sh                                            rem Linux /
 > 在麒麟机/容器上 `bash tools/build_linux.sh` → `bash tools/kylin/build_deb.sh` 出 `.deb`。
 > 完整指南见 [`tools/kylin/README.md`](tools/kylin/README.md)。
 
-`build_windows.ps1` 自动完成四步：
+`build_windows.ps1` 自动完成五步：
 1. **清理** 旧 `dist/`、`build/`
 2. **编译保护**（可选）：把 Qt-free 的纯 Python 模块用 Cython 编成 `.pyd`（详见下节）
 3. **PyInstaller**（`tools/pyinstaller.spec`）：入口 `scripts/entry.py`（包外脚本，避免直接以包内 `app/main.py` 为入口时 `app.bootstrap` 打不进包）
 4. **复制运行时可分离部分**：QGIS 数据（`etc/`、`plugins/`、`i18n/`、`providers/`、`platforms/`、`proj.db`、`srs.db`）→ `dist/app/runtime/`；`config/`、`resource/` → 产物根；并把 `start_runtime.bat` 复制进产物
+5. **生成安装包**（可选）：用 Inno Setup 6 把 `dist/app/` 压成 `dist/图斑核实平台_V<版本>_Setup.exe`
+
+`build_linux.sh` 的对应阶段：清理 → 版本戳 → Cython 编译保护 → PyInstaller → 收集 QGIS 运行时到 `runtime/`（迷你前缀）→ 复制 `config/`、`resource/` 到产物根 → 递归收集 `.so` 到 `_internal/` → 启动器 → `build_info.json` → **布局自检**（缺 `runtime/share/qgis/resources/srs.db`、`processing`、`lib/qgis/plugins`、Qt xcb 插件等关键项直接失败，避免打出“能启动但功能缺失”的包）。
+
+### 安装包
+
+产物是单个 `dist/<应用名>_V<版本>_Setup.exe`（LZMA2 压缩，约 1.4 GB 目录压到数百 MB），
+双击后可选安装目录，默认 `%LOCALAPPDATA%\<应用名>`：
+
+- **免管理员**（`PrivilegesRequired=lowest`）：应用会往 exe 同级写 `logs/`、`.tmp/`、`config/`，装 `Program Files` 会因无写权限失败。
+- **升级保留用户配置**：`config/app.yaml` 用 `onlyifdoesntexist` 安装，卸载时也保留；其余程序文件随安装包更新。
+- **不进包**：`logs/`、`.tmp/`、`__pycache__` 不打进安装包，装完自动建空目录。
+- 桌面 / 开始菜单快捷方式、卸载程序由安装器生成。
+- 安装目录可以含中文：QGIS 4.2 在非 ASCII 路径下加载不了 `provider_wms.dll` 等外部 provider（底图打不开、`Invalid data provider wms`）。程序启动时检测到 `runtime/` 路径含非 ASCII 字符，会自动在 `%LOCALAPPDATA%\qgis_dev_runtime\` 下建一个 ASCII junction 指向它，并把 QGIS/GDAL/Qt 的环境变量指到链接（`app/env/qgis_runtime.py::_ascii_prefix_for_qgis`）。
+- `-NoInstaller` 跳过第 5 步，只留目录产物；机器上没有 Inno Setup 时也会自动跳过（提示但不报错）。
+- 安装包 exe 未签名，首次运行会被 SmartScreen 拦截；正式对外分发需代码签名证书。
+
+依赖：`winget install JRSoftware.InnoSetup --source winget`（检测 `%LOCALAPPDATA%\Programs\Inno Setup 6\ISCC.exe` 及 Program Files 下两处）。
+
+### 自动更新
+
+客户端启动后自动检查新版本（默认 10s 后首次、之后每 4 小时），验签清单、断点续传
+下载、校验 SHA-256，并调用独立更新器完成安装与失败回滚；Windows 走 Inno 静默安装，
+麒麟 / Linux 走 root 提权更新器。发布侧（清单托管、签名、管理页）在
+`problem-feedback` 项目中。
+
+完整说明见 [`docs/update.md`](docs/update.md)，发布命令见
+`python tools/update_release.py --help`、`python tools/update_signing.py --help`。
 
 ### 启动打包结果
 
 - **直接双击 `dist\app\app.exe`**：应用冻结态自动探测便携包（见下），无需任何环境变量
 - **双击 `dist\app\start_runtime.bat`**：显式设置环境变量后启动（与 app.exe 同目录即可用）
+- **安装包安装后**：开始菜单 / 桌面快捷方式直接指向安装目录下的 `app.exe`，行为与便携包一致
 
 ### 免装 QGIS 的关键设计
 
-1. **运行时可分离**：QGIS 数据集中放 `dist/app/runtime/`（`proj.db`、`etc/`、`plugins/`、`i18n/`、`providers/`、`platforms/`、`resources/srs.db`）；Python 库与扩展（含 `qgis` python 包）在 `_internal/`。
-2. **`QgisRuntime.for_portable`**（`app/env/qgis_runtime.py`）：把 `QGIS_PREFIX_PATH`、`PROJ_LIB`、`GDAL_DATA`、`QT_PLUGIN_PATH` 等环境变量全部指向 `dist/app/runtime`，PROJ 能在包内找到 `proj.db`。
-3. **`_build_qgis_runtime` 优先 `QGIS_PREFIX`**（`app/bootstrap/__init__.py`）：launcher 设 `QGIS_PREFIX=dist/app/runtime` → 走 `for_portable`；若指向完整 QGIS 安装（有 `apps/qgis`）→ 走 `for_prod`。
-4. **`_ensure_portable_env` 自动探测**：PyInstaller 冻结态下，`app.exe` 所在目录若含 `qgis/` + `proj.db` 即识别为便携包，自动设置全部环境变量——所以**直接双击 app.exe 也能跑**。
+1. **运行时可分离**：QGIS 数据集中放 `dist/app/runtime/`（Windows：`proj.db`、`etc/`、`plugins/`、`i18n/`、`providers/`、`platforms/`、`resources/srs.db`；Linux：`share/qgis`、`share/proj`、`share/gdal`、`lib/qgis/plugins`、`lib/gdalplugins`、`bin/`）；Python 库与扩展（含 `qgis` python 包）在 `_internal/`。
+2. **运行时选择**（`app/env/qgis_runtime.py`）：Windows 便携包走 `for_portable`，把 `QGIS_PREFIX_PATH`、`PROJ_LIB`、`GDAL_DATA`、`QT_PLUGIN_PATH` 等全部指向 `dist/app/runtime`；Linux 便携包的 `runtime/` 是迷你 conda 前缀，走 `for_system`（`QGIS_PREFIX=dist/app/runtime`），额外把 `GDAL_DRIVER_PATH` 指到 `runtime/lib/gdalplugins`，否则 libgdal 编译期烧进去的构建机绝对路径失效，会静默丢掉 21 个插件驱动。
+3. **`_build_qgis_runtime` 优先 `QGIS_PREFIX`**（`app/bootstrap/__init__.py`）：launcher 设 `QGIS_PREFIX=dist/app/runtime` → Windows 走 `for_portable`、Linux 走 `for_system`；若指向完整 QGIS 安装（有 `apps/qgis`）→ 走 `for_prod`。
+4. **`_ensure_portable_env` 自动探测**：PyInstaller 冻结态下，`app.exe` / `qgis_dev` 所在目录若含 `runtime/proj.db`（Windows）或 `runtime/share/qgis`（Linux）即识别为便携包，自动设置全部环境变量——所以**直接双击 exe 也能跑**。旧 Linux 平铺布局（`proj.db` + `share/qgis` 直接在产物根）仍兼容；新布局的库都在 `_internal/`，不再走 `LD_LIBRARY_PATH` 重新 exec（否则会无限 exec）。
 5. **config 打包 + `QGIS_DEV_*` 环境变量**：打包后 `__file__` 指向 `_internal/`，而 `config/`、`resource/` 在顶层，靠 launcher/自动探测把路径指回去。
-6. **Qt 平台插件**：`apps/qt6/plugins/platforms/` → `dist/app/runtime/platforms/`（GUI 显示必需）。
+6. **Qt 平台插件**：Windows `apps/qt6/plugins/platforms/` → `dist/app/runtime/platforms/`；Linux 整棵 Qt 插件树 → `dist/app/runtime/lib/qt6/plugins/`（Qt5 构建为 `lib/qt5/plugins`，launcher 按 `platforms/` 是否存在自动探测）。GUI 显示必需。
 7. **DLL 运行时隔离**（`tools/rthook_dll_dirs.py`）：`qgis/__init__.py` 会把 `PATH` 里每个目录都 `add_dll_directory`；若目标机还装着另一份 QGIS/GDAL（OSGeo4W/conda），会加载到版本不匹配的 `gdal313.dll`/`proj_9.dll`，报 `ImportError: DLL load failed while importing _core: 找不到指定的程序`。运行时钩子在 `qgis` 被 import 前把 `_internal/` 前置到 DLL 搜索路径，并**剔除提供了随包同名 DLL 的外部 PATH 目录**（系统目录除外），保证便携包只用随包运行时。
 
 ### spec 要点（`tools/pyinstaller.spec`）
 
 - 入口 `scripts/entry.py`，`pathex` 为项目根；用 `SPECPATH`（而非 `__file__`）推导项目根（spec 命名空间没有 `__file__`）。
-- `contents_directory="_internal"`（仅 Windows）：collected 文件（Python 库、扩展、DLL）全部落到 `_internal/`，根目录干净；Linux 构建脚本已自建 `lib/`、`share/qgis/` 布局，保持扁平。
-- `datas`（Windows）：只留 `qgis` python 包；`resource/`、`config/`、`srs.db`、`proj.db`、`platforms/` 改由 `build_windows.ps1` 的 STAGE 4 复制到产物根 / `runtime/`。
+- `contents_directory="_internal"`（Windows / Linux 一致）：collected 文件（Python 库、扩展、DLL/.so）全部落到 `_internal/`，根目录干净；Linux 的 QGIS 运行时由 `build_linux.sh` 组装进 `runtime/`（迷你前缀）。
+- `datas`：只留 `qgis` python 包（Windows / Linux 一致，落 `_internal/qgis`）；`resource/`、`config/`、`srs.db`、`proj.db`、Qt 插件等改由构建脚本复制到产物根 / `runtime/`，不埋进 `_internal`。
 - `binaries`（Windows）：`qgis_core.dll`、`qgis_gui.dll`、`gdal313.dll`、`geos_c.dll`、`pdalcpp.dll`、`proj_9.dll`、Qt6 核心 DLL（均落 `_internal/`）。
 - `runtime_hooks`：`tools/rthook_dll_dirs.py`，隔离随包运行时与宿主机同名 DLL（见上）。
 - `icon`（Windows）：构建时用 Pillow 从 `resource/png/app_icon.png` 生成多尺寸 `build/app_icon.ico`（16/24/32/48/64）嵌进 `app.exe`——即资源管理器 / 任务栏上看到的文件图标。**换图标只需替换该 png**（源图小于 256 时不生成 256 档位）。
@@ -197,7 +242,7 @@ bash tools/build_linux.sh                                            rem Linux /
 
 1. `build_windows.ps1` 的 **STAGE 2** 调用 `tools/protect_cython.py`，按 `config/app.yaml` 的 `build.protect.cython` 配置把目标模块编成 `.pyd`，写出 `build/protect/manifest.json`。
 2. PyInstaller **分析阶段仍用原始 `.py`**（保证 `collect_submodules` / 动态导入收集完整）。
-3. spec 读 manifest，把这些模块的**字节码从 PYZ 剔除**，只把 `.pyd` 作为二进制收进 `dist/app/_internal/app/...`（Linux 仍为 `dist/app/app/...`）。
+3. spec 读 manifest，把这些模块的**字节码从 PYZ 剔除**，只把 `.pyd` / `.so` 作为二进制收进 `dist/app/_internal/app/...`（Windows / Linux 一致）。
 4. 运行期冻结导入器在 PYZ 找不到模块时回退到磁盘 FileFinder（`PyInstaller/loader/pyimod02_importers.py` 的 `PyiFrozenFinder.find_spec`），于是加载 `.pyd`。
 
 **默认范围**：只编译 **不 import `qgis`/`PyQt` 的模块**（约 104 个），已覆盖 `app.core.auth`（密钥/授权/凭据/DPAPI）、`app.core.data`、`app.core.util`、`app.core.domain` 算法、`app.infra`、`app.env`、`app.server`。
@@ -250,7 +295,7 @@ app.ui  ←  表现层（MainWindow + docks + dialogs + tools），只发信号�
 
 - **单向依赖**：`app.core` 不依赖 UI；`app.ui` 通过信号/回调把业务交给 `MainWindow`（回调注入模式）。
 - **统一路径**：所有资源路径走 `app.infra.fs.paths.Paths`，支持环境变量覆盖（打包后由 launcher 注入）。
-- **QGIS 运行时装配**：`QgisRuntime.apply_env()` 幂等地写入 `QGIS_PREFIX_PATH` / `PROJ_LIB` / `GDAL_DATA` / `QT_PLUGIN_PATH` 等，并加入 `sys.path`；支持三种模式（dev 安装 / prod 安装 / portable `runtime/` 布局）。
+- **QGIS 运行时装配**：`QgisRuntime.apply_env()` 幂等地写入 `QGIS_PREFIX_PATH` / `PROJ_LIB` / `GDAL_DATA` / `QT_PLUGIN_PATH` 等，并加入 `sys.path`；支持四种模式（dev 安装 / prod 安装 / Windows portable `runtime/` / Linux system 迷你前缀 `runtime/`）。
 
 ### 主窗口（`app/ui/main_window/main_window.py`）
 

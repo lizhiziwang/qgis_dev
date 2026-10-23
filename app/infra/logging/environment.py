@@ -25,13 +25,14 @@ from pathlib import Path
 from typing import Any
 
 from app import __version__ as app_version
+from app.build_meta import BUILD_INFO_FILE, read_build_info
 from app.infra.fs.paths import Paths
 
 from .config import LogConfig
 from .session import current_session
 
 #: 打包时可由构建脚本写在产物根的版本戳（``{"git": "abc1234"}``），有则优先用。
-BUILD_INFO_FILE = "build_info.json"
+__all__ = ["BUILD_INFO_FILE", "as_json", "build_snapshot", "config_path", "qgis_version", "read_git_revision"]
 
 
 def build_snapshot(
@@ -49,10 +50,18 @@ def build_snapshot(
     """
     session = current_session()
     directory = log_dir if log_dir is not None else LogConfig.from_env().log_dir
+    build = read_build_info(project_root)
+    git = build.get("git") or "?"
+    if git == "?":
+        git = read_git_revision(project_root)
     return {
         "app": _text(getattr(cfg, "app_name", None)),
         "version": app_version,
-        "git": read_git_revision(project_root),
+        "version_code": _text(build.get("versionCode")),
+        "build_id": _text(build.get("buildId")),
+        "runtime_id": _text(build.get("runtimeId")),
+        "channel": _text(build.get("channel")),
+        "git": git,
         "env": _text(getattr(cfg, "env", None)),
         "python": platform.python_version(),
         "platform": platform.platform(),
@@ -124,15 +133,22 @@ def _text(value: Any) -> str:
 
 
 def portable_root() -> Path | None:
-    """冻结态下的便携包根目录（``app.exe`` 所在目录）；非冻结态返回 ``None``。
+    """冻结态下的便携包根目录（可执行文件所在目录）；非冻结态返回 ``None``。
 
-    与 :func:`app.bootstrap._ensure_portable_env` 判据一致：只有存在 ``runtime/proj.db``
-    才认它是便携包，免得把普通安装目录当成便携包。
+    判据与 :func:`app.bootstrap._ensure_portable_env` 一致，避免把普通安装目录
+    当成便携包：
+
+    - ``runtime/proj.db``：Windows 便携包（QGIS 运行时平铺在 ``runtime/``）
+    - ``runtime/share/qgis``：新 Linux 便携包（``runtime/`` 是迷你 conda 前缀）
+    - 产物根同时有 ``proj.db`` + ``share/qgis``：旧 Linux 平铺布局
     """
     if not getattr(sys, "frozen", False):
         return None
     bundle = Path(sys.executable).resolve().parent
-    if (bundle / "runtime" / "proj.db").is_file():
+    runtime = bundle / "runtime"
+    if (runtime / "proj.db").is_file() or (runtime / "share" / "qgis").is_dir():
+        return bundle
+    if (bundle / "proj.db").is_file() and (bundle / "share" / "qgis").is_dir():
         return bundle
     return None
 
@@ -149,6 +165,3 @@ def config_path(explicit: PathLike | str | None = None) -> Path | None:
         env = os.environ.get("QGIS_DEV_CONFIG")
         path = Path(env) if env else Paths.default().config_file("app.yaml")
     return path if path.is_file() else None
-
-
-__all__ = ["BUILD_INFO_FILE", "as_json", "build_snapshot", "config_path", "qgis_version", "read_git_revision"]

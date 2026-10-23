@@ -265,7 +265,7 @@ _TOOL_GROUPS: list = [
         ],
     ),
     (
-        "数据导出",
+        "切片导出",
         [
             ("生成矢量瓦片（XYZ）", "native:writevectortiles_xyz"),
             ("影像切片（XYZ）", "native:tilesxyzdirectory"),

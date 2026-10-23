@@ -28,6 +28,10 @@ from qgis.PyQt.QtWidgets import (
     QMessageBox,
 )
 
+from app.core.domain.basemap import (
+    domestic_basemap_extent,
+    is_domestic_basemap_source,
+)
 from app.infra.logging import get_logger
 from app.ui.common.icons import Icons
 
@@ -193,8 +197,9 @@ class LayerActionsMixin:
     ) -> None:
         """缩放至一组图层的合并范围。
 
-        与「全图」同一套口径：每个图层的 extent 先换算到画布 CRS 再合并，否则
-        经纬度（度）与投影（米）混在一起会偏。
+        与「全图」同一套口径：每个图层先经 :meth:`_layer_view_extent` 取到
+        画布 CRS 下的范围再合并 —— 既处理经纬度 / 投影混用，也让国内在线底图
+        按中国范围参与合并，而不是把视图拉到世界范围。
         """
         dest_crs = self.canvas.mapSettings().destinationCrs()
         combined = None
@@ -202,24 +207,16 @@ class LayerActionsMixin:
             if layer is None:
                 continue
             try:
-                if not layer.isValid():
-                    continue
-                extent = layer.extent()
-            except RuntimeError:  # 图层已销毁
+                extent = self._layer_view_extent(layer, dest_crs)
+            except Exception:  # noqa: BLE001 —— 脏数据的越界范围，跳过该图层
+                logger.warning(
+                    "缩放图层：图层 %s 范围转换失败，已跳过",
+                    layer.name(),
+                    exc_info=True,
+                )
                 continue
-            if extent.isNull():
+            if extent is None or extent.isNull():
                 continue
-            if layer.crs() != dest_crs:
-                try:
-                    transform = QgsCoordinateTransform(layer.crs(), dest_crs, self.project)
-                    extent = transform.transformBoundingBox(extent)
-                except Exception:  # noqa: BLE001 —— 脏数据的越界范围，跳过该图层
-                    logger.warning(
-                        "缩放图层：图层 %s 范围转换失败，已跳过",
-                        layer.name(),
-                        exc_info=True,
-                    )
-                    continue
             if combined is None:
                 combined = QgsRectangle(extent)
             else:
@@ -745,23 +742,47 @@ class LayerActionsMixin:
         self.canvas.refresh()
         self.messageBar.pushMessage(f"已粘贴样式到 {layer.name()}", level=Qgis.MessageLevel.Info, duration=2)
 
+    def _layer_view_extent(self, layer, dest_crs):
+        """图层用于定位 / 全图的合并范围（画布 CRS）；不可用返回 ``None``。
+
+        天地图 / 高德等国内在线底图（见
+        :func:`~app.core.domain.basemap.is_domestic_basemap_source`）的 XYZ /
+        WMTS 图层自报 extent 是世界范围，但服务只覆盖中国 —— 按用户要求，
+        「缩放至图层」和「全图」都改用中国范围，避免视图被甩到整个世界。
+        其余图层仍用自己的 extent，并换算到画布 CRS。
+        """
+        if layer is None:
+            return None
+        try:
+            if not layer.isValid():
+                return None
+            if is_domestic_basemap_source(layer.source()):
+                return domestic_basemap_extent(dest_crs, self.project)
+            extent = layer.extent()
+        except RuntimeError:  # 图层已销毁
+            return None
+        if extent.isNull():
+            return None
+        if layer.crs() != dest_crs:
+            transform = QgsCoordinateTransform(layer.crs(), dest_crs, self.project)
+            extent = transform.transformBoundingBox(extent)
+        return extent
+
     def _zoom_to_layer(self, layer) -> None:
         if layer is None:
             return
         dest_crs = self.canvas.mapSettings().destinationCrs()
-        if layer.crs() != dest_crs:
-            xform = QgsCoordinateTransform(layer.crs(), dest_crs, self.project)
-            try:
-                ext = xform.transformBoundingBox(layer.extent())
-            except QgsCsException:
-                # 脏数据(几何坐标范围与声明 CRS 不符)越界时回退到原始范围
-                logger.warning(
-                    "缩放到图层 %s 越界(%s→%s), 使用原始范围",
-                    layer.name(), layer.crs().authid(), dest_crs.authid(),
-                )
-                ext = layer.extent()
-        else:
+        try:
+            ext = self._layer_view_extent(layer, dest_crs)
+        except QgsCsException:
+            # 脏数据(几何坐标范围与声明 CRS 不符)越界时回退到原始范围
+            logger.warning(
+                "缩放到图层 %s 越界(%s→%s), 使用原始范围",
+                layer.name(), layer.crs().authid(), dest_crs.authid(),
+            )
             ext = layer.extent()
+        if ext is None or ext.isNull():
+            return
         self.canvas.setExtent(ext)
         self.canvas.refresh()
 

@@ -143,12 +143,14 @@ def _header_minor_matches(inc: Path) -> bool:
 
 
 def _has_import_lib(libs: Path) -> bool:
+    if sys.platform != "win32":
+        # Linux 无需单独的 import lib（链接参数走 sysconfig）；conda 环境通常
+        # 没有 libs/ 目录，不能拿它当“缺少开发文件”的判据。
+        return True
     if not libs or not libs.is_dir():
         return False
-    if sys.platform == "win32":
-        # 必须精确匹配当前次版本（python312.lib），否则链接到别的 ABI
-        return (libs / f"python{sys.version_info.major}{sys.version_info.minor}.lib").is_file()
-    return True  # Linux 无需单独的 import lib，distutils 走 sysconfig
+    # 必须精确匹配当前次版本（python312.lib），否则链接到别的 ABI
+    return (libs / f"python{sys.version_info.major}{sys.version_info.minor}.lib").is_file()
 
 
 def _sibling_python_dirs() -> list[Path]:
@@ -525,6 +527,16 @@ def main() -> int:
         print("  失败模块（已回退为字节码，不中断构建）:")
         for name in sorted(failed):
             print(f"    - {name}")
+    # fail_open=True 只允许“个别模块失败后回退字节码”。全部失败说明环境本身
+    # 不可用（Cython 与 Python ABI 不匹配 / 缺编译器 / 缺头文件），此时若仍
+    # 返回 0，build_linux.sh 会把空 manifest 当成功导出，产物里 139 个模块
+    # 静默退回 .pyc，保护形同虚设。返回非 0 让构建脚本走“保护失败”分支。
+    if failed and not ok:
+        print(
+            "ERROR: 所有模块编译失败，原生保护未生效（检查 Cython 版本 / C 编译器 / Python 头文件）",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 

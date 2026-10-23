@@ -28,5 +28,8 @@ set "QGIS_DEV_PATHS_RESOURCE=%DIST_DIR%resource"
 set "QGIS_DEV_PATHS_LOG=%DIST_DIR%logs"
 set "QGIS_DEV_PATHS_TMP=%DIST_DIR%.tmp"
 set "QGIS_DEV_PATHS_CONFIG=%DIST_DIR%config"
+REM 日志模块在 import 期就按 QGIS_DEV_LOG_DIR 建目录，早于 bootstrap 换算；
+REM 与 launch_qgis.sh 保持一致，避免打包后写到 _internal\logs。
+set "QGIS_DEV_LOG_DIR=%DIST_DIR%logs"
 
 "%DIST_DIR%app.exe" %*

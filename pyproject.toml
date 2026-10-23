@@ -4,7 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "qgis_dev"
-version = "0.2.0"
+# 版本唯一来源是 config/app.yaml 的 app.version（打包 / 服务端 / 更新清单共用）
+dynamic = ["version"]
 description = "PyQGIS desktop + FastAPI tile/check service"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -50,6 +51,9 @@ qgis_dev_server = "app.server.cli:main"
 # 让 ``pip install -e .`` 把 app.* 装到 site-packages，
 # 之后任意 ``python -c "import app.xxx"`` 都直接能找到，不需要 sys.path hack。
 # ---------------------------------------------------------------------------
+
+[tool.setuptools.dynamic]
+version = { attr = "app.__version__" }
 
 [tool.setuptools.packages.find]
 where = ["."]

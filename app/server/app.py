@@ -13,6 +13,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from starlette.middleware.cors import CORSMiddleware
 
+from app import __version__
 from app.infra.logging import get_logger
 from app.server.config import ServerConfig
 from app.server.dependencies import get_check_service, get_server_config
@@ -29,7 +30,7 @@ def create_app() -> FastAPI:
     """构造 :class:`FastAPI` 实例。"""
     app = FastAPI(
         title="qgis_dev tile & check service",
-        version="0.2.0",
+        version=__version__,
         lifespan=app_lifespan,
     )
 

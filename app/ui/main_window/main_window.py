@@ -207,6 +207,11 @@ class MainWindow(
 
         _SweepTimer.singleShot(2000, self._sweep_startup_gpkg_aliases)
 
+        # ---- 工程脏标记（关闭时决定是否询问保存）----
+        # 放在装配末尾：初始化过程中的设 CRS / 建分组等程序化操作不应当成用户改动，
+        # 这里建立“刚启动 / 刚打开”的干净基线；之后的增删图层、改样式等由信号置脏。
+        self._init_project_dirty_tracking()
+
     # ===================================================== 关闭
 
     #: 关闭窗口时是否弹窗询问“是否保存工程”。默认开启；无头 / 测试场景可置
@@ -230,6 +235,13 @@ class MainWindow(
             event.ignore()
             return
         try:
+            # 更新控制器先停：停掉周期检查并取消进行中的下载（分片保留可续传）
+            update_controller = getattr(self, "_update_controller", None)
+            if update_controller is not None:
+                try:
+                    update_controller.shutdown()
+                except Exception:  # noqa: BLE001 —— 关闭流程不能因更新模块失败而中断
+                    logger.debug("停止更新控制器失败", exc_info=True)
             # ZoomTileGuard 先停：冻结期间若直接关窗，worker 线程还在跑离屏渲染，
             # 关窗口会触发 QPainter/QImage 析构，可能撞上 native 崩溃。
             guard = getattr(self, "_zoom_tile_guard", None)

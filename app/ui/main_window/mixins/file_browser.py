@@ -624,29 +624,66 @@ class FileBrowserMixin:
         return layer
 
     def _load_gdb(self, gdb_path: str) -> None:
-        """File Geodatabase：先诊断驱动问题，再让用户挑图层（可多选）加载。"""
+        """File Geodatabase：先定位有效库、诊断驱动问题，再让用户挑图层（可多选）。"""
 
         from osgeo import gdal, ogr
 
+        from app.core.util.data_formats import resolve_gdb_dir
+
         ogr.RegisterAll()
-        # 用 gdal 的错误栈拿到**具体原因**：GDB 打不开最常见的原因是这种库只有
-        # ESRI 的 FileGDB 驱动能读（GDAL 自带的只读 OpenFileGDB 读不了），
-        # 报原文比一句"无法打开 GDB"有用得多
+
+        # 解压得到的目录常是“外层 xxx.gdb / 内层 xxx.gdb”。外层没有 gdb 与
+        # *.gdbtable，OGR 只会回一条不带原因的“无法打开”；唯一内层库自动下钻。
+        actual_path = resolve_gdb_dir(gdb_path)
+        if actual_path is None:
+            name = os.path.basename(gdb_path.rstrip("/\\"))
+            QMessageBox.warning(
+                self,
+                "无法打开 GDB",
+                f"{name}\n\n这个目录里没有 gdb / *.gdbtable 文件，"
+                "不是有效的 File Geodatabase。\n"
+                "如果它是解压得到的外层文件夹，请展开并选择里面的 .gdb。",
+            )
+            return
+        if actual_path != gdb_path:
+            logger.info("GDB 是外层目录，自动读取内层库：%s → %s", gdb_path, actual_path)
+            self.messageBar.pushMessage(
+                f"已自动读取内层 GDB：{os.path.basename(actual_path)}",
+                level=Qgis.MessageLevel.Info,
+                duration=5,
+            )
+            gdb_path = actual_path
+
+        # 用 gdal 的错误栈拿到**具体原因**（锁定 / 损坏 / 缺驱动）。只有确实
+        # 没有可用的 FileGDB 驱动时才提示“装驱动”，别把有效库误诊成缺驱动。
         gdal.ErrorReset()
         ds = ogr.Open(gdb_path)
         error = gdal.GetLastErrorMsg() or ""
         if ds is None:
             name = os.path.basename(gdb_path.rstrip("/\\"))
+            drivers = {
+                ogr.GetDriver(i).GetName()
+                for i in range(ogr.GetDriverCount())
+            }
             hint = ""
-            if "FileGDB" in error:
+            if not ({"OpenFileGDB", "FileGDB"} & drivers):
                 hint = (
-                    "\n\n这个库需要 ESRI 的 FileGDB 驱动，当前 GDAL 里没有它"
-                    "（只装了只读的 OpenFileGDB，打不开这类库）。\n"
+                    "\n\n当前 GDAL 没有可读取 FileGDB 的驱动（OpenFileGDB / FileGDB）。\n"
                     "处理办法：用 ArcGIS 把该库导出成 GeoPackage / Shapefile，"
                     "或给 GDAL 装上 gdal-filegdb 插件后再试。"
                 )
-            elif not error:
-                hint = "\n\n（该目录不是有效的 File Geodatabase：里面没有 .gdbtable 文件？）"
+            elif "FileGDB" in error:
+                hint = (
+                    "\n\n这个库需要 ESRI 的 FileGDB 驱动，当前 GDAL 里只有只读的"
+                    " OpenFileGDB，打不开这类库。\n"
+                    "处理办法：用 ArcGIS 把该库导出成 GeoPackage / Shapefile，"
+                    "或给 GDAL 装上 gdal-filegdb 插件后再试。"
+                )
+            else:
+                hint = (
+                    "\n\n文件可能存在损坏、被其他程序独占，或目录不完整。"
+                    "可先用 ArcGIS / ArcGIS Pro 打开确认，再尝试重新复制一份。"
+                )
             QMessageBox.warning(self, "无法打开 GDB", f"{name}\n{error}{hint}")
             return
         ds.Destroy()
