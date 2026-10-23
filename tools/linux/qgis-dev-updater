@@ -1,0 +1,612 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""qgis-dev-updater —— 银河麒麟 / Linux 提权更新器（root 运行，固定路径）。
+
+由客户端通过 ``pkexec /usr/local/lib/qgis_dev/qgis-dev-updater <job.json>`` 调用。
+任务文件在**普通用户可写**的更新目录里，因此本程序不信任任务内容：
+
+1. 任务里的 ``manifest`` / ``signature`` 必须能用**内置公钥**验签；
+2. 安装包 SHA-256 必须与已验签清单中 ``packageId`` 对应包一致；
+3. 安装目录固定为 ``/opt/qgis_app``，可执行文件必须在目录内；
+4. tar.gz 只允许普通文件 / 目录，拒绝绝对路径、``..``、符号链接、设备文件；
+5. 解压后递归 ``chown root:root`` 并清除 setuid/setgid。
+
+安装流程：等旧进程退出 → 当前目录改名为备份 → 解压树换入 → 校验
+``build_info.json`` 版本 → 以原用户身份重启 → 等 ``.startup-ok`` 健康标记。
+失败自动回滚并拉起旧版本。
+
+只依赖 Python 3 标准库（麒麟 V10 自带 python3），不 import 项目代码——更新时
+旧代码目录可能正被替换。
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import copy
+import hashlib
+import hmac
+import json
+import os
+import posixpath
+import pwd
+import shutil
+import subprocess
+import sys
+import tarfile
+import time
+import traceback
+
+APP_DIR = "/opt/qgis_app"
+APP_EXE = APP_DIR + "/qgis_dev"
+LAUNCH_SCRIPT = APP_DIR + "/launch_qgis.sh"
+STAGING_DIR = "/opt/.qgis_app.staging"
+BACKUP_DIR = "/opt/.qgis_app.backup"
+LOG_FILE = "/var/log/qgis_dev-updater.log"
+KEY_ID = "cbac7533ef6de3b5"
+
+PUBLIC_KEY_PEM = """-----BEGIN PUBLIC KEY-----
+MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA0zYngPOfxK3VBuKpFu2m
+OsQcORZScw8zuaezGnSvO78ZUNelU/GqlWqDvn5SclumoQsuCp6S6fRasE6p1u31
+Yf2We02Ih5fZN+6+vKOM7VVzclkD8FuQF+ZE0rkB25nu7VHAimsnj2oQ3uhnwBAh
+DA5wyyfmfr2G7VFuMiHoSgedXPTAlUxnn5qaVdo5mdJ/JXJyBqMeFm27mcRZAwNL
+HhSRFLD0cGZlxeAXtLSHbbmpWpsWey/x6VTisYPsChMx+M8Qpbo8yQB0+8B6zy7D
+6wofHP6ybgHq+dTKm1NByPKweNcmRAhcHm6vBPYKgqNNIfVyksee1xR3RJnD9XPo
+2x1DsVoPPqUGy13c6NST8vNISxPC1kqUXsy0DZDGtGUGq44xgCijR+84FS3QTvYN
+qqeGHRo2Ivdvh6dV2QuoiYBRgrb5sfv2G5AWbxGn2HqUJA6br85cizYzmeNtIO2k
+us6VBlhnw8Ifdr+6eb8JgBNwj5ITUlj+P0i+J6c8rE4nAgMBAAE=
+-----END PUBLIC KEY-----
+"""
+
+MAX_JOB_BYTES = 2 * 1024 * 1024
+WAIT_EXIT_SECONDS = 600
+HEALTH_SECONDS = 240
+
+_SHA256_DIGEST_INFO = bytes.fromhex("3031300d060960864801650304020105000420")
+
+
+class UpdateFailure(Exception):
+    pass
+
+
+# --------------------------------------------------------------------- 日志
+
+
+def log(message):
+    line = "%s %s" % (time.strftime("%Y-%m-%d %H:%M:%S"), message)
+    try:
+        with open(LOG_FILE, "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError:
+        pass
+    try:
+        print(line, file=sys.stderr)
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------------------- RSA
+
+
+def _der_tlv(data, pos=0):
+    if pos + 2 > len(data):
+        raise UpdateFailure("DER 截断")
+    tag = data[pos]
+    first = data[pos + 1]
+    pos += 2
+    if first & 0x80:
+        count = first & 0x7F
+        if count == 0 or count > 4 or pos + count > len(data):
+            raise UpdateFailure("DER 长度非法")
+        length = int.from_bytes(data[pos:pos + count], "big")
+        pos += count
+    else:
+        length = first
+    end = pos + length
+    if end > len(data):
+        raise UpdateFailure("DER 截断")
+    return tag, data[pos:end], end
+
+
+def _der_children(value):
+    children = []
+    pos = 0
+    while pos < len(value):
+        tag, child, pos = _der_tlv(value, pos)
+        children.append((tag, child))
+    return children
+
+
+def _load_public_key(pem):
+    body = []
+    inside = False
+    for line in pem.splitlines():
+        if line.startswith("-----BEGIN PUBLIC KEY-----"):
+            inside = True
+            continue
+        if line.startswith("-----END PUBLIC KEY-----"):
+            break
+        if inside:
+            body.append(line.strip())
+    if not body:
+        raise UpdateFailure("内置公钥不可用")
+    der = base64.b64decode("".join(body), validate=True)
+    tag, content, _ = _der_tlv(der, 0)
+    if tag != 0x30:
+        raise UpdateFailure("公钥不是 SPKI")
+    children = _der_children(content)
+    if len(children) < 2 or children[1][0] != 0x03:
+        raise UpdateFailure("公钥 SPKI 结构非法")
+    bit = children[1][1]
+    if not bit or bit[0] != 0:
+        raise UpdateFailure("公钥 BIT STRING 非法")
+    tag, rsa_content, _ = _der_tlv(bit[1:], 0)
+    if tag != 0x30:
+        raise UpdateFailure("RSAPublicKey 结构非法")
+    parts = _der_children(rsa_content)
+    if len(parts) != 2 or parts[0][0] != 0x02 or parts[1][0] != 0x02:
+        raise UpdateFailure("RSAPublicKey 结构非法")
+    n = int.from_bytes(parts[0][1], "big")
+    e = int.from_bytes(parts[1][1], "big")
+    if n.bit_length() < 2048:
+        raise UpdateFailure("公钥过短")
+    return n, e
+
+
+def verify_signature(payload, signature):
+    n, e = _load_public_key(PUBLIC_KEY_PEM)
+    size = (n.bit_length() + 7) // 8
+    if len(signature) != size:
+        return False
+    value = int.from_bytes(signature, "big")
+    if value >= n:
+        return False
+    encoded = pow(value, e, n).to_bytes(size, "big")
+    digest_info = _SHA256_DIGEST_INFO + hashlib.sha256(payload).digest()
+    padding = size - len(digest_info) - 3
+    if padding < 8:
+        return False
+    expected = b"\x00\x01" + b"\xff" * padding + b"\x00" + digest_info
+    return hmac.compare_digest(encoded, expected)
+
+
+# --------------------------------------------------------------------- 任务
+
+
+def _read_job(path):
+    if not os.path.isfile(path) or os.path.islink(path):
+        raise UpdateFailure("任务文件不存在或是符号链接")
+    if os.path.getsize(path) > MAX_JOB_BYTES:
+        raise UpdateFailure("任务文件过大")
+    with open(path, "r", encoding="utf-8") as handle:
+        job = json.load(handle)
+    if not isinstance(job, dict):
+        raise UpdateFailure("任务文件格式非法")
+    return job
+
+
+def _require_int(job, key, minimum=1):
+    value = job.get(key)
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise UpdateFailure("任务字段 %s 非法" % key)
+    return value
+
+
+def _require_str(job, key):
+    value = job.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise UpdateFailure("任务字段 %s 非法" % key)
+    return value.strip()
+
+
+def _int_or(job, key, default, minimum=1):
+    value = job.get(key, default)
+    if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+        raise UpdateFailure("任务字段 %s 非法" % key)
+    return value
+
+
+def _b64(value, name):
+    if not isinstance(value, str) or not value.strip():
+        raise UpdateFailure("任务缺少 %s" % name)
+    try:
+        return base64.b64decode(value.strip(), validate=True)
+    except ValueError as exc:
+        raise UpdateFailure("%s 不是合法 base64" % name) from exc
+
+
+def verify_job(job):
+    """验签并返回 ``(manifest, package)``。"""
+    manifest_raw = _b64(job.get("manifest"), "manifest")
+    signature = _b64(job.get("signature"), "signature")
+    key_id = str(job.get("keyId") or "").strip().lower()
+    if key_id != KEY_ID:
+        raise UpdateFailure("签名密钥不匹配：%s" % (key_id or "(空)"))
+    if not verify_signature(manifest_raw, signature):
+        raise UpdateFailure("清单签名校验失败")
+    try:
+        manifest = json.loads(manifest_raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError) as exc:
+        raise UpdateFailure("清单不是合法 JSON") from exc
+    if not isinstance(manifest, dict):
+        raise UpdateFailure("清单格式非法")
+    if manifest.get("appId") != "qgis-desktop":
+        raise UpdateFailure("清单应用标识不匹配")
+    if manifest.get("channel") != "internal":
+        raise UpdateFailure("只允许 internal 通道自动更新")
+    if manifest.get("schema") != 1:
+        raise UpdateFailure("清单结构版本不支持")
+
+    expected_code = _require_int(job, "expectedVersionCode")
+    if manifest.get("versionCode") != expected_code:
+        raise UpdateFailure("清单版本与任务不一致")
+
+    package_id = _require_int(job, "packageId")
+    packages = manifest.get("packages")
+    if not isinstance(packages, list):
+        raise UpdateFailure("清单 packages 非法")
+    package = next(
+        (item for item in packages if isinstance(item, dict) and item.get("id") == package_id),
+        None,
+    )
+    if package is None:
+        raise UpdateFailure("清单中找不到 packageId=%s" % package_id)
+    if package.get("kind") != "full":
+        raise UpdateFailure("只支持 full 安装包")
+    expected_sha = str(package.get("sha256") or "").strip().lower()
+    if len(expected_sha) != 64:
+        raise UpdateFailure("清单包 SHA-256 非法")
+    return manifest, package
+
+
+def verify_package(package_path, package):
+    if not os.path.isfile(package_path) or os.path.islink(package_path):
+        raise UpdateFailure("安装包不存在或是符号链接")
+    expected = str(package.get("sha256")).lower()
+    size = _require_int(package, "sizeBytes")
+    actual_size = os.path.getsize(package_path)
+    if actual_size != size:
+        raise UpdateFailure("安装包大小不符：%s != %s" % (actual_size, size))
+    hasher = hashlib.sha256()
+    with open(package_path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            hasher.update(chunk)
+    if hasher.hexdigest() != expected:
+        raise UpdateFailure("安装包 SHA-256 校验失败")
+
+
+# --------------------------------------------------------------------- 解压
+
+
+def _safe_members(archive):
+    members = []
+    for member in archive.getmembers():
+        name = posixpath.normpath(member.name)
+        if name in ("", "."):
+            continue
+        if name.startswith("/") or name == ".." or name.startswith("../") or "/../" in name:
+            raise UpdateFailure("压缩包包含越界路径：%s" % member.name)
+        if "\x00" in name:
+            raise UpdateFailure("压缩包路径含空字节：%r" % member.name)
+        if member.isdir():
+            pass
+        elif member.isfile():
+            pass
+        else:
+            # 符号链接 / 硬链接 / 设备 / FIFO 一律拒绝
+            raise UpdateFailure("压缩包包含不支持的文件类型：%s" % member.name)
+        if name != member.name:
+            # tarfile 落盘时用的是 member.name 原值（不是这里的 normpath），
+            # 像 ``a/../..`` 这种名字会 chmod/chown 到 STAGING_DIR 之外。
+            # 统一改成规范化后的相对路径。
+            member = copy.copy(member)
+            member.name = name
+        members.append(member)
+    return members
+
+
+def _chown_tree(root):
+    os.chown(root, 0, 0)
+    os.chmod(root, 0o755)
+    for current, dirs, files in os.walk(root):
+        for name in dirs:
+            path = os.path.join(current, name)
+            os.chown(path, 0, 0)
+            # 应用目录必须对所有用户可读可进入（程序文件本身只读）
+            os.chmod(path, 0o755)
+        for name in files:
+            path = os.path.join(current, name)
+            if os.path.islink(path):
+                os.unlink(path)
+                raise UpdateFailure("解压后出现符号链接：%s" % path)
+            os.chown(path, 0, 0)
+            mode = os.stat(path).st_mode & 0o777
+            # 保证可读；保留可执行位；清 setuid/setgid
+            os.chmod(path, mode | 0o444)
+
+
+def extract_package(package_path):
+    if os.path.exists(STAGING_DIR):
+        shutil.rmtree(STAGING_DIR)
+    os.makedirs(STAGING_DIR, 0o755)
+    with tarfile.open(package_path, "r:gz") as archive:
+        members = _safe_members(archive)
+        for member in members:
+            archive.extract(member, STAGING_DIR)
+    _chown_tree(STAGING_DIR)
+    info_path = os.path.join(STAGING_DIR, "build_info.json")
+    if not os.path.isfile(info_path):
+        raise UpdateFailure("安装包根目录缺少 build_info.json")
+    with open(info_path, "r", encoding="utf-8") as handle:
+        info = json.load(handle)
+    return int(info.get("versionCode") or 0)
+
+
+# --------------------------------------------------------------------- 进程
+
+
+def process_alive(pid):
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    try:
+        with open("/proc/%d/stat" % pid, "r", encoding="utf-8") as handle:
+            state = handle.read().split(") ", 1)[1].split(" ", 1)[0]
+        return state != "Z"
+    except (OSError, IndexError):
+        return True
+
+
+def wait_process_exit(pid, timeout):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if not process_alive(pid):
+            return True
+        time.sleep(0.4)
+    return not process_alive(pid)
+
+
+def wait_health(marker_dir, expected_code, timeout, launched_pid=None):
+    ok_path = os.path.join(marker_dir, ".startup-ok")
+    started_path = os.path.join(marker_dir, ".process-started")
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with open(ok_path, "r", encoding="utf-8") as handle:
+                marker = json.load(handle)
+            if int(marker.get("versionCode") or 0) >= expected_code:
+                return "ok"
+        except (OSError, ValueError, TypeError):
+            pass
+        if launched_pid and not process_alive(launched_pid):
+            # 新进程还没写标记就退出了（缺库 / 启动即崩）——必须回滚，不能等满超时
+            return "dead"
+        try:
+            with open(started_path, "r", encoding="utf-8") as handle:
+                marker = json.load(handle)
+            pid = int(marker.get("pid") or 0)
+            if pid and not process_alive(pid):
+                return "dead"
+        except (OSError, ValueError, TypeError):
+            pass
+        time.sleep(1)
+    return "alive"
+
+
+def launch_as_user(user, extra_env):
+    exe = LAUNCH_SCRIPT if os.path.isfile(LAUNCH_SCRIPT) and os.access(LAUNCH_SCRIPT, os.X_OK) else APP_EXE
+    env = {
+        "HOME": user.pw_dir,
+        "USER": user.pw_name,
+        "LOGNAME": user.pw_name,
+        "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+        "SHELL": user.pw_shell or "/bin/sh",
+        "LANG": "zh_CN.UTF-8",
+    }
+    for key, value in (extra_env or {}).items():
+        if isinstance(key, str) and isinstance(value, str):
+            env[key] = value
+
+    def demote():
+        os.setgroups([])
+        os.setgid(user.pw_gid)
+        os.setuid(user.pw_uid)
+
+    proc = subprocess.Popen(
+        [exe],
+        cwd=APP_DIR,
+        env=env,
+        preexec_fn=demote,
+        close_fds=True,
+        start_new_session=True,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    # 返回 PID 供健康检查判断“新进程没写标记就退出”（启动即崩）
+    return proc.pid
+
+
+# --------------------------------------------------------------------- 安装
+
+
+def current_version_code():
+    path = os.path.join(APP_DIR, "build_info.json")
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            return int(json.load(handle).get("versionCode") or 0)
+    except (OSError, ValueError, TypeError):
+        return 0
+
+
+def restore_backup():
+    if not os.path.isdir(BACKUP_DIR):
+        log("没有可用备份，无法回滚")
+        return False
+    try:
+        # 换入新版本后旧版本的 logs/.tmp 被挪到了新树里（见 install）；回滚前
+        # 先挪回备份，否则它们会跟着新树一起被 rmtree 删掉。
+        if os.path.isdir(APP_DIR):
+            for name in ("logs", ".tmp"):
+                source = os.path.join(APP_DIR, name)
+                target = os.path.join(BACKUP_DIR, name)
+                if os.path.isdir(source) and not os.path.exists(target):
+                    try:
+                        os.rename(source, target)
+                    except OSError as exc:
+                        log("回滚前保留 %s 失败：%s" % (name, exc))
+            shutil.rmtree(APP_DIR)
+        os.rename(BACKUP_DIR, APP_DIR)
+        log("已恢复备份目录")
+        return True
+    except OSError as exc:
+        log("回滚失败：%s" % exc)
+        return False
+
+
+def install(job):
+    package_path = _require_str(job, "packagePath")
+    package_path = os.path.realpath(package_path)
+    user_env = job.get("env") if isinstance(job.get("env"), dict) else {}
+
+    uid_text = os.environ.get("PKEXEC_UID", "")
+    if uid_text:
+        try:
+            user = pwd.getpwuid(int(uid_text))
+        except (ValueError, KeyError):
+            raise UpdateFailure("无法解析 PKEXEC_UID")
+    else:
+        # 仅允许 root 直接调试；正常调用必须带 PKEXEC_UID
+        if os.geteuid() != 0:
+            raise UpdateFailure("必须以 root 运行（pkexec）")
+        user = pwd.getpwuid(os.getuid())
+        if user.pw_uid == 0:
+            raise UpdateFailure("缺少 PKEXEC_UID，拒绝以 root 身份启动桌面程序")
+
+    marker_dir = os.path.realpath(_require_str(job, "markerDir"))
+    # 只允许清理“调用者自己拥有的目录”里的固定文件名（避免 root 任意删除）
+    try:
+        marker_stat = os.stat(marker_dir)
+    except OSError:
+        raise UpdateFailure("健康标记目录不存在")
+    if not os.path.isdir(marker_dir) or marker_stat.st_uid != user.pw_uid:
+        raise UpdateFailure("健康标记目录不属于当前用户")
+
+    manifest, package = verify_job(job)
+    verify_package(package_path, package)
+    log("清单验签与安装包校验通过：version=%s packageId=%s" % (manifest.get("version"), package.get("id")))
+
+    if job.get("dryRun"):
+        return 0
+
+    if current_version_code() > int(manifest.get("versionCode")):
+        raise UpdateFailure("拒绝降级安装")
+
+    if os.path.isdir(BACKUP_DIR):
+        if not os.path.isdir(APP_DIR):
+            log("发现上次中断的备份，先恢复")
+            if not restore_backup():
+                raise UpdateFailure("无法恢复上次中断的安装")
+        else:
+            shutil.rmtree(BACKUP_DIR)
+
+    version_code = extract_package(package_path)
+    expected_code = _require_int(job, "expectedVersionCode")
+    if version_code < expected_code:
+        raise UpdateFailure("包内版本 %s 低于清单版本 %s" % (version_code, expected_code))
+
+    pid = _require_int(job, "pid")
+    if not wait_process_exit(pid, _int_or(job, "waitSeconds", WAIT_EXIT_SECONDS)):
+        raise UpdateFailure("等待旧进程退出超时")
+    time.sleep(1)
+
+    try:
+        os.rename(APP_DIR, BACKUP_DIR)
+    except OSError as exc:
+        raise UpdateFailure("备份当前版本失败：%s" % exc)
+    try:
+        os.rename(STAGING_DIR, APP_DIR)
+    except OSError as exc:
+        log("换入新版本失败，回滚：%s" % exc)
+        restore_backup()
+        raise UpdateFailure("换入新版本失败")
+    log("新版本已就位：%s" % manifest.get("version"))
+
+    # logs/.tmp 不在安装包里（否则每次更新都会覆盖运行期文件），但 deb 初装时
+    # 这两个目录是普通用户可写的。从备份里挪回来，更新后日志路径保持不变。
+    for name in ("logs", ".tmp"):
+        source = os.path.join(BACKUP_DIR, name)
+        if os.path.isdir(source):
+            try:
+                os.rename(source, os.path.join(APP_DIR, name))
+            except OSError as exc:
+                log("保留 %s 目录失败（应用会回退到每用户目录）：%s" % (name, exc))
+
+    for name in (".process-started", ".startup-ok"):
+        try:
+            os.unlink(os.path.join(marker_dir, name))
+        except OSError:
+            pass
+
+    try:
+        new_pid = launch_as_user(user, user_env)
+    except OSError as exc:
+        log("启动新版本失败，回滚：%s" % exc)
+        if restore_backup():
+            try:
+                launch_as_user(user, user_env)
+            except OSError:
+                log("回滚后拉起旧版本也失败")
+        raise UpdateFailure("启动新版本失败")
+    health = wait_health(
+        marker_dir,
+        expected_code,
+        _int_or(job, "healthTimeoutSeconds", HEALTH_SECONDS),
+        launched_pid=new_pid,
+    )
+    if health == "dead":
+        log("新版本启动后退出，开始回滚")
+        if restore_backup():
+            try:
+                launch_as_user(user, user_env)
+            except OSError:
+                log("回滚后拉起旧版本也失败")
+        raise UpdateFailure("新版本未能启动")
+    if health == "alive":
+        log("警告：未在超时内确认健康标记，进程仍在运行，保留新版本")
+
+    shutil.rmtree(BACKUP_DIR, ignore_errors=True)
+    shutil.rmtree(STAGING_DIR, ignore_errors=True)
+    log("更新完成：%s" % manifest.get("version"))
+    return 0
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(description="qgis_dev 提权更新器")
+    parser.add_argument("job", help="任务 JSON 路径")
+    parser.add_argument("--dry-run", action="store_true", help="只验签 / 校验包，不安装")
+    args = parser.parse_args(argv)
+
+    if os.geteuid() != 0:
+        print("必须以 root 运行（pkexec）", file=sys.stderr)
+        return 2
+    try:
+        job = _read_job(args.job)
+        if args.dry_run:
+            job["dryRun"] = True
+        return install(job)
+    except UpdateFailure as exc:
+        log("更新失败：%s" % exc)
+        return 1
+    except Exception as exc:  # noqa: BLE001 —— 独立更新器：任何异常都要落日志
+        log("更新器异常：%s\n%s" % (exc, traceback.format_exc()))
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv[1:]))

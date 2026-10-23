@@ -27,6 +27,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Optional
 
+from app import APP_MUTEX
 from app.bootstrap.main_window import build_window
 from app.core.auth import (
     AuthClient,
@@ -41,6 +42,7 @@ from app.core.util.service_client import set_session_token
 from app.env.config import AppConfig
 from app.env.qgis_runtime import QgisRuntime
 from app.infra.fs.paths import Paths
+from app.infra.fs.single_instance import SingleInstance, notify_already_running
 from app.infra.logging import (
     build_snapshot,
     collect_secret_values,
@@ -54,6 +56,7 @@ from app.infra.logging import (
 from app.infra.logging.config import LogConfig
 from app.infra.logging.environment import as_json
 from app.infra.logging.sink import _RootSink
+from app.update.markers import mark_process_started, mark_startup_ok
 
 logger = get_logger(__name__)
 
@@ -73,6 +76,21 @@ def main(argv: Optional[list[str]] = None) -> int:
     """应用入口。返回 ``app.exec()`` 的退出码。"""
     # 打包后直接双击 app.exe 也能工作：自动探测便携包并设环境变量
     _ensure_portable_env()
+
+    # 单实例：更新器安装前会等这个互斥体释放（Inno Setup AppMutex 同名）。
+    # 实例必须活到 main 返回；进程退出（含崩溃）时由内核释放。
+    instance = SingleInstance(APP_MUTEX)
+    if not instance.acquire():
+        logger.warning("已有实例在运行，退出（mutex=%s）", APP_MUTEX)
+        notify_already_running(APP_MUTEX)
+        return 0
+
+    # 更新器健康标记：进程已经进入应用入口，且确认自己是唯一实例。
+    # 必须放在 acquire 之后——更新期间用户若再次双击，第二个实例会在 acquire
+    # 失败后立即退出；若它先把旧版本号写进 .process-started，更新器会把正在
+    # 启动的新版本误判为“已退出”。写失败只返回 None，不影响启动。
+    mark_process_started()
+
     config_path = _resolve_config_path()
     cfg = AppConfig.from_file(config_path)
     paths = _build_paths(cfg)
@@ -83,6 +101,11 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # 注册启动完成回调：主窗口显示后立即弹“打开地图文档”，让用户选择要打开的 .pgs
     register_startup_callback(_make_open_project_callback())
+
+    # 注册启动完成回调：检测更新。必须排在“打开地图文档”之后——那个回调是
+    # 模态的，排在它前面会让更新弹窗盖在启动选择框上；排在后面则等用户选完
+    # 工程再延迟检查（回调顺序即注册顺序，见 _run_startup_callbacks）。
+    register_startup_callback(_make_update_callback(cfg))
 
     _configure_logging(cfg, paths)
 
@@ -122,7 +145,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # 登录通过才弹初始化状态页：覆盖 initQgis → 翻译 → 插件注册 → 主窗口构建，
     # 主窗口显示时由 _run_qgis_app 关闭。
-    splash = _start_splash(cfg.app_name)
+    splash = _start_splash(cfg.app_display_name)
     try:
         return _run_qgis_app(cfg, qgis, app, splash, auth_result=auth_result)
     finally:
@@ -142,25 +165,58 @@ def _resolve_config_path() -> Path:
 
 
 def _ensure_portable_env() -> None:
-    """打包后直接双击 ``app.exe`` 也能工作。
+    """打包后直接双击 ``app.exe`` / ``qgis_dev`` 也能工作。
 
-    PyInstaller 冻结态下，可执行文件所在目录即便携包根：
+    PyInstaller 冻结态下，可执行文件所在目录即便携包根，有两种布局：
 
-    - ``runtime/``：QGIS 运行时（``proj.db`` / ``etc`` / ``plugins`` / ``i18n`` ...）
-    - ``config/`` / ``resource/``：可编辑配置与资源（在根目录）
-    - ``_internal/``：Python 运行时与依赖库（PyInstaller 管理）
+    - Windows / 旧 Linux 扁平包：``runtime/``（旧包是包根）放 QGIS 运行时，
+      以 ``proj.db`` 为标志
+    - Linux 新布局：``runtime/`` 是 conda 风格前缀——``share/qgis``（QGIS
+      数据 / i18n / srs.db）、``lib/qgis/plugins``（C++ provider）、
+      ``share/proj/proj.db``；以 ``runtime/share/qgis`` 为标志
 
-    这里自动探测并把 ``QGIS_PREFIX`` 指向 ``runtime/``，同时设好 ``QGIS_DEV_*``；
+    这里自动探测并把 ``QGIS_PREFIX`` 指向运行时根，同时设好 ``QGIS_DEV_*``；
     已由 launcher 设置过则不覆盖（``setdefault``）。
+
+    旧扁平包还有个额外问题：包根 ``lib/`` 里的 Qt/GDAL 动态库必须在**进程
+    exec 时**就进 ``LD_LIBRARY_PATH``（glibc 不会重新读取运行中修改的
+    ``os.environ``），而 PyInstaller 只把包根放进搜索路径。没经 launcher
+    直接执行 ``qgis_dev`` 时，这里改用 launcher 重新 exec 一次，让启动环境
+    与桌面入口完全一致；launcher 拉起时 ``lib`` 已在路径中，不会循环。
+    新布局的动态库全部在 ``_internal/``（PyInstaller 自己会放进搜索路径），
+    不需要也不能再靠 ``LD_LIBRARY_PATH`` 判断，否则 launcher 会反复 exec。
     """
     if not getattr(sys, "frozen", False):
         return
     bundle = Path(sys.executable).resolve().parent
     runtime = bundle / "runtime"
-    # 便携包特征校验，避免误判：QGIS 运行时在 runtime/ 子目录
-    if not (runtime / "proj.db").is_file():
+    is_runtime_layout = (runtime / "proj.db").is_file() or (
+        runtime / "share" / "qgis"
+    ).is_dir()
+    is_flat_layout = (bundle / "proj.db").is_file() and (
+        bundle / "share" / "qgis"
+    ).is_dir()
+    if not is_runtime_layout and not is_flat_layout:
         return
-    os.environ.setdefault("QGIS_PREFIX", str(runtime))
+    prefix = runtime if is_runtime_layout else bundle
+
+    if is_flat_layout:
+        lib = bundle / "lib"
+        launcher = bundle / "launch_qgis.sh"
+        search_dirs = os.environ.get("LD_LIBRARY_PATH", "").split(os.pathsep)
+        if (
+            lib.is_dir()
+            and str(lib) not in search_dirs
+            and str(bundle) not in search_dirs
+            and launcher.is_file()
+        ):
+            logger.info("直接启动便携包，经 launcher 重新执行以装配动态库搜索路径")
+            try:
+                os.execv("/bin/bash", ["bash", str(launcher), *sys.argv[1:]])
+            except OSError:
+                logger.warning("经 launcher 重新执行失败，按当前环境继续启动", exc_info=True)
+
+    os.environ.setdefault("QGIS_PREFIX", str(prefix))
     os.environ.setdefault("QGIS_DEV_CONFIG", str(bundle / "config" / "app.yaml"))
     os.environ.setdefault("QGIS_DEV_PATHS_PROJECT_ROOT", str(bundle))
     os.environ.setdefault("QGIS_DEV_PATHS_RESOURCE", str(bundle / "resource"))
@@ -251,37 +307,64 @@ def _snapshot(cfg: AppConfig, paths: Paths) -> dict[str, str]:
     )
 
 
+def _runtime_for_base(base: Path) -> Optional[QgisRuntime]:
+    """按目录特征识别 QGIS 布局，无法识别返回 ``None``。
+
+    - ``apps/qgis``：OSGeo4W（Windows 开发/正式安装）
+    - 根下有 ``proj.db``：Windows 便携包 / 旧 Linux 扁平包
+    - ``share/qgis``：conda / apt 标准 Linux 布局，以及新 Linux 便携包
+      （``dist/app/runtime`` 就是按这个布局组装的迷你前缀）
+
+    只按“路径存在”判定，不做版本探测；``config/app.yaml`` 文档化的
+    ``QGIS_INSTALL_PATH=$CONDA_PREFIX`` 与 ``QGIS_PREFIX`` 环境变量都走这里，
+    避免把 conda 环境误当成 OSGeo4W 布局（``for_dev`` 会拼出
+    ``$CONDA_PREFIX/apps/qgis`` 这类不存在的路径）。
+    """
+    if (base / "apps" / "qgis").exists():
+        return QgisRuntime.for_dev(base)
+    if (base / "proj.db").is_file():
+        return QgisRuntime.for_portable(base)
+    if (base / "share" / "qgis").is_dir():
+        return QgisRuntime.for_system(base)
+    return None
+
+
 def _build_qgis_runtime(cfg: AppConfig) -> QgisRuntime:
-    # 便携打包：launcher 设置 QGIS_PREFIX 指向扁平 dist/app（或完整 QGIS 安装）
+    # 便携打包：launcher 设置 QGIS_PREFIX 指向 dist/app/runtime（Windows 便携包
+    # 的扁平运行时，或 Linux 便携包的 conda 风格迷你前缀），也可能指向完整
+    # QGIS 安装（含 apps/qgis）。
     prefix = os.environ.get("QGIS_PREFIX")
     if prefix:
         base = Path(prefix)
-        if (base / "apps" / "qgis").exists():
-            return QgisRuntime.for_prod()          # 完整 QGIS 安装布局（OSGeo4W）
-        if (base / "proj.db").is_file():
-            return QgisRuntime.for_portable(base)  # 扁平便携包
-        if (base / "share" / "qgis").is_dir():
-            return QgisRuntime.for_system(base)    # conda/apt 标准 Linux 布局
+        runtime = _runtime_for_base(base)
+        if runtime is not None:
+            return runtime
         # 无法识别布局：退回 dev 配置（含报错路径），保持旧行为
         logger.warning("QGIS_PREFIX 无法识别布局: %s", base)
     if cfg.env == "prod":
         return QgisRuntime.for_prod()
-    if cfg.qgis.install_path is None or not cfg.qgis.install_path.exists():
+    install_path = cfg.qgis.install_path
+    if install_path is not None and install_path.exists():
+        runtime = _runtime_for_base(install_path)
+        if runtime is not None:
+            return runtime
+        logger.warning("config qgis.install_path 无法识别 QGIS 布局: %s", install_path)
+    else:
         # Linux 上 config 的 install_path 是 Windows 路径（D:/... 不存在）
         # → 自动探测 conda/系统 QGIS，免去手设环境变量
         detected = _detect_linux_qgis()
         if detected is not None:
             logger.info(
                 "config qgis.install_path 无效（%s），自动探测到 QGIS: %s",
-                cfg.qgis.install_path,
+                install_path,
                 detected.qgis_base,
             )
             return detected
-    if cfg.qgis.install_path is None:
+    if install_path is None:
         raise RuntimeError(
             "dev 模式需要 config/app.yaml 里 qgis.install_path"
         )
-    return QgisRuntime.for_dev(cfg.qgis.install_path)
+    return QgisRuntime.for_dev(install_path)
 
 
 def _detect_linux_qgis() -> Optional[QgisRuntime]:
@@ -293,9 +376,11 @@ def _detect_linux_qgis() -> Optional[QgisRuntime]:
     if os.name == "nt":
         return None
     candidates: list[Path] = []
-    env = os.environ.get("CONDA_PREFIX")
-    if env:
-        candidates.append(Path(env))
+    # 用当前解释器所在环境优先：conda 未 activate（IDE / 直接跑 envs/qgis423/bin/python）
+    # 时 CONDA_PREFIX 是空的，但 QGIS 就在 sys.prefix 里。
+    for current in (os.environ.get("CONDA_PREFIX"), sys.prefix, sys.base_prefix):
+        if current:
+            candidates.append(Path(current))
     for base in (
         Path.home() / "miniconda3" / "envs",
         Path.home() / "anaconda3" / "envs",
@@ -303,7 +388,9 @@ def _detect_linux_qgis() -> Optional[QgisRuntime]:
         Path("/opt/miniconda3/envs"),
         Path("/opt/anaconda3/envs"),
     ):
-        candidates.append(base / "qgis_new")
+        if base.is_dir():
+            # 环境名不写死（qgis423 / qgis_new / qgis_build ...），统一按布局校验
+            candidates.extend(sorted(base.glob("qgis*")))
     candidates.append(Path("/usr"))  # apt 安装的系统 QGIS
     seen: set[Path] = set()
     for base in candidates:
@@ -360,7 +447,7 @@ def _run_login_dialog(cfg: AppConfig) -> AuthResult | None:
     server = load_auth_server_config(cfg.env)
     logger.info("授权服务器（环境 %s）：%s", cfg.env, server.describe())
     client = AuthClient(server)
-    dlg = LoginDialog(app_name=cfg.app_name, auth_client=client)
+    dlg = LoginDialog(app_name=cfg.app_display_name, auth_client=client)
     if dlg.exec() != QDialog.DialogCode.Accepted:
         logger.info("用户取消登录")
         return None
@@ -477,12 +564,15 @@ def _run_qgis_app(
 
     if splash is not None:
         splash.set_status("正在构建主窗口")
-    window = build_window(app_name=cfg.app_name, auth_result=auth_result)
+    window = build_window(app_name=cfg.app_display_name, auth_result=auth_result)
 
     # 主窗口就绪：先关掉初始化状态页再显示，避免浮窗盖在主窗口上
     if splash is not None:
         splash.close()
     window.show()
+    # 主窗口已显示、启动回调即将执行：更新器看到 .startup-ok 就不会因登录框 /
+    # 启动选择框停留而误判启动失败并回滚。必须在启动回调（模态）之前写。
+    mark_startup_ok()
     _run_startup_callbacks(window)
     return app.exec()
 
@@ -572,6 +662,27 @@ def _make_open_project_callback():
             return
         logger.info("启动选择：打开工程 %s", path)
         opener(path)
+
+    return _cb
+
+
+def _make_update_callback(cfg: AppConfig):
+    """构造“检测更新”启动回调。
+
+    控制器挂到主窗口的 ``_update_controller`` 上保活（QObject 父级是窗口，
+    窗口销毁时一并释放）。回调本身只登记定时器，不做网络请求；网络检查在
+    后台线程里跑，不阻塞启动。
+    """
+
+    def _cb(window) -> None:
+        try:
+            from app.ui.update.controller import UpdateController
+        except Exception:  # 更新 UI 不可用不能阻断启动
+            logger.exception("更新模块导入失败，跳过自动更新")
+            return
+        controller = UpdateController(window, cfg)
+        window._update_controller = controller
+        controller.start()
 
     return _cb
 

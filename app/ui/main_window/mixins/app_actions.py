@@ -1657,7 +1657,9 @@ class AppActionsMixin:
 
     def _show_log_dock(self) -> None:
         if self.log_dock is None:
-            self.log_dock = LogDock(self)
+            cfg = self._load_map_config()
+            feedback_url = getattr(getattr(cfg, "services", None), "feedback_url", "")
+            self.log_dock = LogDock(self, feedback_url=feedback_url)
             self.place_bottom_dock(self.log_dock)
         self.log_dock.show()
         self.log_dock.raise_()

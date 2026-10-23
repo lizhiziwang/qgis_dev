@@ -11,7 +11,13 @@ from typing import Any, Optional
 
 import yaml
 
+from app import __version__ as _code_version
+
 # 环境变量引用：${VAR} 或 ${VAR:-默认值}（空变量也走默认值）
+# 老配置的 app.name 里带着写死的版本号（如「图斑核实平台 V1.0」）。升级时
+# config/app.yaml 被保留，显示名会变成「图斑核实平台 V1.0 V1.0.1」，这里先
+# 去掉末尾的旧版本号，只用 app.version 拼。
+_NAME_VERSION_SUFFIX = re.compile(r"\s*[Vv]\d+(?:\.\d+)*\s*$")
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?}")
 
 
@@ -21,6 +27,7 @@ class AppConfig:
 
     env: str  # "dev" | "prod"
     app_name: str
+    app_version: str
     language: str
     crs: str
     map: "MapConfig"
@@ -29,7 +36,8 @@ class AppConfig:
     logging: "LoggingConfig"
     server: "ServerConfig"
     auth: "AuthConfig"
-    #: 「帮助」菜单配置（app.help 段）；旧配置没有该段时取默认值。
+    services: "ServicesConfig" = field(default_factory=lambda: ServicesConfig())
+    update: "UpdateConfig" = field(default_factory=lambda: UpdateConfig())
     help: "HelpConfig" = field(default_factory=lambda: HelpConfig())
 
     @classmethod
@@ -37,12 +45,19 @@ class AppConfig:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
         return cls.from_dict(data)
 
+    @property
+    def app_display_name(self) -> str:
+        """带版本号的显示名（窗口标题 / 启动页 / 登录框），例如“图斑核实平台 V1.0.1”。"""
+        base = _NAME_VERSION_SUFFIX.sub("", self.app_name).strip()
+        return f"{base or self.app_name} V{self.app_version}"
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "AppConfig":
         app = data.get("app", {})
         return cls(
             env=data.get("env", "dev"),
             app_name=app.get("name", "qgis_dev"),
+            app_version=str(app.get("version") or _code_version),
             language=app.get("language", "zh-Hans"),
             crs=app.get("crs", "EPSG:4490"),
             map=MapConfig.from_dict(data.get("map", {})),
@@ -52,6 +67,8 @@ class AppConfig:
             server=ServerConfig.from_dict(data.get("server", {})),
             auth=AuthConfig.from_dict(data.get("auth", {})),
             help=HelpConfig.from_dict(app.get("help", {})),
+            services=ServicesConfig.from_dict(data.get("services", {})),
+            update=UpdateConfig.from_dict(data.get("update", {})),
         )
 
 
@@ -322,6 +339,65 @@ class AuthConfig:
         return cls(
             username=data.get("username", "admin"),
             password=data.get("password", "admin"),
+        )
+
+
+#: 问题反馈页默认地址（网关代理到 problem-feedback 服务）。配置可覆盖。
+DEFAULT_FEEDBACK_URL = "http://182.108.40.116:9003/cs-feedback/"
+
+
+@dataclass(frozen=True)
+class ServicesConfig:
+    """外部服务地址（``services:`` 段）。"""
+
+    feedback_url: str = DEFAULT_FEEDBACK_URL
+
+    @classmethod
+    def from_dict(cls, data: Optional[dict[str, Any]]) -> "ServicesConfig":
+        data = data or {}
+        return cls(feedback_url=str(data.get("feedback_url") or DEFAULT_FEEDBACK_URL).strip())
+
+
+@dataclass(frozen=True)
+class UpdateConfig:
+    """自动检测更新配置（``update:`` 段）。
+
+    ``base_url`` 留空时回落到 :attr:`ServicesConfig.feedback_url`——两者都由
+    problem-feedback 网关提供，部署时只改一个地方即可。
+    """
+
+    enabled: bool = True
+    base_url: str = ""
+    #: 空 = 使用构建时的 CHANNEL（app/__init__.py）；stable 只接受签名包
+    channel: str = ""
+    check_on_startup: bool = True
+    startup_delay_ms: int = 10000
+    check_interval_hours: int = 4
+    request_timeout_seconds: float = 20.0
+
+    @classmethod
+    def from_dict(cls, data: Optional[dict[str, Any]]) -> "UpdateConfig":
+        data = data or {}
+        try:
+            delay = int(data.get("startup_delay_ms", 10000))
+        except (TypeError, ValueError):
+            delay = 10000
+        try:
+            interval = int(data.get("check_interval_hours", 4))
+        except (TypeError, ValueError):
+            interval = 4
+        try:
+            timeout = float(data.get("request_timeout_seconds", 20.0))
+        except (TypeError, ValueError):
+            timeout = 20.0
+        return cls(
+            enabled=bool(data.get("enabled", True)),
+            base_url=str(data.get("base_url") or "").strip().rstrip("/"),
+            channel=str(data.get("channel") or "").strip(),
+            check_on_startup=bool(data.get("check_on_startup", True)),
+            startup_delay_ms=max(0, delay),
+            check_interval_hours=max(1, interval),
+            request_timeout_seconds=max(3.0, timeout),
         )
 
 
