@@ -109,6 +109,15 @@ class ReprojectDialog(BaseDialog):
         self.input_combo = QComboBox()
         self._populate_layers()
         layout.addWidget(self.input_combo)
+
+        # 输入图层的坐标系：只读回显，避免误以为可在此修改
+        layout.addWidget(QLabel("输入图层坐标系"))
+        self.source_crs_edit = QLineEdit()
+        self.source_crs_edit.setReadOnly(True)
+        self.source_crs_edit.setPlaceholderText("所选图层没有坐标系")
+        layout.addWidget(self.source_crs_edit)
+        self.input_combo.currentIndexChanged.connect(self._refresh_source_crs)
+        self._refresh_source_crs()
         layout.addSpacing(6)
 
         # 2. 目标坐标系（与「创建数据」一致：可搜索下拉 + 坐标系选择弹窗）
@@ -199,6 +208,22 @@ class ReprojectDialog(BaseDialog):
             idx = self.input_combo.findData(current)
             if idx >= 0:
                 self.input_combo.setCurrentIndex(idx)
+        self._refresh_source_crs()
+
+    def _refresh_source_crs(self, *args) -> None:
+        """把当前输入图层的坐标系回显到只读框（EPSG 代码 + 名称）。"""
+        layer = self.input_combo.currentData()
+        text = ""
+        if layer is not None and not sip.isdeleted(layer):
+            crs = layer.crs()
+            if crs.isValid():
+                code = crs.authid()
+                desc = crs.description()
+                parts = [code] if code else []
+                if desc and desc != code:
+                    parts.append(desc)
+                text = "  ".join(parts)
+        self.source_crs_edit.setText(text)
 
     def _on_execute(self) -> None:
         layer = self.input_combo.currentData()

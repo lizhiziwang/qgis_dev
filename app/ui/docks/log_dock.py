@@ -176,11 +176,14 @@ class LogDock(QDockWidget):
         self.level_combo = QComboBox()
         self.level_combo.addItems(["ALL", "INFO", "DEBUG", "ERROR", "WARNING", "CRITICAL"])
         self.level_combo.setCurrentIndex(0)
+        # 级别 / 行数切换后立即按新条件重查，不必再点一次「查询」
+        self.level_combo.currentIndexChanged.connect(self._on_search)
         row.addWidget(self.level_combo)
 
         self.size_combo = QComboBox()
         self.size_combo.addItems(["50", "100", "500", "1000", "无限制"])
         self.size_combo.setCurrentIndex(2)
+        self.size_combo.currentIndexChanged.connect(self._on_search)
         row.addWidget(self.size_combo)
 
         query = QPushButton("查询")
@@ -219,12 +222,10 @@ class LogDock(QDockWidget):
         export.clicked.connect(self._on_export_diagnostics)
         row.addWidget(export)
         row.addSpacing(10)
-        self.auto_btn = QPushButton("自动滚动")
-        self.auto_btn.setCheckable(True)
+        self.auto_btn = QCheckBox("自动滚动")
         self.auto_btn.setChecked(True)
-        self.auto_btn.clicked.connect(
-            lambda: setattr(self, "auto_scroll", self.auto_btn.isChecked())
-        )
+        self.auto_btn.setToolTip("勾选后日志刷新时自动滚动到最新一条")
+        self.auto_btn.toggled.connect(self._on_auto_scroll_toggled)
         row.addWidget(self.auto_btn)
         return bar
 
@@ -283,6 +284,12 @@ class LogDock(QDockWidget):
             return os.path.getmtime(self._log_path())
         except OSError:
             return 0.0
+
+    def _on_auto_scroll_toggled(self, checked: bool) -> None:
+        """勾选状态同时驱动滚动行为；重新勾选时立即回到最新日志。"""
+        self.auto_scroll = checked
+        if checked and self.txt is not None:
+            self.txt.moveCursor(QTextCursor.MoveOperation.End)
 
     def _on_current_session_toggled(self, checked: bool) -> None:
         """勾选当前会话：时间范围由会话决定，日期控件隐藏；取消则恢复手动选择。"""

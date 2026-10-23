@@ -17,7 +17,19 @@ import contextlib
 import threading
 from dataclasses import dataclass
 
-from qgis.core import QgsExpression, QgsFeatureRequest, QgsVectorLayer
+from qgis.core import (
+    QgsExpression,
+    QgsExpressionNode,
+    QgsExpressionNodeBetweenOperator,
+    QgsExpressionNodeBinaryOperator,
+    QgsExpressionNodeColumnRef,
+    QgsExpressionNodeFunction,
+    QgsExpressionNodeInOperator,
+    QgsExpressionNodeLiteral,
+    QgsExpressionNodeUnaryOperator,
+    QgsFeatureRequest,
+    QgsVectorLayer,
+)
 from qgis.PyQt.QtCore import QEvent, QObject, Qt, QTimer, QVariant, pyqtSignal
 from qgis.PyQt.QtGui import QTextCursor
 from qgis.PyQt.QtWidgets import (
@@ -50,6 +62,61 @@ _OPERATORS = [
 
 #: 「加载采样值」读取的要素条数
 _SAMPLE_COUNT = 500
+
+#: 可以直接构成筛选条件的比较 / 逻辑二元运算符；算术、拼接等不算条件
+_CONDITION_BINARY_OPERATORS = {
+    QgsExpressionNodeBinaryOperator.boAnd,
+    QgsExpressionNodeBinaryOperator.boOr,
+    QgsExpressionNodeBinaryOperator.boEQ,
+    QgsExpressionNodeBinaryOperator.boNE,
+    QgsExpressionNodeBinaryOperator.boLT,
+    QgsExpressionNodeBinaryOperator.boLE,
+    QgsExpressionNodeBinaryOperator.boGT,
+    QgsExpressionNodeBinaryOperator.boGE,
+    QgsExpressionNodeBinaryOperator.boLike,
+    QgsExpressionNodeBinaryOperator.boNotLike,
+    QgsExpressionNodeBinaryOperator.boILike,
+    QgsExpressionNodeBinaryOperator.boNotILike,
+    QgsExpressionNodeBinaryOperator.boIs,
+    QgsExpressionNodeBinaryOperator.boIsNot,
+    QgsExpressionNodeBinaryOperator.boRegexp,
+}
+
+
+def _is_condition_node(node: QgsExpressionNode | None, layer: QgsVectorLayer) -> bool:
+    """节点本身是否返回布尔值（单字段只有布尔字段才算条件）。"""
+    if isinstance(node, QgsExpressionNodeColumnRef):
+        index = layer.fields().indexOf(node.name())
+        return index >= 0 and layer.fields().at(index).type() == QVariant.Bool
+    if isinstance(node, QgsExpressionNodeLiteral):
+        return isinstance(node.value(), bool)
+    if isinstance(node, QgsExpressionNodeUnaryOperator):
+        return (
+            node.op() == QgsExpressionNodeUnaryOperator.uoNot
+            and _is_condition_node(node.operand(), layer)
+        )
+    if isinstance(node, QgsExpressionNodeBinaryOperator):
+        if node.op() in (
+            QgsExpressionNodeBinaryOperator.boAnd,
+            QgsExpressionNodeBinaryOperator.boOr,
+        ):
+            return _is_condition_node(node.opLeft(), layer) and _is_condition_node(
+                node.opRight(), layer
+            )
+        return node.op() in _CONDITION_BINARY_OPERATORS
+    return isinstance(
+        node,
+        (
+            QgsExpressionNodeFunction,
+            QgsExpressionNodeInOperator,
+            QgsExpressionNodeBetweenOperator,
+        ),
+    )
+
+
+def _is_condition_expression(expression: QgsExpression, layer: QgsVectorLayer) -> bool:
+    """表达式是否是一个布尔条件（AND / OR / NOT 要求两侧也是条件）。"""
+    return _is_condition_node(expression.rootNode(), layer)
 
 
 class _SqlCountWorker(QObject):
@@ -312,6 +379,11 @@ class QueryBuilderWidget(QWidget):
         unknown = [name for name in expression.referencedColumns() if name not in valid_fields]
         if unknown:
             return "无效字段：" + "、".join(unknown)
+        if not _is_condition_expression(expression, self.layer):
+            return (
+                "筛选条件必须是布尔表达式，不能只写一个字段。\n"
+                "例如：\"字段\" = '值'、\"字段\" > 0、\"条件1\" AND \"条件2\"。"
+            )
         return None
 
     def _test_condition(self) -> None:
