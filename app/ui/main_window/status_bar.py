@@ -11,6 +11,10 @@ from __future__ import annotations
 from qgis.PyQt.QtCore import QEventLoop, Qt, QTimer
 from qgis.PyQt.QtWidgets import QApplication, QHBoxLayout, QLabel, QMainWindow, QWidget
 
+from app.infra.logging import get_logger
+
+logger = get_logger(__name__)
+
 #: 图层加载指示的旋转帧（转圈动画字符序列）
 _LOADING_FRAMES = ("◐", "◓", "◑", "◒")
 #: 旋转帧切换间隔（ms）
@@ -74,6 +78,77 @@ class StatusBar:
         # 把 ``self.project = QgsProject.instance()`` 绑好。若宿主未挂
         # ``project`` 属性（裸 QMainWindow 测试），退回到全局单例。
         project = getattr(self.main_window, "project", None) or QgsProject.instance()
+
+        def _open_crs_pick_dialog() -> None:
+            """点状态栏投影按钮：改用图层属性「坐标系统」的 CrsPickDialog。"""
+            from qgis.core import QgsCoordinateReferenceSystem, QgsVectorLayer
+            from qgis.PyQt.QtWidgets import QDialog
+
+            # 顶层导入会经 base_dialog → frameless → main_window 形成循环
+            from app.ui.dialogs.crs_pick_dialog import CrsPickDialog  # noqa: PLC0415 - 避免循环导入
+
+            try:
+                current_crs = project.crs()
+                current = (
+                    (current_crs.authid() or current_crs.toWkt())
+                    if current_crs.isValid()
+                    else ""
+                )
+                dlg = CrsPickDialog(
+                    self.main_window,
+                    current=current,
+                    layers=[
+                        layer
+                        for layer in project.mapLayers().values()
+                        if isinstance(layer, QgsVectorLayer)
+                    ],
+                )
+                try:
+                    accepted = dlg.exec() == QDialog.DialogCode.Accepted
+                    value = dlg.crs_value() if accepted else ""
+                finally:
+                    dlg.deleteLater()
+                if not value:
+                    return
+                crs = QgsCoordinateReferenceSystem(value)
+                if not crs.isValid():
+                    crs = QgsCoordinateReferenceSystem.fromWkt(value)
+                if not crs.isValid():
+                    self.main_window.messageBar.pushMessage(
+                        f"无法识别的坐标系：{value}",
+                        level=Qgis.MessageLevel.Warning,
+                        duration=5,
+                    )
+                    return
+                # setCrs 会触发下方 _on_proj_selector_changed，由它统一写回
+                # 工程 + 画布并给出提示，避免两处重复维护切换逻辑。
+                proj_selector.setCrs(crs)
+            except RuntimeError:
+                pass  # 控件 / 窗口销毁流程中
+            except Exception as exc:  # noqa: BLE001
+                logger.error("打开坐标系选择失败: %s", exc, exc_info=True)
+                self.main_window.messageBar.pushMessage(
+                    f"打开坐标系选择失败：{exc}",
+                    level=Qgis.MessageLevel.Warning,
+                    duration=5,
+                )
+
+        # QgsProjectionSelectionWidget 内部是「QComboBox + QToolButton」：按钮的
+        # clicked 直连 C++ 的 selectCrs()（非虚函数，Python 子类覆盖不到），
+        # 只能断开这条连接后换成上面的 CrsPickDialog 入口；控件外观与最近
+        # CRS 下拉保持不变。找不到按钮 / 已无连接时退回 QGIS 默认弹窗。
+        try:
+            from qgis.PyQt.QtWidgets import QToolButton
+
+            crs_button = proj_selector.findChild(QToolButton)
+            if crs_button is not None:
+                crs_button.clicked.disconnect()
+                crs_button.clicked.connect(_open_crs_pick_dialog)
+        except TypeError:
+            pass
+        except Exception as exc:  # noqa: BLE001
+            logger.error("替换坐标系选择弹窗失败: %s", exc, exc_info=True)
+
         proj_selector.setCrs(project.crs())
 
         # crsChanged 是无参信号，setCrs 需要 CRS 参数 → 包一层 lambda。
