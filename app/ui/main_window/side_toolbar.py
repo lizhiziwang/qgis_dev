@@ -31,9 +31,10 @@
   :class:`~app.ui.tools.i_query.IQueryTool`：点要素后弹出 ArcMap 风格的
   「I查询」浮动面板，按图层列出全部命中要素；两边按钮共用 ``identify`` key，
   单选高亮由 ``MainWindow._on_map_tool_set`` 统一同步；
-- 「缩放」用 :class:`~app.ui.tools.pan_zoom.ZoomClickTool`：**左键单击放大、
-  按住 Shift 单击缩小**（以点击点为缩放中心），与顶部工具条上独立的「放大 /
-  缩小」按钮（拉框缩放）不是同一个入口；
+- 「缩放」复用顶部「放大 / 缩小」的 :class:`QgsMapToolZoom`，交互改为**拉框**：
+  不按 Shift 拉框放大，按住 Shift 拉框缩小（见
+  :class:`~app.ui.tools.pan_zoom.ShiftZoomTool`），与「通用」页签里的放大 /
+  缩小逻辑一致；
 - 「分屏」复用 :mod:`app.ui.tools.qmap_compare` 的「地图对比」入口
   （``MainWindow._on_qmap_compare``：镜像分屏 / 垂直分割 / 水平分割 /
   放大镜），与顶部工具条「地图对比」同一实现，不再用旧的卷帘覆盖层；
@@ -98,8 +99,8 @@ _TOOL_KEYS = frozenset({
 #: 图标 key 别名：按钮的**高亮 key** 与顶部工具条区分（``side_zoom`` 独立高亮），
 #: 但图标复用 ``zoom_in`` 的那张，外观不变。
 _ICON_ALIAS = {"side_zoom": "zoom_in", "spatial_query": "space_query_polygon"}
-#: 按钮提示文案覆盖（默认用按钮文字）；「缩放」说明单击放大 / Shift 单击缩小。
-_TOOLTIPS = {"side_zoom": "点击地图放大，按住shift键点击地图缩小"}
+#: 按钮提示文案覆盖（默认用按钮文字）；「缩放」说明拉框放大 / Shift 拉框缩小。
+_TOOLTIPS = {"side_zoom": "拉框放大，按住 Shift 拉框缩小"}
 #: 会话型工具 key（独立常亮，不受地图工具切换影响；与顶部工具条同 key）。
 #: 「定位」也归这里：点开气泡 → 按钮保持高亮表示"气泡在显示"，
 #: 关闭气泡（再点同按钮或气泡上的 ×）→ 按钮弹起，与分屏会话同一套高亮逻辑。

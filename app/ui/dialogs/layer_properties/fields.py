@@ -44,6 +44,7 @@ from qgis.PyQt.QtWidgets import (
 from app.infra.logging import get_logger
 from app.ui.dialogs.layer_properties.add_field_dialog import AddFieldDialog
 from app.ui.dialogs.layer_properties.base import LayerPropertyTab
+from app.ui.common.field_combo import make_field_combo_searchable
 from app.ui.common.modeless import show_modeless
 from app.ui.common.widgets import CenteredCheckDelegate
 from app.ui.tools.feature_attrs import field_alias, readonly_field_indices
@@ -257,6 +258,7 @@ class FieldsTab(LayerPropertyTab):
         bot_layout.addWidget(lbl)
         self.display_combo = QComboBox(bot)
         self.display_combo.setMinimumWidth(220)
+        make_field_combo_searchable(self.display_combo)
         bot_layout.addWidget(self.display_combo, 1)
         self.count_label = QLabel("字段个数: —", bot)
         self.count_label.setObjectName("PropValue")

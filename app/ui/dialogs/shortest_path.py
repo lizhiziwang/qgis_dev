@@ -47,6 +47,7 @@ from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.ui.common.algo_desc import make_description_panel
 from app.ui.common.base_dialog import BaseDialog, make_scrollable
+from app.ui.common.field_combo import make_field_combo_searchable
 
 if TYPE_CHECKING:
     from qgis.gui import QgsMapTool
@@ -146,6 +147,7 @@ class ShortestPathDialog(BaseDialog):
         # 3. 方向设置（方向字段 + 顺/逆/双向值 + 默认方向）
         layout.addWidget(QLabel("方向字段（单行线，可不选）"))
         self.direction_combo = QComboBox()
+        make_field_combo_searchable(self.direction_combo)
         self.direction_combo.currentIndexChanged.connect(self._on_direction_changed)
         layout.addWidget(self.direction_combo)
 
@@ -173,6 +175,7 @@ class ShortestPathDialog(BaseDialog):
         # 4. 速度设置（最快时间策略）
         layout.addWidget(QLabel("速度字段（最快时间策略）"))
         self.speed_combo = QComboBox()
+        make_field_combo_searchable(self.speed_combo)
         layout.addWidget(self.speed_combo)
         speed_row = QHBoxLayout()
         self.speed_spin = QDoubleSpinBox()

@@ -614,7 +614,27 @@ class QueryBuilderWidget(QWidget):
             if text and self._find_field_index(text) < 0:
                 self._revert_invalid_field()
                 return True
+        if (
+            is_field_edit
+            and event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            # 可编辑下拉默认只有点箭头才展开；点输入区也自动弹出候选
+            QTimer.singleShot(0, self._show_field_popup)
         return super().eventFilter(obj, event)
+
+    def _show_field_popup(self) -> None:
+        """点输入区时展开候选；用 completer 弹层，保持输入框键盘焦点。"""
+        try:
+            completer = self.field_combo.completer()
+            if completer is None:
+                return
+            self.field_combo.lineEdit().setFocus()
+            # 点击展开全部字段，不拿当前选中值当过滤前缀
+            completer.setCompletionPrefix("")
+            completer.complete()
+        except RuntimeError:
+            pass
 
     def _on_field_changed(self, index: int) -> None:
         self.current_field = str(self.field_combo.itemData(index) or "")

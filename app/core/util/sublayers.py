@@ -18,11 +18,17 @@ sqlite 都能列全），拿不到时退回 ``dataProvider().subLayers()`` 那�
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from app.core.util.data_formats import (
+    GDB_SUFFIX,
+    resolve_gdb_dir,
+    suffix_of,
+)
 from app.infra.logging import get_logger
 
 if TYPE_CHECKING:
@@ -115,11 +121,24 @@ def _kind_from_name(text: str) -> str:
 def list_sublayers(path: str) -> list[Sublayer]:
     """列出 ``path`` 里的所有图层（按名字排序）；读不出来返回空表。
 
-    GDB 是**目录**，传它的目录路径即可（``querySublayers`` 认）。
+    GDB 是**目录**，传它的目录路径即可（``querySublayers`` 认）。如果传进来的是
+    “外层 xxx.gdb”，而真正的库在唯一子目录里，会自动下钻一层（见
+    :func:`~app.core.util.data_formats.resolve_gdb_dir`）。
     """
     if not Path(path).exists():
         logger.info("列子图层：路径不存在 %s", path)
         return []
+    if suffix_of(path) == GDB_SUFFIX:
+        resolved = resolve_gdb_dir(path)
+        if resolved is None:
+            logger.warning(
+                "列子图层：%s 不是有效的 File Geodatabase（没有 gdb / .gdbtable 文件）",
+                path,
+            )
+            return []
+        if resolved != path:
+            logger.info("列子图层：%s 是外层目录，改用内层库 %s", path, resolved)
+        path = resolved
     found = _query_sublayers(path)
     if not found:
         found = _data_provider_sublayers(path)
@@ -228,11 +247,49 @@ def open_sublayer(path: str, sublayer: Sublayer) -> tuple[QgsVectorLayer | None,
     return None, f"打开「{sublayer.name}」失败：{reason}"
 
 
+def open_selections(selections) -> tuple[list["QgsVectorLayer"], list[str]]:
+    """把「添加数据」的 ``DataSelection`` 列表展开成图层对象。
+
+    参数只要求对象带 ``path`` / ``sublayer`` 两个属性（鸭子类型），核心层不反向
+    依赖 UI 的 ``DataSelection``。``sublayer is None`` 时按整份数据源列出全部子图层
+    （普通矢量文件一般正好一个）。
+
+    Returns:
+        ``(图层列表, 失败原因列表)``。部分失败也返回已成功的图层，调用方自行提示。
+    """
+    layers: list["QgsVectorLayer"] = []
+    errors: list[str] = []
+    for selection in selections:
+        path = str(getattr(selection, "path", "") or "")
+        sublayer = getattr(selection, "sublayer", None)
+        if not path:
+            continue
+        candidates = [sublayer] if sublayer is not None else list_sublayers(path)
+        if not candidates:
+            # 普通矢量文件（shp / geojson 等）枚举不到子图层时直开
+            from qgis.core import QgsVectorLayer
+
+            layer = QgsVectorLayer(path, os.path.basename(path), "ogr")
+            if layer.isValid():
+                layers.append(layer)
+            else:
+                errors.append(f"{os.path.basename(path)}：打不开")
+            continue
+        for candidate in candidates:
+            layer, error = open_sublayer(path, candidate)
+            if layer is not None:
+                layers.append(layer)
+            elif error:
+                errors.append(error)
+    return layers, errors
+
+
 __all__ = [
     "VECTOR_FILE_FILTER",
     "Sublayer",
     "geometry_kind_of_layer",
     "hidden_tables",
     "list_sublayers",
+    "open_selections",
     "open_sublayer",
 ]

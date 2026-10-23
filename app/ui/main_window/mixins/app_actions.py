@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import os
-import threading
 from contextlib import suppress
 from pathlib import Path
 
@@ -47,7 +46,7 @@ from app.core.util.local_layer_loader import (
 )
 from app.infra.fs.state import load_state, save_state
 from app.infra.logging import get_logger
-from app.server.cli import main as server_main
+from app.server.cli import main as server_main  # noqa: F401 —— _on_test 保留的启动入口
 from app.ui.common.modeless import show_modeless
 from app.ui.dialogs.add_connection import AddConnectionDialog
 from app.ui.dialogs.check_viewer import CheckViewerDialog
@@ -978,8 +977,8 @@ class AppActionsMixin:
         """数据管理图层右键「导入数据」：把数据源的要素**追加**进这个图层，或**替换**它。
 
         数据源可以是工程里的图层，也可以是电脑上的文件（GDB / 库会先列出里面的图层），
-        而且**可以一次选多个**；导入方式在同一个弹窗里选（默认「追加」，不动原有数据）。
-        字段按**同名匹配**、按目标表 SRID 自动投影，结果里把"没跟上的字段"如实报出来。
+        而且**可以一次选多个**。一个主窗口内用页签切换来源，底部选「追加 / 替换」；
+        本地文件页签点开只弹一次「添加数据」，选完回到主窗口显示已选图层。
         """
         from app.core.domain.append_layer import AppendLayerError, import_features_into_table
         from app.ui.dialogs.create_data_fields_step import ExternalDatasetDialog
@@ -1013,12 +1012,18 @@ class AppActionsMixin:
             )
             return
         geometry_kind = geometry_kind_of_layer(target_layer)
+
+        # 一个主窗口：页签选「工程图层 / 本地文件」，底部选追加/替换；
+        # 本地文件页签点开只弹一次「添加数据」，选完回到本窗口显示已选图层。
         dialog = ExternalDatasetDialog(
             self,
             vector_layers=vector_layers,
             geometry_kind=geometry_kind,
             multi=True,
             allow_replace=True,
+            auto_open_local=False,
+            title=f"导入数据 - {name}",
+            ok_text="导入",
         )
         accepted = dialog.exec()
         sources, error = dialog.resolve_all() if accepted else ([], "")
@@ -1029,7 +1034,6 @@ class AppActionsMixin:
             self._dm_notify(error, level=Qgis.MessageLevel.Warning, duration=6)
         if not sources:
             return
-
         target_label = f"{os.path.basename(path)} · 「{name}」"
         if replace:
             existing = target_layer.featureCount()
@@ -1653,7 +1657,9 @@ class AppActionsMixin:
 
     def _show_log_dock(self) -> None:
         if self.log_dock is None:
-            self.log_dock = LogDock(self)
+            cfg = self._load_map_config()
+            feedback_url = getattr(getattr(cfg, "services", None), "feedback_url", "")
+            self.log_dock = LogDock(self, feedback_url=feedback_url)
             self.place_bottom_dock(self.log_dock)
         self.log_dock.show()
         self.log_dock.raise_()

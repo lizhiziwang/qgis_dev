@@ -51,7 +51,13 @@ def main() -> None:
         sys.exit(1)
 
     print(f"== 1/2 push -> {BRANCH} (zwps) ==")
-    sh(f'git push {REMOTE_URL} {BRANCH}')
+    # 之前直接 push 本地 BRANCH：当前在功能分支时推的是本地**陈旧**的 dev 引用，
+    # 真机 pull 到的还是旧代码。显式推 HEAD:<目标分支>，确保推的是工作区所在的
+    # 提交；跨分支推送若无法快进会被 git 拒绝（不会静默覆盖）。
+    current = sh("git rev-parse --abbrev-ref HEAD")
+    if current != BRANCH:
+        print(f"当前分支 {current}，推送到真机的 {BRANCH} 引用")
+    sh(f'git push {REMOTE_URL} HEAD:{BRANCH}')
     print("push 完成")
 
     print("== 2/2 真机 qgis/ 仓库 git pull ==")

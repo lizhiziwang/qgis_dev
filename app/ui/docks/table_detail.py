@@ -387,6 +387,7 @@ class VectorFieldEditor(_EditorBase):
                         item.setFlags(
                             Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
                         )
+                        item.setToolTip("双击可挂接字典")
                     self.table.setItem(row_index, column, item)
                 combo = QComboBox()
                 for item_type in FIELD_TYPES:

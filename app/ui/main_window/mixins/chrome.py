@@ -48,7 +48,7 @@ from app.ui.main_window.title_bar import (
     MODE_TASK,
 )
 from app.ui.main_window.tool_bar import ToolBar
-from app.ui.tools.pan_zoom import ZoomClickTool
+from app.ui.tools.pan_zoom import ShiftZoomTool
 
 logger = get_logger(__name__)
 
@@ -124,8 +124,9 @@ class WindowChromeMixin:
         self._pan_tool = QgsMapToolPan(self.canvas)
         self._zoom_in_tool = QgsMapToolZoom(self.canvas, False)
         self._zoom_out_tool = QgsMapToolZoom(self.canvas, True)
-        # 侧栏「缩放」（单击放大 / Shift+单击缩小）：与顶部「放大 / 缩小」是两个入口
-        self._side_zoom_tool = ZoomClickTool(self.canvas)
+        # 侧栏「缩放」（拉框放大 / 按住 Shift 拉框缩小）：复用顶部两个原生
+        # QgsMapToolZoom，保证与「放大 / 缩小」的拉框逻辑完全一致
+        self._side_zoom_tool = ShiftZoomTool(self.canvas)
         #: 启动测量前的常规画布工具（再次点测量按钮取消使用时还原）
         self._measure_previous_tool = None
 
@@ -267,7 +268,7 @@ class WindowChromeMixin:
         )
 
     def _build_view_toolbar(self) -> QToolBar:
-        """「查看」tab：调试 / 流程两组（Ribbon 布局）。"""
+        """「查看」tab：调试 / 流程 / 应用三组（Ribbon 布局）。"""
         self._act_log = self._tab_action(
             "日志", "log", self._show_log_dock,
             tooltip="打开日志面板（Ctrl+L）", shortcut="Ctrl+L",
@@ -279,8 +280,20 @@ class WindowChromeMixin:
         return self._build_ribbon_tab_toolbar(
             "查看",
             "ViewTabToolbar",
-            [("调试", [self._act_log]), ("流程", [self._act_flow_editor])],
+            [
+                ("调试", [self._act_log]),
+                ("流程", [self._act_flow_editor]),
+            ],
         )
+
+    def _on_check_updates(self) -> None:
+        """「帮助 → 检查更新」（手动检查始终反馈结果）。"""
+        controller = getattr(self, "_update_controller", None)
+        if controller is None:
+            QMessageBox.information(self, "检查更新", "更新模块不可用，请查看日志。")
+            logger.warning("点击检查更新，但更新控制器尚未创建")
+            return
+        controller.check_now()
 
     # ===================================================== 全局快捷键
 
@@ -475,7 +488,7 @@ class WindowChromeMixin:
     # ===================================================== 帮助页签
 
     def _build_help_toolbar(self) -> QToolBar:
-        """「帮助」tab：使用手册 / 问题反馈 / 关于（与其它页签同为 Ribbon 布局）。"""
+        """「帮助」tab：使用手册 / 问题反馈 / 关于 / 检查更新（Ribbon 布局）。"""
         self._act_manual = self._tab_action(
             "使用手册",
             "manual",
@@ -494,12 +507,16 @@ class WindowChromeMixin:
             self._on_about,
             tooltip="查看应用名称与版本信息",
         )
+        self._act_check_update = self._tab_action(
+            "检查更新", "refresh", self._on_check_updates,
+            tooltip="立即检查是否有新版本",
+        )
         return self._build_ribbon_tab_toolbar(
             "帮助",
             "HelpTabToolbar",
             [
                 ("文档", [self._act_manual]),
-                ("支持", [self._act_feedback, self._act_about]),
+                ("支持", [self._act_feedback, self._act_about, self._act_check_update]),
             ],
         )
 
