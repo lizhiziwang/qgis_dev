@@ -21,6 +21,6 @@ selection_style:
     stroke_color: '#00ffff'
     stroke_width: 2.0
     stroke_opacity: 100
-    fill_enabled: false
-    fill_color: '#000000'
-    fill_opacity: 0
+    fill_enabled: true
+    fill_color: '#00ffff'
+    fill_opacity: 63

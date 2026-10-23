@@ -18,7 +18,7 @@ import threading
 from dataclasses import dataclass
 
 from qgis.core import QgsExpression, QgsFeatureRequest, QgsVectorLayer
-from qgis.PyQt.QtCore import QObject, Qt, QVariant, pyqtSignal
+from qgis.PyQt.QtCore import QEvent, QObject, Qt, QTimer, QVariant, pyqtSignal
 from qgis.PyQt.QtGui import QTextCursor
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
@@ -28,11 +28,13 @@ from qgis.PyQt.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QMessageBox,
     QPushButton,
     QSplitter,
+    QStyle,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -133,6 +135,12 @@ class QueryBuilderWidget(QWidget):
         self._values: list[object] = []
         self._labels: dict[str, str] = {}
         self._test_worker: _SqlCountWorker | None = None
+        #: 最近一次有效字段（显示文本 / 字段名）：手输不存在字段时用于撤回
+        self._last_valid_field_text = ""
+        self._last_valid_field_name = ""
+        self._field_error_timer = QTimer(self)
+        self._field_error_timer.setSingleShot(True)
+        self._field_error_timer.timeout.connect(self._hide_field_error)
         self._build()
         self._init_signals()
         self._reload_fields()
@@ -152,24 +160,53 @@ class QueryBuilderWidget(QWidget):
         field_title = QHBoxLayout()
         field_title.addWidget(QLabel("选中字段："))
         field_title.addStretch(1)
-        self.domain_check = QCheckBox("域字段")
-        self.domain_check.setChecked(False)
-        field_title.addWidget(self.domain_check)
         f_layout.addLayout(field_title)
         self.field_combo = QComboBox()
+        # QSS 作用域锚点：条件页/属性筛选里这枚下拉的「清空 ×」与箭头要挨紧
+        self.field_combo.setObjectName("FieldSearchCombo")
         self.field_combo.setEditable(True)
         self.field_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.field_combo.setToolTip("可直接输入字段名 / 别名筛选")
         line_edit = self.field_combo.lineEdit()
         line_edit.setPlaceholderText("输入字段名 / 别名筛选…")
-        line_edit.setClearButtonEnabled(True)
+        # 原生清除按钮自带 ~22px 的点击区，× 图标居中，和下拉箭头之间会留一大截空白。
+        # 改成 QLineEdit 的尾部 action：图标只有 16px、贴着编辑框右缘，箭头可以靠近。
+        line_edit.setClearButtonEnabled(False)
+        self._clear_field_action = line_edit.addAction(
+            self.style().standardIcon(QStyle.StandardPixmap.SP_LineEditClearButton),
+            QLineEdit.ActionPosition.TrailingPosition,
+        )
+        self._clear_field_action.setToolTip("清空字段")
+        self._clear_field_action.triggered.connect(
+            lambda _checked=False: self.field_combo.setEditText("")
+        )
+        line_edit.textChanged.connect(
+            lambda text: self._clear_field_action.setVisible(bool(text))
+        )
+        self._clear_field_action.setVisible(bool(line_edit.text()))
         completer = QCompleter(self.field_combo.model(), self.field_combo)
         completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
         completer.setFilterMode(Qt.MatchFlag.MatchContains)
         completer.setCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
         completer.setMaxVisibleItems(15)
         self.field_combo.setCompleter(completer)
-        f_layout.addWidget(self.field_combo)
+        # 「域字段」跟着字段下拉，并与下方「显示代码」右对齐（同一列）
+        field_row = QHBoxLayout()
+        field_row.setSpacing(8)
+        field_row.addWidget(self.field_combo, 1)
+        self.domain_check = QCheckBox("域字段")
+        self.domain_check.setChecked(False)
+        field_row.addWidget(self.domain_check, 0, Qt.AlignmentFlag.AlignRight)
+        f_layout.addLayout(field_row)
+        # 手输不存在的字段时的行内提示（不弹模态框，不打断输入）
+        self.field_error = QLabel("")
+        self.field_error.setObjectName("FieldError")
+        self.field_error.setWordWrap(True)
+        self.field_error.hide()
+        f_layout.addWidget(self.field_error)
+        # 失焦 / 回车时校验；Esc 在输入无效时撤回上一次有效字段
+        line_edit.editingFinished.connect(self._on_field_editing_finished)
+        line_edit.installEventFilter(self)
         f_layout.addWidget(QLabel("字段值预览："))
         self.value_list = _CompactListWidget()
         self.value_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
@@ -391,7 +428,13 @@ class QueryBuilderWidget(QWidget):
 
         current = self.field_combo.itemData(selected) if selected >= 0 else ""
         self.current_field = str(current or "")
+        if selected >= 0:
+            self._remember_valid_field(selected)
+        else:
+            self._remember_valid_field(-1)
+        self._hide_field_error()
         self._clear_values()
+        self._clear_field_action.setVisible(bool(self.field_combo.currentText()))
 
     # ------------------------------------------------------------ 值
 
@@ -401,8 +444,111 @@ class QueryBuilderWidget(QWidget):
         self._values = []
         self._labels = {}
 
+    def _find_field_index(self, text: str, *, allow_alias: bool = True) -> int:
+        """按字段名 / 显示文本 / 别名在当前候选里找精确匹配；找不到返回 -1。
+
+        ``allow_alias=False`` 用于输入过程中的自动定位：只认显示文本 / 字段名，
+        避免用户刚敲完某别名就被替换成完整显示文本。
+        """
+        text = text.strip()
+        if not text:
+            return -1
+        for i in range(self.field_combo.count()):
+            display = self.field_combo.itemText(i)
+            name = str(self.field_combo.itemData(i) or "")
+            alias = ""
+            if display.endswith("）") and "（" in display:
+                alias = display.rsplit("（", 1)[1][:-1]
+            if text in (display, name) or (allow_alias and text == alias and alias):
+                return i
+        return -1
+
+    def _remember_valid_field(self, index: int) -> None:
+        """记下最近一次有效选择，供手输无效内容时撤回。"""
+        if index >= 0:
+            self._last_valid_field_text = self.field_combo.itemText(index)
+            self._last_valid_field_name = str(self.field_combo.itemData(index) or "")
+        else:
+            self._last_valid_field_text = ""
+            self._last_valid_field_name = ""
+
+    def _on_field_editing_finished(self) -> None:
+        """失焦 / 回车：手输的字段名精确匹配不到就撤回并提示。"""
+        text = self.field_combo.currentText().strip()
+        if not text:
+            self._hide_field_error()
+            return
+        index = self._find_field_index(text)
+        if index >= 0:
+            # 别名 / 手输有效字段：正式选中它（只在此刻替换显示文本，不打断输入过程）
+            if index != self.field_combo.currentIndex():
+                self.field_combo.setCurrentIndex(index)
+            self._remember_valid_field(index)
+            self._hide_field_error()
+            return
+        self._revert_invalid_field()
+
+    def _revert_invalid_field(self) -> None:
+        """撤回无效字段：恢复最近一次有效字段（没有就清空），并显示行内提示。"""
+        text = self.field_combo.currentText().strip()
+        if not text or self._find_field_index(text) >= 0:
+            return
+        prev_name = self._last_valid_field_name
+        self.field_combo.blockSignals(True)
+        try:
+            index = self.field_combo.findData(prev_name) if prev_name else -1
+            if index < 0 and self.field_combo.count():
+                index = 0
+            if index >= 0:
+                self.field_combo.setCurrentIndex(index)
+                self.current_field = str(self.field_combo.itemData(index) or "")
+                self._remember_valid_field(index)
+            else:
+                self.field_combo.setCurrentIndex(-1)
+                self.field_combo.setEditText("")
+                self.current_field = ""
+                self._remember_valid_field(-1)
+        finally:
+            self.field_combo.blockSignals(False)
+        self._clear_values()
+        if self.current_field:
+            self._show_field_error(
+                f"字段「{text}」不存在，已撤回为「{self.current_field}」"
+            )
+        else:
+            self._show_field_error(f"字段「{text}」不存在，请从下拉列表中选择")
+
+    def _show_field_error(self, text: str) -> None:
+        self.field_error.setText(text)
+        self.field_error.show()
+        self._field_error_timer.start(4000)
+
+    def _hide_field_error(self) -> None:
+        self._field_error_timer.stop()
+        self.field_error.hide()
+
+    def eventFilter(self, obj, event):  # noqa: N802 —— Qt 命名
+        """字段输入框按 Esc：内容无效时撤回；有效 / 空则放行给对话框。"""
+        try:
+            is_field_edit = obj is self.field_combo.lineEdit()
+        except (AttributeError, RuntimeError):
+            is_field_edit = False
+        if (
+            is_field_edit
+            and event.type() == QEvent.Type.KeyPress
+            and event.key() == Qt.Key.Key_Escape
+        ):
+            text = self.field_combo.currentText().strip()
+            if text and self._find_field_index(text) < 0:
+                self._revert_invalid_field()
+                return True
+        return super().eventFilter(obj, event)
+
     def _on_field_changed(self, index: int) -> None:
         self.current_field = str(self.field_combo.itemData(index) or "")
+        if self.current_field:
+            self._remember_valid_field(index)
+            self._hide_field_error()
         self._clear_values()
 
     def _on_field_text_edited(self, text: str) -> None:
@@ -413,14 +559,7 @@ class QueryBuilderWidget(QWidget):
         （精确匹配或从补全列表选择）后才允许取值 / 双击插入值。
         """
         text = text.strip()
-        index = -1
-        if text:
-            index = self.field_combo.findText(text, Qt.MatchFlag.MatchExactly)
-            if index < 0:
-                for i in range(self.field_combo.count()):
-                    if str(self.field_combo.itemData(i) or "") == text:
-                        index = i
-                        break
+        index = self._find_field_index(text, allow_alias=False) if text else -1
         if index >= 0:
             if index != self.field_combo.currentIndex():
                 self.field_combo.setCurrentIndex(index)
@@ -428,6 +567,8 @@ class QueryBuilderWidget(QWidget):
             if name != self.current_field:
                 self.current_field = name
                 self._clear_values()
+            self._remember_valid_field(index)
+            self._hide_field_error()
             return
         if not text:
             # 点清空按钮 / 手动删空：保持「未选中字段」，不要自动跳回某个字段
@@ -436,15 +577,21 @@ class QueryBuilderWidget(QWidget):
             self.field_combo.setEditText("")
             self.field_combo.blockSignals(False)
             self.current_field = ""
+            self._remember_valid_field(-1)
+            self._hide_field_error()
             self._clear_values()
             return
-        # 还没匹配到具体字段：清掉当前字段，避免继续用上一次字段取值
+        # 还没匹配到具体字段：清掉当前字段，避免继续用上一次字段取值。
+        # 这里只是输入筛选过程，不弹“字段不存在”（失焦 / 回车时才校验）。
         self.current_field = ""
         self._clear_values()
 
     def _on_field_chosen(self, index: int) -> None:
         name = self.field_combo.itemData(index)
         self.current_field = str(name or "")
+        if self.current_field:
+            self._remember_valid_field(index)
+            self._hide_field_error()
         self._clear_values()
         if name:
             self._insert_text(f' "{name}" ')

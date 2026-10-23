@@ -166,6 +166,8 @@ class MainWindow(
         #: 否则未选中图层时直接访问会 AttributeError —— 该异常在 Qt 槽内未捕获
         #: 会 native 崩溃（0xC0000409）。
         self._selected_layer: Optional[QgsVectorLayer] = None
+        #: 上次在「图层属性」里停留的页签名（再次右键打开时优先进入该页）
+        self._last_properties_tab: str = ""
         #: 样式剪贴板：复制样式时存 xmlData()，粘贴样式时读（QGIS 图层菜单习惯）
         self._style_clipboard: Optional[str] = None
         #: 图层 / 组剪贴板：复制组时存节点快照（图层存 clone()），组右键「粘贴」读它

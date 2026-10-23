@@ -990,7 +990,7 @@ class RenderTab(LayerPropertyTab):
         renderer_layout.addWidget(self.renderer_combo, 1)
         self.import_style_btn = QPushButton("导入样式…", renderer_row)
         self.import_style_btn.setToolTip(
-            "从工程内同几何类型的图层或外部 QGIS 样式文件导入渲染方式"
+            "从工程内同几何类型的图层或外部样式文件导入渲染方式"
         )
         self.import_style_btn.clicked.connect(self._on_import_style)
         renderer_layout.addWidget(self.import_style_btn)

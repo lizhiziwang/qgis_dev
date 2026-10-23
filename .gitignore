@@ -9,6 +9,9 @@ dist/
 # 本地探针/临时测试目录
 .tmp/
 
+# 测试报告（本地生成，含截图，不入库）
+docs/test-report/
+
 # Python 字节码 / 缓存
 __pycache__/
 *.py[cod]

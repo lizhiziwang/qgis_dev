@@ -59,14 +59,14 @@ class ImportStyleDialog(BaseDialog):
             self.layer_combo.addItem("（没有其它同类型的矢量图层）", None)
         root.addWidget(self.layer_combo)
 
-        self.file_radio = QRadioButton("从外部样式文件导入（QGIS .qml / .xml）", self)
+        self.file_radio = QRadioButton("从外部样式文件导入（.qml / .xml）", self)
         self.file_radio.setChecked(not self._layers)
         root.addWidget(self.file_radio)
 
         row = QHBoxLayout()
         row.setSpacing(6)
         self.path_edit = QLineEdit(self)
-        self.path_edit.setPlaceholderText("选择 QGIS 图层样式 / 符号文件")
+        self.path_edit.setPlaceholderText("选择图层样式 / 符号文件")
         self.path_edit.textChanged.connect(self._sync_state)
         self.browse_btn = QPushButton("浏览…", self)
         self.browse_btn.clicked.connect(self._on_browse)
@@ -110,7 +110,7 @@ class ImportStyleDialog(BaseDialog):
             self,
             "选择样式文件",
             self.path_edit.text().strip() or "",
-            "QGIS 样式 (*.qml *.xml);;所有文件 (*)",
+            "样式文件 (*.qml *.xml);;所有文件 (*)",
         )
         if path:
             self.path_edit.setText(path)

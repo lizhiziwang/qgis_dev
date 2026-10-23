@@ -253,7 +253,7 @@ class ConditionQueryDialog(BaseDialog):
             button.setMinimumHeight(22)
             button.setFocusPolicy(Qt.FocusPolicy.NoFocus)
             if label == "?":
-                button.setToolTip("单字符通配符（QGIS LIKE 里写作 _）")
+                button.setToolTip("单字符通配符（LIKE 里写作 _）")
             button.clicked.connect(
                 lambda _checked=False, text=insert, offset=back: self._insert_text(text, offset)
             )

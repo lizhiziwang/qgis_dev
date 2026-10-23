@@ -21,7 +21,6 @@ from qgis.gui import (
 from qgis.PyQt.QtCore import QSize, Qt, QTimer, QUrl
 from qgis.PyQt.QtGui import (
     QAction,
-    QColor,
     QDesktopServices,
     QKeySequence,
     QResizeEvent,
@@ -417,7 +416,6 @@ class WindowChromeMixin:
         """
         from app.infra.edit_settings import (
             EditSettingsManager,
-            load_settings,
             save_settings,
         )
         from app.infra.shortcuts import diff_from_defaults, save_overrides
@@ -835,11 +833,12 @@ class WindowChromeMixin:
         dig_tb = getattr(self, "digitizing_toolbar", None)
         if dig_tb is not None:
             dig_tb.apply_theme(theme)
-        # 画布底色跟随主题（setCanvasColor，不走 QSS）
+        # 画布底色跟随主题：只改控件背景，不触发图层重绘。
+        # 地图本身是透明底渲染的（见 AppMapCanvas），百万要素图层切主题
+        # 不再需要一次十几秒的全量重画。
         canvas = getattr(self, "canvas", None)
         if canvas is not None:
-            canvas.setCanvasColor(QColor(theme.canvas_bg))
-            canvas.refresh()
+            canvas.apply_theme_background(theme.canvas_bg)
         # 浮动消息条的外观 QSS 里含主题色，切主题要重贴
         refresh_bar = getattr(self, "_apply_message_bar_appearance", None)
         if callable(refresh_bar):

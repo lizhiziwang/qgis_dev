@@ -52,8 +52,13 @@ class FlatSlider(QWidget):
         # 控件自身不画系统底色；完全由 paintEvent 自己掌控
         self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
-        # 主题切换 → 重绘
-        ThemeManager.instance().theme_changed.connect(lambda _t: self.update())
+        # 主题切换 → 重绘。**必须用绑定方法**：lambda 连接会被 ThemeManager 单例持有，
+        # 控件销毁后仍可能被调用（对已删除的 C++ 对象 update() → 槽内异常 → 进程退出 127）。
+        # 绑定方法让 Qt 在接收者销毁时自动断开。
+        ThemeManager.instance().theme_changed.connect(self._on_theme_changed)
+
+    def _on_theme_changed(self, _theme=None) -> None:
+        self.update()
 
     # ----------------------------------------------------------- 公开 API
 

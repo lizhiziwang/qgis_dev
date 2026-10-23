@@ -659,7 +659,7 @@ def _branch_url(color: str, opened: bool) -> str:
         return _BRANCH_CACHE[key]
 
     from qgis.PyQt.QtCore import QPoint, Qt
-    from qgis.PyQt.QtGui import QColor, QPainter, QPolygon, QPixmap
+    from qgis.PyQt.QtGui import QColor, QPainter, QPixmap
 
     size = 9
     pm = QPixmap(size, size)
@@ -839,6 +839,7 @@ def app_qss(t: Theme) -> str:
     QLabel {{ color: {t.menu_text}; }}
     QLabel#loginSubtitle {{ color: {t.text_secondary}; }}
     QLabel#loginError {{ color: {t.text_error}; font-weight: bold; }}
+    QLabel#FieldError {{ color: {t.text_error}; font-size: 11px; }}
     QLabel#DialogTitle {{ font-size: 14px; font-weight: bold; color: {t.menu_text}; }}
     /* 属性类面板的数值（图层对象个数 / 范围坐标 / 透明度百分比等）：
        之前用 input_focus 蓝跟主操作色撞色，改成主文本色 + 加粗，
@@ -929,6 +930,22 @@ def app_qss(t: Theme) -> str:
         color: {t.text_secondary};
     }}
     QComboBox::drop-down {{ border: none; width: 22px; background-color: transparent; }}
+    /* 字段搜索下拉（属性筛选 / 图层属性-条件）：清空「×」与下拉箭头挨紧。
+       清除按钮已换成 16px 的尾部 action（见 query_builder_widget），
+       下拉区 16px + 箭头右移 8px，既能贴近「×」又不会跑出边框。 */
+    QComboBox#FieldSearchCombo {{ padding-right: 0px; }}
+    QComboBox#FieldSearchCombo::drop-down {{
+        border: none; width: 16px; background-color: transparent;
+    }}
+    QComboBox#FieldSearchCombo::down-arrow {{
+        image: url({_arrow_url(t.menu_text)});
+        width: 8px;
+        height: 6px;
+        margin-right: 8px;
+    }}
+    QComboBox#FieldSearchCombo::down-arrow:on {{
+        image: url({_arrow_url(t.menu_text, up=True)});
+    }}
     /* 日期 / 时间输入框的日历按钮：**必须显式给 ::drop-down 宽度和箭头图**。
        Qt 的规矩是——只要给控件套了边框/背景（上面的共用规则就套了），原生下拉
        按钮就不再画；不给 ::drop-down，日历弹窗**根本点不开**（用户报的"日期字段

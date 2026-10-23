@@ -33,7 +33,7 @@ def snapshot() -> dict[str, Any]:
     try:
         from qgis.core import QgsProject
     except ImportError as exc:  # 无 QGIS 运行时（单元测试 / 服务端）
-        return {"status": f"无 QGIS 运行时：{exc}"}
+        return {"status": f"无 GIS 运行时：{exc}"}
 
     try:
         project = QgsProject.instance()

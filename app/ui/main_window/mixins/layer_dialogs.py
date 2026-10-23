@@ -77,14 +77,26 @@ class LayerDialogsMixin:
         self._select_tab_widget_page(dlg, ("渲染", "Render"))
 
     def _configure_layer_properties(self, dlg) -> None:
-        """新建图层属性窗口时接上「已应用」信号：点「应用」也刷新行首色块。"""
+        """新建图层属性窗口时接上「已应用」信号：点「应用」也刷新行首色块。
+
+        上次关窗时停在哪个页签，这次右键打开就优先进入哪个页签（页签被禁用时跳过）。
+        """
         try:
             dlg.applied.connect(self.layer_dock.refresh_symbol_icons)
         except (AttributeError, TypeError):
             pass
+        last = getattr(self, "_last_properties_tab", "")
+        if last:
+            self._select_tab_widget_page(dlg, (last,))
 
-    def _on_layer_properties_finished(self, _dlg) -> None:
-        """图层属性关闭（确定 / 取消都算）→ 刷新行尾标注开关与行首符号色块。"""
+    def _on_layer_properties_finished(self, dlg) -> None:
+        """图层属性关闭（确定 / 取消都算）→ 记住当前页签并刷新图层树。"""
+        try:
+            tabs = getattr(dlg, "tabs", None)
+            if tabs is not None and tabs.count():
+                self._last_properties_tab = tabs.tabText(tabs.currentIndex())
+        except (RuntimeError, AttributeError):
+            pass
         try:
             self.layer_dock.refresh_label_state()
             self.layer_dock.refresh_symbol_icons()
@@ -263,7 +275,7 @@ class LayerDialogsMixin:
             if tabs is None:
                 return
             for index in range(tabs.count()):
-                if tabs.tabText(index) in texts:
+                if tabs.tabText(index) in texts and tabs.isTabEnabled(index):
                     tabs.setCurrentIndex(index)
                     return
         except Exception:  # noqa: BLE001

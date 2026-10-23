@@ -31,7 +31,6 @@ from qgis.PyQt.QtWidgets import (
     QFormLayout,
     QGridLayout,
     QHBoxLayout,
-    QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
@@ -397,7 +396,7 @@ class SaveSymbolDialog(BaseDialog):
             self,
             "新建符号库",
             self.path_edit.text().strip() or str(libraries_dir()),
-            "QGIS 样式 (*.xml);;所有文件 (*)",
+            "样式文件 (*.xml);;所有文件 (*)",
         )
         if chosen:
             if not chosen.lower().endswith(".xml"):
@@ -525,7 +524,7 @@ class SymbolSelectorDialog(BaseDialog):
         ops = QGridLayout()
         ops.setSpacing(6)
         self.edit_btn = QPushButton("编辑符号…", right)
-        self.edit_btn.setToolTip("打开 QGIS 完整符号编辑器（多符号层 / 数据定义属性）")
+        self.edit_btn.setToolTip("打开完整符号编辑器（多符号层 / 数据定义属性）")
         self.edit_btn.clicked.connect(self._on_edit_symbol)
         self.save_btn = QPushButton("另存为…", right)
         self.save_btn.setToolTip("把当前符号保存到用户符号库")
@@ -542,7 +541,7 @@ class SymbolSelectorDialog(BaseDialog):
         self.reset_btn.setToolTip("恢复该几何类型的默认符号")
         self.reset_btn.clicked.connect(self._on_reset)
         self.import_btn = QPushButton("样式引用…", right)
-        self.import_btn.setToolTip("导入 QGIS 样式 XML / QML 符号")
+        self.import_btn.setToolTip("导入样式 XML / QML 符号")
         self.import_btn.clicked.connect(self._on_style_reference)
         for index, btn in enumerate(
             (

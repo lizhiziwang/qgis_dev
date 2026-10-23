@@ -2590,19 +2590,55 @@ def table_geometry_column(db_path: str | Path, table_name: str) -> str:
     return str(meta.get("geom_col") or "")
 
 
-def describe_local_db(db_path: str | Path) -> dict[str, Any]:
+def count_local_db_rows(db_path: str | Path, names: list[str]) -> dict[str, Any]:
+    """只读统计若干表的行数（供数据管理窗口后台补行数）。
+
+    与 :func:`describe_local_db` 的 counts 口径一致；出错/表已删记 ``None``。
+    单独成一个函数是为了让"打开窗口"先拿目录、行数在后台线程慢慢补。
+    """
+    p = Path(db_path)
+    if not p.is_file() or not names:
+        return {}
+    counts: dict[str, Any] = {}
+    try:
+        conn = sqlite3.connect(str(p), timeout=5.0)
+        conn.execute("PRAGMA query_only = ON")
+    except sqlite3.Error:
+        return {name: None for name in names}
+    try:
+        for n in names:
+            try:
+                counts[n] = conn.execute(
+                    f"SELECT COUNT(*) FROM {_quote_ident(n)}"
+                ).fetchone()[0]
+            except sqlite3.Error:
+                counts[n] = None
+    finally:
+        conn.close()
+    return counts
+
+
+def describe_local_db(
+    db_path: str | Path, *, repair: bool = False, with_counts: bool = True
+) -> dict[str, Any]:
     """打开现有本地库, 返回三类已注册图层目录与行数/元信息(供数据管理树/表展示)。
 
     类别表名清单即 ``local_db_util.query_all_table_name()`` 的原始输出
     (按 user_relation 注册顺序); counts 为逐表 ``COUNT(*)`` 的行数, 表已删/
     打不开的表记 ``None``; meta 为逐表图层元信息(见 :func:`_table_meta`,
-    空间元数据缺失时几何/坐标系回落 None)。不创建文件。仅对 GeoPackage
-    做一次幂等的一致性修复(见
-    :meth:`local_db_util.repair_gpkg_conformance`: 修旧版写坏的几何
-    flags + 补 ``user_version``), 规范库不会重复扫描。
+    空间元数据缺失时几何/坐标系回落 None)。不创建文件。
+
+    默认**不做** GPKG 一致性修复: 该修复会逐表扫描/解压/改写几何, 百万行
+    库要数秒, 放在"打开列表"里会把数据管理窗口卡住。修复已由真正打开图层
+    的路径负责(见 :func:`repair_gpkg_if_needed` / ``LocalLayerLoader.load``);
+    只有需要主动维护库的调用方(如显式修复动作)才传 ``repair=True``。
 
     Args:
         db_path: 已存在的 sqlite / spatialite 库文件路径。
+        repair: 是否顺带执行一次幂等的 GPKG 一致性修复。默认关闭。
+        with_counts: 是否同步统计每表行数。默认 True；数据管理窗口首次
+            打开传 False（目录/元信息秒开，行数由后台线程补齐，见
+            :func:`count_local_db_rows`）。
 
     Returns:
         ``{"categories": {"spatial": [...], "dict": [...], "image": [...]},
@@ -2617,9 +2653,11 @@ def describe_local_db(db_path: str | Path) -> dict[str, Any]:
     try:
         db = local_db_util(p)
         try:
-            # 旧版写坏的 GPKG 几何头(flags=0x00)会导致 QGIS/GDAL 读几何
-            # 失败("Unable to read geometry"), 这里打开时顺手修一次。
-            db.repair_gpkg_conformance()
+            if repair:
+                # 旧版写坏的 GPKG 几何头(flags=0x00)会导致 QGIS/GDAL 读几何
+                # 失败("Unable to read geometry")。只有显式要求时才在这里修；
+                # 打开图层的路径会在加载前调用 repair_gpkg_if_needed。
+                db.repair_gpkg_conformance()
             cats = db.query_all_table_name()
         finally:
             db.conn.close()
@@ -2629,7 +2667,7 @@ def describe_local_db(db_path: str | Path) -> dict[str, Any]:
         ) from exc
 
     names = [n for key in _CATEGORY_ORDER for n in cats.get(key, [])]
-    counts: dict[str, Any] = {}
+    counts: dict[str, Any] = {n: None for n in names}
     meta: dict[str, dict] = {}
     if names:
         try:
@@ -2638,13 +2676,14 @@ def describe_local_db(db_path: str | Path) -> dict[str, Any]:
             conn = sqlite3.connect(str(p), timeout=5.0)
             conn.execute("PRAGMA query_only = ON")
             try:
-                for n in names:
-                    try:
-                        counts[n] = conn.execute(
-                            f"SELECT COUNT(*) FROM {_quote_ident(n)}"
-                        ).fetchone()[0]
-                    except sqlite3.Error:
-                        counts[n] = None
+                if with_counts:
+                    for n in names:
+                        try:
+                            counts[n] = conn.execute(
+                                f"SELECT COUNT(*) FROM {_quote_ident(n)}"
+                            ).fetchone()[0]
+                        except sqlite3.Error:
+                            counts[n] = None
                 meta = _table_meta(conn, names)
             finally:
                 conn.close()

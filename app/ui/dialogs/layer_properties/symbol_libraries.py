@@ -40,7 +40,7 @@ _HIDDEN_KEY = "hidden_groups"
 #: 内置库（用户符号在前，系统库在后）
 _DEFAULT_LIBRARIES = (
     {"id": "user", "name": "用户符号", "kind": "user"},
-    {"id": "system", "name": "QGIS 系统符号库", "kind": "system"},
+    {"id": "system", "name": "系统符号库", "kind": "system"},
 )
 
 #: QGIS 默认样式的标签 → 中文显示名

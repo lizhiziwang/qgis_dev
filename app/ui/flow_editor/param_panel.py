@@ -477,7 +477,7 @@ class ParamPanelDock(QDockWidget):
 
         load_cb = QCheckBox()
         load_cb.setChecked(outs.load_to_canvas)
-        load_cb.setToolTip("把结果加载到 QGIS 图层面板")
+        load_cb.setToolTip("把结果加载到图层面板")
         load_cb.toggled.connect(lambda chk: setattr(outs, "load_to_canvas", chk))
         grid.addWidget(load_cb, row, 4)
 
@@ -590,7 +590,7 @@ class ParamPanelDock(QDockWidget):
         code_edit = QPlainTextEdit()
         code_edit.setPlainText(node.code or "")
         code_edit.setPlaceholderText(
-            "# 输入 PyQGIS 代码：\n# 引用 inputs 字典、给 outputs 字典赋值"
+            "# 输入 Python 代码：\n# 引用 inputs 字典、给 outputs 字典赋值"
         )
         font = code_edit.font()
         font.setFamily("Consolas")

@@ -74,8 +74,10 @@ class WindowShellMixin:
         # 拦截浏览器拖出的图层 URI，走与双击一致的添加路径（原生 drop 会把图层
         # 直接挂到工程根节点，不进"数据图层"分组、也不设 path_c）
         canvas.installEventFilter(self)
-        # 画布底色跟随主题（默认浅色为白色）
-        canvas.setCanvasColor(QColor(ThemeManager.instance().current().canvas_bg))
+        # 画布底色跟随主题：地图按透明底渲染，RGB 由控件背景提供。
+        # 切主题只改这一层背景，不触发图层重绘（见 AppMapCanvas）。
+        canvas.setCanvasColor(QColor(0, 0, 0, 0))
+        canvas.apply_theme_background(ThemeManager.instance().current().canvas_bg)
         canvas.enableAntiAliasing(True)
         # ---- 编辑撤销 / 重做快捷键（Ctrl+Z / Ctrl+Shift+Z / Ctrl+Y）----
         # 编辑工具（点选/框选 Delete、节点编辑、合并、分割、属性录入）每个动作都

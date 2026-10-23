@@ -2,9 +2,9 @@
 
 弹窗内容（按用户原话）：
 
-1. **待导入图层**：**一开始是空列表**；点旁边的「选择」弹数据源选择器
-   （工程里的图层 / 本地文件——GDB / GeoPackage / SQLite 会把里面的图层全列出来，
-   可多选），选中的图层进列表。列表里可选中后用「删除选中」去掉。
+1. **待导入图层**：**一开始是空列表**；两个入口分别挑「工程图层」/「本地文件」
+   （GDB / GeoPackage / SQLite 会把里面的图层全列出来，可多选），选中的图层
+   直接进列表。列表里可选中后用「删除选中」去掉。
    **不再问目标坐标系**：每份数据按**自己的坐标系**入库（多份数据可以各带各的
    CRS，GPKG / SpatiaLite 每张表各存各的 SRS）。
 2. **数据库下拉**：合并本地库（``kind=local``）与服务器库（``kind=server``），
@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 import os
+from typing import Optional
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
@@ -106,8 +107,8 @@ class ImportLayerDialog(BaseDialog):
         form.setHorizontalSpacing(8)
         form.setVerticalSpacing(8)
 
-        # 1. 待导入图层：**一开始是空列表**；点「选择」挑数据源（工程图层 / 本地文件，
-        #    容器数据源会列出里面的图层、可多选），选中的进列表；可选中后删除
+        # 1. 待导入图层：**一开始是空列表**；两个入口分别挑工程图层 / 本地文件，
+        #    容器数据源会列出里面的图层、可多选；选中的直接进列表；可选中后删除
         self.layer_list = QListWidget()
         #: QSS 作用域锚点：选中色由主题里 #ImportLayerList 规则加深
         #: （全局 toolbar_hover 太浅，用户会以为没选上）
@@ -123,13 +124,17 @@ class ImportLayerDialog(BaseDialog):
         layer_row.addWidget(self.layer_list, 1)
         side = QVBoxLayout()
         side.setSpacing(4)
-        self.pick_btn = QPushButton("选择")
-        self.pick_btn.setToolTip(
-            "挑要导入的数据：工程里的图层，或电脑上的文件"
-            "（GDB / GeoPackage / SQLite 会把里面的图层全列出来，可按住 Ctrl / Shift 多选）"
+        self.pick_project_btn = QPushButton("从工程图层…")
+        self.pick_project_btn.setToolTip("从当前工程已加载的矢量图层里选（可多选）")
+        self.pick_project_btn.clicked.connect(self._on_pick_project_layers)
+        side.addWidget(self.pick_project_btn)
+        self.pick_file_btn = QPushButton("从本地文件…")
+        self.pick_file_btn.setToolTip(
+            "直接打开「添加数据」：GDB / GeoPackage / SQLite 可就地展开选图层，"
+            "选完直接进待导入列表（可按住 Ctrl / Shift 多选）"
         )
-        self.pick_btn.clicked.connect(self._on_pick_layers)
-        side.addWidget(self.pick_btn)
+        self.pick_file_btn.clicked.connect(self._on_pick_local_layers)
+        side.addWidget(self.pick_file_btn)
         self.remove_btn = QPushButton("删除选中")
         self.remove_btn.setToolTip("把选中的条目从待导入列表里去掉（不影响任何数据）")
         self.remove_btn.clicked.connect(self._on_remove_selected)
@@ -189,27 +194,80 @@ class ImportLayerDialog(BaseDialog):
 
     # ------------------------------------------------------------- 事件
 
-    def _on_pick_layers(self) -> None:
-        """「选择」：弹数据源选择器，把选中的图层全部追加进待导入列表。
-
-        - **工程里的图层**：列出工程里的矢量图层；
-        - **本地文件**：挑电脑上的数据（GDB / GeoPackage / SQLite 会把里面的图层全列出来）；
-        - 两种来源都支持 Ctrl / Shift 多选。
-
-        开文件、列子图层是 IO，交给 :mod:`app.core.util.sublayers`；本弹窗只摆界面。
-        """
+    def _on_pick_project_layers(self) -> None:
+        """「从工程图层…」：只列工程里的矢量图层，多选后追加进待导入列表。"""
         from app.ui.dialogs.create_data_fields_step import ExternalDatasetDialog
 
-        dialog = ExternalDatasetDialog(self, vector_layers=self._vector_layers, multi=True)
+        dialog = ExternalDatasetDialog(
+            self,
+            vector_layers=self._vector_layers,
+            multi=True,
+            show_local=False,
+        )
         accepted = dialog.exec()
         layers, error = dialog.resolve_all() if accepted else ([], "")
         dialog.deleteLater()
         if error:
-            # 部分失败也照样把能打开的加进来；打不开的那几个在提示里说清楚
             QMessageBox.warning(self, "选择数据源", error)
         for layer in layers:
             self._add_layer(layer)
         self._refresh_ok_enabled()
+
+    def _on_pick_local_layers(self) -> None:
+        """「从本地文件…」：直接打开「添加数据」，选中图层直接进待导入列表。
+
+        不再经过「选择外部数据集」中间窗口：选完 / 取消都只进出一次，
+        避免用户为了选一个本地图层先后开三层弹窗。
+        """
+        from app.ui.dialogs.add_data_dialog import AddDataDialog
+
+        picker = AddDataDialog(self)
+        accepted = picker.exec()
+        selections = picker.selected_sources() if accepted else []
+        picker.deleteLater()
+        if not selections:
+            return
+        layers, errors = self._open_selections(selections)
+        for layer in layers:
+            self._add_layer(layer)
+        if errors:
+            QMessageBox.warning(
+                self,
+                "选择数据源",
+                "以下数据没有导入：\n" + "\n".join(errors),
+            )
+        self._refresh_ok_enabled()
+
+    @staticmethod
+    def _open_selections(selections) -> tuple[list[object], list[str]]:
+        """把「添加数据」的选择展开成图层对象；返回 ``(图层, 失败原因)``。"""
+        from app.core.util.sublayers import list_sublayers, open_sublayer
+
+        layers: list[object] = []
+        errors: list[str] = []
+        for selection in selections:
+            path = str(getattr(selection, "path", "") or "")
+            sublayer = getattr(selection, "sublayer", None)
+            if not path:
+                continue
+            candidates = [sublayer] if sublayer is not None else list_sublayers(path)
+            if not candidates:
+                # 普通矢量文件（shp / geojson 等）枚举不到子图层时直开
+                from qgis.core import QgsVectorLayer
+
+                layer = QgsVectorLayer(path, os.path.basename(path), "ogr")
+                if layer.isValid():
+                    layers.append(layer)
+                else:
+                    errors.append(f"{os.path.basename(path)}：打不开")
+                continue
+            for candidate in candidates:
+                layer, error = open_sublayer(path, candidate)
+                if layer is not None:
+                    layers.append(layer)
+                elif error:
+                    errors.append(error)
+        return layers, errors
 
     def _add_layer(self, layer) -> bool:
         """把图层追加进列表（同名跳过，避免同一层导两遍）。"""

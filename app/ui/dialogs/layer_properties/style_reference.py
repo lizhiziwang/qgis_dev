@@ -83,7 +83,7 @@ class StyleReferenceDialog(BaseDialog):
         self.default_btn.setToolTip("恢复全部内置分组并移除外来样式")
         self.default_btn.clicked.connect(self._on_default)
         self.add_btn = QPushButton("将样式添加到列表…", self)
-        self.add_btn.setToolTip("添加 QGIS 样式 XML / QML 文件")
+        self.add_btn.setToolTip("添加样式 XML / QML 文件")
         self.add_btn.clicked.connect(self._on_add)
         self.remove_btn = QPushButton("移除选中样式", self)
         self.remove_btn.setToolTip("只移除外来样式分组，内置分组只能取消勾选")
@@ -194,7 +194,7 @@ class StyleReferenceDialog(BaseDialog):
             self,
             "将样式添加到列表",
             "",
-            "QGIS 样式 (*.xml *.qml);;所有文件 (*)",
+            "样式文件 (*.xml *.qml);;所有文件 (*)",
         )
         if not path:
             return

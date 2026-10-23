@@ -800,7 +800,7 @@ class LabelingTab(LayerPropertyTab):
         self.mode_combo.blockSignals(False)
 
         self.hint_label.setText(
-            "基于规则标注的规则请在 QGIS 规则编辑器中维护" if mode == "rule" else ""
+            "基于规则标注的规则请在规则编辑器中维护" if mode == "rule" else ""
         )
         self._load_settings(_current_settings(layer))
         self._load_translate(layer)

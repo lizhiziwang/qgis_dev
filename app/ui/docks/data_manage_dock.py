@@ -57,6 +57,7 @@ gpkg 库(经同 inode 的 ``.gpkg`` 硬链接别名打开 —— GDAL 3.11 按�
 
 from __future__ import annotations
 
+import threading
 from collections.abc import Callable
 from contextlib import suppress
 from pathlib import Path
@@ -66,7 +67,6 @@ from qgis.PyQt.QtGui import QAction, QBrush, QColor, QFont, QIcon
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QDialog,
-    QDockWidget,
     QHBoxLayout,
     QHeaderView,
     QInputDialog,
@@ -88,6 +88,7 @@ from app.core.util.local_db_util import (
     _CATEGORY_LABEL,
     _CATEGORY_ORDER,
     _CATEGORY_UNIT,
+    count_local_db_rows,
     describe_local_db,
 )
 from app.infra.logging import get_logger
@@ -131,6 +132,8 @@ class DataManageDock(QWidget):
     #: 文件里 —— 用户要的是「绑定好之后即使当前工程没保存，下次打开也还在」
     #: （见 :mod:`app.infra.fs.state`）。
     databasesChanged = pyqtSignal()
+    #: 后台行数统计完成：``(库路径, {表名: 行数})``
+    counts_ready = pyqtSignal(str, object)
 
     def __init__(
         self,
@@ -189,6 +192,9 @@ class DataManageDock(QWidget):
         self._current_db: dict | None = None
         #: 当前选中的类别过滤(类别分组节点点击时设; refresh_all 重画用)
         self._current_category: str | None = None
+        #: 正在后台统计行数的库路径（避免重复起线程）
+        self._counting_paths: set[str] = set()
+        self.counts_ready.connect(self._on_counts_ready)
         #: 列宽程序化调整中(防止信号重入)
         self._fitting = False
         #: 服务器连接清单(kind=server, 挂在「服务器数据库」分组下)
@@ -665,7 +671,7 @@ class DataManageDock(QWidget):
                 logger.warning("数据管理[恢复]: 本地库文件不存在, 跳过: %s", path)
                 continue
             try:
-                catalog = describe_local_db(path)
+                catalog = describe_local_db(path, with_counts=False)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("数据管理[恢复]: 读取本地库失败, 跳过: %s (%s)", path, exc)
                 continue
@@ -690,6 +696,104 @@ class DataManageDock(QWidget):
             dict(c) for c in (state.get("server") or []) if isinstance(c, dict)
         ]
         self._rebuild_tree()
+        self._schedule_counts()
+
+    # ------------------------------------------------------ 行数后台补齐
+
+    def _schedule_counts(self) -> None:
+        """目录/元信息先上屏，行数交给后台线程（百万行库 COUNT(*) 很慢）。
+
+        ``restore_state`` 走 ``describe_local_db(with_counts=False)`` 秒开窗口；
+        这里按库起一个 daemon 线程，统计完通过 ``counts_ready`` 回主线程补标签。
+        """
+        for db in self._databases:
+            path = str(db.get("path") or "")
+            if not path or path in self._counting_paths:
+                continue
+            names = [
+                name
+                for cat in _CATEGORY_ORDER
+                for name in (db.get("categories") or {}).get(cat, [])
+            ]
+            if not names:
+                continue
+            self._counting_paths.add(path)
+            threading.Thread(
+                target=self._count_rows_worker,
+                args=(path, names),
+                name="data-manage-counts",
+                daemon=True,
+            ).start()
+
+    def _count_rows_worker(self, path: str, names: list[str]) -> None:
+        """后台线程体：只做 SQL + 发信号，绝不碰控件。"""
+        try:
+            counts = count_local_db_rows(path, names)
+        except Exception:  # noqa: BLE001 —— 统计失败不影响目录展示
+            logger.warning("数据管理[行数统计] 失败: %s", path, exc_info=True)
+            counts = {name: None for name in names}
+        with suppress(RuntimeError):
+            self.counts_ready.emit(path, counts)
+
+    def _on_counts_ready(self, path: str, counts: object) -> None:
+        """主线程：把后台算出的行数写回库 dict，并就地刷新标签 / 右表。"""
+        self._counting_paths.discard(path)
+        db = next(
+            (d for d in self._databases if str(d.get("path") or "") == path),
+            None,
+        )
+        if db is None or not isinstance(counts, dict):
+            return
+        db["counts"] = counts
+        self._refresh_count_labels(db)
+        if self._current_db is db:
+            self._show_database(db, category=self._current_category)
+
+    def _refresh_count_labels(self, db: dict) -> None:
+        """只改叶子节点的行数列，不重建整棵树（保留展开/选中状态）。
+
+        目录刚建时 counts 是空的，``_apply_tree_theme`` 末尾会把行数列宽
+        ``resizeColumnToContents`` 成极小值；后台补上行数后必须**重新算列宽**，
+        否则新文字会被省略成 ``...``（用户看到的"数量一直不出来"）。
+        同时补上行数专用的小字号 / 次要色 / 右对齐（初建时没有文字，样式没套上）。
+        """
+        counts = db.get("counts") or {}
+        theme = ThemeManager.instance().current()
+        base = QFont(self.tree.font())
+        counts_font = QFont(base)
+        counts_font.setPointSizeF(max(6.0, base.pointSizeF() - _COUNT_FONT_DELTA))
+        secondary = QBrush(QColor(theme.text_secondary))
+        root = self.tree.topLevelItem(0)  # 「本地数据库」固定在顶层第 0 个
+        if root is None:
+            return
+        for i in range(root.childCount()):
+            conn_item = root.child(i)
+            payload = conn_item.data(0, _ROLE)
+            payload_db = (payload or {}).get("db") if isinstance(payload, dict) else None
+            if not isinstance(payload_db, dict) or str(
+                payload_db.get("path") or ""
+            ) != str(db.get("path") or ""):
+                continue
+            for j in range(conn_item.childCount()):
+                group = conn_item.child(j)
+                group_payload = group.data(0, _ROLE)
+                cat = (group_payload or {}).get("cat")
+                for k in range(group.childCount()):
+                    leaf = group.child(k)
+                    leaf_payload = leaf.data(0, _ROLE)
+                    name = (leaf_payload or {}).get("name")
+                    count = counts.get(name)
+                    if count is None:
+                        continue
+                    leaf.setText(1, f"{count} {_CATEGORY_UNIT.get(cat, '')}")
+                    leaf.setFont(1, counts_font)
+                    leaf.setForeground(1, secondary)
+                    leaf.setTextAlignment(
+                        1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                    )
+            # 列宽按新内容重算一次（放在最后，所有叶子都填完）
+            self.tree.resizeColumnToContents(1)
+            return
 
     @staticmethod
     def _select_node(root: QTreeWidgetItem, item: QTreeWidgetItem) -> None:

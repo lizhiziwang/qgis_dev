@@ -125,7 +125,7 @@ from app.ui.common.widgets import open_file_dir
 from app.ui.dialogs.create_data_fields_step import FieldsStepPage
 from app.ui.dialogs.crs_pick_dialog import CrsPickDialog
 from qgis.core import QgsCoordinateReferenceSystem, QgsProject, QgsVectorLayer
-from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
+from qgis.PyQt.QtCore import QEvent, Qt, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QComboBox,
     QCompleter,
@@ -231,12 +231,16 @@ class CrsComboBox(QComboBox):
         self.setEditable(True)
         # 不插入：允许「输入的内容不在候选里」而不污染候选表
         self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
-        self.addItems([f"{authid}{EPSG_SEP}{name}" for authid, name in _epsg_entries()])
+        #: 约 7200 条 EPSG 候选不在构造时灌：addItems 一次要 100+ ms，而用户
+        #: 多半直接沿用默认坐标系。首次聚焦 / 展开 / 输入时再装（见
+        #: :meth:`_ensure_epsg_items`）。
+        self._epsg_loaded = False
+        self._pending_authid = ""
         line_edit = self.lineEdit()
         line_edit.setPlaceholderText("输入 EPSG 代码或名称搜索，如 4490 / CGCS2000")
         line_edit.setClearButtonEnabled(True)
-        # 候选一次性灌满（约 7200 项，读一次 srs.db + addItems 几十毫秒）：输入即
-        # 过滤是「EPSG 代码搜索」的主用法，懒加载会让首次输入不出候选
+        line_edit.installEventFilter(self)
+        # 候选装满后 completer 自然跟着更新（它直接引用 combo 的 model）
         completer = QCompleter(self.model(), self)
         completer.setCompletionMode(QCompleter.CompletionMode.PopupCompletion)
         completer.setFilterMode(Qt.MatchFlag.MatchContains)
@@ -248,8 +252,23 @@ class CrsComboBox(QComboBox):
         # 收起时字段放不下的长名称，至少能在悬停提示里看全
         self.currentTextChanged.connect(lambda text: self.setToolTip(text.strip()))
 
-    def showPopup(self) -> None:
+    def _ensure_epsg_items(self) -> None:
+        """首次用到候选时再灌 EPSG 列表（幂等）。"""
+        if self._epsg_loaded:
+            return
+        self._epsg_loaded = True
+        self.addItems([f"{authid}{EPSG_SEP}{name}" for authid, name in _epsg_entries()])
+        if self._pending_authid:
+            self._select_loaded_crs(self._pending_authid)
+
+    def eventFilter(self, obj, event):  # noqa: N802 —— Qt 命名
+        if obj is self.lineEdit() and event.type() == QEvent.Type.FocusIn:
+            self._ensure_epsg_items()
+        return super().eventFilter(obj, event)
+
+    def showPopup(self) -> None:  # noqa: N802 —— Qt 命名
         """展开候选列表时按最长名称加宽，避免长坐标系名被截断。"""
+        self._ensure_epsg_items()
         view = self.view()
         if self._popup_width <= 0:
             width = view.sizeHintForColumn(0)
@@ -261,15 +280,26 @@ class CrsComboBox(QComboBox):
             view.setMinimumWidth(self._popup_width)
         super().showPopup()
 
+    def _select_loaded_crs(self, authid: str) -> None:
+        index = self.findText(f"{authid}{EPSG_SEP}", Qt.MatchFlag.MatchStartsWith)
+        if index >= 0:
+            self.setCurrentIndex(index)
+
     def set_crs(self, authid: str) -> None:
         """把当前选中项置为 ``authid``；候选里没有时直接写进文本框。"""
         if not authid:
             return
-        index = self.findText(f"{authid}{EPSG_SEP}", Qt.MatchFlag.MatchStartsWith)
-        if index >= 0:
-            self.setCurrentIndex(index)
-        else:
-            self.setEditText(authid)
+        self._pending_authid = authid
+        if self._epsg_loaded:
+            index = self.findText(f"{authid}{EPSG_SEP}", Qt.MatchFlag.MatchStartsWith)
+            if index >= 0:
+                self.setCurrentIndex(index)
+                return
+        # 候选还没装：用一次 CRS 查询把名称补上（不读 7200 条列表），
+        # 这样默认值仍显示「EPSG:4490 — China Geodetic…」，而不是干巴巴的代码。
+        crs = QgsCoordinateReferenceSystem(authid)
+        desc = crs.description() if crs.isValid() else ""
+        self.setEditText(f"{authid}{EPSG_SEP}{desc}" if desc else authid)
 
     def authid(self) -> str:
         """把当前输入解析成 authid（如 ``EPSG:4490``）；解析不出返回空串。"""
@@ -432,10 +462,9 @@ class CreateDataDialog(BaseDialog):
             self.db_file_name_edit.setFocus()
         self._sync_footer()
         self._refresh_hint()
-        # 第二步那页（四十多个控件）推迟到窗口显示后的第一个事件循环 tick 再建：
-        # 打开是用户直接感受得到的，而这一步他只是刚看到窗口。**不是偷懒不建** ——
-        # 推到下一个 tick 之后，点「下一步」时它已经备好了（见 fields_page 属性）。
-        QTimer.singleShot(0, self._ensure_fields_page)
+        # 第二步那页（四十多个控件）只在用户点「下一步」时建（约 0.1s）。
+        # 开窗时不再预热：预热会把刚显示出来的窗口再卡一下，反而让"打开慢"。
+        # 点「下一步」时它已经由 next_step() 的 _ensure_fields_page() 建好。
 
     # ---- 页签一：本地数据库（只建空库）----
 
@@ -596,7 +625,7 @@ class CreateDataDialog(BaseDialog):
 
         # 第 2 步：字段结构设置（表格 / 工具条 / 结构来源整块都在那个页里）。
         # **不在开窗时建**：它有四十多个控件，实测光建它就占开窗耗时的一大截 ——
-        # 由 :attr:`fields_page` 按需建、并在窗口显示后立刻预热（见 _init_ui 的 singleShot）
+        # 由 :attr:`fields_page` 按需建（点「下一步」时才建，见 _init_ui 的说明）
         self._fields_page: FieldsStepPage | None = None
 
         self.step_stack = QStackedWidget(page)

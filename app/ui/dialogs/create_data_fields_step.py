@@ -59,7 +59,7 @@ from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.widgets import CenteredCheckDelegate, open_file_dir, save_file
 from app.ui.dialogs.dict_pick_dialog import DictPickDialog
-from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtGui import QBrush
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
@@ -75,7 +75,7 @@ from qgis.PyQt.QtWidgets import (
     QMenu,
     QPushButton,
     QRadioButton,
-    QStackedWidget,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -332,7 +332,7 @@ class FieldsStepPage(QWidget):
         else:
             # 本机 GDAL 没有可写的 XLSX 驱动：灰着说清楚，别让用户点了才报错
             self.template_btn.setEnabled(False)
-            self.template_btn.setToolTip("本机 QGIS 没有可写 Excel（XLSX）的驱动，生成不了模板文件")
+            self.template_btn.setToolTip("本机缺少可写 Excel（XLSX）的驱动，生成不了模板文件")
         self.template_btn.clicked.connect(self._on_generate_template)
         row.addWidget(self.template_btn)
         row.addStretch(1)
@@ -957,6 +957,7 @@ class ExternalDatasetDialog(BaseDialog):
         geometry_kind: str = "",
         multi: bool = False,
         allow_replace: bool = False,
+        show_local: bool = True,
     ) -> None:
         """
         Args:
@@ -972,6 +973,9 @@ class ExternalDatasetDialog(BaseDialog):
         self._geometry_kind = str(geometry_kind or "")
         self._multi = bool(multi)
         self._allow_replace = bool(allow_replace)
+        #: 是否提供「本地文件」页签。导入图层这类入口已有独立的本地文件按钮，
+        #: 传 False 就只显示工程图层，避免多套一层选择流程。
+        self._show_local = bool(show_local)
         self._layers = [
             layer for layer in vector_layers
             if not self._geometry_kind or geometry_kind_of_layer(layer) == self._geometry_kind
@@ -991,22 +995,14 @@ class ExternalDatasetDialog(BaseDialog):
         layout.setContentsMargins(12, 12, 12, 10)
         layout.setSpacing(8)
 
-        sources = QHBoxLayout()
-        sources.addWidget(QLabel("数据源："))
-        self.project_radio = QRadioButton("工程里的图层")
-        self.project_radio.setChecked(True)
-        self.project_radio.toggled.connect(self._on_source_changed)
-        sources.addWidget(self.project_radio)
-        self.file_radio = QRadioButton("本地文件")
-        self.file_radio.toggled.connect(self._on_source_changed)
-        sources.addWidget(self.file_radio)
-        sources.addStretch(1)
-        layout.addLayout(sources)
-
-        self.source_stack = QStackedWidget()
-        self.source_stack.addWidget(self._build_project_page())
-        self.source_stack.addWidget(self._build_file_page())
-        layout.addWidget(self.source_stack, 1)
+        # 数据源用页签，不用单选：点「本地文件」直接进文件选择，
+        # 不再先切一页、再点「浏览…」开第二个弹窗。
+        self.source_tabs = QTabWidget()
+        self.source_tabs.addTab(self._build_project_page(), "工程里的图层")
+        if self._show_local:
+            self.source_tabs.addTab(self._build_file_page(), "本地文件")
+        self.source_tabs.currentChanged.connect(self._on_source_tab_changed)
+        layout.addWidget(self.source_tabs, 1)
 
         # 导入方式（追加 / 替换）：「导入数据」才显示。**默认追加**（保守，不动原有数据）
         self.append_radio = QRadioButton("追加（保留原有要素）")
@@ -1036,15 +1032,12 @@ class ExternalDatasetDialog(BaseDialog):
         layout.addWidget(self.buttons)
         self.setLayout(layout)
 
-        # **两组单选必须分开**：Qt 默认把同一个父控件下的 QRadioButton 自动归成一组。
-        # 数据源（工程 / 文件）与导入方式（追加 / 替换）同在一个对话框里，不分组的话
-        # 勾「替换」会把「工程里的图层」取消勾选，数据源的选中也被连带清掉（用户报的）。
-        self._source_group = QButtonGroup(self)
-        self._source_group.addButton(self.project_radio)
-        self._source_group.addButton(self.file_radio)
+        # 导入方式的单选组（数据源已改成页签，不再需要两组互斥）
         self._mode_group = QButtonGroup(self)
         self._mode_group.addButton(self.append_radio)
         self._mode_group.addButton(self.replace_radio)
+        #: 是否已经自动弹过一次文件选择（取消后不反复弹，按钮可重试）
+        self._picker_opened = False
         self._refresh_ok()
 
     def _build_project_page(self) -> QWidget:
@@ -1105,9 +1098,9 @@ class ExternalDatasetDialog(BaseDialog):
         self.path_edit.setReadOnly(True)
         self.path_edit.setPlaceholderText("还没选择数据源")
         row.addWidget(self.path_edit, 1)
-        browse_button = QPushButton("浏览数据…")
+        browse_button = QPushButton("选择本地数据…")
         browse_button.setToolTip(
-            "打开「添加数据」弹窗：最近目录 / 快速访问 / 盘符，"
+            "打开「添加数据」界面：最近目录 / 快速访问 / 盘符，"
             "GDB / GeoPackage / SQLite / Excel 可就地展开选图层，支持多选"
         )
         browse_button.clicked.connect(self._on_browse_data)
@@ -1137,20 +1130,47 @@ class ExternalDatasetDialog(BaseDialog):
 
     # --------------------------------------------------------------- 交互
 
-    def _on_source_changed(self, *_args: object) -> None:
-        self.source_stack.setCurrentIndex(1 if self.file_radio.isChecked() else 0)
+    def _on_source_tab_changed(self, index: int) -> None:
+        """切到「本地文件」页签时直接弹「添加数据」，不再让用户多点一次。"""
         self._refresh_ok()
+        if index == 1 and not self._entries and not self._picker_opened:
+            # 等页签切换完成再弹，避免在信号栈里开模态窗口；窗口已关就别弹
+            QTimer.singleShot(0, self._auto_open_picker)
+
+    def _auto_open_picker(self) -> None:
+        """延迟打开文件选择前先确认窗口还活着（用户可能已点取消/关闭）。"""
+        try:
+            if not self.isVisible():
+                return
+        except RuntimeError:  # C++ 对象已销毁
+            return
+        self._on_browse_data()
 
     def _on_browse_data(self) -> None:
-        """用统一「添加数据」弹窗挑数据；**只取选择结果，不加载到地图**。"""
+        """用统一「添加数据」界面挑数据；**只取选择结果，不加载到地图**。
+
+        **不要 hide() 本窗口**：本窗口正处在自己的 ``exec()`` 模态循环里，
+        隐藏它会让该循环提前退出（``exec()`` 返回 Rejected），调用方以为用户
+        取消了、随后 deleteLater；而这里 finally 又 show() 回来，留下一个
+        已脱离事件循环、点不动的窗口 —— 表现就是“关掉选择器后界面卡死”。
+        选择器作为子弹窗叠在上面即可，关闭后焦点自然回到本窗口。
+        """
         from app.ui.dialogs.add_data_dialog import AddDataDialog
 
+        self._picker_opened = True
         picker = AddDataDialog(self)
-        accepted = picker.exec()
-        selections = picker.selected_sources() if accepted else []
-        picker.deleteLater()
+        accepted = False
+        try:
+            accepted = picker.exec()
+        finally:
+            selections = picker.selected_sources() if accepted else []
+            picker.deleteLater()
         if selections:
             self._set_sources(selections)
+        elif not self._entries:
+            self.file_status.setText("还没选择数据源（可点上方「选择本地数据…」重试）")
+        self.raise_()
+        self.activateWindow()
 
     def _set_sources(self, selections) -> None:
         """把「添加数据」的选择展开成图层条目（普通文件先列子图层，再按几何类型筛）。"""
@@ -1262,7 +1282,7 @@ class ExternalDatasetDialog(BaseDialog):
 
     def _has_selection(self) -> bool:
         """当前是否选中了至少一项（**不打开文件**）。"""
-        if self.project_radio.isChecked():
+        if self.source_tabs.currentIndex() == 0:
             return any(
                 item.data(Qt.ItemDataRole.UserRole) is not None
                 for item in self.layer_list.selectedItems()
@@ -1296,7 +1316,7 @@ class ExternalDatasetDialog(BaseDialog):
         本弹窗在用户点「确定」时才调它，失败原因记在 :attr:`last_error`。
         """
         self.last_error = ""
-        if self.project_radio.isChecked():
+        if self.source_tabs.currentIndex() == 0:
             layers = [
                 item.data(Qt.ItemDataRole.UserRole)
                 for item in self.layer_list.selectedItems()

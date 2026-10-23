@@ -583,7 +583,7 @@ class FileBrowserMixin:
             self,
             f"{format_name} 文件较大",
             f"{os.path.basename(file_path)} 约 {size / (1024 * 1024):.1f} MB。\n\n"
-            f"{format_name} 是文本交换格式，QGIS 加载、修改字段和属性表定位都会很慢，"
+            f"{format_name} 是文本交换格式，加载、修改字段和属性表定位都会很慢，"
             "部分驱动还会因整文件解析而内存不足。\n"
             "建议先用「矢量格式转换」转为 GeoPackage 再加载 / 编辑。\n\n仍要加载吗？",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,

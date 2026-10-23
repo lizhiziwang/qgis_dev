@@ -506,7 +506,7 @@ def algorithm_description_html(code: str) -> str:
         return (
             f"<h2>{algorithm_title(code, name)}</h2>"
             "<p style='color:gray'>"
-            "（该算法的详细说明未随 QGIS 注册表一同装载，"
+            "（该算法的详细说明未随处理注册表一同装载，"
             "请在对话框中按字段名 / tooltip 查看参数意义。）</p>"
             f"<p style='color:gray;font-size:small'>内部 code："
             f"<code>{code}</code></p>"

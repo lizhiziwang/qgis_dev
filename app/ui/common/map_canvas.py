@@ -35,6 +35,7 @@ QGIS 自身在选中集变化时走的是：
 from __future__ import annotations
 
 from qgis.gui import QgsMapCanvas
+from qgis.PyQt.QtGui import QColor
 
 
 class AppMapCanvas(QgsMapCanvas):
@@ -44,6 +45,14 @@ class AppMapCanvas(QgsMapCanvas):
         super().__init__(parent)
         # 缓存按图层存渲染图：triggerRepaint 驱动的重绘只重画脏图层
         self.setCachingEnabled(True)
+        # 地图本身按**透明底**渲染，画布底色交给控件背景。
+        # 这样切主题只改控件背景（一次重绘，微秒级），不必 setCanvasColor +
+        # refresh() 触发全部图层重画 —— 百万要素图层一次全量重画要十几秒。
+        self.setCanvasColor(QColor(0, 0, 0, 0))
+
+    def apply_theme_background(self, color: str) -> None:
+        """只改画布控件底色，不触发地图重绘（主题切换用）。"""
+        self.setStyleSheet(f"QgsMapCanvas {{ background-color: {color}; }}")
 
     def refresh(self) -> None:
         """清掉图层渲染缓存后再重画（等价于未开缓存时的 ``refresh()``）。
