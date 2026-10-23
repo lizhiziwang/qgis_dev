@@ -8,7 +8,12 @@
 env: dev
 
 app:
-  name: 图斑核实平台 V1.0
+  name: 图斑核实平台
+  # 版本唯一事实源：改版本只改这一行（major.minor.patch），
+  # VERSION_CODE 由它自动算出（major*10000+minor*100+patch）。
+  # 界面标题、build_info.json、更新清单、安装包版本都从这里读；
+  # 升级时安装器会保留本文件，但会把这一行改成新版本号。
+  version: "1.0.6"
   language: zh-Hans       # i18n
   crs: EPSG:4490          # 默认坐标系（中国 2000）
   # 「帮助」菜单（顶部最后一个页签）
@@ -20,7 +25,21 @@ app:
     manual_url: ""
     # 在线问题反馈地址：留空时使用内置反馈页面（cs-feedback）。
     feedback_url: ""
-    
+# 外部服务地址。problem-feedback 网关同时提供反馈页与更新清单/下载接口。
+# 线上经 9003 端口代理；本地联调 problem-feedback 时改成 6111 端口即可。
+services:
+  feedback_url: "http://182.108.40.116:9003/cs-feedback/"
+
+# 自动检测更新（完整说明见 .claude/archive/2026-10-22_检测更新方案.md）
+update:
+  enabled: true
+  base_url: ""             # 留空 = services.feedback_url
+  # internal = 未做代码签名的内网包；stable 只接受签名包（客户端 fail closed）
+  channel: "internal"
+  check_on_startup: true
+  startup_delay_ms: 10000  # 主窗口显示后再等 10s，避开启动高峰
+  check_interval_hours: 4
+  request_timeout_seconds: 20
 # 【已废弃】启动登录已改为授权服务器鉴权，本段不再参与校验，仅为 AppConfig
 # 兼容保留。授权服务器地址按本文件顶部的 env 选段（dev / prod…）：见
 # app/core/auth/config.py 的 PROFILES，加一个环境 = 在那里加一段 + 把这里的

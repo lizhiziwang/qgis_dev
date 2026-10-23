@@ -1530,7 +1530,6 @@ class AppActionsMixin:
         except OSError:
             return False
 
-    @staticmethod
     def _on_swipe(self) -> None:
         """卷帘对比：分屏会话已存续则直接恢复（不弹窗）；否则弹窗选栅格激活。
 
@@ -1657,7 +1656,9 @@ class AppActionsMixin:
 
     def _show_log_dock(self) -> None:
         if self.log_dock is None:
-            self.log_dock = LogDock(self)
+            cfg = self._load_map_config()
+            feedback_url = getattr(getattr(cfg, "services", None), "feedback_url", "")
+            self.log_dock = LogDock(self, feedback_url=feedback_url)
             self.place_bottom_dock(self.log_dock)
         self.log_dock.show()
         self.log_dock.raise_()

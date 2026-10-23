@@ -2,8 +2,8 @@
 
 新建 / 保存为工程 / 打开工程、工程名询问、图层加入工程分组，以及地图配置
 （app.yaml）的读取与基础底图装载。保存为工程时额外记录画布当前显示范围，
-下次打开自动恢复。关闭应用前询问是否保存工程：已是工程文件（打开过 / 另存过）
-则直接更新该文件，否则走“保存为工程”另存。
+下次打开自动恢复。关闭应用或打开其它工程前询问是否保存当前工程：已是工程
+文件（打开过 / 另存过）则直接更新该文件，否则走“保存为工程”另存。
 
 由 :class:`~app.ui.main_window.main_window.MainWindow` 多继承组合，方法只依赖
 ``self`` 上的共享状态。
@@ -616,6 +616,64 @@ class ProjectOpsMixin:
             return self._save_current_project()
         return True  # 否（不保存）
 
+    def _has_open_project(self) -> bool:
+        """当前是否已经存在工程（新建 / 打开 / 另存过）。
+
+        启动时只加载了配置底图，此时 ``project.title()`` 为空、没有
+        ``_project_path``、也没有「数据图层」分组，不算已有工程；用户从启动
+        对话框打开工程时不应被“是否保存”打扰。
+        """
+        if getattr(self, "_project_path", None):
+            return True
+        if self.project.title():
+            return True
+        return getattr(self, "_data_group", None) is not None
+
+    def _has_data(self) -> bool:
+        """当前工程里是否有用户数据（排除启动时自动加载的配置底图）。
+
+        没有新建 / 打开工程时也可以直接往地图里加数据，这时虽然
+        :meth:`_has_open_project` 为假，但打开其它工程同样会丢掉这些数据，
+        因此也要走保存确认。启动底图单独记了 id（见 bootstrap），不算数据。
+        """
+        startup_id = getattr(self, "_startup_base_layer_id", None)
+        for layer in self.project.mapLayers().values():
+            if startup_id is None or layer.id() != startup_id:
+                return True
+        return False
+
+    def _confirm_save_project_before_open(self) -> bool:
+        """打开其它工程前询问是否保存当前工程；返回 ``True`` 表示继续打开。
+
+        - 没有工程且没有数据 / 没有图层 / 提示被禁用 → 直接继续；
+        - 「是（保存）」→ 已有工程文件则更新，否则走“保存为工程”；保存失败或
+          用户在另存对话框中取消即中止打开（返回 ``False``）；
+        - 「否（不保存）」→ 放弃当前工程，继续打开目标工程；
+        - 「取消」→ 返回 ``False``，不打开目标工程。
+        """
+        if not getattr(self, "prompt_save_on_close", True):
+            return True
+        if not self.project.mapLayers():
+            return True
+        if not self._has_open_project() and not self._has_data():
+            return True
+        path = getattr(self, "_project_path", None)
+        hint = f"将保存到：{path}" if path else "当前工程尚未保存到文件。"
+        ret = QMessageBox.question(
+            self,
+            "打开工程",
+            f"是否保存当前工程？\n{hint}",
+            QMessageBox.StandardButton.Yes
+            | QMessageBox.StandardButton.No
+            | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Yes,
+        )
+        if ret == QMessageBox.StandardButton.Cancel:
+            return False
+        if ret == QMessageBox.StandardButton.Yes:
+            return self._save_current_project()
+        return True  # 否（不保存）
+
     def _store_canvas_extent(self) -> None:
         """把画布当前显示范围写入工程视图设置（保存工程时调用）。"""
         try:
@@ -682,6 +740,9 @@ class ProjectOpsMixin:
         只负责选路径，读盘、bridge 同步、分组重排都在这里。
         """
         if not path:
+            return False
+        # 已有工程时先问是否保存当前工程；用户取消 / 保存失败则不打开目标工程
+        if not self._confirm_save_project_before_open():
             return False
         # QgsProject.read 会同步读入工程里所有图层（大工程较慢）→ 期间亮起加载指示
         self._begin_layer_loading(f"正在打开图层：{os.path.basename(path)}")

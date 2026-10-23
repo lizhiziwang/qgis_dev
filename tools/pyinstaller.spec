@@ -89,8 +89,9 @@ else:
     # ------------------------------------------------------------------ Linux
     # QGIS 由构建环境提供（conda env / apt）。路径不写死：
     # - qgis python 包取当前 Python 能 import 到的 qgis 包目录
-    # - 动态库（.so）、Qt 插件、GDAL 数据等由 tools/build_linux.sh 收集进 dist/app/lib 等目录，
-    #   不在这里列（Linux 下 dlopen 加载，PyInstaller 静态分析不到，硬列还会因路径不存在而跳过）
+    # - 动态库（.so）、Qt 插件、GDAL 数据等由 tools/build_linux.sh 收集进
+    #   dist/app/_internal/ 与 dist/app/runtime/，不在这里列（Linux 下 dlopen
+    #   加载，PyInstaller 静态分析不到，硬列还会因路径不存在而跳过）
     try:
         import qgis  # 构建环境必须有 QGIS（conda activate 后跑）
         _qgis_pkg = Path(qgis.__file__).resolve().parent  # .../site-packages/qgis
@@ -99,19 +100,39 @@ else:
             "Linux 打包需要先激活含 QGIS 的 Python 环境（conda activate qgis_build 或系统已装 python3-qgis）"
         )
 
+    # 与 Windows 一致：只把 qgis python 包交给 PyInstaller（落到 _internal/qgis）。
+    # config/、resource/ 以及 QGIS 运行时数据由 build_linux.sh 复制到产物根 /
+    # runtime/，这样根目录干净，且用户可改的配置不会埋在 _internal 里。
     datas = [
         (str(_qgis_pkg), "qgis"),
-        (str(PROJECT_ROOT / "resource"), "resource"),
-        (str(PROJECT_ROOT / "config"), "config"),
     ]
     binaries = []
 
-# 隐藏导入：Win 用 PyQt6（OSGeo4W 版 QGIS 4.2），Linux 用 PyQt5（conda-forge / 麒麟源 QGIS）
-_PYQT_PREFIX = "PyQt6" if IS_WIN else "PyQt5"
+# 隐藏导入的 Qt 绑定按**构建环境实际安装的** QGIS 决定，不能按平台猜：
+# Windows OSGeo4W 的 QGIS 4.2 是 PyQt6，麒麟 conda 的 QGIS 3.x 是 PyQt5，
+# 而同一个麒麟上的 QGIS 4.2（qgis423 环境）又是 PyQt6。
+def _detect_pyqt_prefix() -> str:
+    # qgis.PyQt 是绑定 shim（QGIS 3.x -> PyQt5，QGIS 4.x -> PyQt6）
+    try:
+        from qgis.PyQt.QtCore import PYQT_VERSION_STR
+
+        if PYQT_VERSION_STR.startswith("6"):
+            return "PyQt6"
+        if PYQT_VERSION_STR.startswith("5"):
+            return "PyQt5"
+    except Exception:
+        pass
+    for name in ("PyQt6", "PyQt5"):
+        try:
+            __import__(name)
+            return name
+        except ImportError:
+            continue
+    return "PyQt6" if IS_WIN else "PyQt5"
+
+
+_PYQT_PREFIX = _detect_pyqt_prefix()
 _PYQT_MODULES = [
-    "pylupdate",
-    "pyrcc",
-    "Qt",
     "QtBluetooth",
     "QtCore",
     "QtDBus",
@@ -140,10 +161,40 @@ _PYQT_MODULES = [
     "QtXml",
     "sip",
 ]
-# QtOpenGLWidgets/QtSvgWidgets 仅在 PyQt6 有独立模块（PyQt5 的 QOpenGLWidget 在
-# QtWidgets 里，无此绑定模块，conda pyqt 下会报 Hidden import not found）
-if IS_WIN:
+# pylupdate / pyrcc 是 PyQt5 的构建期模块，PyQt6 已移除（改用 pyuic6 / 独立
+# 工具）；QtOpenGLWidgets / QtSvgWidgets 只有 PyQt6 才有独立绑定模块（PyQt5 的
+# QOpenGLWidget 在 QtWidgets 里）。按实际绑定的差异取，避免无谓的 Hidden import
+# not found 告警。
+if _PYQT_PREFIX == "PyQt6":
     _PYQT_MODULES += ["QtOpenGLWidgets", "QtSvgWidgets"]
+else:
+    _PYQT_MODULES += ["Qt", "pylupdate", "pyrcc"]
+
+
+def _available_bindings(prefix: str, names: list[str]) -> list[str]:
+    """过滤构建环境里没装的绑定模块。
+
+    conda-forge 的 PyQt6 不含 QtBluetooth / QtRemoteObjects / QtSensors /
+    QtTextToSpeech，如果不在这里过滤，PyInstaller 会对每个缺失项打一条
+    ``ERROR: Hidden import ... not found``，把真正需要关注的缺失淹没掉，
+    也会让以后加严格检查时一直红。
+    """
+    import importlib.util
+
+    available = []
+    for name in names:
+        try:
+            found = importlib.util.find_spec(f"{prefix}.{name}") is not None
+        except (ImportError, ModuleNotFoundError, ValueError):
+            found = False
+        if found:
+            available.append(name)
+        else:
+            print(f"[pyqt] 构建环境未安装 {prefix}.{name}，跳过 hidden import")
+    return available
+
+
+_PYQT_MODULES = _available_bindings(_PYQT_PREFIX, _PYQT_MODULES)
 
 hiddenimports = [
     "qgis.core",
@@ -157,6 +208,9 @@ hiddenimports = [
     "xlwt",                 # 字段结构 / 本地字典导出 .xls
     "xlrd",                 # 本地字典导入 .xls
     "openpyxl",             # 本地字典导入 .xlsx
+    # local_db_util 顶层 import（Cython 保护后 PyInstaller 分析不到）。Linux
+    # 构建环境同样要装 pysqlite3，否则产物启动即 ModuleNotFoundError。
+    "pysqlite3",
 ]
 
 try:
@@ -172,7 +226,7 @@ try:
         except Exception:
             pass
 
-    for pkg in ("setuptools",):
+    for pkg in ("setuptools", "pysqlite3"):
         try:
             tmp = collect_all(pkg)
             datas += tmp[0]
@@ -304,10 +358,10 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    # PyInstaller 6 默认把 collected 文件放进 `_internal/`。Windows 保留这个默认，
-    # 根目录只留 app.exe / start_runtime.bat / config / resource / logs / runtime；
-    # Linux 构建脚本已按 lib/ share/qgis/ 等自建布局，改动风险大，继续用扁平。
-    contents_directory=("_internal" if IS_WIN else "."),
+    # PyInstaller 6 默认把 collected 文件放进 `_internal/`。Windows / Linux 都
+    # 保留这个布局：根目录只留 qgis_dev（app.exe）/ 启动器 / config / resource /
+    # runtime / logs / .tmp，Python 运行时与依赖库全在 _internal/。
+    contents_directory="_internal",
 )
 
 coll = COLLECT(

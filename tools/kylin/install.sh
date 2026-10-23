@@ -14,7 +14,7 @@ PORTABLE="$PROJECT_ROOT/dist/app"
 PKG_NAME="qgis-dev-app"
 APP_DIR="/opt/qgis_app"
 
-if [ ! -d "$PORTABLE" ] || [ ! -x "$PORTABLE/app" ]; then
+if [ ! -d "$PORTABLE" ] || [ ! -x "$PORTABLE/qgis_dev" ]; then
     echo "ERROR: 未找到便携包 $PORTABLE（先跑 bash tools/build_linux.sh）" >&2
     exit 1
 fi
@@ -25,7 +25,12 @@ sudo mkdir -p "$APP_DIR"
 sudo cp -a "$PORTABLE/." "$APP_DIR/"
 sudo mkdir -p "$APP_DIR/logs" "$APP_DIR/.tmp"
 sudo chmod 777 "$APP_DIR/logs" "$APP_DIR/.tmp"
-sudo chmod 755 "$APP_DIR/launch_qgis.sh" "$APP_DIR/app"
+sudo chmod 755 "$APP_DIR/launch_qgis.sh" "$APP_DIR/qgis_dev"
+
+# 自动更新提权程序：root:root 0755，固定路径（客户端 UpdaterLauncher 只认这个位置）。
+echo "== 安装更新器 → /usr/local/lib/qgis_dev/qgis-dev-updater"
+sudo install -D -m 0755 "$PROJECT_ROOT/tools/linux/qgis-dev-updater" \
+    /usr/local/lib/qgis_dev/qgis-dev-updater
 
 echo "== 注册桌面入口"
 sudo cp "$SCRIPT_DIR/qgis_dev.desktop" "/usr/share/applications/${PKG_NAME}.desktop"
