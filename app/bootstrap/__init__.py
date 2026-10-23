@@ -498,6 +498,11 @@ def _make_base_tile_callback(cfg: AppConfig):
         else:
             logger.info("已加载配置底图：%s", layer.name())
             _zoom_to_base_tile(window, layer)
+        # 启动自动加载的底图属于程序化初始化，不算用户改动：复位工程脏标记，
+        # 否则用户启动后什么都不做、直接退出也会被问“是否保存工程”。
+        mark_clean = getattr(window, "_mark_project_clean", None)
+        if callable(mark_clean):
+            mark_clean()
 
     return _cb
 
@@ -524,6 +529,11 @@ def _zoom_to_base_tile(window, layer) -> None:
             zoom(layer)   # 带 CRS 变换 + 退化范围兜底（见 LayerActionsMixin）
         except Exception:  # noqa: BLE001 —— 启动期画布 / 图层可能已销毁
             logger.debug("启动定位底图失败", exc_info=True)
+        # 定位会触发 extentsChanged（按用户要求，地图范围变化算未保存改动）；
+        # 这次是程序化初始化，定位完把视图记成干净基线。
+        mark_view_clean = getattr(window, "_mark_view_clean", None)
+        if callable(mark_view_clean):
+            mark_view_clean()
 
     QTimer.singleShot(0, _apply)
 
