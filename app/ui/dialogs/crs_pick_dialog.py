@@ -5,8 +5,10 @@
 之外的另一个入口：绝大多数用户不知道带号对应的代码，但知道自己要的是
 「CGCS2000 / 3度分带（带号34）」。
 
-页签与行为照原型（``code01/app.js`` 的 ``cdRenderCrs``）：
+页签与行为照原型（``code01/app.js`` 的 ``cdRenderCrs``），并额外补了搜索：
 
+- **搜索**：直接输入 EPSG 代码或名称过滤全量坐标系（如 ``3857`` /
+  ``Pseudo-Mercator``），知道代码时不必去各基准的分带列表里翻；
 - **图层**：列工程里已加载的图层及其空间参考，挑一个就用它的坐标系（用户手里
   往往已经有一份参照数据）；
 - **北京54 / 西安80 / WGS84 / CGCS2000**：左边选分带模式、右边挑具体分带
@@ -29,6 +31,7 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
+    QLineEdit,
     QListWidget,
     QListWidgetItem,
     QPushButton,
@@ -40,7 +43,16 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from app.core.util.srs import DATUMS, Datum, ZoneMode, describe_crs, modes_for, zone_entries
+from app.core.util.srs import (
+    DATUMS,
+    EPSG_SEP,
+    Datum,
+    ZoneMode,
+    describe_crs,
+    epsg_entries,
+    modes_for,
+    zone_entries,
+)
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.widgets import open_file_dir
@@ -60,7 +72,7 @@ _PRJ_FILTER = "投影文件 (*.prj);;所有文件 (*)"
 
 
 class CrsPickDialog(BaseDialog):
-    """坐标系选择：按基准 / 分带挑，或直接沿用某个图层的空间参考。"""
+    """坐标系选择：搜索 EPSG / 按基准分带挑，或沿用某个图层、某份数据的空间参考。"""
 
     def __init__(
         self,
@@ -101,11 +113,15 @@ class CrsPickDialog(BaseDialog):
         self._refresh_head()
 
         self.tabs = QTabWidget()
+        # 搜索放第一个页签并默认选中：知道 EPSG 代码（如 3857）的用户不必先去
+        # 各基准的分带列表里翻，这是最常用的入口。
+        self.tabs.addTab(self._build_search_tab(), "搜索")
         self.tabs.addTab(self._build_layers_tab(), "图层")
         for datum in DATUMS:
             self.tabs.addTab(self._build_zone_tab(datum), datum.key)
         self.tabs.addTab(self._build_custom_tab(), "自定义")
         root.addWidget(self.tabs, 1)
+        self.search_edit.setFocus()
 
         buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
@@ -117,6 +133,49 @@ class CrsPickDialog(BaseDialog):
         buttons.rejected.connect(self.reject)
         root.addWidget(buttons)
         self.setLayout(root)
+
+    def _build_search_tab(self) -> QWidget:
+        """「搜索」页签：按 EPSG 代码 / 名称过滤全量坐标系。"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
+
+        hint = QLabel("输入 EPSG 代码或名称搜索，例如 3857、CGCS2000、Pseudo-Mercator。")
+        hint.setObjectName("PropHint")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("输入 EPSG 代码或名称搜索…")
+        self.search_edit.setClearButtonEnabled(True)
+        layout.addWidget(self.search_edit)
+
+        self.search_list = QListWidget()
+        # 长名称按可用宽度省略，别因为某条名称太长就冒出横向滚动条；完整内容
+        # （含 EPSG 代码）仍可在悬停提示里看。
+        self.search_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.search_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        # 候选表（epsg_entries）有进程级缓存，这里建项后靠隐藏行过滤，避免每次
+        # 输入都清空重填 7000 多项。
+        initial_item = None
+        for authid, name in epsg_entries():
+            item = QListWidgetItem(f"{authid}{EPSG_SEP}{name}" if name else authid)
+            item.setData(Qt.ItemDataRole.UserRole, authid)
+            item.setToolTip(item.text())
+            self.search_list.addItem(item)
+            if authid == self._initial:
+                initial_item = item
+        if initial_item is not None:
+            self.search_list.setCurrentItem(initial_item)
+            self.search_list.scrollToItem(initial_item)
+
+        self.search_edit.textChanged.connect(self._filter_search)
+        self.search_edit.returnPressed.connect(self._accept_first_search)
+        self.search_list.itemSelectionChanged.connect(self._on_search_picked)
+        self.search_list.itemDoubleClicked.connect(lambda _item: self.accept())
+        layout.addWidget(self.search_list, 1)
+        return page
 
     def _build_layers_tab(self) -> QWidget:
         """「图层」页签：工程里各图层用的是哪个空间参考，挑一个照用。"""
@@ -161,7 +220,10 @@ class CrsPickDialog(BaseDialog):
         self.layer_table.insertRow(row)
         self.layer_table.setItem(row, 0, QTableWidgetItem(layer.name()))
         description = crs.description() or crs.authid() or "（未知）"
-        self.layer_table.setItem(row, 1, QTableWidgetItem(description))
+        crs_item = QTableWidgetItem(description)
+        if crs.authid():
+            crs_item.setToolTip(crs.authid())
+        self.layer_table.setItem(row, 1, crs_item)
         value = layer_crs_value(layer)
         self.layer_table.item(row, 0).setData(Qt.ItemDataRole.UserRole, value)
         if value and value == self._initial:
@@ -275,6 +337,7 @@ class CrsPickDialog(BaseDialog):
         for entry in entries:
             item = QListWidgetItem(entry.label)
             item.setData(Qt.ItemDataRole.UserRole, entry.authid)
+            item.setToolTip(entry.authid)
             zone_list.addItem(item)
             if entry.authid == self._initial:
                 item.setSelected(True)
@@ -284,6 +347,41 @@ class CrsPickDialog(BaseDialog):
             placeholder = QListWidgetItem("（本机的坐标系库没有这组分带，请改用「自定义」或直接输入 EPSG 代码）")
             placeholder.setFlags(Qt.ItemFlag.NoItemFlags)
             zone_list.addItem(placeholder)
+
+    def _filter_search(self, text: str) -> None:
+        """按输入过滤「搜索」列表（同时匹配 authid 与名称，忽略大小写）。"""
+        needle = text.strip().lower()
+        for row in range(self.search_list.count()):
+            item = self.search_list.item(row)
+            item.setHidden(bool(needle) and needle not in item.text().lower())
+
+    def _accept_first_search(self) -> None:
+        """搜索框里按回车：采用当前项（被过滤掉时取第一条可见结果）并确定。"""
+        item = self.search_list.currentItem()
+        if item is None or item.isHidden():
+            item = next(
+                (
+                    self.search_list.item(row)
+                    for row in range(self.search_list.count())
+                    if not self.search_list.item(row).isHidden()
+                ),
+                None,
+            )
+        if item is None:
+            return
+        authid = item.data(Qt.ItemDataRole.UserRole)
+        if authid:
+            self.search_list.setCurrentItem(item)
+            self._take(str(authid), item.text())
+            self.accept()
+
+    def _on_search_picked(self) -> None:
+        item = self.search_list.currentItem()
+        if item is None:
+            return
+        authid = item.data(Qt.ItemDataRole.UserRole)
+        if authid:
+            self._take(str(authid), item.text())
 
     def _on_zone_picked(self, datum: Datum) -> None:
         item = self._zone_lists[datum.key].currentItem()
