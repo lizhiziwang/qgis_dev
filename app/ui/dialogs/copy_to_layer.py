@@ -26,7 +26,7 @@ from collections.abc import Sequence
 from typing import Optional
 
 from qgis.core import QgsVectorLayer
-from qgis.PyQt.QtCore import Qt
+from qgis.PyQt.QtCore import QEvent, Qt, QTimer
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -77,6 +77,33 @@ class _SourceFieldCombo(QComboBox):
         self.setEditable(True)
         self.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
         self.addItem(_NONE_TEXT, None)
+        # 点输入区也自动展开候选（可编辑下拉默认只认箭头）
+        line_edit = self.lineEdit()
+        if line_edit is not None:
+            line_edit.installEventFilter(self)
+
+    def eventFilter(self, obj, event):  # noqa: N802 —— Qt 命名
+        if (
+            obj is self.lineEdit()
+            and event.type() == QEvent.Type.MouseButtonPress
+            and event.button() == Qt.MouseButton.LeftButton
+        ):
+            QTimer.singleShot(0, self._show_popup_on_click)
+        return super().eventFilter(obj, event)
+
+    def _show_popup_on_click(self) -> None:
+        """点输入区展开候选；用 completer 弹层，保持输入框键盘焦点。"""
+        try:
+            self._ensure_filled()
+            completer = self.completer()
+            if completer is None:
+                return
+            self.lineEdit().setFocus()
+            # 点击展开全部字段，不拿当前选中值当过滤前缀
+            completer.setCompletionPrefix("")
+            completer.complete()
+        except RuntimeError:
+            pass
 
     def set_items(self, items: Sequence[tuple[str, str]]) -> None:
         """登记候选项 ``[(显示文本, 字段名), ...]``；真正写进下拉是**惰性**的。"""

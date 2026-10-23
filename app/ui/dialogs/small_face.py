@@ -62,6 +62,7 @@ from app.core.domain.check.result_layer import build_result_layer
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.field_combo import make_field_combo_searchable
 
 logger = get_logger(__name__)
 
@@ -276,6 +277,7 @@ class SmallFaceDialog(BaseDialog):
         # 4. 面积字段（仅「属性面积」时可用）
         layout.addWidget(QLabel("面积字段"))
         self.area_field_combo = QComboBox()
+        make_field_combo_searchable(self.area_field_combo)
         self.area_field_combo.setEnabled(False)
         layout.addWidget(self.area_field_combo)
         layout.addSpacing(4)

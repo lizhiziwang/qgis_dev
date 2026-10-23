@@ -241,33 +241,9 @@ class ImportLayerDialog(BaseDialog):
     @staticmethod
     def _open_selections(selections) -> tuple[list[object], list[str]]:
         """把「添加数据」的选择展开成图层对象；返回 ``(图层, 失败原因)``。"""
-        from app.core.util.sublayers import list_sublayers, open_sublayer
+        from app.core.util.sublayers import open_selections
 
-        layers: list[object] = []
-        errors: list[str] = []
-        for selection in selections:
-            path = str(getattr(selection, "path", "") or "")
-            sublayer = getattr(selection, "sublayer", None)
-            if not path:
-                continue
-            candidates = [sublayer] if sublayer is not None else list_sublayers(path)
-            if not candidates:
-                # 普通矢量文件（shp / geojson 等）枚举不到子图层时直开
-                from qgis.core import QgsVectorLayer
-
-                layer = QgsVectorLayer(path, os.path.basename(path), "ogr")
-                if layer.isValid():
-                    layers.append(layer)
-                else:
-                    errors.append(f"{os.path.basename(path)}：打不开")
-                continue
-            for candidate in candidates:
-                layer, error = open_sublayer(path, candidate)
-                if layer is not None:
-                    layers.append(layer)
-                elif error:
-                    errors.append(error)
-        return layers, errors
+        return open_selections(selections)
 
     def _add_layer(self, layer) -> bool:
         """把图层追加进列表（同名跳过，避免同一层导两遍）。"""
