@@ -510,6 +510,7 @@ class FieldsStepPage(QWidget):
                 item.setFlags(
                     Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
                 )
+                item.setToolTip("双击可挂接字典")
             if column == _COL_NAME:
                 item.setData(_ROLE_ORDER, row if order is None else order)
             self.table.setItem(row, column, item)
@@ -958,6 +959,9 @@ class ExternalDatasetDialog(BaseDialog):
         multi: bool = False,
         allow_replace: bool = False,
         show_local: bool = True,
+        auto_open_local: bool = True,
+        title: str = "选择外部数据集",
+        ok_text: str = "确定",
     ) -> None:
         """
         Args:
@@ -968,14 +972,24 @@ class ExternalDatasetDialog(BaseDialog):
             multi: ``True`` = 可以一次选多个图层（「导入数据」用）。
             allow_replace: ``True`` = 底部显示「导入方式：追加 / 替换」单选
                 （「导入数据」用；其他调用方只取图层，不关心这条）。
+            show_local: 是否显示「本地文件」页签。
+            auto_open_local: 切到「本地文件」页签时是否**自动**弹「添加数据」。
+                结构来源导入保持自动；数据管理「导入数据」传 False，先显示
+                容器/图层列表页，用户点「选择本地数据…」再弹。
+            title: 窗口标题（导入数据时带上目标图层名）。
+            ok_text: 主按钮文案（导入数据用「导入」）。
         """
-        super().__init__(parent, "选择外部数据集")
+        super().__init__(parent, title)
         self._geometry_kind = str(geometry_kind or "")
         self._multi = bool(multi)
         self._allow_replace = bool(allow_replace)
         #: 是否提供「本地文件」页签。导入图层这类入口已有独立的本地文件按钮，
         #: 传 False 就只显示工程图层，避免多套一层选择流程。
         self._show_local = bool(show_local)
+        #: 切到本地文件页签时是否自动弹「添加数据」
+        self._auto_open_local = bool(auto_open_local)
+        #: 主按钮文案（导入数据入口用「导入」）
+        self._ok_text = str(ok_text or "确定")
         self._layers = [
             layer for layer in vector_layers
             if not self._geometry_kind or geometry_kind_of_layer(layer) == self._geometry_kind
@@ -1025,7 +1039,7 @@ class ExternalDatasetDialog(BaseDialog):
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
             Qt.Orientation.Horizontal,
         )
-        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText("确定")
+        self.buttons.button(QDialogButtonBox.StandardButton.Ok).setText(self._ok_text)
         self.buttons.button(QDialogButtonBox.StandardButton.Cancel).setText("取消")
         self.buttons.accepted.connect(self.accept)
         self.buttons.rejected.connect(self.reject)
@@ -1131,9 +1145,14 @@ class ExternalDatasetDialog(BaseDialog):
     # --------------------------------------------------------------- 交互
 
     def _on_source_tab_changed(self, index: int) -> None:
-        """切到「本地文件」页签时直接弹「添加数据」，不再让用户多点一次。"""
+        """切到「本地文件」页签：按配置决定是否直接弹「添加数据」。"""
         self._refresh_ok()
-        if index == 1 and not self._entries and not self._picker_opened:
+        if (
+            index == 1
+            and self._auto_open_local
+            and not self._entries
+            and not self._picker_opened
+        ):
             # 等页签切换完成再弹，避免在信号栈里开模态窗口；窗口已关就别弹
             QTimer.singleShot(0, self._auto_open_picker)
 

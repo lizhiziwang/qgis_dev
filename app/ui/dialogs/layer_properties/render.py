@@ -106,6 +106,7 @@ from qgis.PyQt.QtWidgets import (
 
 from app.core.util.dict_values import load_field_dict
 from app.infra.logging import get_logger
+from app.ui.common.field_combo import make_field_combo_searchable
 from app.ui.dialogs.layer_properties.base import LayerPropertyTab
 from app.ui.dialogs.layer_properties.widgets import ColorButton
 from app.ui.tools.feature_attrs import field_alias
@@ -1048,6 +1049,7 @@ class RenderTab(LayerPropertyTab):
         self.field_combo.setMinimumWidth(150)
         # 字段名不需要一直撑满整行：把空间让给色带，否则色带挤得看不清
         self.field_combo.setMaximumWidth(220)
+        make_field_combo_searchable(self.field_combo)
         top.addWidget(self.field_combo, 0)
         ramp_label = QLabel("色带", box)
         ramp_label.setObjectName("PropHint")

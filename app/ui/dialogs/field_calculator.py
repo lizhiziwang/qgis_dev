@@ -46,6 +46,7 @@ from qgis.PyQt.QtWidgets import (
 
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.field_combo import make_field_combo_searchable
 from app.ui.dialogs.expression_builder import ExpressionBuilderWidget
 
 logger = get_logger(__name__)
@@ -190,6 +191,7 @@ class FieldCalculatorDialog(BaseDialog):
         layout = QVBoxLayout(group)
         layout.setContentsMargins(3, 9, 3, 0)
         self.update_combo = QComboBox(group)
+        make_field_combo_searchable(self.update_combo)
         from app.ui.tools.feature_attrs import readonly_field_indices
 
         readonly = readonly_field_indices(self._layer.fields())

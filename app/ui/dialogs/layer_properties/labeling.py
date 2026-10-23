@@ -78,6 +78,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from app.infra.logging import get_logger
+from app.ui.common.field_combo import make_field_combo_searchable
 from app.ui.dialogs.layer_properties.base import LayerPropertyTab
 from app.ui.dialogs.layer_properties.widgets import ColorButton
 from app.ui.tools.feature_attrs import field_alias
@@ -283,6 +284,7 @@ class _FieldExpressionSelector(QWidget):
 
         self.combo = QComboBox(self)
         self.combo.setMinimumWidth(160)
+        make_field_combo_searchable(self.combo)
         lay.addWidget(self.combo, 1)
 
         self.expr_edit = QLineEdit(self)
