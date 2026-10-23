@@ -7,8 +7,9 @@ QWidget，仓库既定覆盖层模式，见 :class:`app.ui.common.canvas_zoom.Ca
 拖动分割线左右（垂直卷帘）或上下（水平卷帘）切换。
 
 分屏作为**视图状态常驻**：切到任意工具（平移 / 缩放 / 画要素 / 查询）分屏保留，
-覆盖层与离屏渲染独立于当前激活工具持续工作；再点「卷帘对比」恢复分隔条拖拽；
-**Esc**（或左影像被移除）才真正退出，还原原图层集并移除覆盖层。
+覆盖层与离屏渲染独立于当前激活工具持续工作；再点「卷帘对比」恢复分隔条拖拽，
+而当前已经是卷帘工具时再点一次（或按 **Esc**）才真正退出，还原原图层集并移除
+覆盖层；左影像被移除时也会自动退出。
 
 安全约束（仓库既定结论，见 ``canvas_zoom.py`` / ``main_window``）：
 
@@ -203,6 +204,14 @@ class SwipeTool(QgsMapTool):
         """分屏会话是否存活（供 MainWindow 判断「点卷帘对比」是恢复还是新建）。"""
         return self._alive
 
+    def stop(self) -> None:
+        """外部停止会话（工具条再次点击）：拆覆盖层并还原图层。
+
+        与 Esc 的完整退出路径相比少一步 ``unsetMapTool``——调用方
+        （:meth:`MainWindow._on_swipe`）会紧接着切回平移工具。
+        """
+        self._exit_session()
+
     # ------------------------------------------------------------ QgsMapTool 生命周期
 
     def activate(self) -> None:
@@ -215,6 +224,9 @@ class SwipeTool(QgsMapTool):
             self._overlay.show()
         self._active = True
         self._overlay.raise_to_top()
+        # 从工具条按钮 / 参数对话框激活时焦点不在画布上，Esc 到不了地图工具；
+        # 推迟一拍把焦点还给画布（对话框这时才真正关闭），保证「Esc 退出卷帘」可用。
+        QTimer.singleShot(0, self.canvas.setFocus)
         self._schedule_render()
 
     def deactivate(self) -> None:

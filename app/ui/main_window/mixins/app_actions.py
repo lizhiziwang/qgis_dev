@@ -1531,15 +1531,24 @@ class AppActionsMixin:
             return False
 
     def _on_swipe(self) -> None:
-        """卷帘对比：分屏会话已存续则直接恢复（不弹窗）；否则弹窗选栅格激活。
+        """卷帘对比：**开关型**——会话存续时再点即关闭；未创建时弹窗选栅格激活。
 
         分屏是视图状态常驻：切到任意工具（平移/缩放/画要素/查询）后覆盖层仍在，
-        再点「卷帘对比」即恢复分隔条拖拽；Esc 才真正退出会话。
+        此时再点「卷帘对比」恢复分隔条拖拽；当前已是卷帘工具时再点（或按 Esc）
+        则真正退出会话、还原图层并回到平移工具。
         """
         tool = getattr(self, "_swipe_tool", None)
         if tool is not None and tool.is_alive():
-            self.canvas.setMapTool(tool)
-            self.tool_bar_builder.set_active("swipe")
+            if self.canvas.mapTool() is tool:
+                # 再次点击当前卷帘按钮 → 关闭会话（与 Esc 同一条清理路径）
+                tool.stop()
+                self.canvas.setMapTool(self._pan_tool)
+                self.tool_bar_builder.set_active("pan")
+                self.side_toolbar.set_active("pan")
+            else:
+                # 切到其它工具后覆盖层仍在，再点卷帘恢复分隔条拖拽
+                self.canvas.setMapTool(tool)
+                self.tool_bar_builder.set_active("swipe")
             return
         if not any(isinstance(l, QgsRasterLayer) for l in self.project.mapLayers().values()):
             QMessageBox.information(self, "提示", "请先加载至少一个栅格图层")
