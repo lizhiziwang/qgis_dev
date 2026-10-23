@@ -8,7 +8,7 @@
 
 from __future__ import annotations
 
-from qgis.core import Qgis, QgsCoordinateTransform, QgsRectangle
+from qgis.core import Qgis, QgsRectangle
 from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QPoint, Qt
 from qgis.PyQt.QtWidgets import QMessageBox
@@ -584,11 +584,11 @@ class MapToolsMixin:
         self.tool_bar_builder.set_active("zoom_out")
 
     def _on_side_zoom(self) -> None:
-        """侧栏「缩放」：单击地图放大、按住 Shift 单击缩小（区别于顶部「放大」）。
+        """侧栏「缩放」：默认拉框放大，按住 Shift 拉框缩小。
 
-        顶部「放大 / 缩小」仍是各自独立的 :class:`QgsMapToolZoom`；本入口用
-        :class:`~app.ui.tools.pan_zoom.ZoomClickTool`，独立 ``side_zoom`` key
-        只高亮侧栏按钮，不联动顶部「放大」。
+        与顶部「放大 / 缩小」复用同一套 :class:`QgsMapToolZoom`（事件由
+        :class:`~app.ui.tools.pan_zoom.ShiftZoomTool` 按 Shift 状态转发），
+        拉框样式与缩放倍率保持一致；独立 ``side_zoom`` key 只高亮侧栏按钮。
         """
         self.canvas.setMapTool(self._side_zoom_tool)
         self.tool_bar_builder.set_active("side_zoom")
@@ -747,27 +747,23 @@ class MapToolsMixin:
     def _on_zoom_full(self) -> None:
         """全图：合并所有有效图层的范围。
 
-        ``combineExtentWith`` 只做数值并集、不理解坐标系，因此每个图层的
-        ``extent()`` 必须先换算到画布 CRS 再合并，否则经纬度（度）与投影（米）
-        图层混用时全图会偏。
+        范围统一由 :meth:`_layer_view_extent` 取（画布 CRS）：``combineExtentWith``
+        只做数值并集、不理解坐标系，必须先换算，否则经纬度（度）与投影（米）
+        图层混用时全图会偏。天地图 / 高德等国内在线底图按中国范围参与合并——
+        它们的图层 extent 是世界，但服务只覆盖中国。
         """
         dest_crs = self.canvas.mapSettings().destinationCrs()
         combined = None
         for layer in self.project.mapLayers().values():
-            if not layer.isValid():
+            try:
+                extent = self._layer_view_extent(layer, dest_crs)
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "全图：图层 %s 范围坐标转换失败，已跳过", layer.name(), exc_info=True
+                )
                 continue
-            extent = layer.extent()
-            if extent.isNull():
+            if extent is None or extent.isNull():
                 continue
-            if layer.crs() != dest_crs:
-                try:
-                    transform = QgsCoordinateTransform(layer.crs(), dest_crs, self.project)
-                    extent = transform.transformBoundingBox(extent)
-                except Exception:  # noqa: BLE001
-                    logger.warning(
-                        "全图：图层 %s 范围坐标转换失败，已跳过", layer.name(), exc_info=True
-                    )
-                    continue
             if combined is None:
                 combined = extent
             else:

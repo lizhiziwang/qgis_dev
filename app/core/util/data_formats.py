@@ -136,6 +136,59 @@ def is_gdb_dir(path: str) -> bool:
     return os.path.isdir(path) and suffix_of(path) == GDB_SUFFIX
 
 
+def is_valid_gdb_dir(path: str) -> bool:
+    """目录里是否真的是一套 File Geodatabase（而不只是名字以 ``.gdb`` 结尾）。
+
+    有效库至少要能看到系统文件 ``gdb`` 或任意 ``*.gdbtable``。常见误选是把
+    解压得到的外层目录整个拿来打开：外层名字也叫 ``xxx.gdb``，但真正的库还在
+    里面一层，此时直接交给 OGR 只会得到一条没有细节的“无法打开”。
+    """
+    if not is_gdb_dir(path):
+        return False
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                try:
+                    if not entry.is_file():
+                        continue
+                except OSError:
+                    continue
+                name = entry.name.lower()
+                if name == "gdb" or name.endswith(".gdbtable"):
+                    return True
+    except OSError:
+        return False
+    return False
+
+
+def resolve_gdb_dir(path: str) -> str | None:
+    """定位真正可读的 GDB 目录；失败返回 ``None``。
+
+    - ``path`` 本身有效 → 原样返回；
+    - 否则在它的**直接子目录**中找 ``.gdb``：恰好一个有效库时返回它（兼容
+      “外层 xxx.gdb 里还套着一个 xxx.gdb”的解压目录）；
+    - 没有或有多个候选时不猜，返回 ``None``，由调用方提示用户自行选择。
+    """
+    if not path or not os.path.isdir(path):
+        return None
+    if is_valid_gdb_dir(path):
+        return path
+    candidates: list[str] = []
+    try:
+        with os.scandir(path) as it:
+            for entry in it:
+                try:
+                    if not entry.is_dir() or suffix_of(entry.name) != GDB_SUFFIX:
+                        continue
+                except OSError:
+                    continue
+                if is_valid_gdb_dir(entry.path):
+                    candidates.append(entry.path)
+    except OSError:
+        return None
+    return candidates[0] if len(candidates) == 1 else None
+
+
 def classify_path(path: str) -> str:
     """把路径分成 :data:`KIND_DIR` / ``gdb`` / ``vector`` / ``raster`` / ``container``。
 
@@ -221,5 +274,7 @@ __all__ = [
     "is_container_source",
     "is_gdb_dir",
     "is_multi_layer_source",
+    "is_valid_gdb_dir",
+    "resolve_gdb_dir",
     "suffix_of",
 ]

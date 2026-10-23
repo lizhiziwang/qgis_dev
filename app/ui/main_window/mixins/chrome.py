@@ -48,7 +48,7 @@ from app.ui.main_window.title_bar import (
     MODE_TASK,
 )
 from app.ui.main_window.tool_bar import ToolBar
-from app.ui.tools.pan_zoom import ZoomClickTool
+from app.ui.tools.pan_zoom import ShiftZoomTool
 
 logger = get_logger(__name__)
 
@@ -124,8 +124,9 @@ class WindowChromeMixin:
         self._pan_tool = QgsMapToolPan(self.canvas)
         self._zoom_in_tool = QgsMapToolZoom(self.canvas, False)
         self._zoom_out_tool = QgsMapToolZoom(self.canvas, True)
-        # 侧栏「缩放」（单击放大 / Shift+单击缩小）：与顶部「放大 / 缩小」是两个入口
-        self._side_zoom_tool = ZoomClickTool(self.canvas)
+        # 侧栏「缩放」（拉框放大 / 按住 Shift 拉框缩小）：复用顶部两个原生
+        # QgsMapToolZoom，保证与「放大 / 缩小」的拉框逻辑完全一致
+        self._side_zoom_tool = ShiftZoomTool(self.canvas)
         #: 启动测量前的常规画布工具（再次点测量按钮取消使用时还原）
         self._measure_previous_tool = None
 
