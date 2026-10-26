@@ -96,10 +96,24 @@ class MapToolsMixin:
         self._sync_swipe_session_active()
 
     def _sync_swipe_session_active(self) -> None:
-        """按卷帘会话是否存活同步工具条按钮高亮。"""
+        """按卷帘会话 / 预选面板状态同步高亮；真正结束时顺手关面板。"""
         tool = getattr(self, "_swipe_tool", None)
         alive = tool is not None and tool.is_alive()
-        self.tool_bar_builder.set_session_active("swipe", alive)
+        panel = getattr(self, "_swipe_panel", None)
+        panel_open = panel is not None and not sip.isdeleted(panel)
+        self.tool_bar_builder.set_session_active("swipe", alive or panel_open)
+        if panel_open and not alive:
+            try:
+                started = panel.is_started()
+            except RuntimeError:
+                started = False
+            if started:  # 会话已结束但面板还开着 → 关掉它
+                close_panel = getattr(self, "_close_swipe_panel", None)
+                if callable(close_panel):
+                    try:
+                        close_panel()
+                    except RuntimeError:
+                        pass
 
     def _on_pan(self) -> None:
         self.canvas.setMapTool(self._pan_tool)

@@ -186,6 +186,15 @@ class SwipeOverlay(QWidget):
         """设置右侧完整画面（含背景、按图层树顺序合成），触发重绘。"""
         self._right_image = image
 
+    def set_orientation(self, orientation: str) -> None:
+        """切换卷帘方向；分割线回到中间，整幅覆盖层重绘一次。"""
+        orientation = "horizontal" if orientation == "horizontal" else "vertical"
+        if orientation == self._orientation:
+            return
+        self._orientation = orientation
+        self._divider = 0.5
+        self.update()
+
     def set_divider(self, fraction: float) -> None:
         """设置分割线位置（0~1 归一化），只重绘新旧分割线之间的窄条。
 
@@ -323,12 +332,40 @@ class SwipeTool(QgsMapTool):
         return self._alive
 
     def stop(self) -> None:
-        """外部停止会话（工具条再次点击）：拆覆盖层并还原图层。
+        """外部停止会话（工具条再次点击 / 关闭面板）：拆覆盖层并还原图层。
 
         与 Esc 的完整退出路径相比少一步 ``unsetMapTool``——调用方
         （:meth:`MainWindow._on_swipe`）会紧接着切回平移工具。
         """
         self._exit_session()
+
+    def apply_params(self, base, compare, orientation: str) -> bool:
+        """在不退出会话的情况下更换左右影像 / 卷帘方向。
+
+        返回是否应用成功。图层已被移除 / 左右相同则不应用，保持原参数。
+        """
+        if not self._alive or base is None or compare is None or base is compare:
+            return False
+        try:
+            layer_ids = self._project.mapLayers()
+            if base.id() not in layer_ids or compare.id() not in layer_ids:
+                return False
+        except RuntimeError:
+            return False
+        self._base = base
+        self._compare = compare
+        self._orientation = orientation
+        if orientation == "vertical":
+            self.setCursor(Qt.CursorShape.SplitHCursor)
+        else:
+            self.setCursor(Qt.CursorShape.SplitVCursor)
+        ov = self._overlay
+        if ov is not None:
+            ov.set_orientation(orientation)
+        self._refresh_layers()
+        self._set_left_layers()
+        self._schedule_render()
+        return True
 
     # ------------------------------------------------------------ QgsMapTool 生命周期
 
