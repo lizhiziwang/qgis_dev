@@ -55,6 +55,7 @@ from app.core.domain.check.result_layer import build_result_layer
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.layer_order import vector_layers_in_tree_order
 
 logger = get_logger(__name__)
 
@@ -304,13 +305,8 @@ class SelfIntersectDialog(BaseDialog):
 
     def _populate_layers(self) -> None:
         """用工程里的矢量图层填输入图层下拉框，默认选中上下文图层。"""
-        layers = [
-            layer
-            for layer in QgsProject.instance().mapLayers().values()
-            if isinstance(layer, QgsVectorLayer) and layer.isValid()
-        ]
-        # 自相交判定只对面要素有意义，面图层排前面（不过滤，源数据可能是复合类型）
-        layers.sort(key=lambda layer: layer.geometryType() != QgsWkbTypes.PolygonGeometry)
+        # 与图层面板从上到下的顺序一致（``mapLayers()`` 按图层 UUID 排，看着是乱序）
+        layers = vector_layers_in_tree_order()
         context = self._current_layer()
         context_id = context.id() if context is not None else None
 
@@ -432,7 +428,8 @@ class SelfIntersectDialog(BaseDialog):
             while time.monotonic() < deadline:
                 seen, fid, _msg = next(self._iterator)
                 self._seen = seen
-                self._failed.append(fid)
+                if fid is not None:
+                    self._failed.append(fid)
         except StopIteration:
             # 落层 / addMapLayer 再推一拍，不和检查循环挤在同一个事件里
             QTimer.singleShot(0, self._on_check_done)
@@ -443,7 +440,7 @@ class SelfIntersectDialog(BaseDialog):
             self._finish_failed()
             return
 
-        pct = min(int(90 * self._seen / self._total), 90) if self._total else self.progress.value()
+        pct = max(1, min(int(90 * self._seen / self._total), 90)) if self._total else self.progress.value()
         self._set_progress(pct, f"正在检查…（已处理 {self._seen}）")
         QTimer.singleShot(0, self._step)
 

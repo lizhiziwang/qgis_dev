@@ -119,11 +119,11 @@ class SpaceAngleCheck(BaseCheck):
     # ------------------------------------------------------------ 流式执行
 
     def iter_failed(self, p: CheckParam):
-        """流式产出命中要素 ``(seen, fid, angle)``。
+        """流式产出 ``(seen, fid, angle)``：**每个处理过的要素都产出一条**。
 
-        ``seen`` 是累计已处理要素数（含未命中），供界面分批执行时更新进度；
-        ``angle`` 是该面要素的最小面内夹角（度），供调用方参考。
-
+        ``fid is None`` 表示该要素通过（仅用于推进进度），``fid`` 非空表示命中；
+        ``angle`` 是命中要素的最小面内夹角（度），通过记录里为 ``None``。
+        每个要素都 yield 一次，界面才能在一遍扫描一个都不命中时也刷新进度。
         调用方需保证 ``p.layer`` 有效；无效图层直接不产出。
         """
         layer: QgsVectorLayer = p.layer
@@ -139,13 +139,13 @@ class SpaceAngleCheck(BaseCheck):
         for feat in layer.getFeatures(req):
             seen += 1
             geom = feat.geometry()
-            if geom.isEmpty():
-                continue
-            angle = self._min_interior_angle(measuring_geometry(geom, transform))
-            if angle is None:
-                continue
-            if threshold > 0 and angle < threshold:
+            angle = None
+            if not geom.isEmpty():
+                angle = self._min_interior_angle(measuring_geometry(geom, transform))
+            if angle is not None and threshold > 0 and angle < threshold:
                 yield seen, feat.id(), angle
+            else:
+                yield seen, None, None
 
     def run(self, p: CheckParam) -> CheckResult:
         if p.layer is None or not p.layer.isValid():
@@ -158,8 +158,9 @@ class SpaceAngleCheck(BaseCheck):
         failed: list[int] = []
         angles: dict[int, float] = {}
         for _seen, fid, angle in self.iter_failed(p):
-            failed.append(fid)
-            angles[fid] = angle
+            if fid is not None:
+                failed.append(fid)
+                angles[fid] = angle
 
         return CheckResult(
             status=CheckStatus.PASS if not failed else CheckStatus.FAIL,

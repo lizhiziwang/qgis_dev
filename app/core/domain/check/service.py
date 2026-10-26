@@ -53,10 +53,14 @@ class CheckService:
     # ---------------------------------------------------------- 流式执行
 
     def iter_failed(self, p: CheckParam, *, type_id: Optional[str] = None):
-        """流式执行支持增量输出的质检，产出 ``(seen, fid, ratio)``。
+        """流式执行支持增量输出的质检，产出 ``(seen, fid, value)``。
 
-        仅像 :class:`SpaceLongThinCheck` 这样实现了 ``iter_failed`` 的 check 可用，
-        供界面分批驱动（避免长循环阻塞 UI）；普通 check 请用 :meth:`run`。
+        **每处理一个要素就产出一条**：``fid is None`` 表示"这条通过了，仅用于推进
+        进度"，``fid`` 非空才是命中。界面按 ``seen`` 与总数算百分比——只在命中时
+        产出的话，一遍扫下来一个都不命中就会一直卡在起始进度、看不出还在跑。
+
+        仅实现了 ``iter_failed`` 的 check 可用，供界面分批驱动（避免长循环阻塞
+        UI）；普通 check 请用 :meth:`run`。
         """
         cls = self._resolve_cls(type_id, p)
         instance = cls()

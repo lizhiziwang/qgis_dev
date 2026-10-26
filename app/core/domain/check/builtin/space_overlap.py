@@ -57,12 +57,13 @@ class SpaceOverlapCheck(BaseCheck):
                 found.append(other_fid)
         return sorted(found)
 
-    def iter_failed(self, p: CheckParam) -> Iterator[tuple[int, int, str]]:
-        """流式产出命中要素 ``(seen, fid, msg)``。
+    def iter_failed(self, p: CheckParam) -> Iterator[tuple[int, int | None, str]]:
+        """流式产出 ``(seen, fid, msg)``：**每个处理过的要素都产出一条**。
 
-        ``seen`` 是累计已处理要素数（含未命中），供界面分批执行时更新进度；
-        ``msg`` 是「与 N 个要素重叠」。调用方需保证 ``p.layer`` 有效；无效图层
-        直接不产出。
+        ``fid is None`` 表示该要素通过（仅用于推进进度），``fid`` 非空表示命中；
+        界面按 ``seen`` 与总数算百分比。每个要素都 yield 一次，界面才能在长时间
+        扫描（一遍下来一个都不命中）时照样刷新进度，而不是卡在 1%。
+        调用方需保证 ``p.layer`` 有效；无效图层直接不产出。
         """
         layer: QgsVectorLayer = p.layer
         if layer is None or not layer.isValid():
@@ -77,10 +78,13 @@ class SpaceOverlapCheck(BaseCheck):
             seen += 1
             geom = feat.geometry()
             if geom.isEmpty():
+                yield seen, None, ""
                 continue
             others = self._overlaps(layer, geom, feat.id())
             if others:
                 yield seen, feat.id(), f"与 {len(others)} 个要素重叠"
+            else:
+                yield seen, None, ""
 
     def run(self, p: CheckParam) -> CheckResult:
         if p.layer is None or not p.layer.isValid():
@@ -91,7 +95,8 @@ class SpaceOverlapCheck(BaseCheck):
             )
         failed: list[int] = []
         for _seen, fid, _msg in self.iter_failed(p):
-            failed.append(fid)
+            if fid is not None:
+                failed.append(fid)
         failed = sorted(failed)
         return CheckResult(
             status=CheckStatus.PASS if not failed else CheckStatus.FAIL,

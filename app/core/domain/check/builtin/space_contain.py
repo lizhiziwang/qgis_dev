@@ -73,44 +73,59 @@ class SpaceContainCheck(BaseCheck):
         from qgis.core import QgsFeatureRequest, QgsSpatialIndex  # 延迟 import
 
         index = QgsSpatialIndex()
+        request = QgsFeatureRequest().setFilterExpression(where).setNoAttributes()
         index.addFeatures(
-            [f for f in ref.getFeatures(QgsFeatureRequest().setFilterExpression(where)) if f.hasGeometry()]
+            [f for f in ref.getFeatures(request) if f.hasGeometry()]
         )
         return index
 
     @staticmethod
+    def _reference_geometry_cache(ref: QgsVectorLayer, where: str) -> dict[int, "QgsGeometry"]:
+        """一次性把参考要素的**几何**读进内存（只取几何、不取属性）。
+
+        逐个 ``getFeature`` 回读会带上 100+ 个属性列；14 万参考要素实测要几十秒。
+        这里用 ``setNoAttributes()`` 批量读一遍（同规模 ~1s），后续按 fid 直接取几何。
+        """
+        from qgis.core import QgsFeatureRequest  # 延迟 import
+
+        request = QgsFeatureRequest().setNoAttributes()
+        if where and where != "1=1":
+            request.setFilterExpression(where)
+        cache: dict[int, QgsGeometry] = {}
+        for feat in ref.getFeatures(request):
+            geom = feat.geometry()
+            if geom is not None and not geom.isEmpty():
+                cache[feat.id()] = geom
+        return cache
+
+    @staticmethod
     def _reference_union(
         index: QgsSpatialIndex,
-        ref: QgsVectorLayer,
         cache: dict[int, QgsGeometry],
         bbox,
     ) -> QgsGeometry | None:
         """取参考图层中与该范围相交的要素并集；范围内没有参考要素返回 ``None``。
 
-        ``cache`` 由调用方跨要素复用：同一批参考要素只从 provider 读一次
-        （大图层上 ``getFeature`` 回读比重算并集贵得多）。
+        ``cache`` 一次性预载参考几何（见 :meth:`_reference_geometry_cache`），
+        不再逐 fid 回 provider 读要素。
         """
         from qgis.core import QgsGeometry  # 延迟 import
 
         parts = []
         for fid in index.intersects(bbox):
             geom = cache.get(fid)
-            if geom is None:
-                geom = ref.getFeature(fid).geometry()
-                cache[fid] = geom
-            if not geom.isEmpty():
+            if geom is not None and not geom.isEmpty():
                 parts.append(geom)
         if not parts:
             return None
         return parts[0] if len(parts) == 1 else QgsGeometry.unaryUnion(parts)
 
     def iter_failed(self, p: CheckParam):
-        """流式产出命中要素 ``(seen, fid, excess_area)``。
+        """流式产出 ``(seen, fid, excess_area)``：**每个处理过的要素都产出一条**。
 
-        ``seen`` 是累计已处理要素数（含未命中），供界面分批执行时更新进度；
-        ``excess_area`` 是该要素**超出参考图层范围**的面积（米²，超出越多越大），
-        完全落在参考范围内时该要素不会产出。
-
+        ``fid is None`` 表示该要素通过（仅用于推进进度），``fid`` 非空表示命中；
+        ``excess_area`` 是**超出参考图层范围**的面积（米²）。每个要素都 yield 一次，
+        界面才能在一遍扫描一个都不越界时也刷新进度。
         调用方需保证 ``p.layer`` 与参考图层都有效；任一无效直接不产出。
         """
         layer: QgsVectorLayer = p.layer
@@ -122,7 +137,9 @@ class SpaceContainCheck(BaseCheck):
         index = self._reference_index(ref, self._reference_where(p))
         if index is None:
             return
-        cache: dict[int, QgsGeometry] = {}
+        # 参考几何一次批量读进内存（只取几何）：后面每个源要素都要按 fid 取候选，
+        # 逐个 getFeature 会带着 180+ 属性列反复回读 provider，是大头开销。
+        cache = self._reference_geometry_cache(ref, self._reference_where(p))
         transform = make_transform(layer.crs())
         measure = make_ellipsoid_measure(layer.crs())
         req = QgsFeatureRequest().setFilterExpression(self.build_where(p))
@@ -132,10 +149,12 @@ class SpaceContainCheck(BaseCheck):
             seen += 1
             geom: QgsGeometry = feat.geometry()
             if geom.isEmpty():
+                yield seen, None, 0.0
                 continue
 
-            covered = self._reference_union(index, ref, cache, geom.boundingBox())
+            covered = self._reference_union(index, cache, geom.boundingBox())
             if covered is not None and covered.contains(geom):
+                yield seen, None, 0.0
                 continue
             # 参考范围内一个要素都没有时，整个要素都算超出
             outside = geom if covered is None else geom.difference(covered)
@@ -159,7 +178,8 @@ class SpaceContainCheck(BaseCheck):
             )
         failed: list[int] = []
         for _seen, fid, _excess in self.iter_failed(p):
-            failed.append(fid)
+            if fid is not None:
+                failed.append(fid)
         return CheckResult(
             status=CheckStatus.PASS if not failed else CheckStatus.FAIL,
             severity=CheckSeverity.ERROR if failed else CheckSeverity.INFO,

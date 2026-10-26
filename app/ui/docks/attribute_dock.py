@@ -1786,21 +1786,26 @@ class _LocatedHeaderView(QHeaderView):
             pass
 
     def _paint_gutter_cell(self, painter, rect) -> None:
-        """行号格：QGIS 那样的浅灰底面 + 细横线，与表格正文区分开（不做浮雕）。
+        """行号格：QGIS 那样的浅灰底面 + 清楚的细边框，方便一眼分辨、逐行点击。
 
-        只铺一层比正文略深（暗色主题则略亮）的平色，再用主题边框色画底部横线和
-        右边线；格与格之间就是一条细线，不再叠渐变和高光/暗影。
+        底色比正文略深（暗色主题则略亮）；分隔线用与底色拉开对比的中性色画
+        底部横线和右边线（不是渐变/浮雕）。线色按主题明暗自动取深/浅，
+        避免浅色主题下 ``border`` 跟底色几乎同色、看不出每格边界。
         """
         try:
             theme = ThemeManager.instance().current()
             face = QColor(theme.window_bg)
-            # 亮色主题压深、暗色主题提亮，否则和正文（window_bg / 交替行）混成一片
-            face = face.darker(104) if face.lightness() >= 128 else face.lighter(112)
+            if face.lightness() >= 128:
+                face = face.darker(106)
+                line = face.darker(132)      # 浅色：浅灰底 + 明显深一档的线
+            else:
+                face = face.lighter(122)
+                line = face.lighter(155)     # 深色：提亮底 + 更亮的线
             painter.save()
             painter.fillRect(rect, face)
-            painter.setPen(QColor(theme.border))
+            painter.setPen(line)
             painter.drawLine(rect.left(), rect.bottom(), rect.right(), rect.bottom())
-            painter.drawLine(rect.right(), rect.top() + 1, rect.right(), rect.bottom())
+            painter.drawLine(rect.right(), rect.top(), rect.right(), rect.bottom())
             painter.restore()
         except Exception:  # noqa: BLE001 —— 绘制里不能抛异常（会直接杀进程）
             pass

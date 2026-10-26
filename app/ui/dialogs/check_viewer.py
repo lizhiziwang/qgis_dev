@@ -35,6 +35,7 @@ from app.core.domain.check import CheckParam, CheckService
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.layer_order import layers_in_tree_order
 from app.ui.common.widgets import open_file_dir
 from app.ui.dialogs.check_editor import CheckConfigDialog, CheckVo
 
@@ -75,7 +76,9 @@ class CheckViewerDialog(BaseDialog):
         ds_layout.addWidget(QLabel("数据源："))
         self.data_source_input = QComboBox()
         if self.parent is not None and hasattr(self.parent, "project"):
-            self.data_source_input.addItems([l.name() for l in self.parent.project.mapLayers().values()])
+            self.data_source_input.addItems(
+                [layer.name() for layer in layers_in_tree_order(self.parent.project)]
+            )
         self.data_source_input.setCurrentIndex(-1)
         ds_layout.addWidget(self.data_source_input)
         main.addLayout(ds_layout)
