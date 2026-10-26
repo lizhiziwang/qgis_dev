@@ -1046,26 +1046,45 @@ def export_with_progress(
 ) -> str | None:
     """带进度提示执行导出（数据管理 / 图层右键「导出」共用）。
 
-    写 GDB / 大图层是同步阻塞调用，没有可用的分阶段回调；用不确定进度条 +
-    阶段文字，至少让用户看到「正在写入图层 / 字典」而不是界面卡死。
+    导出在 UI 线程里逐要素写盘，每 :data:`~app.core.domain.export_layer.PROGRESS_STEP`
+    条回调一次 ``(done, total)``：进度框显示「已导出 N / M（xx%）」，并在回调里
+    处理事件，避免大图层导出时窗口一直"未响应"。总条数未知时显示已处理条数。
     成功返回写出的路径；失败弹提示并返回 ``None``。``load_after`` 为真时
     导出成功后把结果加载进当前工程。
     """
     progress = QProgressDialog(parent)
     progress.setWindowTitle("导出数据")
     progress.setLabelText("正在准备导出…")
-    progress.setRange(0, 0)  # 不确定进度（转圈）
+    progress.setRange(0, 0)  # 条数未知时先转圈，拿到总数后切成确定进度
+    progress.setMinimumWidth(420)
     progress.setCancelButton(None)
     progress.setAutoClose(False)
     progress.setAutoReset(False)
     progress.setMinimumDuration(0)
-    progress.setWindowModality(Qt.WindowModality.WindowModal)
+    # 导出循环里会 processEvents：用应用级模态挡住"再点一次导出 / 关父窗"，
+    # 否则可能在 processEvents 期间重入导出。
+    progress.setWindowModality(Qt.WindowModality.ApplicationModal)
     progress.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
     progress.show()
     QApplication.processEvents()
 
-    def _show_stage(text: str) -> None:
-        progress.setLabelText(text)
+    def _show_progress(done: int, total: int, text: str) -> None:
+        """显示具体数值：有总数就 N / M + 百分比，没有就显示已处理条数。"""
+        try:
+            done = max(0, int(done))
+            total = int(total)
+        except (TypeError, ValueError):
+            done, total = 0, -1
+        if total > 0:
+            if progress.maximum() != total:
+                progress.setRange(0, total)
+            progress.setValue(min(done, total))
+            percent = min(100, int(done * 100 / total))
+            progress.setLabelText(f"{text}  {done} / {total}（{percent}%）")
+        else:
+            if progress.maximum() != 0:
+                progress.setRange(0, 0)
+            progress.setLabelText(text if done <= 0 else f"{text}  已处理 {done} 条")
         QApplication.processEvents()
 
     QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -1073,7 +1092,7 @@ def export_with_progress(
     target = None
     try:
         try:
-            target = export_vector_layer(layer, spec, progress=_show_stage)
+            target = export_vector_layer(layer, spec, progress=_show_progress)
         except ExportLayerError as exc:
             logger.warning("导出数据失败：%s", exc)
             error_message = f"导出失败：{exc}"
