@@ -22,15 +22,16 @@ PROVIDER_ID_NAMES = frozenset({"fid", "ogc_fid"})
 
 
 def provider_id_field_indices(layer: "QgsVectorLayer") -> set[int]:
-    """返回``layer``里数据源自己维护的 FID 字段下标（这些字段不该当属性复制）。
+    """返回``layer``里不该当普通属性复制的 FID 字段下标。
 
-    - 主键元数据可用时：只跳过**主键且列名是 fid/ogc_fid** 的字段；
-    - 主键元数据为空时（内存图层 / 部分 OGR 驱动报不出来）：按列名兜底。
+    判定规则：**列名是 ``fid`` / ``ogc_fid`` 就跳过**，不管它是不是主键 ——
+    目标 GeoPackage / SpatiaLite 的 ``fid`` 是保留的整型主键列，同名业务列
+    写进去不是撞主键就是挡住目标自己的 FID（GDB 里常见一个非主键的 ``fid``
+    列，值往往只是 OBJECTID 的副本）。主键元数据只用于说明来源，不再参与判定。
     """
     indices: set[int] = set()
     try:
         fields = layer.fields()
-        primary_keys = set(layer.primaryKeyAttributes())
     except RuntimeError:  # 图层已销毁
         return indices
     for index in range(fields.count()):
@@ -38,10 +39,7 @@ def provider_id_field_indices(layer: "QgsVectorLayer") -> set[int]:
             name = fields.at(index).name().strip().lower()
         except (IndexError, KeyError):
             continue
-        if name not in PROVIDER_ID_NAMES:
-            continue
-        # 有主键元数据时只认主键列；拿不到时按名字兜底（见 copy_to_layer 同款处理）
-        if index in primary_keys or not primary_keys:
+        if name in PROVIDER_ID_NAMES:
             indices.add(index)
     return indices
 

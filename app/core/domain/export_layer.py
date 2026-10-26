@@ -36,6 +36,7 @@ import sqlite3
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+from app.core.util.ogr_fields import PROVIDER_ID_NAMES, provider_id_field_indices
 from app.infra.logging import get_logger
 
 if TYPE_CHECKING:
@@ -77,6 +78,8 @@ class ExportSpec:
     layer_name: str = ""
     #: 筛选条件（QGIS 表达式）；空串 = 全部要素
     expression: str = ""
+    #: 只导出图层当前**选中**的要素。与 ``expression`` 互斥（同时给出时以本项为准）。
+    selected_only: bool = False
     #: 只导出这些字段（图层字段名）；``None`` = 全部字段。
     #: Shapefile 超过 :data:`SHAPEFILE_MAX_FIELDS` 个字段时，调用方必须给出一个
     #: ≤255 的子集（空元组 = 只导几何、不写属性）。
@@ -230,7 +233,7 @@ def export_vector_layer(
         layer.name(),
         target,
         spec.driver,
-        spec.expression or "全部要素",
+        "选中要素" if spec.selected_only else (spec.expression or "全部要素"),
     )
     if spec.convert_dict:
         if progress is not None:
@@ -696,6 +699,18 @@ def _selected_fields(layer: QgsVectorLayer, field_names) -> list:
     return [by_name[name] for name in field_names if name in by_name]
 
 
+def _export_fields(layer: QgsVectorLayer) -> list:
+    """要写进目标的字段：**排除数据源自维护的 fid/ogc_fid**。
+
+    OGR 会把 gpkg / gdb 的 ``fid`` 当普通字段列进 ``fields()``；把它当属性写出去
+    时，目标写入器会把它当 FID 列校验，类型对不上就报
+    ``Wrong field type for fid``（用户导出时踩过）。FID 交给目标文件自己分配。
+    """
+    fields = list(layer.fields())
+    skip = provider_id_field_indices(layer)
+    return [field for index, field in enumerate(fields) if index not in skip]
+
+
 def _copy_to_memory(
     layer: QgsVectorLayer,
     features,
@@ -813,7 +828,14 @@ def _prepare_source(layer: QgsVectorLayer, spec: ExportSpec) -> QgsVectorLayer:
 
     expression = (spec.expression or "").strip()
     features = None
-    if expression:
+    if spec.selected_only:
+        # 只导出选中要素：按 fid 过滤，不构造表达式（选中数可能很大）
+        fids = list(layer.selectedFeatureIds())
+        if not fids:
+            raise ExportLayerError("当前图层没有选中要素，请先选择要素或改为导出全部")
+        features = list(layer.getFeatures(QgsFeatureRequest().setFilterFids(fids)))
+        logger.info("导出筛选：仅选中要素 → %d 个", len(features))
+    elif expression:
         expr = QgsExpression(expression)
         if expr.hasParserError():
             raise ExportLayerError(f"筛选条件有语法错误：{expr.parserErrorString()}")
@@ -833,10 +855,10 @@ def _prepare_source(layer: QgsVectorLayer, spec: ExportSpec) -> QgsVectorLayer:
             target_crs = QgsCoordinateReferenceSystem("EPSG:4326")
     if target_crs is not None:
         return _copy_to_memory(
-            layer, features, list(layer.fields()), {}, target_crs
+            layer, features, _export_fields(layer), {}, target_crs
         )
     if features is not None:
-        return _copy_to_memory(layer, features, list(layer.fields()), {})
+        return _copy_to_memory(layer, features, _export_fields(layer), {})
     return layer
 
 
@@ -967,12 +989,18 @@ def _apply_field_options(options, source: QgsVectorLayer, spec: ExportSpec, name
         options.skipAttributeCreation = True
         return
     fields = source.fields()
+    provider_ids = provider_id_field_indices(source)
     if spec.field_names is None:
-        indices = list(range(fields.size()))
+        indices = [i for i in range(fields.size()) if i not in provider_ids]
     else:
         indices = [
-            fields.indexOf(name) for name in spec.field_names if fields.indexOf(name) >= 0
+            fields.indexOf(name)
+            for name in spec.field_names
+            if fields.indexOf(name) >= 0
+            and name.strip().lower() not in PROVIDER_ID_NAMES
         ]
+        # 源图层自己维护的 FID 也不写（缓存来自旧调用方时兜底）
+        indices = [i for i in indices if i not in provider_ids]
     if not indices:
         return
     options.attributes = indices

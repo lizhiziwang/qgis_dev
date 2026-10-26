@@ -223,8 +223,6 @@ class DigitizingToolbar(QObject):
         #: 编辑」/ 切图层停旧层 / 关工程等）结束编辑时不走 :meth:`stop_edit_fun`，
         #: 靠本钩子统一清工具并复位状态（见 :meth:`_on_editing_stopped`）。
         self._edit_stop_hook_layer = None
-        #: 已提示过「选数据了但图层没在编辑」：避免每次改选中都弹同一条提示
-        self._not_editing_hint_shown = False
         #: 正在处理"编辑目标被隐藏"的退出流程（防止弹窗/重显可见性时重入）
         self._handling_hidden_target = False
         #: 已挂 ``selectionChanged`` 的图层 id 集合（工程级监听，见
@@ -1050,8 +1048,6 @@ class DigitizingToolbar(QObject):
         :param layer: 新目标图层；为 None 时按当前 getter 的值处理。
         """
         target = layer if layer is not None else self._current_layer()
-        # 目标变了：新图层重新允许提示一次「选了数据但没开始编辑」
-        self._not_editing_hint_shown = False
         if target is None:
             self._disconnect_edit_stop_hook()
             self._refresh_button_states()
@@ -1305,7 +1301,6 @@ class DigitizingToolbar(QObject):
         # 这里在 _editing 复位后再刷，保证退出编辑态时按钮一定是禁用+未勾选)
         self.clear_draw_tool()
         self._editing = False
-        self._not_editing_hint_shown = False
         self._refresh_button_states()
         # 只在确实从「编辑中」切走时发信号：停编路径里 :meth:`_on_editing_stopped`
         # 兜底可能已先复位过（commitChanges/rollBack 同步触发 editingStopped），
@@ -2628,36 +2623,11 @@ class DigitizingToolbar(QObject):
         是这类调用一律 ``QTimer.singleShot(0, ...)`` 推迟出栈（见 ``swipe.py``
         / ``merge_geometry.py`` 的 docstring）。按钮状态仍立即刷新，不受影响。
         """
-        self._maybe_hint_edit_layer_not_editing()
         if self._active_kind in _SELECTION_REQUIRED_KINDS:
             layer = self._current_layer()
             if layer is None or not layer.selectedFeatureIds():
                 QTimer.singleShot(0, self._clear_tool_if_still_no_selection)
         self._refresh_button_states()
-
-    def _maybe_hint_edit_layer_not_editing(self) -> None:
-        """选了编辑图层的数据、但该图层没在编辑 → 提示先点「开始编辑」。
-
-        分割 / 节点编辑等按钮的可用性 = 编辑态 + 选中；只选中不编辑时按钮仍是
-        灰的，用户容易误以为选择没生效。每个"未编辑"阶段只提示一次。
-        """
-        if self._not_editing_hint_shown:
-            return
-        layer = self._current_layer()
-        if layer is None or layer.type() != layer.VectorLayer or layer.isEditable():
-            return
-        try:
-            has_selection = bool(layer.selectedFeatureIds())
-        except RuntimeError:
-            return
-        if not has_selection:
-            return
-        self._not_editing_hint_shown = True
-        self._toast(
-            "当前编辑图层未处于编辑状态：请先点「开始编辑」，"
-            "分割 / 节点编辑等工具才会可用",
-            level="info",
-        )
 
     def _clear_tool_if_still_no_selection(self) -> None:
         """推迟执行的「失去选中即退出工具」：执行时重新校验，不误清新选中的工具。"""
@@ -2684,7 +2654,6 @@ class DigitizingToolbar(QObject):
             return
         was_editing = self._editing
         self._editing = True
-        self._not_editing_hint_shown = False
         self._refresh_button_states()
         self.sync_edit_layer_combo()
         if not was_editing:

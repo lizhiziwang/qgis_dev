@@ -52,6 +52,7 @@ from app.core.domain.export_layer import (
     sanitize_shapefile_field_name,
 )
 from app.core.util.dict_values import layer_dict_field_names
+from app.core.util.ogr_fields import provider_id_field_indices
 from app.core.util.vector_formats import VECTOR_FORMATS, VectorFormat, resolve_format
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
@@ -148,10 +149,26 @@ class ExportLayerDialog(BaseDialog):
         layer: QgsVectorLayer,
         default_dir: str = "",
         extra_formats: bool = False,
+        filter_modes: tuple[str, ...] | None = None,
     ) -> None:
+        """``filter_modes``：
+
+        - ``None``（默认，数据管理入口）——保持原来的「筛选条件」行：空 = 全部要素；
+        - ``("all", "selected", "expression")``（图层列表右键入口）——显示
+          「筛选数据」下拉：导出全部 / 选中数据 / 自定义条件。
+        """
         super().__init__(parent, "导出数据")
         self._layer = layer
         self._default_dir = default_dir
+        #: None = 老版"筛选条件" UI；否则是"筛选数据"下拉允许的模式
+        self._filter_modes = (
+            None
+            if filter_modes is None
+            else tuple(
+                mode for mode in filter_modes if mode in ("all", "selected", "expression")
+            )
+            or ("all",)
+        )
         #: 当前筛选条件（QGIS 表达式；空串 = 全部要素）
         self._expression = ""
         #: 挂了字典的字段名（GDB 写属性域 / GPKG、SQLite 附带字典表用）
@@ -165,6 +182,15 @@ class ExportLayerDialog(BaseDialog):
         self.resize(760, 640)
         self._build()
         self._apply_format_defaults()
+        # 弹窗是**非模态**的：用户可能边开着导出框边改选中集。选中数提示
+        # （「选中数据」的占位 / tooltip / 底部提示）要跟着变；筛选方式本身
+        # 不自动改，避免用户已经选好的「导出全部」被悄悄切走。
+        # 只有「筛选数据」模式（图层列表右键）才有"选中数据"，老版条件行不用连。
+        if self._filter_modes is not None:
+            try:
+                layer.selectionChanged.connect(self._on_layer_selection_changed)
+            except Exception:  # noqa: BLE001 —— 图层销毁等收尾场景
+                logger.exception("导出：连接图层 selectionChanged 失败")
 
     # --------------------------------------------------------------- 构建
 
@@ -176,6 +202,9 @@ class ExportLayerDialog(BaseDialog):
         head = QLabel()
         count = self._layer.featureCount()
         count_text = f"当前 {count} 个要素" if count >= 0 else "要素数未知"
+        selected_count = self._selected_feature_count()
+        if selected_count:
+            count_text += f"，已选中 {selected_count} 个"
         head.setText(f"导出图层：{self._layer.name()}（{count_text}）")
         head.setObjectName("SectionLabel")
         head.setWordWrap(True)
@@ -288,21 +317,90 @@ class ExportLayerDialog(BaseDialog):
         )
         form.addRow("字典", self.dict_check)
 
-        condition_row = QHBoxLayout()
-        condition_row.setContentsMargins(0, 0, 0, 0)
-        condition_row.setSpacing(6)
-        self.condition_edit = QLineEdit()
-        self.condition_edit.setReadOnly(True)
-        self.condition_edit.setPlaceholderText("全部要素（点「条件…」按属性筛选）")
-        condition_row.addWidget(self.condition_edit, 1)
-        pick_condition = QPushButton("条件…")
-        pick_condition.setToolTip("用属性查询器写一个筛选条件，只影响本次导出")
-        pick_condition.clicked.connect(self._on_pick_condition)
-        condition_row.addWidget(pick_condition)
-        clear_condition = QPushButton("清除")
-        clear_condition.clicked.connect(self._on_clear_condition)
-        condition_row.addWidget(clear_condition)
-        form.addRow("筛选条件", condition_row)
+        if self._filter_modes is None:
+            # 数据管理入口：保持原来的「筛选条件」行（空 = 全部要素）
+            condition_row = QHBoxLayout()
+            condition_row.setContentsMargins(0, 0, 0, 0)
+            condition_row.setSpacing(6)
+            self.filter_combo = None
+            self.condition_edit = QLineEdit()
+            self.condition_edit.setReadOnly(True)
+            self.condition_edit.setPlaceholderText("全部要素（点「条件…」按属性筛选）")
+            condition_row.addWidget(self.condition_edit, 1)
+            pick_condition = QPushButton("条件…")
+            pick_condition.setToolTip("用属性查询器写一个筛选条件，只影响本次导出")
+            pick_condition.clicked.connect(self._on_pick_condition)
+            condition_row.addWidget(pick_condition)
+            clear_condition = QPushButton("清除")
+            clear_condition.clicked.connect(self._on_clear_condition)
+            condition_row.addWidget(clear_condition)
+            self._pick_condition_btn = pick_condition
+            self._clear_condition_btn = clear_condition
+            form.addRow("筛选条件", condition_row)
+        else:
+            # 图层列表右键入口：筛选数据（全部 / 选中 / 自定义条件）。
+            # 默认：当前图层有选中要素 → 选中数据；否则导出全部。
+            filter_row = QHBoxLayout()
+            filter_row.setContentsMargins(0, 0, 0, 0)
+            filter_row.setSpacing(6)
+            self.filter_combo = QComboBox()
+            self.filter_combo.setMinimumWidth(110)
+            for mode in self._filter_modes:
+                label, tip = {
+                    "all": ("导出全部", "导出图层里的全部要素"),
+                    "selected": (
+                        "选中数据",
+                        "只导出当前选中的要素（当前选中 "
+                        f"{self._selected_feature_count()} 个）",
+                    ),
+                    "expression": (
+                        "自定义条件",
+                        "点「条件…」用属性查询器写筛选条件",
+                    ),
+                }[mode]
+                index = self.filter_combo.count()
+                self.filter_combo.addItem(label, mode)
+                self.filter_combo.setItemData(
+                    index, tip, Qt.ItemDataRole.ToolTipRole
+                )
+            filter_row.addWidget(self.filter_combo)
+
+            self.condition_edit = QLineEdit()
+            self.condition_edit.setReadOnly(True)
+            self.condition_edit.setPlaceholderText("全部要素")
+            filter_row.addWidget(self.condition_edit, 1)
+            pick_condition = QPushButton("条件…")
+            pick_condition.setToolTip("用属性查询器写一个筛选条件，只影响本次导出")
+            pick_condition.clicked.connect(self._on_pick_condition)
+            filter_row.addWidget(pick_condition)
+            clear_condition = QPushButton("清除")
+            clear_condition.setToolTip("清除自定义条件")
+            clear_condition.clicked.connect(self._on_clear_condition)
+            filter_row.addWidget(clear_condition)
+            self._pick_condition_btn = pick_condition
+            self._clear_condition_btn = clear_condition
+            if "expression" not in self._filter_modes:
+                # 这个入口不提供自定义条件：整组条件控件不显示
+                self.condition_edit.hide()
+                pick_condition.hide()
+                clear_condition.hide()
+            form.addRow("筛选数据", filter_row)
+
+            default_mode = (
+                "selected"
+                if "selected" in self._filter_modes and self._selected_feature_count()
+                else "all"
+                if "all" in self._filter_modes
+                else self._filter_modes[0]
+            )
+            default_index = self.filter_combo.findData(default_mode)
+            self.filter_combo.setCurrentIndex(
+                default_index if default_index >= 0 else 0
+            )
+            self.filter_combo.currentIndexChanged.connect(
+                self._on_filter_mode_changed
+            )
+            self._on_filter_mode_changed()
 
         root.addLayout(form)
         root.addWidget(fields_box, 1)
@@ -328,6 +426,61 @@ class ExportLayerDialog(BaseDialog):
     def _current_format(self) -> VectorFormat | None:
         fmt = self.format_combo.currentData()
         return fmt if isinstance(fmt, VectorFormat) else None
+
+    # ------------------------------------------------------- 筛选数据
+
+    def _selected_feature_count(self) -> int:
+        """当前图层选中要素数（图层销毁时按 0）。"""
+        try:
+            return len(self._layer.selectedFeatureIds())
+        except RuntimeError:
+            return 0
+
+    def _filter_mode(self) -> str:
+        """``all`` / ``selected`` / ``expression``；老版条件行按 expression 处理。"""
+        if self.filter_combo is None:
+            return "expression"
+        data = self.filter_combo.currentData()
+        return data if isinstance(data, str) else "all"
+
+    def _on_filter_mode_changed(self, *_args: object) -> None:
+        """切筛选方式：只有"自定义条件"才启用条件框 / 条件按钮。"""
+        if self.filter_combo is None:
+            return
+        mode = self._filter_mode()
+        custom = mode == "expression"
+        self.condition_edit.setEnabled(custom)
+        self._pick_condition_btn.setEnabled(custom)
+        self._clear_condition_btn.setEnabled(custom)
+        if custom:
+            self.condition_edit.setText(self._expression)
+            self.condition_edit.setPlaceholderText("点「条件…」按属性筛选")
+        else:
+            self.condition_edit.clear()
+            if mode == "selected":
+                count = self._selected_feature_count()
+                self.condition_edit.setPlaceholderText(
+                    f"已选中 {count} 个要素" if count else "当前图层没有选中要素"
+                )
+            else:
+                self.condition_edit.setPlaceholderText("全部要素")
+        # 选中数可能变化：更新「选中数据」的 tooltip
+        selected_index = self.filter_combo.findData("selected")
+        if selected_index >= 0:
+            self.filter_combo.setItemData(
+                selected_index,
+                f"只导出当前选中的要素（当前选中 {self._selected_feature_count()} 个）",
+                Qt.ItemDataRole.ToolTipRole,
+            )
+        if hasattr(self, "hint"):
+            self._update_hint()
+
+    def _on_layer_selection_changed(self) -> None:
+        """图层选中集变化：刷新选中数提示（不自动切换筛选方式）。"""
+        try:
+            self._on_filter_mode_changed()
+        except RuntimeError:
+            pass  # 对话框关闭 / 图层销毁
 
     def _apply_format_defaults(self, *_args: object) -> None:
         """切格式：保存位置的后缀跟着换；容器格式才需要图层名。"""
@@ -402,9 +555,27 @@ class ExportLayerDialog(BaseDialog):
         fmt = self._current_format()
         if fmt is None:
             return
-        total = len(self._layer.fields())
+        total = self._exportable_field_count()
         selected = len(self._selected_field_names())
         parts: list[str] = []
+        # 筛选数据（只有「筛选数据」下拉模式才有；数据管理的老版条件行保持原样）
+        if self._filter_modes is not None:
+            mode = self._filter_mode()
+            if mode == "selected":
+                count = self._selected_feature_count()
+                parts.append(
+                    f"只导出选中要素（当前选中 {count} 个）"
+                    if count
+                    else "只导出选中要素：当前图层没有选中要素"
+                )
+            elif mode == "expression":
+                parts.append(
+                    f"按条件筛选：{self._expression}"
+                    if self._expression
+                    else "自定义条件：尚未填写条件"
+                )
+            else:
+                parts.append("导出全部要素")
         if fmt.extension == ".dxf":
             parts.append("DXF 无属性表，只写几何；字段选择不适用")
         else:
@@ -455,18 +626,24 @@ class ExportLayerDialog(BaseDialog):
         self._update_field_warning(fmt, selected)
 
     def _auto_limit_shapefile_fields(self) -> None:
-        """切到 Shapefile 时字段超过上限：自动只勾前 255 个。"""
+        """切到 Shapefile 时字段超过上限：自动只勾前 255 个（跳过不可勾选的 fid）。"""
         total = self.field_table.rowCount()
-        if total <= SHAPEFILE_MAX_FIELDS:
+        checkable = [
+            row
+            for row in range(total)
+            if (item := self.field_table.item(row, 0)) is not None
+            and item.flags() & Qt.ItemFlag.ItemIsUserCheckable
+        ]
+        if len(checkable) <= SHAPEFILE_MAX_FIELDS:
             return
         self._loading_fields = True
         try:
-            for row in range(total):
+            for position, row in enumerate(checkable):
                 item = self.field_table.item(row, 0)
                 if item is not None:
                     item.setCheckState(
                         Qt.CheckState.Checked
-                        if row < SHAPEFILE_MAX_FIELDS
+                        if position < SHAPEFILE_MAX_FIELDS
                         else Qt.CheckState.Unchecked
                     )
         finally:
@@ -476,7 +653,7 @@ class ExportLayerDialog(BaseDialog):
         """Shapefile 字段上限的红色提示（其它格式 / 未超限时隐藏）。"""
         text = ""
         if fmt is not None and fmt.extension == ".shp":
-            total = self.field_table.rowCount()
+            total = self._exportable_field_count()
             if selected > SHAPEFILE_MAX_FIELDS:
                 text = (
                     f"已选 {selected} 个字段，超过 Shapefile 上限 "
@@ -499,20 +676,35 @@ class ExportLayerDialog(BaseDialog):
     # ---------------------------------------------------------- 导出字段表
 
     def _fill_field_table(self) -> None:
-        """按图层字段填表：名称（勾选）/ 导出名称（可改）/ 类型。"""
+        """按图层字段填表：名称（勾选）/ 导出名称（可改）/ 类型。
+
+        数据源自己维护的 ``fid`` / ``ogc_fid`` **不参与导出**（目标文件会分配
+        自己的 FID；把它当普通属性写出去会报 ``Wrong field type for fid``）：
+        这一行置灰、不可勾选、默认不选。
+        """
         fields = self._layer.fields()
+        provider_ids = provider_id_field_indices(self._layer)
         self._loading_fields = True
         try:
             self.field_table.setRowCount(fields.size())
             for row in range(fields.size()):
                 field = fields.at(row)
                 name_item = QTableWidgetItem(field.name())
-                name_item.setFlags(
-                    Qt.ItemFlag.ItemIsEnabled
-                    | Qt.ItemFlag.ItemIsSelectable
-                    | Qt.ItemFlag.ItemIsUserCheckable
-                )
-                name_item.setCheckState(Qt.CheckState.Checked)
+                if row in provider_ids:
+                    name_item.setFlags(
+                        Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable
+                    )
+                    name_item.setCheckState(Qt.CheckState.Unchecked)
+                    name_item.setToolTip(
+                        "数据源维护的 FID，导出时由目标文件自动分配，不作为属性导出"
+                    )
+                else:
+                    name_item.setFlags(
+                        Qt.ItemFlag.ItemIsEnabled
+                        | Qt.ItemFlag.ItemIsSelectable
+                        | Qt.ItemFlag.ItemIsUserCheckable
+                    )
+                    name_item.setCheckState(Qt.CheckState.Checked)
                 name_item.setData(Qt.ItemDataRole.UserRole, field.name())
                 self.field_table.setItem(row, 0, name_item)
 
@@ -543,7 +735,7 @@ class ExportLayerDialog(BaseDialog):
             state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
             for row in range(self.field_table.rowCount()):
                 item = self.field_table.item(row, 0)
-                if item is not None:
+                if item is not None and item.flags() & Qt.ItemFlag.ItemIsUserCheckable:
                     item.setCheckState(state)
         finally:
             self._loading_fields = False
@@ -574,6 +766,10 @@ class ExportLayerDialog(BaseDialog):
             if item is not None and item.checkState() == Qt.CheckState.Checked:
                 names.append(str(item.data(Qt.ItemDataRole.UserRole) or item.text()))
         return names
+
+    def _exportable_field_count(self) -> int:
+        """可导出字段数（图层字段去掉数据源自维护的 fid/ogc_fid）。"""
+        return len(self._layer.fields()) - len(provider_id_field_indices(self._layer))
 
     def _export_name_map(self) -> dict[str, str]:
         """``{原字段名: 导出名称}``（空白的回退原字段名）。"""
@@ -650,11 +846,23 @@ class ExportLayerDialog(BaseDialog):
 
     def _set_condition(self, condition: str) -> None:
         self._expression = (condition or "").strip()
-        self.condition_edit.setText(self._expression)
+        if self.filter_combo is None:
+            self.condition_edit.setText(self._expression)
+        else:
+            index = self.filter_combo.findData("expression")
+            if index >= 0 and self.filter_combo.currentIndex() != index:
+                # 选好条件即切到「自定义条件」；change 信号会回填编辑框
+                self.filter_combo.setCurrentIndex(index)
+            else:
+                self.condition_edit.setText(self._expression)
+        if hasattr(self, "hint"):
+            self._update_hint()
 
     def _on_clear_condition(self) -> None:
         self._expression = ""
         self.condition_edit.clear()
+        if hasattr(self, "hint"):
+            self._update_hint()
 
     # --------------------------------------------------------------- 取值
 
@@ -684,7 +892,7 @@ class ExportLayerDialog(BaseDialog):
                 return
         # 只导出部分字段：明确问一句，别让用户以为全部字段都写进去了
         if spec.driver != "DXF":
-            total = len(self._layer.fields())
+            total = self._exportable_field_count()
             selected = len(spec.field_names or ())
             if selected < total:
                 ret = QMessageBox.question(
@@ -703,6 +911,12 @@ class ExportLayerDialog(BaseDialog):
         fmt = self._current_format()
         if fmt is None:
             return "本机没有可用的矢量写驱动，导不出去"
+        if self._filter_modes is not None:
+            mode = self._filter_mode()
+            if mode == "selected" and self._selected_feature_count() == 0:
+                return "当前图层没有选中要素：请先选择要素，或把「筛选数据」改为导出全部"
+            if mode == "expression" and not self._expression:
+                return "请点「条件…」设置筛选条件，或把「筛选数据」改为导出全部"
         target = self.path_edit.text().strip()
         if not target:
             return "请选择保存位置"
@@ -744,13 +958,16 @@ class ExportLayerDialog(BaseDialog):
             field_export_names = tuple(
                 mapping.get(name, name) for name in selected
             )
+        mode = self._filter_mode()
         return ExportSpec(
             path=os.path.dirname(target) or ".",
             file_name=os.path.basename(target),
             driver=fmt.driver,
             extension=fmt.extension,
             layer_name=self.layer_name_edit.text().strip() or os.path.splitext(os.path.basename(target))[0],
-            expression=self._expression,
+            # 只有「自定义条件」才带表达式；「选中数据」交给 selected_only
+            expression=self._expression if mode == "expression" else "",
+            selected_only=(mode == "selected"),
             field_names=field_names,
             field_export_names=field_export_names,
             convert_dict=bool(self.dict_check.isChecked()),
@@ -852,24 +1069,27 @@ def export_with_progress(
         QApplication.processEvents()
 
     QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+    error_message = ""
+    target = None
     try:
         try:
             target = export_vector_layer(layer, spec, progress=_show_stage)
         except ExportLayerError as exc:
             logger.warning("导出数据失败：%s", exc)
-            QMessageBox.warning(parent, "导出数据", f"导出失败：{exc}")
-            return None
+            error_message = f"导出失败：{exc}"
         except Exception as exc:  # noqa: BLE001 —— 任何意外都要让用户看到
             logger.error("导出数据异常：%s", exc, exc_info=True)
-            QMessageBox.warning(
-                parent, "导出数据", f"导出失败（{type(exc).__name__}）：{exc}"
-            )
-            return None
+            error_message = f"导出失败（{type(exc).__name__}）：{exc}"
     finally:
         QApplication.restoreOverrideCursor()
         if progress.isVisible():
             progress.close()
         QApplication.processEvents()
+    # **先关进度框再弹错误**：反过来的话，错误框是模态的，进度框会一直挂在
+    # 后面转到用户点「确定」为止（用户报过"导出进度一直卡住"）。
+    if error_message:
+        QMessageBox.warning(parent, "导出数据", error_message)
+        return None
     loaded = False
     if load_after:
         loaded = load_exported_layer(parent, target, spec)

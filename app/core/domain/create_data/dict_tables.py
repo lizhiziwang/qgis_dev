@@ -21,6 +21,7 @@ canonical 表里；没有可识别的代码/名称列时跳过并报告。
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -151,6 +152,22 @@ def _sql_token(name: object) -> str:
 
 def _quote(name: str) -> str:
     return '"' + str(name).replace('"', '""') + '"'
+
+
+def _index_token(raw: object) -> str:
+    """字典表索引名：可读短名 + 原文哈希，避免长表名截断后撞名。
+
+    ``_sql_token`` 会截到 60 字符；对很长的字典表名，
+    ``ux_<表名>_domain_code`` 与 ``ux_<表名>_domain_parent`` 会截成**同一个名字**。
+    先建的普通索引让后面的唯一索引 ``IF NOT EXISTS`` 直接跳过，随后
+    ``INSERT ... ON CONFLICT(domain, code)`` 就报
+    ``ON CONFLICT clause does not match any PRIMARY KEY or UNIQUE constraint``
+    （GDB 属性域导出到 GeoPackage 时踩过）。
+    """
+    text = str(raw or "")
+    token = _sql_token(text)
+    digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+    return f"{token[:50]}_{digest}"
 
 
 def local_dict_categories(db_path: str) -> set[str]:
@@ -667,7 +684,7 @@ def ensure_local_dict_domain(
                 (item.domain, item.code, item.name, item.parent_code, item.sort_order)
                 for item in items
             ]
-        index_name = _sql_token(f"ux_{table}_domain_code")
+        index_name = _index_token(f"ux_{table}_domain_code")
         db.cursor.execute(
             f"CREATE UNIQUE INDEX IF NOT EXISTS {_quote(index_name)} "
             f"ON {_quote(table)} (domain, code)"
@@ -769,7 +786,7 @@ def create_local_dict_table(
                         for domain in dict_service.list_domains(source)
                     }
                 )
-        index_name = _sql_token(f"ux_{name}_domain_code")
+        index_name = _index_token(f"ux_{name}_domain_code")
         db.cursor.execute(
             f"CREATE UNIQUE INDEX IF NOT EXISTS {_quote(index_name)} "
             f"ON {_quote(name)} (domain, code)"
@@ -778,7 +795,7 @@ def create_local_dict_table(
         # EXISTS 子查询。没有这个索引，2 万条字典展开一次要十几秒（实测 15.6s
         # → 0.03s）。建表时顺手建好，老库在打开字典表详情时再补（见
         # table_detail.DictTableEditor._ensure_lookup_index）。
-        parent_index = _sql_token(f"ux_{name}_domain_parent")
+        parent_index = _index_token(f"ux_{name}_domain_parent")
         db.cursor.execute(
             f"CREATE INDEX IF NOT EXISTS {_quote(parent_index)} "
             f"ON {_quote(name)} (domain, parent_code)"
@@ -879,7 +896,7 @@ def persist_dict_tables(db, specs: Sequence[DictTableSpec]) -> list[str]:
             # create_local_dict_table 的说明）；老库/已存在的表也在这里补上。
             column_names = {name for name, _declared in spec.columns}
             if {"domain", "parent_code"} <= column_names:
-                parent_index = _sql_token(f"ux_{spec.table_name}_domain_parent")
+                parent_index = _index_token(f"ux_{spec.table_name}_domain_parent")
                 db.cursor.execute(
                     f"CREATE INDEX IF NOT EXISTS {_quote(parent_index)} "
                     f"ON {_quote(spec.table_name)} (domain, parent_code)"
@@ -897,7 +914,7 @@ def persist_dict_tables(db, specs: Sequence[DictTableSpec]) -> list[str]:
             marks = ", ".join("?" for _ in insert_columns)
             if spec.upsert_key:
                 keys = ", ".join(_quote(name) for name in spec.upsert_key)
-                index_name = _sql_token(
+                index_name = _index_token(
                     f"ux_{spec.table_name}_{'_'.join(spec.upsert_key)}"
                 )
                 db.cursor.execute(

@@ -323,6 +323,8 @@ class LayerDialogsMixin:
                 layer=layer,
                 default_dir=default_output_dir(),
                 extra_formats=True,
+                # 图层列表右键：筛选数据（导出全部 / 选中数据 / 自定义条件）
+                filter_modes=("all", "selected", "expression"),
             ),
             on_accepted=_export,
             layer=layer,
