@@ -91,6 +91,15 @@ class MapToolsMixin:
         key = self._tool_key(tool)
         self.tool_bar_builder.set_active(key)
         self.side_toolbar.set_active(key)
+        # 卷帘是“会话型”工具：切到平移/缩放后分屏仍常驻，按钮也要保持高亮；
+        # 只有会话真正退出（再次点按钮 / Esc / 影像被删）才取消高亮。
+        self._sync_swipe_session_active()
+
+    def _sync_swipe_session_active(self) -> None:
+        """按卷帘会话是否存活同步工具条按钮高亮。"""
+        tool = getattr(self, "_swipe_tool", None)
+        alive = tool is not None and tool.is_alive()
+        self.tool_bar_builder.set_session_active("swipe", alive)
 
     def _on_pan(self) -> None:
         self.canvas.setMapTool(self._pan_tool)

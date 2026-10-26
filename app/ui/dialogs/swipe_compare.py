@@ -92,13 +92,18 @@ class SwipeCompareDialog(BaseDialog):
             self.compare_label.setText("下影像")
 
     def _populate_layers(self, *_args) -> None:
-        """填充工程里的栅格图层（图层对象存 itemData），保留底层当前选中项。"""
+        """按图层树上下顺序填充栅格图层（图层对象存 itemData），保留当前选中项。
+
+        不遍历 ``project.mapLayers()``：它按图层 id 排序，下拉框顺序会像乱序；
+        ``layerTreeRoot().findLayers()`` 返回图层面板里从上到下的顺序。
+        """
         current = self.base_combo.currentData()
         current_src = current.source() if current is not None else None
         self.base_combo.clear()
         self.compare_combo.clear()
-        for layer in self.project.mapLayers().values():
-            if layer.type() != QgsMapLayer.RasterLayer:
+        for node in self.project.layerTreeRoot().findLayers():
+            layer = node.layer()
+            if layer is None or layer.type() != QgsMapLayer.RasterLayer:
                 continue
             self.base_combo.addItem(layer.name(), layer)
             self.compare_combo.addItem(layer.name(), layer)
