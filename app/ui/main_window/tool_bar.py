@@ -62,10 +62,10 @@ class ToolBar:
 
     两类状态按钮：
 
-    - 地图工具（平移/缩放/选择/识别/卷帘）：单选高亮，跟随画布当前激活的
+    - 地图工具（平移/缩放/选择/识别）：单选高亮，跟随画布当前激活的
       :class:`QgsMapTool`（``MainWindow`` 监听 ``mapToolSet`` 后调用
       :meth:`set_active`）；
-    - 会话型工具（地图对比）：独立开关，会话存活期间保持高亮
+    - 会话型工具（卷帘/地图对比）：独立开关，会话存活期间保持高亮
       （:meth:`set_session_active`），不受地图工具切换影响。
 
     一次性动作（全图/刷新/质检/分析/取消选择）不参与高亮（曾经的「测试」按钮已
@@ -80,10 +80,9 @@ class ToolBar:
         "identify",
         "zoom_in",
         "zoom_out",
-        "swipe",
     })
     #: 会话型工具 key → 按钮独立开关（会话存活期常亮）
-    _SESSION_KEYS = frozenset({"qmap_compare"})
+    _SESSION_KEYS = frozenset({"swipe", "qmap_compare"})
 
     def __init__(self, main_window: QMainWindow) -> None:
         self.main_window = main_window
@@ -138,7 +137,7 @@ class ToolBar:
     def set_active(self, key: Optional[str]) -> None:
         """地图工具单选：高亮 ``key`` 对应按钮，其余地图工具按钮取消高亮。
 
-        会话型工具（地图对比）不受影响。
+        会话型工具（卷帘 / 地图对比）不受影响。
         """
         self._active_key = key
         for k, act in self._tool_actions.items():

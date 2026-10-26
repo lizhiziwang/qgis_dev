@@ -23,13 +23,33 @@ from qgis.core import QgsMapLayer, QgsProject
 from app.ui.common.base_dialog import BaseDialog
 
 
+def raster_layers_in_tree_order(project) -> list:
+    """按图层树从上到下的顺序返回工程里的栅格图层。"""
+    try:
+        root = project.layerTreeRoot()
+    except (AttributeError, RuntimeError):
+        return []
+    layers = []
+    for node in root.findLayers():
+        layer = node.layer()
+        if layer is not None and layer.type() == QgsMapLayer.RasterLayer:
+            layers.append(layer)
+    return layers
+
+
 class SwipeCompareDialog(BaseDialog):
     """卷帘对比参数对话框（``exec()`` 模态）。"""
 
     def __init__(self, parent=None) -> None:
-        super().__init__(parent, "卷帘对比")
-        # BaseDialog 默认 800x600，本对话框内容少，收敛尺寸（super 之后设置生效）
-        self.setMinimumSize(460, 300)
+        super().__init__(
+            parent,
+            "卷帘对比",
+            show_min_button=False,
+            show_max_button=False,
+        )
+        # BaseDialog 默认 800x600，本对话框内容少，收敛成紧凑尺寸
+        self.setMinimumSize(380, 240)
+        self.resize(420, 260)
         self.project = QgsProject.instance()
         self._init_ui()
         self.project.layersAdded.connect(self._populate_layers)
@@ -92,14 +112,16 @@ class SwipeCompareDialog(BaseDialog):
             self.compare_label.setText("下影像")
 
     def _populate_layers(self, *_args) -> None:
-        """填充工程里的栅格图层（图层对象存 itemData），保留底层当前选中项。"""
+        """按图层树上下顺序填充栅格图层（图层对象存 itemData），保留当前选中项。
+
+        不遍历 ``project.mapLayers()``：它按图层 id 排序，下拉框顺序会像乱序；
+        ``layerTreeRoot().findLayers()`` 返回图层面板里从上到下的顺序。
+        """
         current = self.base_combo.currentData()
         current_src = current.source() if current is not None else None
         self.base_combo.clear()
         self.compare_combo.clear()
-        for layer in self.project.mapLayers().values():
-            if layer.type() != QgsMapLayer.RasterLayer:
-                continue
+        for layer in raster_layers_in_tree_order(self.project):
             self.base_combo.addItem(layer.name(), layer)
             self.compare_combo.addItem(layer.name(), layer)
             if current_src is not None and layer.source() == current_src:

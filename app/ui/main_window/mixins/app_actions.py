@@ -17,7 +17,6 @@ from pathlib import Path
 from qgis.core import (
     Qgis,
     QgsProject,
-    QgsRasterLayer,
     QgsVectorLayer,
 )
 from qgis.PyQt import sip
@@ -57,11 +56,12 @@ from app.ui.dialogs.import_layer_dialog import ImportLayerDialog
 from app.ui.dialogs.offline_download import OfflineDownloadDialog
 from app.ui.dialogs.qmap_compare import QMapCompareDialog
 from app.ui.dialogs.spatial_query import SpatialQueryDialog
-from app.ui.dialogs.swipe_compare import SwipeCompareDialog
+from app.ui.dialogs.swipe_compare import raster_layers_in_tree_order
 from app.ui.docks.attribute_dock import AttributeDock
 from app.ui.docks.data_manage_dock import DataManageDialog
 from app.ui.docks.log_dock import LogDock
 from app.ui.docks.quality_dock import QualityDock
+from app.ui.docks.swipe_compare_panel import SwipeComparePanel
 from app.ui.docks.tools_dock import ToolsDock
 from app.ui.flow_editor import FlowEditorWindow
 from app.ui.tools.qmap_compare import (
@@ -1531,56 +1531,147 @@ class AppActionsMixin:
             return False
 
     def _on_swipe(self) -> None:
-        """卷帘对比：**开关型**——会话存续时再点即关闭；未创建时弹窗选栅格激活。
+        """卷帘对比：开关型；未开始时直接在地图右上角弹出设置面板。
 
-        分屏是视图状态常驻：切到任意工具（平移/缩放/画要素/查询）后覆盖层仍在，
-        此时再点「卷帘对比」恢复分隔条拖拽；当前已是卷帘工具时再点（或按 Esc）
-        则真正退出会话、还原图层并回到平移工具。
+        面板先做参数预选（默认第一个 / 第二个栅格），点「开始卷帘」才真正
+        创建 SwipeTool；会话存续时再点工具条按钮或「×」即退出。
         """
         tool = getattr(self, "_swipe_tool", None)
         if tool is not None and tool.is_alive():
-            if self.canvas.mapTool() is tool:
-                # 再次点击当前卷帘按钮 → 关闭会话（与 Esc 同一条清理路径）
-                tool.stop()
-                self.canvas.setMapTool(self._pan_tool)
-                self.tool_bar_builder.set_active("pan")
-                self.side_toolbar.set_active("pan")
-            else:
-                # 切到其它工具后覆盖层仍在，再点卷帘恢复分隔条拖拽
-                self.canvas.setMapTool(tool)
-                self.tool_bar_builder.set_active("swipe")
+            self._stop_swipe_session()
             return
-        if not any(isinstance(l, QgsRasterLayer) for l in self.project.mapLayers().values()):
-            QMessageBox.information(self, "提示", "请先加载至少一个栅格图层")
+        panel = getattr(self, "_swipe_panel", None)
+        if panel is not None and not sip.isdeleted(panel):
+            # 预选面板已打开但还没开始：再点按钮就收起
+            self._close_swipe_panel()
+            self._sync_swipe_session_active()
             return
+        if len(raster_layers_in_tree_order(self.project)) < 2:
+            QMessageBox.information(self, "提示", "请先加载至少两个栅格图层")
+            self.tool_bar_builder.set_session_active("swipe", False)
+            return
+        panel = self._ensure_swipe_panel()
+        panel.set_started(False)
+        panel.show()
+        panel.raise_()
+        self.tool_bar_builder.set_session_active("swipe", True)
 
-        def _start_swipe(dlg) -> None:
-            base, compare, orientation = dlg.selected_params()
-            layer_ids = self.project.mapLayers()
+    # ------------------------------------------------------------ 卷帘控制面板
+
+    def _ensure_swipe_panel(self):
+        """取得（必要时创建）地图右上角的卷帘控制面板。"""
+        panel = getattr(self, "_swipe_panel", None)
+        if panel is None or sip.isdeleted(panel):
+            panel = SwipeComparePanel(
+                self.canvas, parent=self.canvas.parentWidget()
+            )
+            panel.params_changed.connect(self._on_swipe_params_changed)
+            panel.start_requested.connect(self._on_swipe_start_requested)
+            panel.closed.connect(self._on_swipe_panel_closed)
+            self._swipe_panel = panel
+        return panel
+
+    def _on_swipe_start_requested(self, base, compare, orientation: str) -> None:
+        """面板点「开始卷帘」：校验后创建 SwipeTool，会话随即进入常驻。"""
+        tool = getattr(self, "_swipe_tool", None)
+        if tool is not None and tool.is_alive():
+            return
+        try:
             if (
                 base is None
                 or compare is None
                 or sip.isdeleted(base)
                 or sip.isdeleted(compare)
-                or base.id() not in layer_ids
-                or compare.id() not in layer_ids
+                or base is compare
+                or base.id() not in self.project.mapLayers()
+                or compare.id() not in self.project.mapLayers()
             ):
                 QMessageBox.information(
                     self, "提示", "所选栅格图层已被移除，请重新选择"
                 )
                 return
-            self._swipe_tool = SwipeTool(
-                self.canvas, base, compare, orientation, parent=self
-            )
-            self.canvas.setMapTool(self._swipe_tool)
-            self.tool_bar_builder.set_active("swipe")
-
-        show_modeless(
-            self,
-            "swipe_params",
-            lambda: SwipeCompareDialog(self),
-            on_accepted=_start_swipe,
+        except RuntimeError:
+            return
+        self._swipe_tool = SwipeTool(
+            self.canvas, base, compare, orientation, parent=self
         )
+        self.canvas.setMapTool(self._swipe_tool)
+        self.tool_bar_builder.set_session_active("swipe", True)
+        panel = getattr(self, "_swipe_panel", None)
+        if panel is not None and not sip.isdeleted(panel):
+            panel.set_params(base, compare, orientation)
+            panel.set_started(True)
+            panel.show()
+            panel.raise_()
+
+    def _on_swipe_params_changed(self, base, compare, orientation: str) -> None:
+        """面板改选影像 / 方向：在当前会话上直接应用，不关闭重开。"""
+        tool = getattr(self, "_swipe_tool", None)
+        if tool is None or not tool.is_alive():
+            return
+        try:
+            if (
+                base is None
+                or compare is None
+                or sip.isdeleted(base)
+                or sip.isdeleted(compare)
+                or base.id() not in self.project.mapLayers()
+                or compare.id() not in self.project.mapLayers()
+            ):
+                self.messageBar.pushMessage(
+                    "所选栅格图层已被移除，请重新选择",
+                    level=Qgis.MessageLevel.Warning,
+                    duration=4,
+                )
+                return
+        except RuntimeError:
+            return
+        if not tool.apply_params(base, compare, orientation):
+            self.messageBar.pushMessage(
+                "卷帘参数未应用，请检查左右影像",
+                level=Qgis.MessageLevel.Warning,
+                duration=3,
+            )
+
+    def _on_swipe_panel_closed(self) -> None:
+        """用户关闭控制面板：已开始则退出卷帘，未开始则只收起面板。"""
+        panel = getattr(self, "_swipe_panel", None)
+        self._swipe_panel = None
+        started = (
+            panel is not None
+            and not sip.isdeleted(panel)
+            and panel.is_started()
+        )
+        tool = getattr(self, "_swipe_tool", None)
+        try:
+            if started and tool is not None and tool.is_alive():
+                self._stop_swipe_session()
+            else:
+                self._sync_swipe_session_active()
+        except RuntimeError:
+            pass  # 窗口销毁流程中画布 / 工具可能已失效
+
+    def _stop_swipe_session(self) -> None:
+        """结束卷帘会话、关闭控制面板并回到平移工具。"""
+        tool = getattr(self, "_swipe_tool", None)
+        if tool is not None and tool.is_alive():
+            tool.stop()
+        self._close_swipe_panel()
+        self.canvas.setMapTool(self._pan_tool)
+        self.tool_bar_builder.set_active("pan")
+        self.side_toolbar.set_active("pan")
+
+    def _close_swipe_panel(self) -> None:
+        """关闭并释放控制面板（屏蔽信号，避免回头再触发退出逻辑）。"""
+        panel = getattr(self, "_swipe_panel", None)
+        self._swipe_panel = None
+        if panel is None or sip.isdeleted(panel):
+            return
+        try:
+            panel.blockSignals(True)
+            panel.close()
+        except RuntimeError:
+            pass
 
     def _on_qmap_compare(self) -> None:
         """地图对比：会话激活时再点即停止；否则弹窗选择图层 + 模式后启动。
