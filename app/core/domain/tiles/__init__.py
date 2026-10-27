@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from .service import TileJob, TileService
+from .service import TileJob, TileService, write_vector_tile_viewer
 
-__all__ = ["TileJob", "TileService"]
+__all__ = ["TileJob", "TileService", "write_vector_tile_viewer"]
 
 
 def __getattr__(name: str):

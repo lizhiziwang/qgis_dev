@@ -47,9 +47,9 @@ _GEOM_NAMES = {0: "点", 1: "线", 2: "面"}
 
 #: 「设置数据源」的文件过滤器
 _SOURCE_FILTER = (
-    "全部支持的数据 (*.gpkg *.shp *.geojson *.json *.kml *.gml *.tif *.tiff *.img);;"
+    "全部支持的数据 (*.gpkg *.shp *.geojson *.json *.kml *.gml *.tif *.tiff *.img *.mbtiles);;"
     "GeoPackage (*.gpkg);;Shapefile (*.shp);;GeoJSON (*.geojson *.json);;"
-    "栅格 (*.tif *.tiff *.img);;全部文件 (*)"
+    "栅格 (*.tif *.tiff *.img *.mbtiles);;全部文件 (*)"
 )
 
 

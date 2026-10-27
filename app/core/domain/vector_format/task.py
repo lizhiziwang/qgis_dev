@@ -7,6 +7,7 @@ GDAL 写出放在 :class:`QThread` 中执行，避免大图层阻塞 UI；进度
 
 from __future__ import annotations
 
+import os
 from typing import TYPE_CHECKING
 
 from qgis.PyQt.QtCore import QThread, pyqtSignal
@@ -56,7 +57,9 @@ class VectorConvertTask(QThread):
             )
             self.phase_changed.emit("exporting")
             path = self._service.write(prepared, feedback)
-            written = self._service.count_output_features(path, prepared.fmt)
+            # 追加到已有库时文件里可能有多层：按写入的图层名统计
+            layer_name = prepared.layer_name or os.path.splitext(os.path.basename(path))[0]
+            written = self._service.count_output_features(path, prepared.fmt, layer_name)
         except Exception as exc:
             logger.error("矢量格式转换后台任务失败: %s", exc, exc_info=True)
             self.failed.emit(str(exc))

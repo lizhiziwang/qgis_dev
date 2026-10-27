@@ -1,18 +1,19 @@
 """MBTiles 影像切片后台任务。
 
-在普通 :class:`threading.Thread` 里执行 ``native:tilesxyzmbtiles``，把当前地图
-画布渲染为单个 MBTiles 文件。
+与 XYZ 目录版同款，有两种执行方式：
+
+1. **子进程（默认）**：把当前工程另存临时工程，交给独立进程跑
+   ``native:tilesxyzmbtiles``，主进程界面不受算法持有 GIL 的影响；
+2. **进程内（回退）**：子进程准备失败时退回普通 :class:`threading.Thread`。
 
 .. note::
-   不用 :class:`QgsTask`：与 directory 版同源的问题——该系列算法内部用
-   :class:`QgsMapRendererSequentialJob` 渲染，经 :class:`QgsTaskManager` 后台
-   线程运行会原生崩溃（退出码 127）；改走普通 ``threading.Thread`` 则稳定，
-   主线程事件循环照常泵事件。
+   不用 :class:`QgsTask`：该系列算法内部用
+   :class:`QgsMapRendererSequentialJob` 渲染，经
+   :class:`QgsTaskManager` 后台线程运行会原生崩溃（退出码 127）。
 
 进度经 :attr:`progress_updated` 信号回报（``0~100`` int）；算法输出经
 :attr:`log_message` 信号回报（``level, message``），同时写入应用日志
-（日志面板 / ``logs/app.log``）。日志捕获经 :class:`ProcessingLogFeedback`
-（见 :mod:`app.core.domain.imagery_tiles.feedback`）完成。
+（日志面板 / ``logs/app.log``）。
 """
 
 from __future__ import annotations
@@ -20,11 +21,21 @@ from __future__ import annotations
 import os
 import sqlite3
 import threading
-from html import escape as html_escape
 
 from qgis.PyQt.QtCore import QObject, pyqtSignal
 
+from app.core.domain.imagery_tiles.active_tasks import (
+    register as _register_active,
+)
+from app.core.domain.imagery_tiles.active_tasks import (
+    unregister as _unregister_active,
+)
 from app.core.domain.imagery_tiles.feedback import ProcessingLogFeedback
+from app.core.domain.imagery_tiles.worker_runner import (
+    WorkerCallbacks,
+    WorkerSpec,
+    run_worker_process,
+)
 from app.infra.logging import get_logger
 
 from .service import TILE_FORMAT_LABELS, ImageryMbtilesJob
@@ -33,7 +44,7 @@ logger = get_logger(__name__)
 
 
 class CreateImageryMbtilesTask(QObject):
-    """MBTiles 切片任务（普通线程执行）。
+    """MBTiles 切片任务（子进程 / 普通线程执行）。
 
     信号面与 :class:`~app.core.domain.imagery_tiles.task.CreateImageryTileTask`
     一致：``progress_updated`` / ``log_message`` / ``taskCompleted`` /
@@ -42,35 +53,71 @@ class CreateImageryMbtilesTask(QObject):
     """
 
     progress_updated = pyqtSignal(int)
+    #: 算法 ``setProgressText`` 给出的文字（当前算法未使用，保留通用通道）
+    progress_text = pyqtSignal(str)
     #: (level, message)；level ∈ {INFO, CMD, DEBUG, WARNING, ERROR}
     log_message = pyqtSignal(str, str)
     taskCompleted = pyqtSignal()
     taskTerminated = pyqtSignal()
 
-    def __init__(self, description: str, job: ImageryMbtilesJob) -> None:
+    def __init__(
+        self,
+        description: str,
+        job: ImageryMbtilesJob,
+        worker_spec: WorkerSpec | None = None,
+    ) -> None:
         super().__init__()
         self.job = job
+        #: 子进程作业；为空表示走进程内回退路径
+        self.worker_spec = worker_spec
         self.exception: object = None
         self.result_output: dict = {}
+        #: 勾选网页查看器时，任务生成的 index.html 路径；未生成/失败为空串
+        self.preview_html = ""
         self.feedback = ProcessingLogFeedback()
         self.feedback.progressChanged.connect(self._on_progress)
         # feedback.log_line 在渲染线程发出 → 投递到主线程的普通 Python 方法（安全）
         self.feedback.log_line.connect(self._on_log_line)
+        self.feedback.progress_text.connect(self._on_progress_text)
         self._thread: threading.Thread | None = None
+        #: 子进程取消标志（置位后 worker_runner 立即终止子进程）
+        self._cancel_event = threading.Event()
 
     def start(self) -> None:
-        """启动后台线程。
+        """启动后台线程并登记为「正在切片」（关闭程序时据此提示）。
 
         调用前请先连接好 ``taskCompleted`` / ``taskTerminated`` 等信号——
         快速任务可能立即完成，错过连接就会丢完成事件。
         """
+        target = self._run_subprocess if self.worker_spec is not None else self._run
+        _register_active(self, self._describe())
         self._thread = threading.Thread(
-            target=self._run, name="imagery-mbtiles", daemon=True
+            target=self._run_registered, args=(target,), name="imagery-mbtiles", daemon=True
         )
-        self._thread.start()
+        try:
+            self._thread.start()
+        except Exception:
+            _unregister_active(self)
+            raise
+
+    def _run_registered(self, target) -> None:
+        """跑真正的执行函数，结束时（无论成败）注销登记。"""
+        try:
+            target()
+        finally:
+            _unregister_active(self)
+
+    def _describe(self) -> str:
+        """关闭提示里显示的任务描述：图层名 + 输出文件。"""
+        try:
+            name = self.job.layer.name()
+        except Exception:  # noqa: BLE001 - 图层已删除时只影响提示文字
+            name = "影像图层"
+        return f"{name} → {self.job.output_file}"
 
     def cancel(self) -> None:
-        """请求取消（算法在切片间隙检查 ``feedback.isCanceled()``）。"""
+        """请求取消（子进程直接终止；回退路径靠算法检查反馈上的取消标志）。"""
+        self._cancel_event.set()
         if self.feedback is not None and not self.feedback.isCanceled():
             self.feedback.cancel()
 
@@ -78,6 +125,10 @@ class CreateImageryMbtilesTask(QObject):
 
     def _on_progress(self, value: float) -> None:
         self.progress_updated.emit(int(value))
+
+    def _on_progress_text(self, text: str) -> None:
+        """算法阶段性进度文字 → 主线程 UI。"""
+        self.progress_text.emit(text)
 
     def _on_log_line(self, level: str, message: str) -> None:
         """渲染线程算法日志经队列投递到这里（主线程），转发给应用日志与 UI。"""
@@ -100,7 +151,52 @@ class CreateImageryMbtilesTask(QObject):
 
     # ------------------------------------------------------------ 执行
 
+    def _run_subprocess(self) -> None:
+        """子进程执行切片：等待期间主线程可以正常操作界面。"""
+        spec = self.worker_spec
+        job = self.job
+        assert spec is not None  # start() 只在有 spec 时走这里
+        try:
+            self._log_line("INFO", "MBTiles 切片在后台进程中运行，可继续使用其他功能")
+            result = run_worker_process(
+                spec,
+                self._cancel_event,
+                WorkerCallbacks(
+                    progress=self.progress_updated.emit,
+                    text=self.progress_text.emit,
+                    log=self._log_line,
+                ),
+            )
+            if result.canceled:
+                self._log_line("WARNING", "MBTiles 切片已取消")
+                self.taskTerminated.emit()
+                return
+            if not result.ok:
+                self.exception = RuntimeError(result.error or "MBTiles 切片失败")
+                self._log_line("ERROR", f"MBTiles 切片失败：{result.error}")
+                self.taskTerminated.emit()
+                return
+            if job.html:
+                try:
+                    html_path = self._write_preview_html(job)
+                    self.preview_html = html_path
+                    self._log_line("INFO", f"网页查看器：{html_path}")
+                except Exception as e:  # noqa: BLE001
+                    self.preview_html = ""
+                    self._log_line("ERROR", f"生成网页查看器失败：{e}")
+            self.taskCompleted.emit()
+        except Exception as e:  # noqa: BLE001
+            self.exception = e
+            self._log_line("ERROR", f"MBTiles 切片异常：{e}")
+            self.taskTerminated.emit()
+        finally:
+            try:
+                spec.cleanup()
+            except Exception:  # noqa: BLE001 - 清理失败不影响结果
+                logger.debug("清理切片临时目录失败", exc_info=True)
+
     def _run(self) -> None:
+        """进程内回退路径（子进程准备失败时）。"""
         try:
             # 延迟 import：避免 service 模块顶层依赖 processing
             import processing
@@ -125,8 +221,10 @@ class CreateImageryMbtilesTask(QObject):
             if job.html:
                 try:
                     html_path = self._write_preview_html(job)
+                    self.preview_html = html_path
                     self._log_line("INFO", f"网页查看器：{html_path}")
                 except Exception as e:  # noqa: BLE001
+                    self.preview_html = ""
                     self._log_line("ERROR", f"生成网页查看器失败：{e}")
             self._log_line("INFO", "MBTiles 切片完成")
             self.taskCompleted.emit()
@@ -181,30 +279,13 @@ class CreateImageryMbtilesTask(QObject):
             min_zoom, max_zoom = job.min_zoom, job.max_zoom
 
         title = os.path.splitext(os.path.basename(job.output_file))[0]
-        cx, cy = (minx + maxx) / 2.0, (miny + maxy) / 2.0
-        start_zoom = (min_zoom + max_zoom) // 2
-        attribution = html_escape("Created by QGIS")
+        from app.core.domain.tile_viewer import write_tile_viewer  # noqa: PLC0415
 
-        html_path = os.path.join(preview_dir, "index.html")
-        with open(html_path, "w", encoding="utf-8") as f:
-            f.write(
-                "<!DOCTYPE html>"
-                "<html><head><meta charset=\"utf-8\"/>"
-                f"<title>{html_escape(title)}</title>"
-                "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">"
-                "<link rel=\"stylesheet\" href=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.css\""
-                "integrity=\"sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H\""
-                "crossorigin=\"\"/>"
-                "<script src=\"https://unpkg.com/leaflet@1.9.4/dist/leaflet.js\""
-                "integrity=\"sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH\""
-                "crossorigin=\"\"></script>"
-                "<style>body{margin:0}html,body,#map{width:100%;height:100%}</style>"
-                "</head><body><div id=\"map\"></div><script>"
-                f"var map=L.map('map',{{attributionControl:false}}).setView([{cy:.6f},{cx:.6f}],{start_zoom});"
-                "L.control.attribution({prefix:false}).addTo(map);"
-                f"L.tileLayer('{{z}}/{{x}}/{{y}}.{ext}',"
-                f"{{minZoom:{min_zoom},maxZoom:{max_zoom},tms:false,attribution:'{attribution}'}})"
-                ".addTo(map);"
-                "</script></body></html>"
-            )
-        return html_path
+        return write_tile_viewer(
+            preview_dir,
+            title=title,
+            tile_template=f"{{z}}/{{x}}/{{y}}.{ext}",
+            min_zoom=min_zoom,
+            max_zoom=max_zoom,
+            bounds=(minx, miny, maxx, maxy),
+        )

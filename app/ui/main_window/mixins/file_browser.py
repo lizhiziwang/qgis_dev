@@ -33,7 +33,7 @@ logger = get_logger(__name__)
 #: 重设数据源时按「原图层的数据源类型」给的过滤器（同类型文件）
 _RASTER_FILE_FILTER = (
     "栅格数据 (*.tif *.tiff *.img *.jpg *.jpeg *.png *.bmp *.gif "
-    "*.dem *.asc *.vrt *.jp2 *.ecw *.hdf *.nc *.mrf)"
+    "*.dem *.asc *.vrt *.jp2 *.ecw *.hdf *.nc *.mrf *.mbtiles)"
 )
 
 _VECTOR_FILE_FILTERS: dict[str, str] = {

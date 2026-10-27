@@ -51,6 +51,9 @@ RASTER_EXTS: Final[frozenset[str]] = frozenset(
         ".hdf",
         ".nc",
         ".mrf",
+        # MBTiles 是单个 SQLite 文件里的栅格瓦片金字塔，GDAL 的 MBTiles
+        # 驱动可直接按栅格打开（坐标系固定 EPSG:3857）
+        ".mbtiles",
     }
 )
 
@@ -114,6 +117,7 @@ FORMAT_LABELS: Final[dict[str, str]] = {
     ".hdf": "HDF 栅格",
     ".nc": "NetCDF 栅格",
     ".mrf": "MRF 栅格",
+    ".mbtiles": "MBTiles 瓦片包",
 }
 
 #: 分类结果（字符串常量，避免 UI 各处再维护一套枚举）

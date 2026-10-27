@@ -21,6 +21,7 @@ from qgis.PyQt.QtWidgets import (
 from qgis.core import QgsMapLayer, QgsProject
 
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.layer_combo import combo_current_layer, layer_source
 
 
 class SwipeCompareDialog(BaseDialog):
@@ -97,8 +98,8 @@ class SwipeCompareDialog(BaseDialog):
         不遍历 ``project.mapLayers()``：它按图层 id 排序，下拉框顺序会像乱序；
         ``layerTreeRoot().findLayers()`` 返回图层面板里从上到下的顺序。
         """
-        current = self.base_combo.currentData()
-        current_src = current.source() if current is not None else None
+        # 图层刚被移除时 itemData 里的 wrapper 已失效，不能直接调 .source()
+        current_src = layer_source(self.base_combo.currentData())
         self.base_combo.clear()
         self.compare_combo.clear()
         for node in self.project.layerTreeRoot().findLayers():
@@ -119,8 +120,8 @@ class SwipeCompareDialog(BaseDialog):
         self._populate_layers()
 
     def _on_start(self) -> None:
-        base = self.base_combo.currentData()
-        compare = self.compare_combo.currentData()
+        base = combo_current_layer(self.base_combo)
+        compare = combo_current_layer(self.compare_combo)
         if base is None or compare is None:
             QMessageBox.warning(self, "提示", "请先加载至少一个影像图层")
             return
@@ -132,4 +133,4 @@ class SwipeCompareDialog(BaseDialog):
     def selected_params(self) -> tuple:
         """返回 (左影像, 右影像, 方向)；方向为 ``"vertical"`` / ``"horizontal"``。"""
         orientation = "vertical" if self.vertical_radio.isChecked() else "horizontal"
-        return self.base_combo.currentData(), self.compare_combo.currentData(), orientation
+        return combo_current_layer(self.base_combo), combo_current_layer(self.compare_combo), orientation

@@ -389,12 +389,24 @@ class VectorFormatDialog(BaseDialog):
             return
         path = _with_extension(path, spec.extension)
         self.output_path_edit.setText(path)
+        layer_name = os.path.splitext(os.path.basename(path))[0]
 
         if os.path.exists(path):
+            # GPKG / SQLite 只替换同名图层，库内其它图层保留；其它格式整份覆盖。
+            if spec.driver in ("GPKG", "SQLite"):
+                question = (
+                    f"输出文件已存在，将写入 / 替换其中的图层「{layer_name}」，"
+                    f"库内其它图层保留。\n{path}\n\n是否继续？"
+                )
+            else:
+                question = (
+                    f"输出文件已存在，继续将覆盖整个文件（已有图层会丢失）。\n"
+                    f"{path}\n\n是否继续？"
+                )
             answer = QMessageBox.question(
                 self,
                 "确认覆盖",
-                f"输出文件已存在，继续将覆盖整个文件（已有图层会丢失）。\n{path}\n\n是否继续？",
+                question,
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -410,7 +422,7 @@ class VectorFormatDialog(BaseDialog):
             layer=layer,
             output_path=path,
             fmt=spec,
-            layer_name=os.path.splitext(os.path.basename(path))[0],
+            layer_name=layer_name,
             only_selected=only_selected,
         )
 

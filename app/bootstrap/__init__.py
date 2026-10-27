@@ -77,6 +77,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     # 打包后直接双击 app.exe 也能工作：自动探测便携包并设环境变量
     _ensure_portable_env()
 
+    # 影像切片子进程入口（由 worker_runner 以 ``--tile-worker <job.json>`` 拉起）。
+    # 必须在单实例互斥体 / 登录 / 界面之前处理：子进程不抢主进程的锁，也不需要
+    # 账号界面，只跑一次切片就退出。见 app/core/domain/imagery_tiles/worker.py
+    args = list(argv) if argv is not None else sys.argv
+    if "--tile-worker" in args:
+        index = args.index("--tile-worker")
+        job_file = args[index + 1] if index + 1 < len(args) else ""
+        if not job_file:
+            logger.error("--tile-worker 缺少作业文件参数")
+            return 2
+        from app.core.domain.imagery_tiles.worker import main as tile_worker_main  # noqa: PLC0415
+
+        return tile_worker_main(job_file)
+
     # 单实例：更新器安装前会等这个互斥体释放（Inno Setup AppMutex 同名）。
     # 实例必须活到 main 返回；进程退出（含崩溃）时由内核释放。
     instance = SingleInstance(APP_MUTEX)

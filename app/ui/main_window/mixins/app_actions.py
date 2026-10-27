@@ -484,9 +484,21 @@ class AppActionsMixin:
         dlg = AddConnectionDialog(self, default_kind=scope or "local")
         if dlg.exec() != QDialog.DialogCode.Accepted:
             return
+        # 弹窗「确定」被绕过（回车 / 自动化 / 页面校验未通过）时 connection() 为 None，
+        # 直接 dict(None) 会抛 TypeError 且用户看不到任何提示（QA BUG-04）。
+        conn = dlg.connection()
+        if not isinstance(conn, dict) or not conn:
+            logger.warning("新建连接未拿到有效连接信息，已忽略：%r", conn)
+            QMessageBox.warning(
+                self,
+                "新建连接",
+                "连接信息不完整：请选择有效的本地库文件，"
+                "或填全服务器连接的主机 / 端口 / 数据库 / 用户名。",
+            )
+            return
         dock = getattr(self, "_data_manage_dock", None)
         if dock is not None:
-            dock.add_connection(dlg.connection())
+            dock.add_connection(conn)
 
     def _on_dm_remove_connection(self, db: dict) -> None:
         """数据管理库节点右键「删除连接」：确认后**只从列表里解绑，不删库文件**。"""
