@@ -37,7 +37,6 @@ from qgis.PyQt.QtWidgets import (
     QDialogButtonBox,
     QGridLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QSplitter,
     QTabWidget,
@@ -51,6 +50,7 @@ from qgis.PyQt.QtWidgets import (
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.code_editor import CodeEditor
+from app.ui.common.message_box import MessageBox
 from app.ui.common.theme import ThemeManager
 from app.ui.tools.feature_attrs import field_alias
 
@@ -118,7 +118,6 @@ _DEFAULT_HELP = (
     "<li><b>特殊变量</b>：$id、$area、@layer_name 等</li>"
     "</ul>"
 )
-
 
 #: 表达式关键字（高亮 + 补全共用）
 _KEYWORDS = "AND|OR|NOT|IN|LIKE|ILIKE|IS|NULL|BETWEEN|TRUE|FALSE"
@@ -704,11 +703,11 @@ class ExpressionBuilderDialog(BaseDialog):
     def _on_accept(self) -> None:
         text = self.expression_text()
         if not text:
-            QMessageBox.warning(self, "表达式构建器", "表达式不能为空")
+            MessageBox.warning(self, "表达式构建器", "表达式不能为空")
             return
         expr = QgsExpression(text)
         if expr.hasParserError():
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "表达式构建器", f"表达式有语法错误：\n{expr.parserErrorString()}"
             )
             return

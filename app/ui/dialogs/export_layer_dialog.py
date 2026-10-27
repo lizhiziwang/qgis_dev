@@ -24,15 +24,15 @@ from typing import TYPE_CHECKING
 from qgis.PyQt.QtCore import Qt, QVariant
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
-    QComboBox,
+    QApplication,
     QCheckBox,
+    QComboBox,
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QProgressDialog,
     QPushButton,
     QTableWidget,
@@ -40,7 +40,6 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qgis.PyQt.QtWidgets import QApplication
 
 from app.core.domain.create_data import available_drivers
 from app.core.domain.export_layer import (
@@ -56,6 +55,7 @@ from app.core.util.ogr_fields import provider_id_field_indices
 from app.core.util.vector_formats import VECTOR_FORMATS, VectorFormat, resolve_format
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.common.widgets import open_file_dir, save_file
 from app.ui.dialogs.query_builder import QueryBuilderDialog
 from app.ui.tools.feature_attrs import field_alias
@@ -798,7 +798,6 @@ class ExportLayerDialog(BaseDialog):
                 out[original] = safe
         return out
 
-
     def _on_browse(self) -> None:
         """选保存位置：GDB 是目录，用「选文件夹」；其余格式用「另存为」。"""
         fmt = self._current_format()
@@ -879,31 +878,31 @@ class ExportLayerDialog(BaseDialog):
         # 用户确认后才覆盖（容器的替换只动那一个图层，见 export_vector_layer 的说明）。
         existing = existing_target_description(spec)
         if existing:
-            ret = QMessageBox.question(
+            ret = MessageBox.question(
                 self,
                 "替换已存在的数据",
                 f"{existing}。\n\n确定替换？\n（只覆盖这一份；库里的其他图层不受影响）"
                 if spec.is_container
                 else f"{existing}。\n\n确定覆盖？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+                MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+                MessageBox.StandardButton.No,
             )
-            if ret != QMessageBox.StandardButton.Yes:
+            if ret != MessageBox.StandardButton.Yes:
                 return
         # 只导出部分字段：明确问一句，别让用户以为全部字段都写进去了
         if spec.driver != "DXF":
             total = self._exportable_field_count()
             selected = len(spec.field_names or ())
             if selected < total:
-                ret = QMessageBox.question(
+                ret = MessageBox.question(
                     self,
                     "导出字段",
                     f"本次只导出 {selected} 个字段，其余 {total - selected} 个字段"
                     "不会写入目标文件。\n\n确定继续？",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.Yes,
+                    MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+                    MessageBox.StandardButton.Yes,
                 )
-                if ret != QMessageBox.StandardButton.Yes:
+                if ret != MessageBox.StandardButton.Yes:
                     return
         self.accept()
 
@@ -1026,7 +1025,7 @@ def load_exported_layer(parent: QWidget | None, target: str, spec: ExportSpec) -
         if layer is not None:
             layer.deleteLater()
         if parent is not None:
-            QMessageBox.warning(
+            MessageBox.warning(
                 parent,
                 "加载到地图",
                 f"导出成功，但加载到地图失败：\n{target}\n{error}",
@@ -1107,12 +1106,12 @@ def export_with_progress(
     # **先关进度框再弹错误**：反过来的话，错误框是模态的，进度框会一直挂在
     # 后面转到用户点「确定」为止（用户报过"导出进度一直卡住"）。
     if error_message:
-        QMessageBox.warning(parent, "导出数据", error_message)
+        MessageBox.warning(parent, "导出数据", error_message)
         return None
     loaded = False
     if load_after:
         loaded = load_exported_layer(parent, target, spec)
-    QMessageBox.information(
+    MessageBox.information(
         parent,
         "导出数据",
         f"已导出{'（含字典）' if spec.convert_dict else ''}：\n{target}"

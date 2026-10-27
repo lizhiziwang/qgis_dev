@@ -22,7 +22,6 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QLineEdit,
     QMenu,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QTableWidget,
@@ -35,6 +34,7 @@ from app.core.domain.check import CheckParam, CheckService
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.common.layer_order import layers_in_tree_order
 from app.ui.common.widgets import open_file_dir
 from app.ui.dialogs.check_editor import CheckConfigDialog, CheckVo
@@ -289,7 +289,7 @@ class CheckViewerDialog(BaseDialog):
 
     def _start_check(self) -> None:
         if not self.data_source_input.currentText():
-            QMessageBox.warning(self, "提示", "请先选择数据源")
+            MessageBox.warning(self, "提示", "请先选择数据源")
             return
         layer = self.parent.project.mapLayersByName(self.data_source_input.currentText())[0]
         params: list[CheckParam] = []
@@ -300,7 +300,7 @@ class CheckViewerDialog(BaseDialog):
             enabled=self.json_data.get("isApply", 0) == 1,
         )
         if not params:
-            QMessageBox.warning(self, "提示", "请先勾选要执行的质检项")
+            MessageBox.warning(self, "提示", "请先勾选要执行的质检项")
             return
 
         # 开始日志 + 进度条按项数步进

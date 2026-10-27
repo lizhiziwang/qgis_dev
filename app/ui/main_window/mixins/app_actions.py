@@ -24,7 +24,6 @@ from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QDialog,
-    QMessageBox,
 )
 
 from app.core.domain.delete_data import (
@@ -46,6 +45,7 @@ from app.core.util.local_layer_loader import (
 from app.infra.fs.state import load_state, save_state
 from app.infra.logging import get_logger
 from app.server.cli import main as server_main  # noqa: F401 —— _on_test 保留的启动入口
+from app.ui.common.message_box import MessageBox
 from app.ui.common.modeless import show_modeless
 from app.ui.dialogs.add_connection import AddConnectionDialog
 from app.ui.dialogs.check_viewer import CheckViewerDialog
@@ -90,11 +90,11 @@ class AppActionsMixin:
         owner = getattr(self, "_data_manage_dialog", None)
         if owner is not None and owner.isVisible():
             if level == Qgis.MessageLevel.Critical:
-                QMessageBox.critical(owner, "数据管理", str(text))
+                MessageBox.critical(owner, "数据管理", str(text))
             elif level == Qgis.MessageLevel.Warning:
-                QMessageBox.warning(owner, "数据管理", str(text))
+                MessageBox.warning(owner, "数据管理", str(text))
             else:
-                QMessageBox.information(owner, "数据管理", str(text))
+                MessageBox.information(owner, "数据管理", str(text))
             return
         self.messageBar.pushMessage(str(text), level=level, duration=duration)
 
@@ -238,23 +238,23 @@ class AppActionsMixin:
                 continue
             if not dirty:
                 continue
-            ret = QMessageBox.question(
+            ret = MessageBox.question(
                 self,
                 "修改字段结构",
                 f"图层「{layer.name()}」有未保存的编辑。修改表结构前需要先处理：\n\n"
                 "「保存」= 提交这些编辑\n"
                 "「放弃」= 丢弃这些编辑\n"
                 "「取消」= 不改字段结构",
-                QMessageBox.StandardButton.Save
-                | QMessageBox.StandardButton.Discard
-                | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Cancel,
+                MessageBox.StandardButton.Save
+                | MessageBox.StandardButton.Discard
+                | MessageBox.StandardButton.Cancel,
+                MessageBox.StandardButton.Cancel,
             )
-            if ret == QMessageBox.StandardButton.Cancel:
+            if ret == MessageBox.StandardButton.Cancel:
                 return False
-            if ret == QMessageBox.StandardButton.Save:
+            if ret == MessageBox.StandardButton.Save:
                 if not layer.commitChanges():
-                    QMessageBox.warning(
+                    MessageBox.warning(
                         self,
                         "修改字段结构",
                         "保存图层编辑失败：\n" + "\n".join(layer.commitErrors()),
@@ -286,21 +286,21 @@ class AppActionsMixin:
                     continue
                 if not dirty:
                     continue
-                ret = QMessageBox.question(
+                ret = MessageBox.question(
                     self,
                     "编辑名称",
                     f"图层「{layer.name()}」有未保存的编辑。重命名前需要先处理：\n\n"
                     "「保存」= 提交这些编辑\n"
                     "「放弃」= 丢弃这些编辑\n"
                     "「取消」= 不改表名",
-                    QMessageBox.StandardButton.Save
-                    | QMessageBox.StandardButton.Discard
-                    | QMessageBox.StandardButton.Cancel,
-                    QMessageBox.StandardButton.Cancel,
+                    MessageBox.StandardButton.Save
+                    | MessageBox.StandardButton.Discard
+                    | MessageBox.StandardButton.Cancel,
+                    MessageBox.StandardButton.Cancel,
                 )
-                if ret == QMessageBox.StandardButton.Cancel:
+                if ret == MessageBox.StandardButton.Cancel:
                     return False, "操作已取消"
-                if ret == QMessageBox.StandardButton.Save:
+                if ret == MessageBox.StandardButton.Save:
                     if not layer.commitChanges():
                         return False, "保存图层编辑失败：\n" + "\n".join(
                             layer.commitErrors()
@@ -377,8 +377,9 @@ class AppActionsMixin:
         self, path: str, table: str, style_xml: str, visible: bool
     ) -> None:
         """表改名后重新打开并挂回工程（保留原样式与可见性）。"""
-        from app.core.util.local_layer_loader import open_local_vector_table
         from qgis.core import QgsMapLayerStyle
+
+        from app.core.util.local_layer_loader import open_local_vector_table
 
         layer, error = open_local_vector_table(path, table)
         if layer is None:
@@ -500,14 +501,14 @@ class AppActionsMixin:
                 f"库文件：{path}\n\n"
                 "只取消绑定，**不会删除库文件**；以后还可以重新添加。"
             )
-        ret = QMessageBox.question(
+        ret = MessageBox.question(
             self,
             "删除连接",
             message,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
         )
-        if ret != QMessageBox.StandardButton.Yes:
+        if ret != MessageBox.StandardButton.Yes:
             return
         dock = getattr(self, "_data_manage_dock", None)
         if dock is not None and dock.remove_connection(db):
@@ -931,13 +932,13 @@ class AppActionsMixin:
           后缀 gpkg 库才经同 inode 的 ``.gpkg`` 硬链接别名打开(GDAL 3.11
           按后缀裁决驱动, .db 会被 SQLite 抢先成纯属性表; 别名仅图层存续
           期间存在, 移除/退出即删); 老 spatialite 库 OGR 失败时才有回退;
-        - ``dict`` 等无几何数据:沿用原 ``QMessageBox.information`` 提示。
+        - ``dict`` 等无几何数据:沿用原 ``MessageBox.information`` 提示。
         """
 
         path = str(db.get("path") or "")
         label = _CATEGORY_LABEL.get(category, category)
         if not path:
-            QMessageBox.warning(self, "数据管理", f"「{name}」缺少库文件路径, 无法加载。")
+            MessageBox.warning(self, "数据管理", f"「{name}」缺少库文件路径, 无法加载。")
             return
         kind_zh = "影像" if category == "image" else "图层"
         self._begin_layer_loading(f"正在加载{kind_zh}：{name}")
@@ -945,7 +946,7 @@ class AppActionsMixin:
             try:
                 layer = self._layer_loader.load(db, category, name, parent=self)
             except LocalLayerUnsupportedCategoryError:
-                QMessageBox.information(
+                MessageBox.information(
                     self,
                     "数据管理",
                     f"「{name}」为{label}数据(无空间几何), 无法加入地图。\n"
@@ -953,10 +954,10 @@ class AppActionsMixin:
                 )
                 return
             except LocalLayerError as exc:
-                QMessageBox.warning(self, "数据管理", f"「{name}」无法打开: {exc}")
+                MessageBox.warning(self, "数据管理", f"「{name}」无法打开: {exc}")
                 return
             if layer is None:
-                QMessageBox.warning(
+                MessageBox.warning(
                     self,
                     "数据管理",
                     f"「{name}」无法作为地图图层打开\n(文件: {path})",
@@ -1048,14 +1049,14 @@ class AppActionsMixin:
                 f"把 {len(sources)} 份数据的要素追加到\n{target_label}？\n\n"
                 "字段按同名匹配，坐标系会自动转换；原有要素不受影响。"
             )
-        ret = QMessageBox.question(
+        ret = MessageBox.question(
             self,
             "导入数据（替换）" if replace else "导入数据（追加）",
             message,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No if replace else QMessageBox.StandardButton.Yes,
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No if replace else MessageBox.StandardButton.Yes,
         )
-        if ret != QMessageBox.StandardButton.Yes:
+        if ret != MessageBox.StandardButton.Yes:
             return
 
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -1114,16 +1115,17 @@ class AppActionsMixin:
         if owner is None or not owner.isVisible() or owner.isMinimized():
             owner = QApplication.activeWindow() or self
         if not path or db.get("kind") != "local":
-            QMessageBox.warning(
+            MessageBox.warning(
                 owner, "导出数据", "只支持本地库（GeoPackage / SpatiaLite）"
             )
             return
         layer, error = open_local_vector_table(path, name)
         if layer is None:
-            QMessageBox.warning(
+            MessageBox.warning(
                 owner, "导出数据", f"导出失败：打不开「{name}」\n{error}"
             )
             return
+
         def _export(dlg) -> None:
             spec = dlg.spec()
             if spec is None:
@@ -1157,14 +1159,14 @@ class AppActionsMixin:
         path = str(db.get("path") or "")
         label = _CATEGORY_LABEL.get(category, category)
         if db.get("kind") == "server":
-            QMessageBox.information(
+            MessageBox.information(
                 self,
                 "删除图层",
                 "服务器库删除尚未实现，请选用本地库（SpatiaLite / GeoPackage）。",
             )
             return
         if not path:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "删除图层", f"「{name}」缺少库文件路径, 无法删除。"
             )
             return
@@ -1183,14 +1185,14 @@ class AppActionsMixin:
                 f"\n\n当前库中有 {affected_fields} 个字段挂接了该字典表；"
                 "删除后会同时清除这些字段的字典表和字典域（否则图层会读不到字典）。"
             )
-        ret = QMessageBox.question(
+        ret = MessageBox.question(
             self,
             "删除图层",
             message,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
         )
-        if ret != QMessageBox.StandardButton.Yes:
+        if ret != MessageBox.StandardButton.Yes:
             return
 
         # 1) 先移出工程里指向这张表的图层（释放文件句柄 / gpkg 别名）
@@ -1240,14 +1242,14 @@ class AppActionsMixin:
         """
         path = str(db.get("path") or "")
         if db.get("kind") == "server":
-            QMessageBox.information(
+            MessageBox.information(
                 self,
                 "移除全部图层",
                 "服务器库删除尚未实现，请选用本地库（SpatiaLite / GeoPackage）。",
             )
             return
         if not path:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "移除全部图层", "这个库缺少文件路径，无法移除图层。"
             )
             return
@@ -1273,17 +1275,17 @@ class AppActionsMixin:
             return
 
         name = str(source.get("name") or os.path.basename(path))
-        ret = QMessageBox.question(
+        ret = MessageBox.question(
             self,
             "移除全部图层",
             f"确定移除本地库「{name}」里的全部 {len(targets)} 个图层吗？\n\n"
             "将删除库内数据表与注册信息，并把工程中已打开的对应图层移出地图。\n"
             "库内字段上的字典表和字典域也会一并清除。\n"
             "此操作不可恢复。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
         )
-        if ret != QMessageBox.StandardButton.Yes:
+        if ret != MessageBox.StandardButton.Yes:
             return
 
         # 1) 先移出工程里指向这些表的图层（释放文件句柄 / gpkg 别名）
@@ -1409,34 +1411,34 @@ class AppActionsMixin:
             unused = unused_dict_tables(db)
         except Exception as exc:  # noqa: BLE001
             logger.error("检查未使用字典失败：%s", exc, exc_info=True)
-            QMessageBox.warning(owner, "移除未使用字典", f"检查失败：{exc}")
+            MessageBox.warning(owner, "移除未使用字典", f"检查失败：{exc}")
             return
         if not unused:
-            QMessageBox.information(
+            MessageBox.information(
                 owner, "移除未使用字典", "当前库里没有未使用的字典表。"
             )
             return
         preview = "、".join(unused[:12])
         if len(unused) > 12:
             preview += f" 等 {len(unused)} 张"
-        ret = QMessageBox.question(
+        ret = MessageBox.question(
             owner,
             "移除未使用字典",
             f"发现 {len(unused)} 张没有被任何字段引用的字典表：\n{preview}\n\n"
             "确定移除？此操作不可恢复。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
         )
-        if ret != QMessageBox.StandardButton.Yes:
+        if ret != MessageBox.StandardButton.Yes:
             return
         try:
             deleted, failures = delete_unused_dict_tables(db)
         except DeleteDataError as exc:
-            QMessageBox.warning(owner, "移除未使用字典", str(exc))
+            MessageBox.warning(owner, "移除未使用字典", str(exc))
             return
         except Exception as exc:  # noqa: BLE001
             logger.error("移除未使用字典失败：%s", exc, exc_info=True)
-            QMessageBox.warning(owner, "移除未使用字典", f"删除失败：{exc}")
+            MessageBox.warning(owner, "移除未使用字典", f"删除失败：{exc}")
             return
         dock = getattr(self, "_data_manage_dock", None)
         if dock is not None and path:
@@ -1446,9 +1448,9 @@ class AppActionsMixin:
         note = f"已移除 {len(deleted)} 张未使用字典表"
         if failures:
             note += "；失败：" + "；".join(f"{name}：{why}" for name, why in failures)
-            QMessageBox.warning(owner, "移除未使用字典", note)
+            MessageBox.warning(owner, "移除未使用字典", note)
         else:
-            QMessageBox.information(owner, "移除未使用字典", note)
+            MessageBox.information(owner, "移除未使用字典", note)
 
     def _on_dm_dict_domains_deleted(
         self, db: dict, category: str, table: str, domains: list[str]
@@ -1547,7 +1549,7 @@ class AppActionsMixin:
             self._sync_swipe_session_active()
             return
         if len(raster_layers_in_tree_order(self.project)) < 2:
-            QMessageBox.information(self, "提示", "请先加载至少两个栅格图层")
+            MessageBox.information(self, "提示", "请先加载至少两个栅格图层")
             self.tool_bar_builder.set_session_active("swipe", False)
             return
         panel = self._ensure_swipe_panel()
@@ -1586,7 +1588,7 @@ class AppActionsMixin:
                 or base.id() not in self.project.mapLayers()
                 or compare.id() not in self.project.mapLayers()
             ):
-                QMessageBox.information(
+                MessageBox.information(
                     self, "提示", "所选栅格图层已被移除，请重新选择"
                 )
                 return
@@ -1689,7 +1691,7 @@ class AppActionsMixin:
             )
             return
         if not self.project.mapLayers():
-            QMessageBox.information(self, "提示", "请先加载至少一个图层")
+            MessageBox.information(self, "提示", "请先加载至少一个图层")
             self._set_qmap_compare_active(False)
             return
 
@@ -1702,7 +1704,7 @@ class AppActionsMixin:
                 if not sip.isdeleted(layer) and layer.id() in current
             ]
             if not layers:
-                QMessageBox.information(
+                MessageBox.information(
                     self, "提示", "所选图层已被移除，请重新选择"
                 )
                 self._set_qmap_compare_active(False)
@@ -1746,13 +1748,12 @@ class AppActionsMixin:
         """测试按钮：启动独立 FastAPI 服务（在新进程中）。"""
         try:
 
-
             # threading.Thread(target=server_main, daemon=True).start()
             self.messageBar.pushMessage(
                 "测试消息！", level=Qgis.MessageLevel.Info, duration=3
             )
         except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, "失败", str(e))
+            MessageBox.warning(self, "失败", str(e))
 
     def _show_log_dock(self) -> None:
         if self.log_dock is None:

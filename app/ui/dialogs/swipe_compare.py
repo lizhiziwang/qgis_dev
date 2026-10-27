@@ -8,19 +8,19 @@ imagery_tile 的填充模式（图层对象存 ``itemData``，``showEvent`` +
 
 from __future__ import annotations
 
+from qgis.core import QgsMapLayer, QgsProject
 from qgis.PyQt.QtWidgets import (
     QButtonGroup,
     QComboBox,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QRadioButton,
     QVBoxLayout,
 )
-from qgis.core import QgsMapLayer, QgsProject
 
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 
 
 def raster_layers_in_tree_order(project) -> list:
@@ -139,10 +139,10 @@ class SwipeCompareDialog(BaseDialog):
         base = self.base_combo.currentData()
         compare = self.compare_combo.currentData()
         if base is None or compare is None:
-            QMessageBox.warning(self, "提示", "请先加载至少一个影像图层")
+            MessageBox.warning(self, "提示", "请先加载至少一个影像图层")
             return
         if base is compare:
-            QMessageBox.warning(self, "提示", "左影像与右影像不能相同")
+            MessageBox.warning(self, "提示", "左影像与右影像不能相同")
             return
         self.accept()
 

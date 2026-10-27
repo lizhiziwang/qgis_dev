@@ -444,10 +444,11 @@ def case_real_template(out: Path) -> str:
 @case
 def case_dialog(out: Path) -> str:
     """离屏冒烟：三列树 / 内联编辑 / 新建域 / 添加 / 拖拽排序 / 状态栏。"""
-    from qgis.PyQt.QtWidgets import QApplication, QInputDialog, QMessageBox
+    from qgis.PyQt.QtWidgets import QApplication, QInputDialog
 
     from app.core.domain.dict_manage import DictRow, DictService
     from app.ui.common import tool_icons
+    from app.ui.common.message_box import MessageBox as QMessageBox
     from app.ui.dialogs.dict_manage import (
         _KIND_DOMAIN,
         _KIND_ITEM,

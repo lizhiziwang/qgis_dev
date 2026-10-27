@@ -20,7 +20,6 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QTableView,
     QTextEdit,
@@ -30,6 +29,7 @@ from qgis.PyQt.QtWidgets import (
 from app.core.util.local_layer_loader import layer_source_container
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.dialogs.query_builder import QueryBuilderDialog
 
 logger = get_logger(__name__)
@@ -337,7 +337,7 @@ class ExecuteSqlDialog(BaseDialog):
             self._sql_worker = None
         sql = self.sql_input.toPlainText().strip()
         if not sql:
-            QMessageBox.warning(self, "警告", "请输入 SQL 查询！")
+            MessageBox.warning(self, "警告", "请输入 SQL 查询！")
             return
         path = _container_path(self.layer)
         # 仅支持本地文件/容器数据源（shp / gpkg / gdb / geojson / 本地库里的 Sqlite
@@ -349,7 +349,7 @@ class ExecuteSqlDialog(BaseDialog):
             or not path
             or not (os.path.isfile(path) or os.path.isdir(path))
         ):
-            QMessageBox.warning(
+            MessageBox.warning(
                 self,
                 "警告",
                 "仅支持本地文件数据源（shp / gpkg / gdb / geojson 等）的 SQL 查询",

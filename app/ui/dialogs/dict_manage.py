@@ -28,6 +28,24 @@ import re
 from contextlib import contextmanager
 from pathlib import Path
 
+from qgis.PyQt.QtCore import QSignalBlocker, Qt, QTimer, pyqtSignal
+from qgis.PyQt.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QComboBox,
+    QHBoxLayout,
+    QInputDialog,
+    QLabel,
+    QLineEdit,
+    QMenu,
+    QPushButton,
+    QStyledItemDelegate,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
 from app.core.domain.dict_manage import (
     DEFAULT_PAGE_SIZE,
     DEFAULT_SEARCH_LIMIT,
@@ -45,27 +63,10 @@ from app.core.domain.dict_manage import (
 from app.infra.logging import get_logger
 from app.ui.common import tool_icons
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.common.qt_compat import event_pos
 from app.ui.common.theme import ThemeManager
 from app.ui.common.widgets import open_file_dir, save_file
-from qgis.PyQt.QtCore import QSignalBlocker, Qt, QTimer, pyqtSignal
-from qgis.PyQt.QtWidgets import (
-    QAbstractItemView,
-    QApplication,
-    QComboBox,
-    QHBoxLayout,
-    QInputDialog,
-    QLabel,
-    QLineEdit,
-    QMenu,
-    QMessageBox,
-    QPushButton,
-    QStyledItemDelegate,
-    QTreeWidget,
-    QTreeWidgetItem,
-    QVBoxLayout,
-    QWidget,
-)
 
 logger = get_logger(__name__)
 
@@ -327,7 +328,7 @@ class DictManageDialog(BaseDialog):
         try:
             categories = self._service.list_categories()
         except DictError as exc:
-            QMessageBox.warning(self, "字典管理", str(exc))
+            MessageBox.warning(self, "字典管理", str(exc))
             return
         target = select or self._category
         self._category_combo.blockSignals(True)
@@ -348,29 +349,29 @@ class DictManageDialog(BaseDialog):
     def _delete_category(self) -> None:
         """删除当前字典表（类别）及其全部字典域 / 字典项。"""
         if not self._category:
-            QMessageBox.information(self, "删除字典表", "当前没有选中的字典表")
+            MessageBox.information(self, "删除字典表", "当前没有选中的字典表")
             return
         try:
             domains = self._service.list_domains(self._category)
         except DictError as exc:
-            QMessageBox.warning(self, "删除字典表", str(exc))
+            MessageBox.warning(self, "删除字典表", str(exc))
             return
         total = sum(domain.item_count for domain in domains)
-        ret = QMessageBox.question(
+        ret = MessageBox.question(
             self,
             "删除字典表",
             f"确定删除字典表「{self._category}」吗？\n\n"
             f"将删除 {len(domains)} 个字典域、{total} 条字典项。\n"
             "本地库里已经落库的字典副本不受影响。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
         )
-        if ret != QMessageBox.StandardButton.Yes:
+        if ret != MessageBox.StandardButton.Yes:
             return
         try:
             removed = self._service.delete_category(self._category)
         except DictError as exc:
-            QMessageBox.warning(self, "删除字典表", str(exc))
+            MessageBox.warning(self, "删除字典表", str(exc))
             return
         name = self._category
         self._reload_categories()
@@ -396,12 +397,12 @@ class DictManageDialog(BaseDialog):
             return
         name = str(name).strip()
         if not name:
-            QMessageBox.information(self, "创建字典表", "字典表名称不能为空")
+            MessageBox.information(self, "创建字典表", "字典表名称不能为空")
             return
         try:
             category = self._service.create_category(name)
         except DictError as exc:
-            QMessageBox.warning(self, "创建字典表", str(exc))
+            MessageBox.warning(self, "创建字典表", str(exc))
             return
         self._reload_categories(select=category.name)
         self._status_label.setText(f"已创建字典表「{category.name}」")
@@ -445,7 +446,7 @@ class DictManageDialog(BaseDialog):
         try:
             domains = self._service.list_domains(self._category)
         except DictError as exc:
-            QMessageBox.warning(self, "字典管理", str(exc))
+            MessageBox.warning(self, "字典管理", str(exc))
             return
         with self._tree_guard():
             for domain in domains:
@@ -584,7 +585,7 @@ class DictManageDialog(BaseDialog):
                 )
                 total = self._service.count_children(dict_id, parent_code)
             except DictError as exc:
-                QMessageBox.warning(self, "字典管理", str(exc))
+                MessageBox.warning(self, "字典管理", str(exc))
                 return
             for item in items:
                 node.addChild(self._item_node(item, domain_name))
@@ -717,7 +718,7 @@ class DictManageDialog(BaseDialog):
             else:
                 return
         except DictError as exc:
-            QMessageBox.warning(self, "字典管理", f"保存排序失败：{exc}")
+            MessageBox.warning(self, "字典管理", f"保存排序失败：{exc}")
             self._load_domains()
             return
         with self._tree_guard():
@@ -734,10 +735,10 @@ class DictManageDialog(BaseDialog):
         """【修改】：从选中节点的名称列开始内联编辑。"""
         node = self._tree.currentItem()
         if node is None:
-            QMessageBox.information(self, "字典管理", "请先选择一个字典域或字典项")
+            MessageBox.information(self, "字典管理", "请先选择一个字典域或字典项")
             return
         if node.data(0, _ROLE_KIND) not in (_KIND_DOMAIN, _KIND_ITEM, _KIND_RESULT):
-            QMessageBox.information(self, "字典管理", "请选择一个可修改的字典域或字典项")
+            MessageBox.information(self, "字典管理", "请选择一个可修改的字典域或字典项")
             return
         self._start_edit(node, 0)
 
@@ -760,11 +761,11 @@ class DictManageDialog(BaseDialog):
             elif kind in (_KIND_ITEM, _KIND_RESULT):
                 self._commit_item_edit(node, column)
         except DictError as exc:
-            QMessageBox.warning(self, "字典管理", str(exc))
+            MessageBox.warning(self, "字典管理", str(exc))
             self._revert_cell(node, column)
         except Exception as exc:
             logger.exception("保存字典编辑失败")
-            QMessageBox.critical(self, "字典管理", f"保存失败：{exc}")
+            MessageBox.critical(self, "字典管理", f"保存失败：{exc}")
             self._revert_cell(node, column)
 
     def _commit_domain_edit(self, node: QTreeWidgetItem, column: int) -> None:
@@ -968,7 +969,7 @@ class DictManageDialog(BaseDialog):
             # 字典域的同级 = 新建另一个字典域（新建域默认置顶）。
             self._new_domain()
         else:
-            QMessageBox.information(self, "字典管理", "请先选择一个字典域或字典项")
+            MessageBox.information(self, "字典管理", "请先选择一个字典域或字典项")
 
     def _on_add_child(self) -> None:
         node = self._tree.currentItem()
@@ -990,7 +991,7 @@ class DictManageDialog(BaseDialog):
                 "下级添加",
             )
         else:
-            QMessageBox.information(self, "字典管理", "请先选择一个字典域或字典项")
+            MessageBox.information(self, "字典管理", "请先选择一个字典域或字典项")
 
     def _on_new_domain(self) -> None:
         """左下 / 右键「新建字典域」：在当前字典表下新建一个空字典域。"""
@@ -999,7 +1000,7 @@ class DictManageDialog(BaseDialog):
     def _new_domain(self) -> None:
         """新建空字典域并置顶，随后直接进入改名（可再改说明）。"""
         if not self._category:
-            QMessageBox.information(self, "字典管理", "请先创建或选择一个字典表")
+            MessageBox.information(self, "字典管理", "请先创建或选择一个字典表")
             return
         try:
             existing = {d.domain for d in self._service.list_domains(self._category)}
@@ -1014,7 +1015,7 @@ class DictManageDialog(BaseDialog):
                 self._category, name, at_top=True
             )
         except DictError as exc:
-            QMessageBox.warning(self, "字典管理", str(exc))
+            MessageBox.warning(self, "字典管理", str(exc))
             return
         self._load_domains(select_domain_id=domain.id)
         node = self._domain_node_by_id(domain.id)
@@ -1036,7 +1037,7 @@ class DictManageDialog(BaseDialog):
             code = self._unique_item_code(dict_id)
             item = self._service.add_item(dict_id, code, "新字典项", parent_code)
         except DictError as exc:
-            QMessageBox.warning(self, "字典管理", str(exc))
+            MessageBox.warning(self, "字典管理", str(exc))
             return
         if parent_node is None:
             parent_node = self._domain_node_by_id(dict_id)
@@ -1084,7 +1085,7 @@ class DictManageDialog(BaseDialog):
     def _on_delete(self) -> None:
         node = self._tree.currentItem()
         if node is None:
-            QMessageBox.information(self, "字典管理", "请先选择一个字典域或字典项")
+            MessageBox.information(self, "字典管理", "请先选择一个字典域或字典项")
             return
         kind = node.data(0, _ROLE_KIND)
         try:
@@ -1118,22 +1119,22 @@ class DictManageDialog(BaseDialog):
                 self._load_domains()
                 self._status_label.setText(f"已删除字典域「{domain.domain}」（{removed} 条）")
                 return
-            QMessageBox.information(self, "字典管理", "请选择一个可删除的字典域或字典项")
+            MessageBox.information(self, "字典管理", "请选择一个可删除的字典域或字典项")
         except DictError as exc:
-            QMessageBox.warning(self, "字典管理", str(exc))
+            MessageBox.warning(self, "字典管理", str(exc))
         except Exception as exc:
             logger.exception("删除字典项失败")
-            QMessageBox.critical(self, "字典管理", f"删除失败：{exc}")
+            MessageBox.critical(self, "字典管理", f"删除失败：{exc}")
 
     def _confirm(self, text: str) -> bool:
-        ret = QMessageBox.question(
+        ret = MessageBox.question(
             self,
             "删除确认",
             text,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
         )
-        return ret == QMessageBox.StandardButton.Yes
+        return ret == MessageBox.StandardButton.Yes
 
     # ===================================================== 搜索
 
@@ -1151,7 +1152,7 @@ class DictManageDialog(BaseDialog):
         try:
             items = self._service.search(self._category, keyword, limit=DEFAULT_SEARCH_LIMIT)
         except DictError as exc:
-            QMessageBox.warning(self, "字典管理", str(exc))
+            MessageBox.warning(self, "字典管理", str(exc))
             return
         # **保持原来的「字典域 → 字典项」结构**：先建域树，再隐藏不匹配的
         # 数据。这样搜「地貌」时域节点本身还在，可以直接选中后删掉整个域
@@ -1221,7 +1222,7 @@ class DictManageDialog(BaseDialog):
 
     def _on_import(self) -> None:
         if not self._category:
-            QMessageBox.information(self, "Excel导入", "请先创建或选择一个字典表")
+            MessageBox.information(self, "Excel导入", "请先创建或选择一个字典表")
             return
         path = open_file_dir(
             self,
@@ -1232,19 +1233,19 @@ class DictManageDialog(BaseDialog):
         )
         if not path:
             return
-        ret = QMessageBox.question(
+        ret = MessageBox.question(
             self,
             "Excel导入",
             f"文件里的全部字典将导入当前字典表「{self._category}」。\n\n"
             "导入前是否清空文件中出现的同名字典域？\n"
             "「是」= 同名域先清空再导入（替换）\n"
             "「否」= 合并更新（保留原有多余条目）",
-            QMessageBox.StandardButton.Yes
-            | QMessageBox.StandardButton.No
-            | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes
+            | MessageBox.StandardButton.No
+            | MessageBox.StandardButton.Cancel,
+            MessageBox.StandardButton.No,
         )
-        if ret == QMessageBox.StandardButton.Cancel:
+        if ret == MessageBox.StandardButton.Cancel:
             return
         try:
             with self._wait_cursor():
@@ -1252,14 +1253,14 @@ class DictManageDialog(BaseDialog):
                     path,
                     service=self._service,
                     category=self._category,
-                    replace_domains=ret == QMessageBox.StandardButton.Yes,
+                    replace_domains=ret == MessageBox.StandardButton.Yes,
                 )
         except (DictImportError, DictError) as exc:
-            QMessageBox.warning(self, "Excel导入失败", str(exc))
+            MessageBox.warning(self, "Excel导入失败", str(exc))
             return
         except Exception as exc:
             logger.exception("Excel导入失败")
-            QMessageBox.critical(self, "Excel导入失败", str(exc))
+            MessageBox.critical(self, "Excel导入失败", str(exc))
             return
         self._load_domains()
         lines = [
@@ -1276,11 +1277,11 @@ class DictManageDialog(BaseDialog):
             lines.extend(f"· {message}" for message in report.warnings[:8])
             if report.has_more_warnings:
                 lines.append(f"……另有 {report.warning_total - len(report.warnings)} 条，详见日志")
-        QMessageBox.information(self, "Excel导入完成", "\n".join(lines))
+        MessageBox.information(self, "Excel导入完成", "\n".join(lines))
 
     def _on_export(self) -> None:
         if not self._category:
-            QMessageBox.information(self, "Excel导出", "请先创建或选择一个字典表")
+            MessageBox.information(self, "Excel导出", "请先创建或选择一个字典表")
             return
         safe_name = re.sub(r'[\\/:*?"<>|]+', "_", self._category).strip() or "业务字典"
         path = save_file(
@@ -1298,13 +1299,13 @@ class DictManageDialog(BaseDialog):
                     written, service=self._service, category=self._category
                 )
         except DictExportError as exc:
-            QMessageBox.warning(self, "Excel导出失败", str(exc))
+            MessageBox.warning(self, "Excel导出失败", str(exc))
             return
         except Exception as exc:
             logger.exception("Excel导出失败")
-            QMessageBox.critical(self, "Excel导出失败", str(exc))
+            MessageBox.critical(self, "Excel导出失败", str(exc))
             return
-        QMessageBox.information(
+        MessageBox.information(
             self,
             "Excel导出完成",
             f"已导出字典表「{self._category}」的 {count} 条字典项到：\n{written}",

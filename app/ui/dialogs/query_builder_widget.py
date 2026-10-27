@@ -43,7 +43,6 @@ from qgis.PyQt.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPushButton,
     QSplitter,
     QStyle,
@@ -53,6 +52,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from app.core.util.dict_values import layer_dict_field_names, load_field_dict
+from app.ui.common.message_box import MessageBox
 from app.ui.tools.feature_attrs import field_alias
 
 _OPERATORS = [
@@ -390,11 +390,11 @@ class QueryBuilderWidget(QWidget):
         """统计当前条件匹配的要素数。"""
         condition = self.condition()
         if not condition:
-            QMessageBox.warning(self, "警告", "请输入有效的筛选条件！")
+            MessageBox.warning(self, "警告", "请输入有效的筛选条件！")
             return
         error = self.condition_error(condition)
         if error is not None:
-            QMessageBox.critical(self, "测试失败", error)
+            MessageBox.critical(self, "测试失败", error)
             return
         self.test_condition_btn.setEnabled(False)
         self.test_condition_btn.setText("查询中…")
@@ -411,11 +411,11 @@ class QueryBuilderWidget(QWidget):
 
     def _on_test_counted(self, count: int) -> None:
         self._reset_test_btn()
-        QMessageBox.information(self, "测试成功", f"条件合法！\n匹配要素：{count}")
+        MessageBox.information(self, "测试成功", f"条件合法！\n匹配要素：{count}")
 
     def _on_test_failed(self, message: str) -> None:
         self._reset_test_btn()
-        QMessageBox.critical(self, "测试失败", f"查询执行异常！\n{message}")
+        MessageBox.critical(self, "测试失败", f"查询执行异常！\n{message}")
 
     def cancel_test(self) -> None:
         """关闭 / 隐藏编辑器时取消后台计数，避免线程继续占用图层。"""
@@ -715,11 +715,11 @@ class QueryBuilderWidget(QWidget):
     def _load_values(self, sample: bool = True, sample_count: int = _SAMPLE_COUNT) -> None:
         field_name = self.current_field
         if not field_name or self.layer is None:
-            QMessageBox.warning(self, "警告", "无效字段或图层，无法加载值！")
+            MessageBox.warning(self, "警告", "无效字段或图层，无法加载值！")
             return
         field_name = str(field_name)
         if self.layer.fields().indexOf(field_name) < 0:
-            QMessageBox.warning(self, "警告", "无效字段或图层，无法加载值！")
+            MessageBox.warning(self, "警告", "无效字段或图层，无法加载值！")
             return
 
         labels = self._domain_labels(field_name)

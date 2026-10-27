@@ -11,9 +11,12 @@
 4. tar.gz 只允许普通文件 / 目录，拒绝绝对路径、``..``、符号链接、设备文件；
 5. 解压后递归 ``chown root:root`` 并清除 setuid/setgid。
 
-安装流程：等旧进程退出 → 当前目录改名为备份 → 解压树换入 → 校验
-``build_info.json`` 版本 → 以原用户身份重启 → 等 ``.startup-ok`` 健康标记。
-失败自动回滚并拉起旧版本。
+安装流程：验签 / 校验安装包 → 解压到 staging → 等旧进程退出 → 当前目录改名
+为备份 → 解压树换入 → 以原用户身份重启 → 等 ``.startup-ok`` 健康标记。失败
+自动回滚并拉起旧版本。
+
+安装进度（校验 / 解压百分比 / 等待退出）会原子写入任务里的 ``statusFile``，
+供客户端更新对话框显示；旧版客户端不传这个字段时只写日志，行为不变。
 
 只依赖 Python 3 标准库（麒麟 V10 自带 python3），不 import 项目代码——更新时
 旧代码目录可能正被替换。
@@ -31,6 +34,7 @@ import os
 import posixpath
 import pwd
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -44,6 +48,13 @@ STAGING_DIR = "/opt/.qgis_app.staging"
 BACKUP_DIR = "/opt/.qgis_app.backup"
 LOG_FILE = "/var/log/qgis_dev-updater.log"
 KEY_ID = "cbac7533ef6de3b5"
+
+#: 更新器能力版本。客户端（app/update/launcher.py）用正则读这一行判断是否
+#: 支持安装进度：>=2 才会在任务里带 statusFile 并轮询。改动这行格式会破坏判断。
+HELPER_VERSION = 2
+
+#: 进度文件固定文件名（父目录必须是调用者自己的更新目录）
+STATUS_FILE_NAME = "install-status.json"
 
 PUBLIC_KEY_PEM = """-----BEGIN PUBLIC KEY-----
 MIIBojANBgkqhkiG9w0BAQEFAAOCAY8AMIIBigKCAYEA0zYngPOfxK3VBuKpFu2m
@@ -83,6 +94,193 @@ def log(message):
         print(line, file=sys.stderr)
     except OSError:
         pass
+
+
+# --------------------------------------------------------------------- 进度
+
+
+def _status_target(job, user):
+    """校验任务里的 ``statusFile``，返回 ``(path, dir_fd)``。
+
+    不可信任务不能指挥 root 任意写文件，因此只接受调用者自己拥有的目录下的
+    固定文件名。校验通过后把父目录**用 fd 固定住**：之后所有写入都相对这个
+    fd 进行，调用者再也不能把父目录换成指向 /etc 的符号链接（仅校验路径时的
+    TOCTOU 会让 root 在任意目录创建、chown、替换 install-status.json）。
+
+    Windows 单测没有 ``O_DIRECTORY`` / dir_fd，退化为只校验路径（生产环境
+    只有 Linux）。校验失败返回 ``(None, None)``：只是没有进度，不影响安装。
+    """
+    raw = job.get("statusFile")
+    if not isinstance(raw, str) or not raw.strip():
+        return None, None
+    path = os.path.abspath(raw.strip())
+    if os.path.basename(path) != STATUS_FILE_NAME:
+        return None, None
+    parent = os.path.dirname(path)
+
+    if os.name != "posix" or not hasattr(os, "O_DIRECTORY"):
+        try:
+            parent_stat = os.stat(parent)
+        except (OSError, ValueError):
+            # ValueError: 路径里带 NUL（不可信任务）；只是没有进度，不能中断安装
+            return None, None
+        if not os.path.isdir(parent) or parent_stat.st_uid != user.pw_uid:
+            return None, None
+        return path, None
+
+    flags = os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        dir_fd = os.open(parent, flags)
+    except (OSError, ValueError):
+        # ValueError: 路径里带 NUL（不可信任务）；只是没有进度，不能中断安装
+        return None, None
+    try:
+        parent_stat = os.fstat(dir_fd)
+        if not stat.S_ISDIR(parent_stat.st_mode):
+            raise ValueError("不是目录")
+        if parent_stat.st_uid != user.pw_uid:
+            raise ValueError("目录属主不是当前用户")
+        if parent_stat.st_mode & 0o002:
+            raise ValueError("目录对其它用户可写")
+        # 不拒绝“组可写”：麒麟默认 umask 0002，更新目录就是 0775。目录 fd +
+        # O_EXCL 已保证组内用户无法让 root 写穿到别的目录，最多干扰这份纯展示
+        # 的进度文件（客户端有首条进度超时兜底）。
+    except (OSError, ValueError):
+        os.close(dir_fd)
+        return None, None
+    return path, dir_fd
+
+
+class StatusReporter:
+    """把安装阶段原子写入客户端可读的 JSON，供更新对话框显示进度。
+
+    纯展示用途：任何校验 / 写入失败都只记一次日志，绝不中断安装。
+    """
+
+    def __init__(self, job, user):
+        self._path, self._dir_fd = _status_target(job, user)
+        self._uid = user.pw_uid
+        self._gid = user.pw_gid
+        self._job_id = str(job.get("jobId") or "")
+        self._version = str(job.get("expectedVersion") or "")
+        self._last = 0.0
+        self._warned = False
+        if self._path is None:
+            log("未启用安装进度上报（任务缺少有效的 statusFile）")
+
+    @property
+    def enabled(self):
+        return self._path is not None
+
+    def close(self):
+        """释放固定住的目录 fd（安装结束 / 安装失败时调用）。"""
+        self._path = None
+        if self._dir_fd is not None:
+            try:
+                os.close(self._dir_fd)
+            except OSError:
+                pass
+            self._dir_fd = None
+
+    def set(self, phase, message, done=None, total=None, percent=None, force=True):
+        if self._path is None:
+            return
+        now = time.time()
+        # 解压 1 万多个文件时每 0.4 秒落一次盘足够了，避免拖慢安装
+        if not force and now - self._last < 0.4:
+            return
+        self._last = now
+        if percent is None and total:
+            percent = int((done or 0) * 100 / total)
+        payload = {
+            "schema": 1,
+            "jobId": self._job_id,
+            "version": self._version,
+            "phase": phase,
+            "message": message,
+            "ts": now,
+            "pid": os.getpid(),
+        }
+        if done is not None:
+            payload["done"] = int(done)
+        if total is not None:
+            payload["total"] = int(total)
+        if percent is not None:
+            payload["percent"] = max(0, min(100, int(percent)))
+        try:
+            if self._dir_fd is not None:
+                self._write_dir(self._dir_fd, payload)
+            else:
+                # 只在 Windows 单测里走到：没有 dir_fd 的路径写入
+                self._write_path(payload)
+        except Exception as exc:  # noqa: BLE001 - 进度纯展示，任何异常都不能中断安装
+            # 不只是 OSError：Windows 老版本没有 os.fchmod（AttributeError）、
+            # job 字段异常时 json.dump 会抛 TypeError / ValueError。
+            self._warn(exc)
+
+    def _write_dir(self, dir_fd, payload):
+        """相对固定住的目录 fd 写入（不会跟随被替换掉的父目录）。"""
+        temp = STATUS_FILE_NAME + ".tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            try:
+                os.unlink(temp, dir_fd=dir_fd)
+            except FileNotFoundError:
+                pass
+            fd = os.open(temp, flags, 0o600, dir_fd=dir_fd)
+            try:
+                try:
+                    os.fchown(fd, self._uid, self._gid)
+                except (OSError, AttributeError):
+                    pass
+                os.fchmod(fd, 0o644)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    fd = -1
+                    json.dump(payload, handle, ensure_ascii=False)
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+            os.replace(temp, STATUS_FILE_NAME, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        except OSError as exc:
+            self._warn(exc)
+
+    def _write_path(self, payload):
+        path = self._path
+        temp = path + ".tmp"
+        try:
+            # 用 O_NOFOLLOW + O_EXCL 创建，避免父目录里被预置指向 /etc/* 的
+            # 符号链接；chmod/chown 作用在这个 fd 上，os.replace 只替换目录项。
+            try:
+                os.unlink(temp)
+            except FileNotFoundError:
+                pass
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(temp, flags, 0o600)
+            try:
+                try:
+                    os.fchown(fd, self._uid, self._gid)
+                except (OSError, AttributeError):
+                    # Windows 单测没有 os.fchown；生产环境（Linux）有
+                    pass
+                try:
+                    os.fchmod(fd, 0o644)
+                except (OSError, AttributeError):
+                    # Windows 3.13 之前没有 os.fchmod；单测写入不关心权限
+                    pass
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    fd = -1
+                    json.dump(payload, handle, ensure_ascii=False)
+            finally:
+                if fd >= 0:
+                    os.close(fd)
+            os.replace(temp, path)
+        except OSError as exc:
+            self._warn(exc)
+
+    def _warn(self, exc):
+        if not self._warned:
+            self._warned = True
+            log("安装进度上报失败（不影响安装）：%s" % exc)
 
 
 # --------------------------------------------------------------------- RSA
@@ -259,7 +457,7 @@ def verify_job(job):
     return manifest, package
 
 
-def verify_package(package_path, package):
+def verify_package(package_path, package, status=None):
     if not os.path.isfile(package_path) or os.path.islink(package_path):
         raise UpdateFailure("安装包不存在或是符号链接")
     expected = str(package.get("sha256")).lower()
@@ -268,11 +466,24 @@ def verify_package(package_path, package):
     if actual_size != size:
         raise UpdateFailure("安装包大小不符：%s != %s" % (actual_size, size))
     hasher = hashlib.sha256()
+    done = 0
     with open(package_path, "rb") as handle:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             hasher.update(chunk)
+            done += len(chunk)
+            if status is not None:
+                status.set(
+                    "verify",
+                    "正在校验更新包…",
+                    done=done,
+                    total=size,
+                    force=False,
+                )
     if hasher.hexdigest() != expected:
         raise UpdateFailure("安装包 SHA-256 校验失败")
+    if status is not None:
+        # 最后一块可能被 0.4s 节流吞掉，这里强制补一个 100%，避免一直停在半路
+        status.set("verify", "正在校验更新包… 100%", done=size, total=size, percent=100)
 
 
 # --------------------------------------------------------------------- 解压
@@ -325,14 +536,38 @@ def _chown_tree(root):
             os.chmod(path, mode | 0o444)
 
 
-def extract_package(package_path):
+def extract_package(package_path, status=None):
     if os.path.exists(STAGING_DIR):
         shutil.rmtree(STAGING_DIR)
     os.makedirs(STAGING_DIR, 0o755)
+    # getmembers() 要把整个 gz 解一遍（几十秒），先切到解压阶段并显示忙碌动画，
+    # 否则对话框还停在“正在校验更新包”。
+    if status is not None:
+        status.set("extract", "正在读取更新包目录…")
+    total = 0
     with tarfile.open(package_path, "r:gz") as archive:
         members = _safe_members(archive)
-        for member in members:
+        total = len(members)
+        for index, member in enumerate(members, 1):
             archive.extract(member, STAGING_DIR)
+            if status is not None:
+                percent = int(index * 100 / total) if total else None
+                status.set(
+                    "extract",
+                    "正在解压更新包…" + (" %d%%" % percent if percent is not None else ""),
+                    done=index,
+                    total=total,
+                    percent=percent,
+                    force=False,
+                )
+    if status is not None:
+        status.set(
+            "extract",
+            "正在设置文件权限…",
+            done=total,
+            total=total,
+            percent=100,
+        )
     _chown_tree(STAGING_DIR)
     info_path = os.path.join(STAGING_DIR, "build_info.json")
     if not os.path.isfile(info_path):
@@ -497,11 +732,30 @@ def install(job):
     if not os.path.isdir(marker_dir) or marker_stat.st_uid != user.pw_uid:
         raise UpdateFailure("健康标记目录不属于当前用户")
 
+    # 进度上报只是给客户端画进度条：statusFile 缺失/非法时 StatusReporter
+    # 自动禁用，安装流程照旧。
+    status = StatusReporter(job, user)
+    status.set("starting", "更新程序已启动，正在校验更新包…")
+    try:
+        return _install(job, package_path, user_env, user, marker_dir, status)
+    except UpdateFailure as exc:
+        status.set("error", "更新失败：%s" % exc)
+        raise
+    except Exception as exc:  # noqa: BLE001 —— 任何异常都要把失败阶段告诉客户端
+        status.set("error", "更新器异常：%s" % exc)
+        raise
+    finally:
+        status.close()
+
+
+def _install(job, package_path, user_env, user, marker_dir, status):
     manifest, package = verify_job(job)
-    verify_package(package_path, package)
+    status.set("verify", "正在校验更新包…")
+    verify_package(package_path, package, status=status)
     log("清单验签与安装包校验通过：version=%s packageId=%s" % (manifest.get("version"), package.get("id")))
 
     if job.get("dryRun"):
+        status.set("done", "校验通过（试运行）")
         return 0
 
     if current_version_code() > int(manifest.get("versionCode")):
@@ -515,20 +769,24 @@ def install(job):
         else:
             shutil.rmtree(BACKUP_DIR)
 
-    version_code = extract_package(package_path)
+    version_code = extract_package(package_path, status=status)
     expected_code = _require_int(job, "expectedVersionCode")
     if version_code < expected_code:
         raise UpdateFailure("包内版本 %s 低于清单版本 %s" % (version_code, expected_code))
 
+    # 从这里开始等旧进程退出：客户端看到这个阶段就可以关闭自己了。
+    status.set("wait_for_exit", "更新包已准备就绪，正在等待当前程序退出…")
     pid = _require_int(job, "pid")
     if not wait_process_exit(pid, _int_or(job, "waitSeconds", WAIT_EXIT_SECONDS)):
         raise UpdateFailure("等待旧进程退出超时")
     time.sleep(1)
 
+    status.set("backup", "正在备份当前版本…")
     try:
         os.rename(APP_DIR, BACKUP_DIR)
     except OSError as exc:
         raise UpdateFailure("备份当前版本失败：%s" % exc)
+    status.set("swap", "正在替换程序文件…")
     try:
         os.rename(STAGING_DIR, APP_DIR)
     except OSError as exc:
@@ -553,6 +811,7 @@ def install(job):
         except OSError:
             pass
 
+    status.set("launch", "正在启动新版本…")
     try:
         new_pid = launch_as_user(user, user_env)
     except OSError as exc:
@@ -563,6 +822,7 @@ def install(job):
             except OSError:
                 log("回滚后拉起旧版本也失败")
         raise UpdateFailure("启动新版本失败")
+    status.set("health", "正在确认新版本正常启动…")
     health = wait_health(
         marker_dir,
         expected_code,
@@ -583,6 +843,7 @@ def install(job):
     shutil.rmtree(BACKUP_DIR, ignore_errors=True)
     shutil.rmtree(STAGING_DIR, ignore_errors=True)
     log("更新完成：%s" % manifest.get("version"))
+    status.set("done", "更新完成：%s" % manifest.get("version"))
     return 0
 
 

@@ -18,7 +18,8 @@ from __future__ import annotations
 
 from typing import Optional
 
-from qgis.PyQt.QtCore import QDate, QDateTime, QTime, Qt, QVariant
+from qgis.core import QgsField, QgsVectorLayer
+from qgis.PyQt.QtCore import QDate, QDateTime, Qt, QTime, QVariant
 from qgis.PyQt.QtWidgets import (
     QDialogButtonBox,
     QFormLayout,
@@ -26,16 +27,14 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
-from qgis.core import QgsField, QgsVectorLayer
-
 from app.core.domain.check.space_index import clear_spatial_index
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.tools.feature_attrs import auto_id_field_index, uid_field_index
 
 #: 空值占位文本：既表示"没值"，也是保存时转真 NULL 的判据
@@ -184,13 +183,13 @@ class CustomAttrDialog(BaseDialog):
             try:
                 value = self._parse_field_value(field, editor.text())
             except ValueError as exc:
-                QMessageBox.warning(self, "属性错误", str(exc))
+                MessageBox.warning(self, "属性错误", str(exc))
                 return
             parsed.append((name, value))
         for name, value in parsed:
             self.feature.setAttribute(name, value)
         if not self.layer.addFeature(self.feature):
-            QMessageBox.warning(self, "错误", "要素添加失败，请检查后重试！")
+            MessageBox.warning(self, "错误", "要素添加失败，请检查后重试！")
             return
         # 新增要素 → 空间索引缓存失效。不清的话点选 / 框选用的
         # ``intersect_features`` 会一直读旧索引，新画的要素怎么都选不中。

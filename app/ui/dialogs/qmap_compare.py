@@ -7,12 +7,12 @@
 
 from __future__ import annotations
 
+from qgis.core import QgsLayerTreeGroup, QgsLayerTreeLayer, QgsProject
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QButtonGroup,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QRadioButton,
     QSlider,
@@ -22,9 +22,9 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qgis.core import QgsLayerTreeGroup, QgsLayerTreeLayer, QgsProject
 
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.common.widgets import CenteredCheckDelegate
 from app.ui.tools.qmap_compare import (
     LENS_MAX_SIZE_RATE,
@@ -210,10 +210,10 @@ class QMapCompareDialog(BaseDialog):
     def _on_start(self) -> None:
         layers = self._checked_layers()
         if not layers:
-            QMessageBox.warning(self, "提示", "请至少勾选一个对比图层")
+            MessageBox.warning(self, "提示", "请至少勾选一个对比图层")
             return
         if self._mode() == "mirror" and len(layers) == 0:
-            QMessageBox.warning(self, "提示", "镜像分屏至少需要一个对比图层")
+            MessageBox.warning(self, "提示", "镜像分屏至少需要一个对比图层")
             return
         self.accept()
 

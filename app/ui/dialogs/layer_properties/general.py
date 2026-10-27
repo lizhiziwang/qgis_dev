@@ -26,7 +26,6 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QSizePolicy,
     QVBoxLayout,
@@ -35,6 +34,7 @@ from qgis.PyQt.QtWidgets import (
 
 from app.core.util.local_layer_loader import layer_source_container, layer_source_table
 from app.infra.logging import get_logger
+from app.ui.common.message_box import MessageBox
 from app.ui.common.slider import FlatSlider as QSlider
 from app.ui.dialogs.create_data_dialog import CrsComboBox
 from app.ui.dialogs.crs_pick_dialog import CrsPickDialog
@@ -301,7 +301,7 @@ class GeneralTab(LayerPropertyTab):
             QApplication.clipboard().setText(text)
         except Exception as exc:  # noqa: BLE001
             logger.error("复制数据范围失败: %s", exc, exc_info=True)
-            QMessageBox.warning(self, "图层属性", f"复制数据范围失败：{exc}")
+            MessageBox.warning(self, "图层属性", f"复制数据范围失败：{exc}")
 
     def _on_scale_toggled(self, checked: bool) -> None:
         self.min_scale_edit.setEnabled(checked)
@@ -338,7 +338,7 @@ class GeneralTab(LayerPropertyTab):
         except Exception as exc:  # noqa: BLE001
             # 槽里未捕获的异常在本环境会直接原生崩溃（见仓库备忘录），必须兜住
             logger.error("选择坐标系失败: %s", exc, exc_info=True)
-            QMessageBox.warning(self, "图层属性", f"选择坐标系失败：{exc}")
+            MessageBox.warning(self, "图层属性", f"选择坐标系失败：{exc}")
 
     def _on_set_data_source(self) -> None:
         """选新数据源文件：只暂存 + 回显，真正写回在 :meth:`apply`。"""
@@ -356,7 +356,7 @@ class GeneralTab(LayerPropertyTab):
             self.dataset_edit.setText(os.path.splitext(os.path.basename(path))[0])
         except Exception as exc:  # noqa: BLE001
             logger.error("选择数据源失败: %s", exc, exc_info=True)
-            QMessageBox.warning(self, "图层属性", f"选择数据源失败：{exc}")
+            MessageBox.warning(self, "图层属性", f"选择数据源失败：{exc}")
 
     def _on_recalc_extent(self) -> None:
         """重算数据范围。只刷新缓存的 extent，不改持久状态，故立刻生效。
@@ -381,7 +381,7 @@ class GeneralTab(LayerPropertyTab):
             self._show_extent(self._layer)
         except Exception as exc:  # noqa: BLE001
             logger.error("重新计算数据范围失败: %s", exc, exc_info=True)
-            QMessageBox.warning(self, "图层属性", f"重新计算数据范围失败：{exc}")
+            MessageBox.warning(self, "图层属性", f"重新计算数据范围失败：{exc}")
 
     # ------------------------------------------------------------- 写回
 
@@ -392,7 +392,7 @@ class GeneralTab(LayerPropertyTab):
 
         name = self.name_edit.text().strip()
         if not name:
-            QMessageBox.warning(self, "图层属性", "图层名不能为空")
+            MessageBox.warning(self, "图层属性", "图层名不能为空")
             self.name_edit.setFocus()
             return False
 
@@ -402,10 +402,10 @@ class GeneralTab(LayerPropertyTab):
             max_scale = _parse_scale(self.min_scale_edit.text(), "最小比例尺")
             min_scale = _parse_scale(self.max_scale_edit.text(), "最大比例尺")
         except ValueError as exc:
-            QMessageBox.warning(self, "图层属性", str(exc))
+            MessageBox.warning(self, "图层属性", str(exc))
             return False
         if use_scale and max_scale > 0 and min_scale > 0 and max_scale >= min_scale:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "图层属性", "最小比例尺的分母必须小于最大比例尺的分母"
             )
             return False
@@ -417,10 +417,10 @@ class GeneralTab(LayerPropertyTab):
                 layer.setDataSource(uri, name, provider)
             except Exception as exc:  # noqa: BLE001
                 logger.error("设置数据源失败: %s", exc, exc_info=True)
-                QMessageBox.warning(self, "图层属性", f"设置数据源失败：{exc}")
+                MessageBox.warning(self, "图层属性", f"设置数据源失败：{exc}")
                 return False
             if not layer.isValid():
-                QMessageBox.warning(self, "图层属性", f"新数据源无法加载：{uri}")
+                MessageBox.warning(self, "图层属性", f"新数据源无法加载：{uri}")
                 return False
             self._pending_source = None
 
@@ -432,7 +432,7 @@ class GeneralTab(LayerPropertyTab):
         if self.crs_combo.currentText().strip():
             crs = self.crs_combo.crs()
             if not crs.isValid():
-                QMessageBox.warning(
+                MessageBox.warning(
                     self,
                     "图层属性",
                     "坐标系统无效：请输入 EPSG 代码（如 4490）或从下拉候选里选一项",
@@ -450,7 +450,6 @@ class GeneralTab(LayerPropertyTab):
         if isinstance(layer, QgsVectorLayer):
             self.count_label.setText(str(layer.featureCount()))
         return True
-
 
 # ----------------------------------------------------------------- 工具函数
 

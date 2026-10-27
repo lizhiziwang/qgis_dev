@@ -13,12 +13,12 @@ from qgis.PyQt.QtCore import pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QDialog,
     QHBoxLayout,
-    QMessageBox,
     QPushButton,
     QVBoxLayout,
 )
 
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.dialogs.query_builder_widget import QueryBuilderWidget
 
 
@@ -105,7 +105,7 @@ class QueryBuilderDialog(BaseDialog):
             if cond:
                 error = self.widget.condition_error(cond)
                 if error is not None:
-                    QMessageBox.critical(self, "条件有误", error)
+                    MessageBox.critical(self, "条件有误", error)
                     return
             self.sqlConfirmed.emit(cond)
             self.accept()
@@ -118,16 +118,16 @@ class QueryBuilderDialog(BaseDialog):
             return
         error = self.widget.condition_error(cond)
         if error is not None:
-            QMessageBox.critical(self, "应用失败", error)
+            MessageBox.critical(self, "应用失败", error)
             return
         try:
             # 提供者可能拒绝（返回 False 时旧条件仍在）：不报成功、也不发信号，
             # 否则属性表模型会按新条件筛而图层还是旧子集，两边对不上。
             if not self.layer.setSubsetString(cond):
-                QMessageBox.critical(self, "应用失败", "图层提供者拒绝了该筛选条件，条件未生效！")
+                MessageBox.critical(self, "应用失败", "图层提供者拒绝了该筛选条件，条件未生效！")
                 return
             self.sqlConfirmed.emit(cond)
-            QMessageBox.information(self, "操作成功", f"已应用 SQL！\n剩余要素：{self.layer.featureCount()}")
+            MessageBox.information(self, "操作成功", f"已应用 SQL！\n剩余要素：{self.layer.featureCount()}")
             self.accept()
         except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "应用失败", str(e))
+            MessageBox.critical(self, "应用失败", str(e))

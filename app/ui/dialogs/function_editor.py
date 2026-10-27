@@ -30,7 +30,6 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPushButton,
     QSplitter,
     QVBoxLayout,
@@ -46,6 +45,7 @@ from app.env.user_expressions import (
 )
 from app.infra.logging import get_logger
 from app.ui.common.code_editor import CodeEditor
+from app.ui.common.message_box import MessageBox
 
 logger = get_logger(__name__)
 
@@ -200,17 +200,17 @@ class FunctionEditorWidget(QWidget):
         if not ok or not name:
             return
         if not _NAME_RE.match(name):
-            QMessageBox.warning(self, "新建函数文件", "文件名只能是字母、数字、下划线，且不能以数字开头。")
+            MessageBox.warning(self, "新建函数文件", "文件名只能是字母、数字、下划线，且不能以数字开头。")
             return
         self.save_if_modified()
         path = os.path.join(expressions_dir(), f"{name}.py")
         if os.path.exists(path):
-            QMessageBox.warning(self, "新建函数文件", f"文件已存在：{name}.py")
+            MessageBox.warning(self, "新建函数文件", f"文件已存在：{name}.py")
             self._reload_list(name)
             return
         _count, error = save_function_file(path, FUNCTION_TEMPLATE)
         if error is not None:
-            QMessageBox.warning(self, "新建函数文件", f"创建失败：\n{error}")
+            MessageBox.warning(self, "新建函数文件", f"创建失败：\n{error}")
         self._reload_list(name)
 
     def _delete_file(self) -> None:
@@ -219,13 +219,13 @@ class FunctionEditorWidget(QWidget):
             return
         name = current.text()
         path = current.data(Qt.ItemDataRole.UserRole)
-        if QMessageBox.question(
+        if MessageBox.question(
             self,
             "删除函数文件",
             f"确定删除 {name}.py 吗？该文件注册的函数会被注销。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
-        ) != QMessageBox.StandardButton.Yes:
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
+        ) != MessageBox.StandardButton.Yes:
             return
         delete_function_file(path)
         self._current_path = None
@@ -235,7 +235,7 @@ class FunctionEditorWidget(QWidget):
         if not self._current_path:
             current = self.file_list.currentItem()
             if current is None:
-                QMessageBox.information(self, "自定义函数", "请先新建一个函数文件。")
+                MessageBox.information(self, "自定义函数", "请先新建一个函数文件。")
                 return False
             self._current_path = current.data(Qt.ItemDataRole.UserRole)
         return self._save_path(self._current_path, silent=False)
@@ -253,7 +253,7 @@ class FunctionEditorWidget(QWidget):
             self.status.setStyleSheet("color: #c0392b;")
             self.status.setText(f"保存失败（{name}.py），已写入文件但未注册：\n{error.strip()}")
             if not silent:
-                QMessageBox.warning(self, "自定义函数", f"函数有错误，未能注册：\n\n{error}")
+                MessageBox.warning(self, "自定义函数", f"函数有错误，未能注册：\n\n{error}")
             return False
         self.editor.document().setModified(False)
         self.status.setStyleSheet("color: #2e7d32;")

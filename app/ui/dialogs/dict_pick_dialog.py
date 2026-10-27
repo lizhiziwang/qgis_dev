@@ -27,11 +27,6 @@ import sqlite3
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from app.core.domain.dict_manage import DictError, DictService
-from app.core.util.local_db_util import local_db_util
-from app.infra.logging import get_logger
-from app.ui.common.base_dialog import BaseDialog
-from app.ui.common.widgets import open_file_dir
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtGui import QBrush, QColor
 from qgis.PyQt.QtWidgets import (
@@ -41,12 +36,18 @@ from qgis.PyQt.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
 )
+
+from app.core.domain.dict_manage import DictError, DictService
+from app.core.util.local_db_util import local_db_util
+from app.infra.logging import get_logger
+from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
+from app.ui.common.widgets import open_file_dir
 
 logger = get_logger(__name__)
 
@@ -362,11 +363,11 @@ class DictPickDialog(BaseDialog):
                 self._local_db_path, name, source_category=source, dict_service=service
             )
         except DictTableError as exc:
-            QMessageBox.warning(self, "添加字典表", str(exc))
+            MessageBox.warning(self, "添加字典表", str(exc))
             return
         except Exception as exc:  # noqa: BLE001 —— 槽内异常不能冒出去
             logger.exception("添加本地字典表失败")
-            QMessageBox.warning(self, "添加字典表", f"创建失败：{exc}")
+            MessageBox.warning(self, "添加字典表", f"创建失败：{exc}")
             return
         self._normalize_names()
         self._load_categories(select_table=name)
@@ -421,7 +422,7 @@ class DictPickDialog(BaseDialog):
             return
         name = str(name or "").strip()
         if not name:
-            QMessageBox.warning(self, "导入外部字典", "字典表名称不能为空")
+            MessageBox.warning(self, "导入外部字典", "字典表名称不能为空")
             return
         if name != suggested:
             name = self._suggest_table_name(name)
@@ -431,18 +432,18 @@ class DictPickDialog(BaseDialog):
                 source, self._local_db_path, name, replace=True
             )
         except DictTableError as exc:
-            QMessageBox.warning(self, "导入外部字典", str(exc))
+            MessageBox.warning(self, "导入外部字典", str(exc))
             return
         except LocalDictExcelError as exc:
-            QMessageBox.warning(self, "导入外部字典", str(exc))
+            MessageBox.warning(self, "导入外部字典", str(exc))
             return
         except Exception as exc:  # noqa: BLE001 —— 槽内异常不能冒出去
             logger.exception("从 Excel 导入本地字典失败")
-            QMessageBox.warning(self, "导入外部字典", f"导入失败：{exc}")
+            MessageBox.warning(self, "导入外部字典", f"导入失败：{exc}")
             return
         self._normalize_names()
         self._load_categories(select_table=name)
-        QMessageBox.information(
+        MessageBox.information(
             self,
             "导入外部字典",
             f"已导入到字典表「{name}」：新增 {report.inserted} 条，"
@@ -460,10 +461,10 @@ class DictPickDialog(BaseDialog):
         )
 
         if not os.path.isfile(source):
-            QMessageBox.warning(self, "导入外部字典", f"文件不存在：{source}")
+            MessageBox.warning(self, "导入外部字典", f"文件不存在：{source}")
             return
         if os.path.abspath(source) == os.path.abspath(self._local_db_path):
-            QMessageBox.warning(self, "导入外部字典", "源库与当前库是同一个文件")
+            MessageBox.warning(self, "导入外部字典", "源库与当前库是同一个文件")
             return
         try:
             conn = sqlite3.connect(source, timeout=5.0)
@@ -475,10 +476,10 @@ class DictPickDialog(BaseDialog):
             finally:
                 conn.close()
         except sqlite3.Error as exc:
-            QMessageBox.warning(self, "导入外部字典", f"不是可读的本地库：{exc}")
+            MessageBox.warning(self, "导入外部字典", f"不是可读的本地库：{exc}")
             return
         if not rows:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "导入外部字典", "源库里没有登记为字典表的表（user_relation.type=dict）"
             )
             return
@@ -519,16 +520,16 @@ class DictPickDialog(BaseDialog):
             finally:
                 db.conn.close()
         except DictTableError as exc:
-            QMessageBox.warning(self, "导入外部字典", str(exc))
+            MessageBox.warning(self, "导入外部字典", str(exc))
             return
         except Exception as exc:  # noqa: BLE001 —— 槽内异常不能冒出去
             logger.exception("从本地库导入字典表失败")
-            QMessageBox.warning(self, "导入外部字典", f"导入失败：{exc}")
+            MessageBox.warning(self, "导入外部字典", f"导入失败：{exc}")
             return
         name = written[0] if written else ""
         self._normalize_names()
         self._load_categories(select_table=name)
-        QMessageBox.information(
+        MessageBox.information(
             self, "导入外部字典", f"已导入字典表：{'、'.join(written)}"
         )
 

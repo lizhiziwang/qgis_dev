@@ -72,7 +72,6 @@ from qgis.PyQt.QtWidgets import (
     QInputDialog,
     QLabel,
     QMenu,
-    QMessageBox,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -94,6 +93,7 @@ from app.core.util.local_db_util import (
 from app.infra.logging import get_logger
 from app.ui.common import tool_icons
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.common.theme import ThemeManager
 from app.ui.common.widgets import reveal_in_file_manager, save_file
 from app.ui.dialogs.add_connection import AddConnectionDialog
@@ -1402,7 +1402,7 @@ class DataManageDock(QWidget):
             except LocalTableError as exc:
                 ok, error = False, str(exc)
         if not ok:
-            QMessageBox.warning(self, "编辑名称", error or "重命名失败")
+            MessageBox.warning(self, "编辑名称", error or "重命名失败")
             return
         self._current_detail = None
         self.refresh_database(live)
@@ -1438,7 +1438,7 @@ class DataManageDock(QWidget):
         live = self._cache_db(db) or db
         path = str(live.get("path") or "")
         if not path:
-            QMessageBox.warning(self, "添加字典表", "缺少库文件路径")
+            MessageBox.warning(self, "添加字典表", "缺少库文件路径")
             return
         from app.core.domain.create_data.dict_tables import (
             DictTableError,
@@ -1469,12 +1469,12 @@ class DataManageDock(QWidget):
                 path, name, source_category=source, dict_service=service
             )
         except DictTableError as exc:
-            QMessageBox.warning(self, "添加字典表", str(exc))
+            MessageBox.warning(self, "添加字典表", str(exc))
             return
         self.refresh_database(live)
         self._select_leaf(live, "dict", name)
         self._show_detail(live, "dict", name)
-        QMessageBox.information(
+        MessageBox.information(
             self,
             "添加字典表",
             f"已创建字典表「{name}」" + (f"，复制 {count} 条字典项" if count else "（空表）"),
@@ -1500,9 +1500,9 @@ class DataManageDock(QWidget):
         try:
             written, count = export_field_structure_xls(target, path, name)
         except FieldStructureError as exc:
-            QMessageBox.warning(self, "导出字段结构", str(exc))
+            MessageBox.warning(self, "导出字段结构", str(exc))
             return
-        QMessageBox.information(
+        MessageBox.information(
             self,
             "导出字段结构",
             f"已导出 {count} 个字段到：\n{written}",
@@ -1519,10 +1519,10 @@ class DataManageDock(QWidget):
             issues = check_field_structure(path, name, dict_service=DictService())
         except Exception as exc:  # noqa: BLE001 —— 槽内异常会 native 崩溃
             logger.error("字段结构检查失败：%s", exc, exc_info=True)
-            QMessageBox.warning(self, "检查字段结构", f"检查失败：{exc}")
+            MessageBox.warning(self, "检查字段结构", f"检查失败：{exc}")
             return
         if not issues:
-            QMessageBox.information(self, "检查字段结构", "字段结构检查通过")
+            MessageBox.information(self, "检查字段结构", "字段结构检查通过")
             return
         from app.ui.common.modeless import show_modeless
         from app.ui.dialogs.field_check_dialog import FieldCheckDialog

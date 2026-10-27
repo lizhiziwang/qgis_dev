@@ -18,7 +18,6 @@ from qgis.PyQt.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QSizePolicy,
@@ -32,6 +31,7 @@ from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.ui.common.algo_desc import make_description_panel
 from app.ui.common.base_dialog import BaseDialog, make_scrollable
+from app.ui.common.message_box import MessageBox
 
 logger = get_logger(__name__)
 
@@ -244,7 +244,7 @@ class VectorFormatDialog(BaseDialog):
         if not path:
             return
         if os.path.isdir(path):
-            QMessageBox.warning(
+            MessageBox.warning(
                 self,
                 "无法直接选择目录",
                 "GDB 等目录型数据请先在主界面加载，再在「输入图层」里选择。",
@@ -278,7 +278,7 @@ class VectorFormatDialog(BaseDialog):
         finally:
             QApplication.restoreOverrideCursor()
         if not candidates:
-            QMessageBox.warning(self, "无法打开", f"无法识别为矢量数据：\n{path}")
+            MessageBox.warning(self, "无法打开", f"无法识别为矢量数据：\n{path}")
             return
 
         chosen = None
@@ -303,7 +303,7 @@ class VectorFormatDialog(BaseDialog):
             except RuntimeError:
                 continue
         if chosen is None:
-            QMessageBox.warning(self, "无法打开", f"无法识别为矢量数据：\n{path}")
+            MessageBox.warning(self, "无法打开", f"无法识别为矢量数据：\n{path}")
             return
         self._populate_layers()
         idx = self.input_combo.findData(chosen)
@@ -391,14 +391,14 @@ class VectorFormatDialog(BaseDialog):
         self.output_path_edit.setText(path)
 
         if os.path.exists(path):
-            answer = QMessageBox.question(
+            answer = MessageBox.question(
                 self,
                 "确认覆盖",
                 f"输出文件已存在，继续将覆盖整个文件（已有图层会丢失）。\n{path}\n\n是否继续？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+                MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+                MessageBox.StandardButton.No,
             )
-            if answer != QMessageBox.StandardButton.Yes:
+            if answer != MessageBox.StandardButton.Yes:
                 return
 
         only_selected = self.only_selected_check.isChecked()

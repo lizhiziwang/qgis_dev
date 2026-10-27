@@ -14,7 +14,6 @@ from qgis.core import QgsProject, QgsVectorLayer
 from qgis.PyQt.QtCore import QTimer, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
-    QMessageBox,
     QPushButton,
     QTabWidget,
     QVBoxLayout,
@@ -22,6 +21,7 @@ from qgis.PyQt.QtWidgets import (
 
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.common.wheel_guard import WheelValueGuard
 from app.ui.dialogs.layer_properties.base import PlaceholderTab
 from app.ui.dialogs.layer_properties.condition import ConditionTab
@@ -143,7 +143,7 @@ class LayerPropertiesDialog(BaseDialog):
                 ok = applier(self.layer)
             except Exception as exc:
                 logger.error("应用图层属性失败: %s", exc, exc_info=True)
-                QMessageBox.warning(self, "图层属性", f"应用失败：{exc}")
+                MessageBox.warning(self, "图层属性", f"应用失败：{exc}")
                 return False
             if not ok:
                 return False

@@ -23,13 +23,14 @@ from qgis.core import (
     QgsVectorLayer,
 )
 from qgis.PyQt.QtCore import QTimer
-from qgis.PyQt.QtWidgets import QDialog, QMessageBox
+from qgis.PyQt.QtWidgets import QDialog
 from qgis.PyQt.QtXml import QDomDocument
 
 from app.core.domain.basemap import add_base_tile_layer
 from app.env.config import AppConfig
 from app.infra.fs.paths import Paths
 from app.infra.logging import get_logger
+from app.ui.common.message_box import MessageBox
 from app.ui.common.recent_projects import add_recent
 from app.ui.common.widgets import save_file
 from app.ui.dialogs.startup_project import StartupProjectDialog
@@ -42,7 +43,6 @@ _PROJECT_FILTER = "工程文件 (*.pgs);;所有文件 (*)"
 
 #: 默认坐标系兜底（配置读不到时用）：CGCS2000 / 中国 2000，见 :meth:`ProjectOpsMixin._default_crs_authid`
 _DEFAULT_CRS_AUTHID = "EPSG:4490"
-
 
 
 class ProjectOpsMixin:
@@ -331,14 +331,14 @@ class ProjectOpsMixin:
         """新建工程：先弹窗输入工程名，创建后把名字带到右侧工程 Dock 显示。"""
         # 已有图层时先确认清空（避免输入完名字又取消）
         if self.project.mapLayers():
-            ret = QMessageBox.question(
+            ret = MessageBox.question(
                 self,
                 "新建工程",
                 "将清空当前所有图层并新建工程，是否继续？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+                MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+                MessageBox.StandardButton.No,
             )
-            if ret != QMessageBox.StandardButton.Yes:
+            if ret != MessageBox.StandardButton.Yes:
                 return
         name = self._ask_project_name()
         if name is None:
@@ -365,7 +365,7 @@ class ProjectOpsMixin:
             name = name.strip()
             if name:
                 return name
-            QMessageBox.warning(self, "提示", "工程名不能为空")
+            MessageBox.warning(self, "提示", "工程名不能为空")
 
     def _on_project_create(self, name: str) -> None:
         """真正创建工程：清空图层、建两个分组、设工程名（Dock 展示名字）。"""
@@ -491,13 +491,13 @@ class ProjectOpsMixin:
             saved = self.project.write(path)
         except Exception as exc:  # noqa: BLE001
             logger.warning("保存工程失败：%s", exc, exc_info=True)
-            QMessageBox.warning(self, "保存失败", f"无法保存工程：{path}\n{exc}")
+            MessageBox.warning(self, "保存失败", f"无法保存工程：{path}\n{exc}")
             return False
         finally:
             self._end_layer_loading()
 
         if not saved:
-            QMessageBox.warning(self, "保存失败", f"无法保存工程：{path}")
+            MessageBox.warning(self, "保存失败", f"无法保存工程：{path}")
             return False
         title = self.project.title() or Path(path).stem
         self.project.setTitle(title)
@@ -516,7 +516,7 @@ class ProjectOpsMixin:
     def _on_save_project_as(self) -> bool:
         """另存为工程：选路径后写入。返回是否已保存。"""
         if not self.project.mapLayers():
-            QMessageBox.information(self, "提示", "当前没有可保存的图层")
+            MessageBox.information(self, "提示", "当前没有可保存的图层")
             return False
         path = save_file(
             self,
@@ -562,18 +562,18 @@ class ProjectOpsMixin:
             if isinstance(lyr, QgsVectorLayer) and lyr.isEditable() and lyr.isModified()
         ]
         for layer in dirty:
-            ret = QMessageBox.question(
+            ret = MessageBox.question(
                 self,
                 "关闭应用",
                 f"图层「{layer.name()}」有未保存的修改，是否保存？",
-                QMessageBox.StandardButton.Save
-                | QMessageBox.StandardButton.Discard
-                | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Save,
+                MessageBox.StandardButton.Save
+                | MessageBox.StandardButton.Discard
+                | MessageBox.StandardButton.Cancel,
+                MessageBox.StandardButton.Save,
             )
-            if ret == QMessageBox.StandardButton.Cancel:
+            if ret == MessageBox.StandardButton.Cancel:
                 return False
-            if ret == QMessageBox.StandardButton.Save:
+            if ret == MessageBox.StandardButton.Save:
                 if not self.editing_service.stop(layer, save=True):
                     logger.error("关闭前保存图层「%s」失败，中止关闭", layer.name())
                     return False
@@ -601,18 +601,18 @@ class ProjectOpsMixin:
             return True
         path = getattr(self, "_project_path", None)
         hint = f"将保存到：{path}" if path else "当前工程尚未保存到文件。"
-        ret = QMessageBox.question(
+        ret = MessageBox.question(
             self,
             "关闭应用",
             f"是否保存当前工程？\n{hint}",
-            QMessageBox.StandardButton.Yes
-            | QMessageBox.StandardButton.No
-            | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Yes,
+            MessageBox.StandardButton.Yes
+            | MessageBox.StandardButton.No
+            | MessageBox.StandardButton.Cancel,
+            MessageBox.StandardButton.Yes,
         )
-        if ret == QMessageBox.StandardButton.Cancel:
+        if ret == MessageBox.StandardButton.Cancel:
             return False
-        if ret == QMessageBox.StandardButton.Yes:
+        if ret == MessageBox.StandardButton.Yes:
             return self._save_current_project()
         return True  # 否（不保存）
 
@@ -659,18 +659,18 @@ class ProjectOpsMixin:
             return True
         path = getattr(self, "_project_path", None)
         hint = f"将保存到：{path}" if path else "当前工程尚未保存到文件。"
-        ret = QMessageBox.question(
+        ret = MessageBox.question(
             self,
             "打开工程",
             f"是否保存当前工程？\n{hint}",
-            QMessageBox.StandardButton.Yes
-            | QMessageBox.StandardButton.No
-            | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.Yes,
+            MessageBox.StandardButton.Yes
+            | MessageBox.StandardButton.No
+            | MessageBox.StandardButton.Cancel,
+            MessageBox.StandardButton.Yes,
         )
-        if ret == QMessageBox.StandardButton.Cancel:
+        if ret == MessageBox.StandardButton.Cancel:
             return False
-        if ret == QMessageBox.StandardButton.Yes:
+        if ret == MessageBox.StandardButton.Yes:
             return self._save_current_project()
         return True  # 否（不保存）
 
@@ -731,7 +731,7 @@ class ProjectOpsMixin:
                 self.open_project_path(path)
         except Exception as exc:  # noqa: BLE001 —— 槽内异常在本环境会原生崩溃
             logger.error("打开工程失败: %s", exc, exc_info=True)
-            QMessageBox.warning(self, "打开工程", f"打开工程失败：{exc}")
+            MessageBox.warning(self, "打开工程", f"打开工程失败：{exc}")
 
     def open_project_path(self, path: str) -> bool:
         """读入 ``path`` 指定的工程文件并刷新画布；返回是否成功。
@@ -806,12 +806,11 @@ class ProjectOpsMixin:
             # 用户打开工程后直接退出不应再被询问保存。
             self._mark_project_clean()
             return True
-        QMessageBox.warning(self, "打开失败", f"无法打开工程：{path}")
+        MessageBox.warning(self, "打开失败", f"无法打开工程：{path}")
         return False
 
     def _map_config_path(self):
         """``config/app.yaml`` 实际路径（``QGIS_DEV_CONFIG`` 可覆盖），读/写共用。"""
-
 
         return Path(os.environ.get("QGIS_DEV_CONFIG") or Paths.default().config_file("app.yaml"))
 

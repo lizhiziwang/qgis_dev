@@ -19,7 +19,6 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
@@ -27,6 +26,7 @@ from qgis.PyQt.QtWidgets import (
 
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.dialogs.layer_properties.symbol_libraries import (
     all_groups,
     delete_symbol_library_file,
@@ -173,14 +173,14 @@ class StyleReferenceDialog(BaseDialog):
             self._hidden.add(group)
 
     def _on_default(self) -> None:
-        answer = QMessageBox.question(
+        answer = MessageBox.question(
             self,
             "设置为默认列表",
             "恢复全部内置符号分组，并移除已添加的外部样式？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
         )
-        if answer != QMessageBox.StandardButton.Yes:
+        if answer != MessageBox.StandardButton.Yes:
             return
         self._hidden.clear()
         entries = [e for e in load_libraries() if e.get("kind") != "external"]
@@ -199,14 +199,14 @@ class StyleReferenceDialog(BaseDialog):
         if not path:
             return
         if not os.path.isfile(path):
-            QMessageBox.warning(self, "样式引用", "文件不存在。")
+            MessageBox.warning(self, "样式引用", "文件不存在。")
             return
         entries = load_libraries()
         if any(
             entry.get("kind") == "external" and entry.get("path") == path
             for entry in entries
         ):
-            QMessageBox.information(self, "样式引用", "该样式已在列表中。")
+            MessageBox.information(self, "样式引用", "该样式已在列表中。")
             return
         name = os.path.splitext(os.path.basename(path))[0]
         entries.append(
@@ -224,7 +224,7 @@ class StyleReferenceDialog(BaseDialog):
     def _on_remove(self) -> None:
         item = self.list.currentItem()
         if item is None:
-            QMessageBox.information(self, "样式引用", "请先选中要移除的分组。")
+            MessageBox.information(self, "样式引用", "请先选中要移除的分组。")
             return
         group = item.text()
         entries = load_libraries()
@@ -245,7 +245,7 @@ class StyleReferenceDialog(BaseDialog):
             )
         ]
         if len(remaining) == len(entries):
-            QMessageBox.information(
+            MessageBox.information(
                 self, "样式引用", "内置符号分组不能移除，只能取消勾选。"
             )
             return
@@ -254,15 +254,15 @@ class StyleReferenceDialog(BaseDialog):
         path = str(external.get("path") or "") if external is not None else ""
         if path:
             # 移除注册后询问是否连文件一起删（外部 XML / QML 是我们自己加进来的）
-            answer = QMessageBox.question(
+            answer = MessageBox.question(
                 self,
                 "移除样式",
                 f"已从列表移除「{group}」。\n是否同时删除符号库文件？\n\n{path}",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+                MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+                MessageBox.StandardButton.No,
             )
-            if answer == QMessageBox.StandardButton.Yes and not delete_symbol_library_file(path):
-                QMessageBox.warning(self, "样式引用", "删除文件失败，详见日志。")
+            if answer == MessageBox.StandardButton.Yes and not delete_symbol_library_file(path):
+                MessageBox.warning(self, "样式引用", "删除文件失败，详见日志。")
         self._fill()
 
     def accept(self) -> None:
