@@ -9,6 +9,9 @@
 - **左键双击** → 完成：把双击点收作末点后执行分割，**只切当前选中的要素**
   （线要素 / 面要素都支持；点要素不参与），写入编辑缓冲、可整体撤销；完成后
   清空切割线，可接着画下一条；
+- **磁性捕捉** → 起点 / 转折点 / 末点与光标预览都走画布吸附（顶点 / 边，与
+  「面分割」及绘制工具共用 :func:`~app.core.domain.drawing.tools.snap.snapped_match`），
+  吸附命中时显示磁吸指示器；是否启用由画布「磁性捕捉」工具条决定；
 - **右键单击** → 清除已画的切割线（可重画）；
 - **Esc** → 依次：清切割线 → 退出工具。
 
@@ -61,6 +64,8 @@ from qgis.PyQt.QtCore import QPoint, QPointF, Qt, QTimer
 from qgis.PyQt.QtGui import QColor
 
 from app.core.domain.check.space_index import clear_spatial_index
+from app.core.domain.drawing.tools.base import _snap_indicator_for
+from app.core.domain.drawing.tools.snap import snapped_match
 from app.infra.logging import get_logger
 from app.ui.tools.feature_attrs import refresh_area_fields
 
@@ -106,6 +111,7 @@ class SplitFeatureTool(QgsMapTool):
 
     def deactivate(self) -> None:
         self._clear_line()
+        self._set_snap_match(None)
         super().deactivate()
 
     def keyPressEvent(self, event) -> None:  # noqa: N802
@@ -160,7 +166,7 @@ class SplitFeatureTool(QgsMapTool):
             return
         if not self._capturing:
             return
-        self._append_vertex(self._map_point_of_event(event))
+        self._append_vertex(self._snapped_pt(event, wait_index=True))
         self._capturing = False
 
     def canvasDoubleClickEvent(self, event) -> None:  # noqa: N802
@@ -171,7 +177,7 @@ class SplitFeatureTool(QgsMapTool):
         self._skip_next_release = True
         self._capturing = False
         # 双击前的第一次单击可能已把该点收进 _cut_pts → 末点间距过近时不再重复加
-        self._append_vertex(self._map_point_of_event(event))
+        self._append_vertex(self._snapped_pt(event, wait_index=True))
         self._finish_split()
 
     def _append_vertex(self, pt: QgsPointXY | None) -> None:
@@ -189,10 +195,16 @@ class SplitFeatureTool(QgsMapTool):
     # -------------------------------------------------- 切割线采集
 
     def canvasMoveEvent(self, event) -> None:  # noqa: N802
-        """鼠标移动：按住左键时采样加点；否则/间距不足时把预览端跟到光标。"""
+        """鼠标移动：按住左键时采样加点；否则/间距不足时把预览端跟到光标。
+
+        预览端也走吸附（``wait_index=False``：只触发索引构建不等待），这样拖动时
+        能看到切点贴到已有要素的顶点 / 边上，和落点实际使用的点一致。
+        """
         if not self._cut_pts:
+            # 还没有第一个点：也刷新磁吸指示器，用户能提前看到起点会吸到哪里
+            self._snapped_pt(event, wait_index=False)
             return  # 没有已定点，无从预览
-        pt = self._map_point_of_event(event)
+        pt = self._snapped_pt(event, wait_index=False)
         if pt is None:
             return
         last = self._cut_pts[-1]
@@ -221,7 +233,7 @@ class SplitFeatureTool(QgsMapTool):
         if not layer.selectedFeatureIds():
             self._hint("请先用点选 / 框选选中要分割的要素，再画切割线")
             return
-        self._append_vertex(self._map_point_of_event(event))
+        self._append_vertex(self._snapped_pt(event, wait_index=True))
         self._capturing = True
 
     def _clear_line(self) -> None:
@@ -229,6 +241,7 @@ class SplitFeatureTool(QgsMapTool):
         self._capturing = False
         self._cut_pts = []
         self._preview_pt = None
+        self._set_snap_match(None)
         if self._band is not None:
             try:
                 self._band.reset(QgsWkbTypes.LineGeometry)
@@ -428,6 +441,32 @@ class SplitFeatureTool(QgsMapTool):
             return self.canvas.getCoordinateTransform().toMapCoordinates(px)
         except RuntimeError:
             return None
+
+    def _snapped_pt(self, event, wait_index: bool = True) -> QgsPointXY | None:
+        """事件像素 → **吸附后**的地图坐标；同步磁吸指示器。
+
+        与「面分割」/ 绘制工具共用 :func:`snapped_match`：开关、类型、容差全部
+        由画布吸附配置决定；没开吸附 / 没命中时回退原始地图坐标。
+        """
+        match = snapped_match(self.canvas, event, wait_index=wait_index)
+        self._set_snap_match(match)
+        if match is not None:
+            return match.point()
+        return self._map_point_of_event(event)
+
+    def _set_snap_match(self, match) -> None:
+        """把吸附 match 喂给画布共享的 :class:`QgsSnapIndicator`（吸不到隐藏）。"""
+        widget = _snap_indicator_for(self.canvas)
+        if widget is None:
+            return
+        try:
+            if match is not None and match.isValid():
+                widget.setMatch(match)
+                widget.setVisible(True)
+            else:
+                widget.setVisible(False)
+        except Exception:  # noqa: BLE001
+            pass
 
     def _px_distance(self, a: QgsPointXY, b: QgsPointXY) -> float:
         """两个地图坐标点的画布像素距离（采样去重用）。"""

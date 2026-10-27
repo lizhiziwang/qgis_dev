@@ -6,9 +6,9 @@
 分组默认折叠，避免打开 dock 时铺满整屏；搜索时会自动展开命中的分组。
 点击工具节点弹出对应参数对话框（对话框内部是"左参数 + 右算法描述"布局，
 描述逻辑见 :mod:`app.ui.common.algo_desc`）；同一算法只维护一个对话框实例，
-已打开时点击置前。``destroy_on_close=True`` 的面板（如「质检」，
-见 :mod:`app.ui.docks.quality_dock`）则在窗口关闭后立即销毁实例，下次点击
-重新创建，不复用上一次的进度 / 结果状态。
+已打开时点击置前。面板可选择 ``destroy_on_close=True``（关闭即销毁）；
+「质检」面板复用实例，由对话框自身在每次显示时复位运行态、保留参数
+（见 :mod:`app.ui.docks.quality_dock`）。
 
 本模块只提供通用树 dock 与「分析工具」这一实例；其它专题面板（如「质检」，
 见 :mod:`app.ui.docks.quality_dock`）通过 ``title`` / ``groups`` /

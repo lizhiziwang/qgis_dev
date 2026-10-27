@@ -17,8 +17,10 @@
 :func:`_make_open_check_viewer` 仍保留（复用主窗口既有入口，不写第二套逻辑），
 按需再挂到分组树里。后续各专项质检继续往 :data:`_QUALITY_GROUPS` 里加。
 
-专项窗口一律 ``destroy_on_close``：确认 / 取消 / 标题栏关闭后实例立即销毁，
-下次点击重新创建，不复用上一次的进度、选中图层与结果状态。
+专项窗口**复用实例**（``destroy_on_close=False``）：确认 / 取消 / 标题栏关闭后
+实例保留，下次打开先恢复上次选的图层、参考图层、过滤条件、阈值与输出路径；
+只把进度条 / 按钮等运行态复位（见
+:class:`app.ui.dialogs.check_dialog_state.CheckDialogRunStateMixin`）。
 """
 
 from __future__ import annotations
@@ -131,9 +133,9 @@ _QUALITY_DIALOG_FACTORIES: dict = {
 class QualityDock(ToolsDock):
     """质检面板：一个「质检」分组，下挂「狭长面」「细碎面」等专项质检节点。
 
-    与「分析工具」不同，本面板的专项窗口**关闭即销毁**（``destroy_on_close``）：
-    确认 / 取消 / 标题栏关闭后实例不再保留，下次点击重新创建，免得下次打开看到
-    上次的进度条、选中图层与结果状态。
+    与「分析工具」一致，本面板的专项窗口**关闭后不销毁**（``destroy_on_close=False``）：
+    再次打开时保留上次的图层 / 参考图层 / 过滤条件 / 阈值 / 输出路径，只复位
+    进度条与按钮（见 ``CheckDialogRunStateMixin``）。
     """
 
     def __init__(self, parent=None) -> None:
@@ -144,8 +146,10 @@ class QualityDock(ToolsDock):
             simple_actions=_QUALITY_ACTIONS,
             tips=_QUALITY_TIPS,
             dialog_factories=_QUALITY_DIALOG_FACTORIES,
-            destroy_on_close=True,
+            destroy_on_close=False,
         )
+        # 质检项不多（7 个专项）：默认展开分组，打开面板就能直接看到全部质检项
+        self.tree.expandAll()
 
 
 __all__ = ["QualityDock"]

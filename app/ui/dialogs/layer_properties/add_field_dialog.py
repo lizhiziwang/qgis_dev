@@ -4,17 +4,19 @@
 行为，但本仓库走自建 chrome（:class:`app.ui.common.base_dialog.BaseDialog`），
 不调 QGIS 原生的 ``QgsNewVectorLayerDialog`` / ``QgsFieldCalculator``。
 
-字段类型走 QVariant.Type 枚举，类型切换时自动给「长度 / 小数位数」填默认
-值（用户没填的话也按默认走）。
+字段类型走 QVariant.Type 枚举；**类型切换时只显示该类型有意义的行**：
+文本只显示「长度」，双精度显示「长度 + 小数位数」，整型 / 长整型 / 日期 /
+日期时间 / 布尔两项都隐藏（QGIS 里也不使用它们）。
 """
 
 from __future__ import annotations
 
-from qgis.PyQt.QtCore import Qt, QVariant
+from qgis.PyQt.QtCore import Qt, QTimer, QVariant
 from qgis.PyQt.QtWidgets import (
     QComboBox,
     QDialogButtonBox,
     QFormLayout,
+    QLabel,
     QLineEdit,
     QSpinBox,
     QVBoxLayout,
@@ -45,7 +47,7 @@ class AddFieldDialog(BaseDialog):
         self.setMinimumSize(0, 0)
         self.resize(360, 220)
 
-        form = QFormLayout()
+        self._form = form = QFormLayout()
         form.setLabelAlignment(
             Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         )
@@ -67,15 +69,17 @@ class AddFieldDialog(BaseDialog):
         self.type_combo.currentIndexChanged.connect(self._on_type_changed)
         form.addRow("字段类型", self.type_combo)
 
+        self._length_label = QLabel("长度")
         self.length_spin = QSpinBox()
         self.length_spin.setRange(0, 65535)
         self.length_spin.setSpecialValueText("默认")
-        form.addRow("长度", self.length_spin)
+        form.addRow(self._length_label, self.length_spin)
 
+        self._precision_label = QLabel("小数位数")
         self.precision_spin = QSpinBox()
         self.precision_spin.setRange(0, 20)
         self.precision_spin.setSpecialValueText("默认")
-        form.addRow("小数位数", self.precision_spin)
+        form.addRow(self._precision_label, self.precision_spin)
 
         bb = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel,
@@ -97,6 +101,7 @@ class AddFieldDialog(BaseDialog):
             self._load_initial(self._initial)
         else:
             self._on_type_changed(0)
+        self._fit_to_content()
         self.name_edit.setFocus()
 
     def _load_initial(self, spec: dict) -> None:
@@ -114,20 +119,52 @@ class AddFieldDialog(BaseDialog):
                 break
         self.length_spin.setValue(int(spec.get("length", 0) or 0))
         self.precision_spin.setValue(int(spec.get("precision", 0) or 0))
+        # 只刷新可见性；编辑模式保留 spec 里的长度 / 精度，不按类型默认值重置
+        data = self.type_combo.currentData()
+        if data:
+            self._apply_row_visibility(data[0])
 
     # ----------------------------------------------------------- 交互
 
+    @staticmethod
+    def _row_visibility(qtype) -> tuple[bool, bool]:
+        """(显示长度, 显示小数位数)。
+
+        只有文本用长度；双精度用长度 + 小数位数；整型 / 长整型 / 日期 /
+        日期时间 / 布尔都没有这两项（QGIS 里也不使用它们）。
+        """
+        return qtype in (QVariant.String, QVariant.Double), qtype == QVariant.Double
+
+    def _apply_row_visibility(self, qtype) -> None:
+        """按类型显示 / 隐藏长度与小数位数的标签和输入框。"""
+        show_length, show_precision = self._row_visibility(qtype)
+        self._length_label.setVisible(show_length)
+        self.length_spin.setVisible(show_length)
+        self._precision_label.setVisible(show_precision)
+        self.precision_spin.setVisible(show_precision)
+
+    def _fit_to_content(self) -> None:
+        """隐藏行后把窗口高度收到内容大小（宽度保持不变）。"""
+        try:
+            self.layout().activate()
+            self.resize(self.width(), self.sizeHint().height())
+        except Exception:  # noqa: BLE001 —— 纯外观，失败不影响功能
+            pass
+
     def _on_type_changed(self, index: int) -> None:
-        """类型切换时刷新长度 / 小数位数的默认值（未填时才覆盖）。"""
+        """类型切换：只留下该类型有意义的长度 / 小数位数，并回填默认值。"""
         data = self.type_combo.itemData(index)
         if not data:
             return
-        _, _, def_len, def_prec = data
-        # 当前值是「默认」（== 最小值）才覆盖；用户已经手动改过的不动
-        if self.length_spin.value() == self.length_spin.minimum():
-            self.length_spin.setValue(def_len)
-        if self.precision_spin.value() == self.precision_spin.minimum():
-            self.precision_spin.setValue(def_prec)
+        qtype, _, def_len, def_prec = data
+        show_length, show_precision = self._row_visibility(qtype)
+        self._apply_row_visibility(qtype)
+        # 不适用的项归零，避免隐藏值悄悄写进字段定义
+        self.length_spin.setValue(def_len if show_length else 0)
+        self.precision_spin.setValue(def_prec if show_precision else 0)
+        if self.isVisible():
+            # 隐藏行要等布局下一拍才生效，延后一拍再按新内容收高度
+            QTimer.singleShot(0, self._fit_to_content)
 
     # ----------------------------------------------------------- 输出
 
@@ -142,8 +179,9 @@ class AddFieldDialog(BaseDialog):
             return None
         alias = self.alias_edit.text().strip()
         qtype, type_name, _, _ = self.type_combo.currentData()
-        length = self.length_spin.value()
-        precision = self.precision_spin.value()
+        show_length, show_precision = self._row_visibility(qtype)
+        length = self.length_spin.value() if show_length else 0
+        precision = self.precision_spin.value() if show_precision else 0
         return {
             "name": name,
             "alias": alias,

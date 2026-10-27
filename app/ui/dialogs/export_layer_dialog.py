@@ -217,7 +217,8 @@ class ExportLayerDialog(BaseDialog):
 
         self.format_combo = QComboBox()
         for fmt in self._formats:
-            self.format_combo.addItem(fmt.label, fmt)
+            # 下拉里带出文件后缀，避免同义格式（GeoPackage / SQLite / FileGDB）只看名字分不清
+            self.format_combo.addItem(f"{fmt.label}({fmt.extension})", fmt)
             if fmt.note:
                 self.format_combo.setItemData(
                     self.format_combo.count() - 1, fmt.note, Qt.ItemDataRole.ToolTipRole
