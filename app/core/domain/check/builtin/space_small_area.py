@@ -87,11 +87,11 @@ class SpaceSmallAreaCheck(BaseCheck):
     # ------------------------------------------------------------ 流式执行
 
     def iter_failed(self, p: CheckParam):
-        """流式产出命中要素 ``(seen, fid, area)``。
+        """流式产出 ``(seen, fid, area)``：**每个处理过的要素都产出一条**。
 
-        ``seen`` 是累计已处理要素数（含未命中），供界面分批执行时更新进度；
-        ``area`` 是判定所用的面积（几何面积或属性值），供调用方参考。
-
+        ``fid is None`` 表示该要素通过（仅用于推进进度），``fid`` 非空表示命中；
+        ``area`` 是判定所用的面积（几何面积或属性值），通过记录里为 ``None``。
+        每个要素都 yield 一次，界面才能在一遍扫描一个都不命中时也刷新进度。
         调用方需保证 ``p.layer`` 有效；无效图层直接不产出。
         """
         layer: QgsVectorLayer = p.layer
@@ -110,6 +110,7 @@ class SpaceSmallAreaCheck(BaseCheck):
             seen += 1
             geom = feat.geometry()
             if geom.isEmpty():
+                yield seen, None, None
                 continue
 
             # 几何面积 / 周长一次算好：面积按 ``area_type`` 取舍，周长只用于周长面积比
@@ -134,6 +135,8 @@ class SpaceSmallAreaCheck(BaseCheck):
                 failed = True
             if failed:
                 yield seen, feat.id(), area
+            else:
+                yield seen, None, None
 
     def run(self, p: CheckParam) -> CheckResult:
         if p.layer is None or not p.layer.isValid():
@@ -146,8 +149,9 @@ class SpaceSmallAreaCheck(BaseCheck):
         failed: list[int] = []
         areas: dict[int, float] = {}
         for _seen, fid, area in self.iter_failed(p):
-            failed.append(fid)
-            areas[fid] = area
+            if fid is not None:
+                failed.append(fid)
+                areas[fid] = area
 
         return CheckResult(
             status=CheckStatus.PASS if not failed else CheckStatus.FAIL,

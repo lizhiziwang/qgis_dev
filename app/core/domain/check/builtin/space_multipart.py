@@ -38,11 +38,10 @@ class SpaceMultipartCheck(BaseCheck):
         return int(abstract.partCount()) if abstract is not None else 0
 
     def iter_failed(self, p: CheckParam):
-        """流式产出命中要素 ``(seen, fid, msg)``。
+        """流式产出 ``(seen, fid, msg)``：**每个处理过的要素都产出一条**。
 
-        ``seen`` 是累计已处理要素数（含未命中），供界面分批执行时更新进度；
+        ``fid is None`` 表示该要素通过（仅用于推进进度），``fid`` 非空表示命中；
         ``msg`` 是命中原因（``"3 个部分"`` 这样的部分数说明）。
-
         调用方需保证 ``p.layer`` 有效；无效图层直接不产出。
         """
         layer: QgsVectorLayer = p.layer
@@ -57,10 +56,13 @@ class SpaceMultipartCheck(BaseCheck):
             seen += 1
             geom: QgsGeometry = feat.geometry()
             if geom.isEmpty():
+                yield seen, None, ""
                 continue
             parts = self._part_count(geom)
             if parts > 1:
                 yield seen, feat.id(), f"{parts} 个部分"
+            else:
+                yield seen, None, ""
 
     def run(self, p: CheckParam) -> CheckResult:
         if p.layer is None or not p.layer.isValid():
@@ -71,7 +73,8 @@ class SpaceMultipartCheck(BaseCheck):
             )
         failed: list[int] = []
         for _seen, fid, _msg in self.iter_failed(p):
-            failed.append(fid)
+            if fid is not None:
+                failed.append(fid)
         return CheckResult(
             status=CheckStatus.PASS if not failed else CheckStatus.FAIL,
             severity=CheckSeverity.ERROR if failed else CheckSeverity.INFO,

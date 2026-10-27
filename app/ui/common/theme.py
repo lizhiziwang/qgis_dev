@@ -864,6 +864,44 @@ def app_qss(t: Theme) -> str:
     QPushButton#DialogPrimary:hover {{ background-color: {primary_hover}; }}
     QPushButton#DialogPrimary:pressed {{ background-color: {primary_pressed}; }}
     QPushButton#DialogPrimary:focus {{ outline: none; }}
+    /* 消息框（common.MessageBox）：正文 12px；补充说明用次要文字色；
+       按钮统一高度/内边距（主按钮实心、破坏性按钮红字）；
+       「详细信息」做成文字链接，展开区用等宽字体。
+       尺寸整体按原先的 75% 收窄，避免小提示也占一大块屏。 */
+    QLabel#MessageBoxText {{ font-size: 12px; }}
+    QLabel#MessageBoxInfo {{ color: {t.text_secondary}; font-size: 11px; }}
+    QToolButton#MessageBoxDetails {{
+        color: {t.input_focus};
+        background: transparent;
+        border: none;
+        padding: 2px 0;
+        font-size: 11px;
+    }}
+    QToolButton#MessageBoxDetails:hover {{ color: {primary_hover}; }}
+    QPlainTextEdit#MessageBoxDetailsView {{
+        font-family: "Consolas", "Courier New", monospace;
+        font-size: 11px;
+    }}
+    /* 选择器写成 QDialog#MessageBox QPushButton（ID + 两个类型），确保这里
+       的尺寸/内边距压过 QPushButton#DialogPrimary 自身规则，主按钮与普通
+       按钮同高同字号，整排看起来才齐。 */
+    QDialog#MessageBox QPushButton {{
+        min-width: 48px;
+        min-height: 24px;
+        padding: 0 12px;
+        border-radius: 4px;
+        font-size: 12px;
+    }}
+    QPushButton#DialogDanger {{ color: {t.text_error}; }}
+    QPushButton#DialogDanger:hover {{
+        background-color: {t.btn_hover};
+        border-color: {t.border};
+        color: {t.text_error};
+    }}
+    QPushButton#DialogDanger:pressed {{
+        background-color: {t.btn_pressed};
+        color: {t.text_error};
+    }}
     /* 参考提示框：底色 + 左侧红色强调条，对应设计稿的红框提示卡片 */
     QLabel#CheckDesc {{
         background-color: {t.input_bg};

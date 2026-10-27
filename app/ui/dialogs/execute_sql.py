@@ -39,7 +39,6 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QProgressDialog,
     QPushButton,
     QTableView,
@@ -50,6 +49,7 @@ from qgis.PyQt.QtWidgets import (
 from app.core.util.local_layer_loader import layer_source_container
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.dialogs.query_builder import QueryBuilderDialog
 
 logger = get_logger(__name__)
@@ -556,7 +556,7 @@ class ExecuteSqlDialog(BaseDialog):
             self._sql_worker = None
         sql = self.sql_input.toPlainText().strip()
         if not sql:
-            QMessageBox.warning(self, "警告", "请输入 SQL 查询！")
+            MessageBox.warning(self, "警告", "请输入 SQL 查询！")
             return
         path = _container_path(self.layer)
         # 仅支持本地文件/容器数据源（shp / gpkg / gdb / geojson / 本地库里的 Sqlite
@@ -568,7 +568,7 @@ class ExecuteSqlDialog(BaseDialog):
             or not path
             or not (os.path.isfile(path) or os.path.isdir(path))
         ):
-            QMessageBox.warning(
+            MessageBox.warning(
                 self,
                 "警告",
                 "仅支持本地文件数据源（shp / gpkg / gdb / geojson 等）的 SQL 查询",
@@ -637,24 +637,24 @@ class ExecuteSqlDialog(BaseDialog):
     def _on_load_layer(self) -> None:
         """把查询结果物化成内存矢量图层加入工程（保留几何 / 坐标系 / 字段）。"""
         if self._sql_worker is not None:
-            QMessageBox.information(self, "提示", "查询仍在执行，请等待完成后再加载图层")
+            MessageBox.information(self, "提示", "查询仍在执行，请等待完成后再加载图层")
             return
         total = self._table_model.rowCount()
         if total <= 0:
-            QMessageBox.information(self, "提示", "请先执行查询并获得结果")
+            MessageBox.information(self, "提示", "请先执行查询并获得结果")
             return
         sql = self._executed_sql
         if not sql:
-            QMessageBox.information(self, "提示", "请先执行查询并获得结果")
+            MessageBox.information(self, "提示", "请先执行查询并获得结果")
             return
         if total > LOAD_LAYER_WARN_ROWS:
-            ret = QMessageBox.question(
+            ret = MessageBox.question(
                 self,
                 "加载为图层",
                 f"查询结果共 {total:,} 条。加载为内存图层需要把全部要素读入内存，"
                 "可能耗时较长并占用较多内存。是否继续？",
             )
-            if ret != QMessageBox.StandardButton.Yes:
+            if ret != MessageBox.StandardButton.Yes:
                 return
 
         name = self.layer_name_input.text().strip() or f"{self.layer.name()}_SQL结果"
@@ -684,7 +684,7 @@ class ExecuteSqlDialog(BaseDialog):
             )
         except Exception as exc:  # noqa: BLE001
             logger.exception("加载查询结果为图层失败")
-            QMessageBox.warning(self, "加载为图层", f"加载失败：{exc}")
+            MessageBox.warning(self, "加载为图层", f"加载失败：{exc}")
             return
         finally:
             progress.close()
@@ -697,7 +697,7 @@ class ExecuteSqlDialog(BaseDialog):
         subset = self.subset_filter_input.text().strip()
         if subset and not layer.setSubsetString(subset):
             logger.warning("加载图层时过滤条件无效，已忽略：%s", subset)
-            QMessageBox.warning(
+            MessageBox.warning(
                 self,
                 "加载为图层",
                 f"过滤条件无效，已忽略：\n{subset}",

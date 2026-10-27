@@ -30,7 +30,6 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QSizePolicy,
     QSpacerItem,
@@ -48,6 +47,7 @@ from app.infra.logging import (
     render_log_html,
 )
 from app.ui.common.date_field import DatePickerField
+from app.ui.common.message_box import MessageBox
 from app.ui.common.project_report import snapshot_text
 from app.ui.common.widgets import open_file_dir
 
@@ -357,7 +357,7 @@ class LogDock(QDockWidget):
         start = f"{start_date.toString('yyyy-MM-dd')} 00:00:00" if start_date is not None else ""
         end = f"{end_date.toString('yyyy-MM-dd')} 23:59:59" if end_date is not None else ""
         if start and end and start > end:
-            QMessageBox.warning(self, "时间查询", "开始日期不能晚于结束日期，请重新选择。")
+            MessageBox.warning(self, "时间查询", "开始日期不能晚于结束日期，请重新选择。")
             return
         self.param["time_enabled"] = bool(start or end)
         self.param["time_start"] = start
@@ -373,13 +373,13 @@ class LogDock(QDockWidget):
         self._on_search()
 
     def _on_clear(self) -> None:
-        mb = QMessageBox(self)
+        mb = MessageBox(self)
         mb.setWindowTitle("日志")
         mb.setText("是否清除当前日志信息？")
-        mb.setIcon(QMessageBox.Icon.Warning)
-        mb.addButton(QMessageBox.StandardButton.Ok)
-        mb.addButton(QMessageBox.StandardButton.Cancel)
-        if mb.exec() == QMessageBox.StandardButton.Ok:
+        mb.setIcon(MessageBox.Icon.Warning)
+        mb.addButton(MessageBox.StandardButton.Ok)
+        mb.addButton(MessageBox.StandardButton.Cancel)
+        if mb.exec() == MessageBox.StandardButton.Ok:
             # 只清累积的 app.log。会话日志（session/*.log、*.jsonl）是诊断包的
             # 核心证据，清空日志不应连带清掉；会话文件自己的清理由 ``session_keep``
             # 在每次启动时负责。
@@ -400,9 +400,9 @@ class LogDock(QDockWidget):
         full = os.path.join(path, file_name)
         ok = write_text(full, self.txt.toPlainText())
         if not ok:
-            QMessageBox.warning(self, "保存失败", f"日志保存失败：\n{full}")
+            MessageBox.warning(self, "保存失败", f"日志保存失败：\n{full}")
             return
-        QMessageBox.information(self, "保存成功", f"日志已保存到\n{full}")
+        MessageBox.information(self, "保存成功", f"日志已保存到\n{full}")
 
     def _on_export_diagnostics(self) -> None:
         """导出诊断包：一次运行的全部证据，打成一个 zip。
@@ -425,12 +425,12 @@ class LogDock(QDockWidget):
             )
         except Exception as exc:  # 导出失败要说清楚，不能静默
             logger.exception("导出诊断包失败 dest=%s", path)
-            QMessageBox.critical(self, "导出失败", f"诊断包导出失败：\n{exc}")
+            MessageBox.critical(self, "导出失败", f"诊断包导出失败：\n{exc}")
             return
         finally:
             QApplication.restoreOverrideCursor()
         size_kb = package.size_bytes / 1024
-        QMessageBox.information(
+        MessageBox.information(
             self,
             "导出完成",
             f"诊断包已导出到\n{package.path}\n\n"
@@ -461,7 +461,7 @@ class LogDock(QDockWidget):
         url = f"{FEEDBACK_URL}?{query}"
         if not QDesktopServices.openUrl(QUrl(url)):
             logger.error("打开反馈页面失败 url=%s", url)
-            QMessageBox.warning(self, "反馈", f"无法打开浏览器，请手动访问：\n{url}")
+            MessageBox.warning(self, "反馈", f"无法打开浏览器，请手动访问：\n{url}")
 
     def _feedback_identity(self) -> tuple[str, str]:
         """当前登录用户的 ``(user_id, user_name)``；没有会话时返回两个空串。

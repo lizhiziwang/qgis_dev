@@ -56,6 +56,10 @@ _CONTAINER_EXTENSIONS = frozenset({".gdb", ".gpkg", ".sqlite", ".sqlite3", ".db"
 #: ArcMap 打不开，QGIS 自己能读）。导出前必须把字段裁到上限以内。
 SHAPEFILE_MAX_FIELDS = 255
 
+#: 导出进度回调每处理这么多条要素报一次（同时给界面一个 ``processEvents`` 的机会，
+#: 否则大图层写入期间窗口会一直显示"未响应"）。
+PROGRESS_STEP = 1000
+
 
 class ExportLayerError(RuntimeError):
     """导出失败。消息可直接展示给用户。"""
@@ -144,8 +148,10 @@ def export_vector_layer(
     Args:
         layer: 要导出的图层（可以是本地库里的表 —— 打开它的地方自己负责）。
         spec: 导出参数。
-        progress: 可选进度回调 ``callable(str)``；写图层 / 写字典阶段各报一次
-            文字（GDB 大图层导出可能要几十秒，界面靠它显示“正在做什么”）。
+        progress: 可选进度回调 ``callable(done: int, total: int, text: str)``。
+            ``done`` 是已处理条数、``total`` 是预计总数（``<= 0`` 表示还不确定），
+            ``text`` 是阶段文字。收集要素 / 写入图层两个耗时阶段都会按
+            :data:`PROGRESS_STEP` 条报一次，界面据此显示「已导出 N / M（xx%）」。
 
     Returns:
         实际写出的文件（或 ``.gdb`` 目录）路径。
@@ -168,17 +174,14 @@ def export_vector_layer(
             f"{len(spec.field_names)} 个。请减少导出字段，或改用 FileGDB / GeoPackage。"
         )
 
-    source = _prepare_source(layer, spec)
+    source = _prepare_source(layer, spec, progress=progress)
     # 字段选择 / 改名：OGR 写入器自带 attributes / attributesExportNames，
     # 不用再复制图层；映射同时用于字典属性域与别名落库（按导出后的列名写）。
     export_map = _export_name_map(layer, spec)
     target = spec.file_path
     existed = os.path.exists(target)
 
-    from qgis.core import (
-        QgsCoordinateTransformContext,
-        QgsVectorFileWriter,
-    )
+    from qgis.core import QgsVectorFileWriter
 
     options = QgsVectorFileWriter.SaveVectorOptions()
     options.driverName = spec.driver
@@ -209,22 +212,19 @@ def export_vector_layer(
     # 的字段中文还是乱码。写完后把原图层的别名还原，避免悄悄改用户图层。
     alias_restore = _repair_source_aliases(source)
     if progress is not None:
-        progress("正在写入图层…")
+        progress(0, 0, "正在写入图层…")
     try:
         try:
-            error, errmsg, _new, _saved = QgsVectorFileWriter.writeAsVectorFormatV3(
-                source, target, QgsCoordinateTransformContext(), options
-            )
+            _write_features(source, target, options, progress)
         except OSError as exc:
             if not existed:
                 _cleanup(target)
             raise ExportLayerError(f"导出失败：{target}\n{exc}") from exc
-
-        if error != QgsVectorFileWriter.WriterError.NoError:
+        except Exception:
             # 只清理**本次新建**的半成品；覆盖既有文件时删掉会把用户原数据毁掉
             if not existed:
                 _cleanup(target)
-            raise ExportLayerError(f"导出失败：{errmsg or '未知原因'}")
+            raise
     finally:
         _restore_aliases(source, alias_restore)
 
@@ -237,7 +237,7 @@ def export_vector_layer(
     )
     if spec.convert_dict:
         if progress is not None:
-            progress("正在写入字典…")
+            progress(-1, -1, "正在写入字典…")
         try:
             _export_dictionaries(layer, spec, target, export_map)
         except Exception as exc:  # noqa: BLE001 —— 数据已写成功，字典失败不毁结果
@@ -247,8 +247,120 @@ def export_vector_layer(
     except Exception as exc:  # noqa: BLE001 —— 别名失败不毁已写出的数据
         logger.warning("导出字段别名失败（图层数据已写出）：%s", exc, exc_info=True)
     if progress is not None:
-        progress("导出完成")
+        progress(-1, -1, "导出完成")
     return target
+
+
+def _feature_total(layer) -> int:
+    """预计要写的要素数（``-1`` = 该数据源不能快速给出）。"""
+    try:
+        count = int(layer.featureCount())
+    except Exception:  # noqa: BLE001 —— 数不出来不影响导出
+        return -1
+    return count if count >= 0 else -1
+
+
+def _writer_fields_and_indices(source, options) -> tuple[object, list[int]]:
+    """按 ``options.attributes`` / ``attributesExportNames`` 生成写入器字段表与取属性顺序。
+
+    ``QgsVectorFileWriter.create`` **不会**自己应用 ``options.attributes``（实测：
+    把全字段传进去就全写）；静态入口 ``writeAsVectorFormatV3`` 也是先把字段裁好、
+    按 ``attributes`` 的顺序建成 writer 的字段表，再按同一顺序取要素属性。这里照做：
+    ``attributes`` 为空表示全部字段，``attributesExportNames`` 按**源字段下标**改名。
+    """
+    from qgis.core import QgsField, QgsFields
+
+    if getattr(options, "skipAttributeCreation", False):
+        # DXF 这类"没有属性表"的格式：字段表必须留空，否则 OGR 会在建层时
+        # 报 “does not support arbitrary field creation”，整次导出失败。
+        return QgsFields(), []
+
+    source_fields = source.fields()
+    attrs = (
+        [int(i) for i in options.attributes]
+        if options.attributes
+        else list(range(source_fields.count()))
+    )
+    names = list(options.attributesExportNames) if options.attributesExportNames else []
+    fields = QgsFields()
+    for original_index in attrs:
+        if not (0 <= original_index < source_fields.count()):
+            continue
+        field = QgsField(source_fields.at(original_index))
+        if original_index < len(names) and names[original_index]:
+            field.setName(str(names[original_index]))
+        fields.append(field)
+    return fields, attrs
+
+
+def _write_features(source, target: str, options, progress) -> None:
+    """逐要素写入目标（替代一次性的 ``writeAsVectorFormatV3``）。
+
+    静态方法内部同样是一个要素一个要素地写，但**不暴露进度**：大图层（尤其
+    FileGDB）写入期间界面只能转圈，用户判断不了还要多久。这里用同一个
+    ``QgsVectorFileWriter`` 对象接口自己驱动，每 :data:`PROGRESS_STEP` 条回调一次
+    ``(done, total, 文字)``；写完后 ``finalize()`` 落盘并检查错误。
+    """
+    from qgis.core import (
+        QgsCoordinateTransformContext,
+        QgsFeature,
+        QgsVectorFileWriter,
+    )
+
+    fields, attrs = _writer_fields_and_indices(source, options)
+    writer = QgsVectorFileWriter.create(
+        target,
+        fields,
+        source.wkbType(),
+        source.crs(),
+        QgsCoordinateTransformContext(),
+        options,
+    )
+    if writer is None:
+        raise ExportLayerError(f"导出失败：无法创建目标文件\n{target}")
+    # 写入器按**位置**取要素属性，而 OGR 图层的要素常带着被跳过的 fid/ogc_fid
+    # （``options.attributes`` 里没有它）——直接塞原要素会让后面的列整体错一位
+    # （曾把村名字符串写进 Real 字段，报 "Could not convert value ... to Real"）。
+    # 字段顺序与源完全一致时零拷贝；否则按 attrs 顺序重建一条要素再写。
+    identity = attrs == list(range(source.fields().count()))
+    error_message = ""
+    done = 0
+    total = _feature_total(source)
+    try:
+        for feature in source.getFeatures():
+            if identity:
+                out_feature = feature
+            else:
+                values = feature.attributes()
+                out_feature = QgsFeature()
+                out_feature.setAttributes(
+                    [values[index] for index in attrs if index < len(values)]
+                )
+                geometry = feature.geometry()
+                if geometry is not None:
+                    out_feature.setGeometry(geometry)
+            if not writer.addFeature(out_feature):
+                error_message = writer.errorMessage() or "写入要素失败"
+                break
+            done += 1
+            if progress is not None and done % PROGRESS_STEP == 0:
+                progress(done, total, "正在写入图层…")
+    finally:
+        try:
+            if progress is not None:
+                # finalize() 里 GDB 还要建索引 / 收尾，可能再卡一会儿：先给个明确提示
+                progress(done, total if total >= 0 else done, "正在完成写入（收尾）…")
+            # 注意：本构建的 PyQt 里 finalize() 返回 None（C++ 侧是 void），
+            # 不能拿返回值判断成败；落盘后看 hasError() / errorMessage()。
+            writer.finalize()
+            if not error_message and writer.hasError():
+                error_message = writer.errorMessage() or "写入目标文件时失败"
+        finally:
+            writer = None
+    if error_message:
+        raise ExportLayerError(f"导出失败：{error_message}")
+    if progress is not None:
+        progress(done, total if total >= 0 else done, "图层写入完成")
 
 
 def _store_export_aliases(layer, spec: ExportSpec, target: str, name_map=None) -> None:
@@ -717,6 +829,8 @@ def _copy_to_memory(
     fields,
     renamed: dict[str, str],
     target_crs=None,
+    *,
+    progress=None,
 ) -> QgsVectorLayer:
     """把 ``fields``（源字段子集，可改名）与要素复制到内存图层。
 
@@ -724,7 +838,7 @@ def _copy_to_memory(
     不能把源要素直接塞进字段数不同的图层（按位置对齐，会错列）。
     ``target_crs`` 非空时把几何重投影到该坐标系（KML / GeoJSON 用）。
     """
-    from qgis.core import QgsFeature, QgsField, QgsGeometry, QgsVectorLayer
+    from qgis.core import QgsFeature, QgsFeatureRequest, QgsField, QgsGeometry, QgsVectorLayer
 
     wkb_name = _wkb_name(layer)
     crs = target_crs or layer.crs()
@@ -756,18 +870,23 @@ def _copy_to_memory(
     provider.addAttributes(target_fields)
     memory.updateFields()
     if features is None:
-        features = list(layer.getFeatures())
+        features = _collect_features(
+            layer, QgsFeatureRequest(), -1, progress, "正在读取要素…"
+        )
     if not features:
         return memory
+    total = len(features)
 
     if transform is None and _is_full_unchanged(layer, fields, {}):
         # 字段原样、只是筛了要素：源要素与目标结构一一对应，直接写
+        if progress is not None:
+            progress(total, total, "正在准备导出数据…")
         if not provider.addFeatures(features):
             raise ExportLayerError("把要素复制到导出用的内存图层时失败")
         return memory
 
     copies = []
-    for feature in features:
+    for done, feature in enumerate(features, start=1):
         source_attrs = feature.attributes()
         copy = QgsFeature(memory.fields())
         try:
@@ -782,6 +901,10 @@ def _copy_to_memory(
             logger.warning("导出：要素 %s 的属性列对不上，已跳过", feature.id())
             continue
         copies.append(copy)
+        if progress is not None and done % PROGRESS_STEP == 0:
+            progress(done, total, "正在准备导出数据…")
+    if progress is not None:
+        progress(total, total, "正在准备导出数据…")
     if copies and not provider.addFeatures(copies):
         raise ExportLayerError("把要素复制到导出用的内存图层时失败")
     return memory
@@ -817,12 +940,15 @@ def _restore_aliases(source, restore: list[tuple[int, str]]) -> None:
         pass
 
 
-def _prepare_source(layer: QgsVectorLayer, spec: ExportSpec) -> QgsVectorLayer:
+def _prepare_source(layer: QgsVectorLayer, spec: ExportSpec, *, progress=None) -> QgsVectorLayer:
     """要写给 OGR 的那份图层：按需筛要素 / 把 KML、GeoJSON 转到经纬度。
 
     字段子集与改名**不在这里复制**：``QgsVectorFileWriter`` 的
     ``attributes`` / ``attributesExportNames`` 能直接选字段、改导出名（所有
     格式通用），见 :func:`_apply_field_options`。
+
+    ``progress(done, total, text)`` 在"把筛选结果读进内存"这段也开始报数：
+    大图层的按条件/仅选中导出，光这一步就可能先卡很久。
     """
     from qgis.core import QgsCoordinateReferenceSystem, QgsExpression, QgsFeatureRequest
 
@@ -833,7 +959,13 @@ def _prepare_source(layer: QgsVectorLayer, spec: ExportSpec) -> QgsVectorLayer:
         fids = list(layer.selectedFeatureIds())
         if not fids:
             raise ExportLayerError("当前图层没有选中要素，请先选择要素或改为导出全部")
-        features = list(layer.getFeatures(QgsFeatureRequest().setFilterFids(fids)))
+        features = _collect_features(
+            layer,
+            QgsFeatureRequest().setFilterFids(fids),
+            len(fids),
+            progress,
+            "正在读取选中要素…",
+        )
         logger.info("导出筛选：仅选中要素 → %d 个", len(features))
     elif expression:
         expr = QgsExpression(expression)
@@ -843,7 +975,13 @@ def _prepare_source(layer: QgsVectorLayer, spec: ExportSpec) -> QgsVectorLayer:
         unknown = [name for name in expr.referencedColumns() if name not in names]
         if unknown:
             raise ExportLayerError("筛选条件引用了不存在的字段：" + "、".join(unknown))
-        features = list(layer.getFeatures(QgsFeatureRequest().setFilterExpression(expression)))
+        features = _collect_features(
+            layer,
+            QgsFeatureRequest().setFilterExpression(expression),
+            -1,
+            progress,
+            "正在按条件筛选要素…",
+        )
         logger.info("导出筛选：%s → 命中 %d 个要素", expression, len(features))
 
     # KML / GeoJSON 规范只认经纬度：投影坐标系（3857 / 4547 …）直接写会把米
@@ -855,11 +993,27 @@ def _prepare_source(layer: QgsVectorLayer, spec: ExportSpec) -> QgsVectorLayer:
             target_crs = QgsCoordinateReferenceSystem("EPSG:4326")
     if target_crs is not None:
         return _copy_to_memory(
-            layer, features, _export_fields(layer), {}, target_crs
+            layer, features, _export_fields(layer), {}, target_crs, progress=progress
         )
     if features is not None:
-        return _copy_to_memory(layer, features, _export_fields(layer), {})
+        return _copy_to_memory(
+            layer, features, _export_fields(layer), {}, progress=progress
+        )
     return layer
+
+
+def _collect_features(layer, request, total: int, progress, text: str) -> list:
+    """把 ``request`` 命中的要素读进列表（每 :data:`PROGRESS_STEP` 条报一次进度）。"""
+    features = []
+    for feature in layer.getFeatures(request):
+        features.append(feature)
+        count = len(features)
+        if progress is not None and count % PROGRESS_STEP == 0:
+            progress(count, total, text)
+    if progress is not None:
+        finished = len(features)
+        progress(finished, finished if total < 0 else total, text)
+    return features
 
 
 def sanitize_shapefile_field_name(name: str, used: set[str]) -> str:

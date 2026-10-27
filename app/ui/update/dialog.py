@@ -50,6 +50,9 @@ class UpdateDialog(BaseDialog):
         self.resize(680, 500)
         self._outcome = outcome
         self._downloading = False
+        #: 更新器已在工作：这期间不能关窗（安装无法从客户端取消，关掉只会让
+        #: 用户看不到进度；主窗口关闭流程仍可拒绝退出）
+        self._installing = False
         self._manual: Path | None = None
         self._folder: Path | None = None
         self._init_ui()
@@ -147,8 +150,12 @@ class UpdateDialog(BaseDialog):
         return self._folder
 
     def set_outcome(self, outcome: UpdateOutcome) -> None:
+        if self._installing:
+            # 更新器已在工作：周期检查的结果不能把进度界面重置成“立即更新”
+            return
         self._outcome = outcome
         self._downloading = False
+        self._installing = False
         self._manual = None
         self._folder = None
         manifest = outcome.result.manifest
@@ -195,6 +202,7 @@ class UpdateDialog(BaseDialog):
 
     def set_downloading(self) -> None:
         self._downloading = True
+        self._installing = False
         self._progress.setRange(0, 1000)
         self._progress.setValue(0)
         self._progress.show()
@@ -220,6 +228,7 @@ class UpdateDialog(BaseDialog):
 
     def set_download_error(self, message: str) -> None:
         self._downloading = False
+        self._installing = False
         self._progress.hide()
         self._cancel_btn.hide()
         self._install_btn.setEnabled(True)
@@ -237,6 +246,7 @@ class UpdateDialog(BaseDialog):
 
     def set_installing(self) -> None:
         self._downloading = False
+        self._installing = True
         self._progress.setRange(0, 1)
         self._progress.setValue(1)
         self._progress.show()
@@ -251,6 +261,7 @@ class UpdateDialog(BaseDialog):
     def set_starting_updater(self) -> None:
         """更新器进程已创建，正在等它写出启动心跳（还没到退出的时候）。"""
         self._downloading = False
+        self._installing = True
         self._progress.setRange(0, 0)  # 忙碌动画，进度未知
         self._progress.show()
         self._status_label.setStyleSheet("color: #4b5563;")
@@ -268,6 +279,7 @@ class UpdateDialog(BaseDialog):
         启动第二个更新器并发安装。
         """
         self._downloading = False
+        self._installing = False
         self._progress.hide()
         self._manual = None
         self._folder = log_path.parent if log_path is not None else None
@@ -295,6 +307,7 @@ class UpdateDialog(BaseDialog):
         自行放弃，不会修改任何文件）。
         """
         self._downloading = False
+        self._installing = False
         self._progress.hide()
         self._install_btn.hide()
         self._skip_btn.hide()
@@ -305,9 +318,83 @@ class UpdateDialog(BaseDialog):
         self._status_label.setText(reason)
         self._status_label.show()
 
+    def set_install_progress(self, message: str, percent: int | None) -> None:
+        """Linux 更新器正在校验 / 解压：显示真实百分比。"""
+        self._downloading = False
+        self._installing = True
+        self._progress.show()
+        if percent is None:
+            self._progress.setRange(0, 0)  # 忙碌动画
+        else:
+            self._progress.setRange(0, 100)
+            self._progress.setValue(max(0, min(100, int(percent))))
+        self._status_label.setStyleSheet("color: #4b5563;")
+        self._status_label.setText(message or "正在安装更新…")
+        self._status_label.show()
+        self._install_btn.hide()
+        self._skip_btn.hide()
+        self._remind_btn.hide()
+        self._cancel_btn.hide()
+        self._open_download_btn.hide()
+        self._open_folder_btn.hide()
+
+    def set_install_waiting_exit(self, message: str = "") -> None:
+        """更新包已解压完成，更新器在等本程序退出。"""
+        self._downloading = False
+        self._installing = True
+        self._progress.setRange(0, 100)
+        self._progress.setValue(100)
+        self._progress.show()
+        self._status_label.setStyleSheet("color: #237804;")
+        self._status_label.setText(message or "更新包已准备就绪，正在关闭程序以完成安装…")
+        self._status_label.show()
+        self._install_btn.hide()
+        self._skip_btn.hide()
+        self._remind_btn.hide()
+        self._cancel_btn.hide()
+        self._open_download_btn.hide()
+        self._open_folder_btn.hide()
+
+    def set_install_failed(self, reason: str, log_path: Path | None) -> None:
+        """更新器报告失败 / 意外退出：保持程序运行，允许重试。"""
+        self._downloading = False
+        self._installing = False
+        self._progress.hide()
+        self._folder = log_path.parent if log_path is not None else None
+        self._manual = None
+        self._install_btn.setText("重试更新")
+        self._install_btn.setEnabled(True)
+        self._install_btn.show()
+        self._skip_btn.hide()
+        self._remind_btn.setEnabled(True)
+        self._remind_btn.show()
+        self._cancel_btn.hide()
+        self._open_download_btn.hide()
+        self._open_folder_btn.setVisible(self._folder is not None)
+        detail = f"（日志：{log_path}）" if log_path is not None else ""
+        self._status_label.setStyleSheet("color: #cf1322;")
+        self._status_label.setText(f"{reason}，本次更新没有完成，程序保持运行。{detail}")
+        self._status_label.show()
+
+    def set_install_cancelled(self) -> None:
+        """未获得管理员授权：恢复“立即更新”，不改变其他状态。"""
+        self._downloading = False
+        self._installing = False
+        if self._outcome is not None:
+            self.set_outcome(self._outcome)
+        else:
+            self._install_btn.setEnabled(True)
+            self._install_btn.show()
+            self._remind_btn.setEnabled(True)
+            self._remind_btn.show()
+        self._status_label.setStyleSheet("color: #ad4e00;")
+        self._status_label.setText("未获得管理员授权（或更新程序未能启动），本次更新已取消。")
+        self._status_label.show()
+
     def set_manual(self, reason: str, package_path: Path | None) -> None:
         """自动安装不可用：展示原因，提供下载页 / 所在文件夹。"""
         self._downloading = False
+        self._installing = False
         self._manual = package_path
         self._folder = package_path
         self._progress.hide()
@@ -340,6 +427,9 @@ class UpdateDialog(BaseDialog):
             self.open_folder_requested.emit()
 
     def reject(self) -> None:
+        # 更新器已经在工作：关窗不能中止安装，只会让用户看不到进度
+        if self._installing:
+            return
         # 关闭窗口 = 稍后提醒（不能把强制更新变成“跳过”）
         if self._downloading:
             # 下载中关窗：先取消，分片保留可续传
@@ -347,6 +437,9 @@ class UpdateDialog(BaseDialog):
         super().reject()
 
     def closeEvent(self, event):
+        if self._installing:
+            event.ignore()
+            return
         if self._downloading:
             self.cancel_requested.emit()
         super().closeEvent(event)

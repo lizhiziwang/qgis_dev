@@ -20,7 +20,7 @@
     盘符(实测 sqlite3_open(D) 失败; 仅相对路径无冒号时前缀可开, 但工程需持久化绝对
     路径, 故直接落库 ``.gpkg`` 后缀)。
   - ``dict`` 等无几何数据:抛 :class:`LocalLayerUnsupportedCategoryError`
-    让上层弹原有 ``QMessageBox.information``(UX 行为保持不变)。
+    让上层弹 ``MessageBox.information``(UX 行为保持不变)。
 - 成功返回 :class:`QgsMapLayer` 实例(可直接 :meth:`QgsProject.addMapLayer`);
 - 失败抛 :class:`LocalLayerError` 子类,由 MainWindow 转译为模态警告。
 
@@ -136,7 +136,7 @@ class LocalLayerLoader(QObject):
             return self._load_image(db, name, path)
         if category == "spatial":
             return self._load_vector(db, name, path)
-        # "dict" 走这里 — 让 MainWindow 弹原有的 QMessageBox.information
+        # "dict" 走这里 — 让 MainWindow 弹 MessageBox.information
         raise LocalLayerUnsupportedCategoryError(category)
 
     # ------------------------------------------------------------ 影像

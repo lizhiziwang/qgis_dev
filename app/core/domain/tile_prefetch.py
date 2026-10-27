@@ -37,8 +37,9 @@ import math
 import threading
 import time
 from collections import OrderedDict, deque
-from typing import Optional
+from typing import Any, Optional
 
+from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QObject, QTimer
 from qgis.PyQt.QtGui import QColor, QImage, QPainter
 
@@ -331,7 +332,7 @@ def _extent_key(extent) -> str:
 
 
 class ZoomTileGuard(QObject):
-    """缩放时后台预取当前视口瓦片，瓦片到齐后 refresh() 重绘——不冻结画布。
+    """缩放时后台预取当前视口瓦片，瓦片到齐后只重绘瓦片图层——不冻结画布。
 
     背景与设计权衡
     --------------
@@ -343,16 +344,17 @@ class ZoomTileGuard(QObject):
     瓦片到齐再 ``freeze(False) + refresh()`` 出新帧。物理上就是"先回退到旧帧、
     再突然跳到新帧"，是个明显的 snap——用户反馈不平滑。
 
-    现版（2026-09-04）：**拿掉 freeze**，只做后台预取 + 完成后 ``refresh()``。
+    现版（2026-09-04）：**拿掉 freeze**，只做后台预取 + 完成后重绘瓦片图层。
     流程：
     1. ``canvas.extentsChanged`` → 启动 200ms 防抖（连续缩放时合并）
     2. 防抖到期 → 后台离屏渲染当前视口（单 extent，``completion_event``）
-    3. 预取完成 → ``canvas.refresh()``（瓦片已在缓存，重绘不阻塞网络）
-    4. 兜底：预取超时（2s）或失败 → 直接 ``refresh()``
-       （接受白屏，不让画布永远等）
+    3. 预取完成 → ``layer.triggerRepaint()``：只把该瓦片图层缓存置脏
+       （``QgsMapRendererCache`` 自己监听 ``repaintRequested``），矢量层继续
+       复用缓存；取不到图层时才回退 ``canvas.refresh()``
+    4. 兜底：预取超时（2s）或失败 → 同上（只重绘瓦片层，不让画布永远等）
 
     视觉上：画布先出当前 extent（瓦片未到时该位置是白的，**不会被回退到旧
-    帧**），瓦片就绪后 refresh 把它填上——连续的、没有 snap。如果白屏明显，
+    帧**），瓦片就绪后重绘瓦片层把它填上——连续的、没有 snap。如果白屏明显，
     再考虑用占位灰代替纯白（见 ``QgsRasterLayer`` 的 backgroundColor/placeholder）。
 
     worker 实例**独立**于 TilePrefetcher 的 worker：
@@ -364,8 +366,8 @@ class ZoomTileGuard(QObject):
     ------------------------------------------
     - 信号是 ``extentsChanged``（带 s），不是 ``extentChanged``（代码库里
       swipe.py:347、qmap_compare.py:437 等都是这个写法）
-    - 仍**不**监听 ``renderComplete``：预取完成时主动 ``canvas.refresh()``，
-      renderComplete 仍可能为之前已 in-flight 的渲染触发，与本类逻辑无冲突
+    - 仍**不**监听 ``renderComplete``：预取完成时主动 ``triggerRepaint()``
+      瓦片图层，renderComplete 仍可能为之前已 in-flight 的渲染触发，与本类逻辑无冲突
     """
 
     _DEBOUNCE_MS = 200       # 缩放空闲后才预取（连续滚动时合并）
@@ -386,6 +388,7 @@ class ZoomTileGuard(QObject):
         self._pending_event: Optional[threading.Event] = None
         self._started_at: Optional[float] = None
         self._worker: Optional[_PrefetchWorker] = None
+        self._prefetch_layer: Any = None  # 本轮预取的 XYZ 图层（收尾只重绘它）
         # 防抖：缩放空闲 200ms 才调度预取
         self._debounce = QTimer(self)
         self._debounce.setSingleShot(True)
@@ -439,6 +442,7 @@ class ZoomTileGuard(QObject):
             evt = threading.Event()
             self._pending_event = evt
             self._started_at = time.monotonic()
+            self._prefetch_layer = layers[0]
             self._worker.submit(
                 [(layers[0], extent)],
                 QgsMapSettings(settings),
@@ -449,7 +453,7 @@ class ZoomTileGuard(QObject):
             logger.debug("zoom tile guard prefetch failed: %s", exc)
 
     def _on_poll(self) -> None:
-        """轮询：worker 完成 / 超时 → refresh（仅当批次匹配当前 seq）。
+        """轮询：worker 完成 / 超时 → 重绘瓦片层（仅当批次匹配当前 seq）。
 
         注意：用户继续缩放时 ``_on_extents_changed`` 会把 ``_pending_event``
         置 None 并 stop timer，所以本方法只在"当前确实有进行中的预取"时
@@ -460,7 +464,7 @@ class ZoomTileGuard(QObject):
         if not self._pending_event.is_set():
             if self._started_at is not None and \
                (time.monotonic() - self._started_at) * 1000 > self._TIMEOUT_MS:
-                logger.debug("zoom tile guard prefetch 超时，强制 refresh")
+                logger.debug("zoom tile guard prefetch 超时，强制重绘瓦片层")
                 self._pending_event = None
                 self._pending_seq = 0
                 self._poll.stop()
@@ -477,15 +481,26 @@ class ZoomTileGuard(QObject):
         self._refresh()
 
     def _refresh(self) -> None:
-        """触发一次画布重绘（瓦片已在缓存，渲染不阻塞网络）。
+        """让画布用缓存里的瓦片重绘一次（不重绘其它图层）。
 
-        无 freeze 后，``_unfreeze`` 这个名字不再合适；改名 ``_refresh`` 体现
-        语义——只是让画布用缓存里的瓦片再画一次。
+        只调 ``layer.triggerRepaint()``：``QgsMapRendererCache`` 自己监听图层的
+        ``repaintRequested`` 并只把该图层缓存置脏，矢量层继续复用缓存。**不要**
+        调 ``canvas.refresh()``——那会进入 ``AppMapCanvas.refresh()`` 的
+        ``clearCache()``，把整幅地图的所有图层缓存一起废掉（平移/缩放后再全量
+        重绘一遍）。图层已删除 / 取不到时才回退整幅刷新。
         """
         canvas = self._canvas
         self._started_at = None
         if canvas is None:
             return
+        layer = self._prefetch_layer
+        self._prefetch_layer = None
+        if layer is not None and not sip.isdeleted(layer):
+            try:
+                layer.triggerRepaint()
+                return
+            except Exception:
+                logger.debug("瓦片图层 triggerRepaint 失败，回退整幅刷新", exc_info=True)
         try:
             canvas.refresh()
         except Exception:  # noqa: BLE001
@@ -501,6 +516,7 @@ class ZoomTileGuard(QObject):
             self._worker.stop()
             self._worker.join(timeout=2.0)
             self._worker = None
+        self._prefetch_layer = None
         self._canvas = None
 
 

@@ -32,9 +32,10 @@ class SpaceLongThinCheck(BaseCheck):
             return 5.0
 
     def iter_failed(self, p: CheckParam):
-        """流式产出命中要素 ``(seen, fid, ratio)``。
+        """流式产出 ``(seen, fid, ratio)``：**每个处理过的要素都产出一条**。
 
-        ``seen`` 是累计已处理要素数（含未命中），供界面分批执行时更新进度。
+        ``fid is None`` 表示该要素通过（仅用于推进进度），``fid`` 非空表示命中；
+        每个要素都 yield 一次，界面才能在一遍扫描一个都不命中时也刷新进度。
         供界面分批驱动（避免长循环阻塞 UI）的同时，也供 :meth:`run` 复用。
 
         调用方需保证 ``p.layer`` 有效；无效图层直接不产出。
@@ -51,25 +52,30 @@ class SpaceLongThinCheck(BaseCheck):
         for feat in layer.getFeatures(req):
             seen += 1
             geom = feat.geometry()
-            if geom.isEmpty():
-                continue
-            geom.convertToMultiType()
-            obb = geom.orientedMinimumBoundingBox()
-            if obb is None:
-                continue
-            poly = obb[0].asPolygon()
-            if not poly or not poly[0]:
-                continue
-            pts = poly[0]
-            if len(pts) < 2:
-                continue
-            e1 = math.hypot(pts[1].x() - pts[0].x(), pts[1].y() - pts[0].y())
-            e2 = math.hypot(pts[2].x() - pts[1].x(), pts[2].y() - pts[1].y())
-            if e2 == 0 or e1 == 0:
-                continue
-            ratio = e1 / e2 if e1 > e2 else e2 / e1
-            if ratio > ratio_limit:
+            ratio = None if geom.isEmpty() else self._ratio_of(geom)
+            if ratio is not None and ratio > ratio_limit:
                 yield seen, feat.id(), ratio
+            else:
+                yield seen, None, None
+
+    @staticmethod
+    def _ratio_of(geom) -> float | None:
+        """长宽比（长边 / 短边）；退化几何等算不出来时返回 ``None``。"""
+        geom.convertToMultiType()
+        obb = geom.orientedMinimumBoundingBox()
+        if obb is None:
+            return None
+        poly = obb[0].asPolygon()
+        if not poly or not poly[0]:
+            return None
+        pts = poly[0]
+        if len(pts) < 2:
+            return None
+        e1 = math.hypot(pts[1].x() - pts[0].x(), pts[1].y() - pts[0].y())
+        e2 = math.hypot(pts[2].x() - pts[1].x(), pts[2].y() - pts[1].y())
+        if e2 == 0 or e1 == 0:
+            return None
+        return e1 / e2 if e1 > e2 else e2 / e1
 
     def run(self, p: CheckParam) -> CheckResult:
         if p.layer is None or not p.layer.isValid():
@@ -82,8 +88,9 @@ class SpaceLongThinCheck(BaseCheck):
         failed: List[int] = []
         ratios: dict[int, float] = {}
         for _seen, fid, ratio in self.iter_failed(p):
-            failed.append(fid)
-            ratios[fid] = ratio
+            if fid is not None:
+                failed.append(fid)
+                ratios[fid] = ratio
 
         return CheckResult(
             status=CheckStatus.PASS if not failed else CheckStatus.FAIL,

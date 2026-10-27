@@ -31,7 +31,6 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
@@ -39,8 +38,9 @@ from qgis.PyQt.QtWidgets import (
 
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.feature_highlight import FeatureHighlighter
-from app.ui.common.widgets import make_table
+from app.ui.common.message_box import MessageBox
 from app.ui.common.value_format import format_value
+from app.ui.common.widgets import make_table
 
 #: 视为「无值」的文本：真 NULL 之外，数据里常把空值写成字面量字符串
 _NULL_TOKENS = {"", "null", "none", "nil", "<null>", "undefined"}
@@ -230,7 +230,7 @@ class MergeGeometryDialog(BaseDialog):
 
     def _on_ok(self) -> None:
         if self.target_fid() is None:
-            QMessageBox.information(self, "提示", "请先选择一个要并入的要素")
+            MessageBox.information(self, "提示", "请先选择一个要并入的要素")
             return
         self.accept()
 

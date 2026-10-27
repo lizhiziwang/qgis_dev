@@ -15,6 +15,29 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
+from qgis.PyQt.QtWidgets import (
+    QAbstractItemView,
+    QApplication,
+    QComboBox,
+    QDialog,
+    QDialogButtonBox,
+    QFormLayout,
+    QHBoxLayout,
+    QHeaderView,
+    QLabel,
+    QLineEdit,
+    QPushButton,
+    QStackedWidget,
+    QStyledItemDelegate,
+    QTableWidget,
+    QTableWidgetItem,
+    QTreeWidget,
+    QTreeWidgetItem,
+    QVBoxLayout,
+    QWidget,
+)
+
 from app.core.domain.create_data.fields import FIELD_TYPES, to_int
 from app.core.domain.local_table_edit import (
     LocalTableError,
@@ -37,31 +60,9 @@ from app.core.util.field_meta import (
 )
 from app.core.util.local_db_util import local_db_util
 from app.infra.logging import get_logger
+from app.ui.common.message_box import MessageBox
 from app.ui.common.widgets import open_file_dir, save_file
 from app.ui.dialogs.dict_pick_dialog import DictPickDialog
-from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
-from qgis.PyQt.QtWidgets import (
-    QAbstractItemView,
-    QApplication,
-    QComboBox,
-    QDialog,
-    QDialogButtonBox,
-    QFormLayout,
-    QHBoxLayout,
-    QHeaderView,
-    QLabel,
-    QLineEdit,
-    QMessageBox,
-    QPushButton,
-    QStackedWidget,
-    QStyledItemDelegate,
-    QTableWidget,
-    QTableWidgetItem,
-    QTreeWidget,
-    QTreeWidgetItem,
-    QVBoxLayout,
-    QWidget,
-)
 
 logger = get_logger(__name__)
 
@@ -185,7 +186,7 @@ class _RowDialog(QDialog):
     def _validate(self) -> None:
         for col in self._columns:
             if col.notnull and not self._edits[col.name].text().strip():
-                QMessageBox.warning(self, "新增字典行", f"「{col.name}」不能为空")
+                MessageBox.warning(self, "新增字典行", f"「{col.name}」不能为空")
                 return
         self.accept()
 
@@ -234,7 +235,7 @@ class _EditorBase(QWidget):
             return bool(self._before_change(self._db, self._category, self._table))
         except Exception as exc:
             logger.exception("准备修改表结构失败")
-            QMessageBox.warning(self, "字段管理", f"修改前准备失败：{exc}")
+            MessageBox.warning(self, "字段管理", f"修改前准备失败：{exc}")
             return False
 
 
@@ -597,7 +598,7 @@ class VectorFieldEditor(_EditorBase):
             reverse=True,
         )
         if not selected_display:
-            QMessageBox.information(self, "字段管理", "请先选中要删除的字段行")
+            MessageBox.information(self, "字段管理", "请先选中要删除的字段行")
             return
         order = self._view_order or list(range(len(self._rows)))
         selected = sorted(
@@ -639,7 +640,7 @@ class VectorFieldEditor(_EditorBase):
     def _save(self) -> None:
         error = self._validate()
         if error:
-            QMessageBox.warning(self, "字段管理", error)
+            MessageBox.warning(self, "字段管理", error)
             return
         if self._info is None:
             return
@@ -670,25 +671,25 @@ class VectorFieldEditor(_EditorBase):
             if row.original is not None and row.orig_dict_table and not row.dict_table
         ]
         if cleared:
-            ret = QMessageBox.question(
+            ret = MessageBox.question(
                 self,
                 "清除字典挂接",
                 "以下字段的字典挂接将被清除：" + "、".join(cleared) + "。是否继续保存？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+                MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+                MessageBox.StandardButton.No,
             )
-            if ret != QMessageBox.StandardButton.Yes:
+            if ret != MessageBox.StandardButton.Yes:
                 return
         if not (deleted or renames or type_changes or new_rows):
             # 只有别名 / 字典 / 可见性变化：不需要动表结构
             try:
                 self._save_metadata()
             except LocalTableError as exc:
-                QMessageBox.warning(self, "字段管理", str(exc))
+                MessageBox.warning(self, "字段管理", str(exc))
                 return
-            QMessageBox.information(self, "字段管理", "字段修改已保存")
+            MessageBox.information(self, "字段管理", "字段修改已保存")
             return
-        ret = QMessageBox.question(
+        ret = MessageBox.question(
             self,
             "保存字段结构",
             "将修改库表结构：\n"
@@ -705,10 +706,10 @@ class VectorFieldEditor(_EditorBase):
                 if part
             ))
             + "\n\n表已在地图中打开时会先从工程移除，数据保留。继续？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
         )
-        if ret != QMessageBox.StandardButton.Yes:
+        if ret != MessageBox.StandardButton.Yes:
             return
         if not self._confirm_close_layers():
             return
@@ -728,16 +729,16 @@ class VectorFieldEditor(_EditorBase):
             for name in deleted:
                 drop_column(self._db_path, self._table, name)
         except LocalTableError as exc:
-            QMessageBox.warning(self, "字段管理", str(exc))
+            MessageBox.warning(self, "字段管理", str(exc))
             self._reload()
             return
         try:
             self._save_metadata()
         except LocalTableError as exc:
-            QMessageBox.warning(self, "字段管理", f"结构已改，但别名/字典元数据保存失败：{exc}")
+            MessageBox.warning(self, "字段管理", f"结构已改，但别名/字典元数据保存失败：{exc}")
         self._reload()
         self.dataChanged.emit(self._category, self._table)
-        QMessageBox.information(self, "字段管理", "字段结构已保存")
+        MessageBox.information(self, "字段管理", "字段结构已保存")
 
     def _ensure_local_dicts(self) -> list[str]:
         """保存前把选中的字典（系统 / 当前库）确保写进当前库；返回失败提示。"""
@@ -833,7 +834,7 @@ class VectorFieldEditor(_EditorBase):
         finally:
             db.conn.close()
         if warnings:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self,
                 "字段管理",
                 "部分字典未能写入本地库：\n" + "\n".join(warnings),
@@ -1066,7 +1067,7 @@ class DictTableEditor(_EditorBase):
             ).fetchall()
         except Exception as exc:
             logger.warning("读取字典域失败：%s", exc, exc_info=True)
-            QMessageBox.warning(self, "字典表", f"读取字典域失败：{exc}")
+            MessageBox.warning(self, "字典表", f"读取字典域失败：{exc}")
             return
         finally:
             db.conn.close()
@@ -1152,7 +1153,7 @@ class DictTableEditor(_EditorBase):
             ).fetchall()
         except Exception as exc:
             logger.warning("读取字典项失败：%s", exc, exc_info=True)
-            QMessageBox.warning(self, "字典表", f"读取字典项失败：{exc}")
+            MessageBox.warning(self, "字典表", f"读取字典项失败：{exc}")
             return
         finally:
             db.conn.close()
@@ -1202,7 +1203,7 @@ class DictTableEditor(_EditorBase):
         old_name = str(node.data(0, self._NAME) or "")
         new_value = node.text(column).strip()
         if not new_value:
-            QMessageBox.warning(self, "字典表", "名称 / 代码不能为空")
+            MessageBox.warning(self, "字典表", "名称 / 代码不能为空")
             self._revert_tree_cell(node, column, old_name if column == 0 else old_code)
             return
         db = local_db_util(self._db_path)
@@ -1248,11 +1249,11 @@ class DictTableEditor(_EditorBase):
             db.conn.commit()
         except LocalTableError as exc:
             db.conn.rollback()
-            QMessageBox.warning(self, "字典表", str(exc))
+            MessageBox.warning(self, "字典表", str(exc))
             self._revert_tree_cell(node, column, old_name if column == 0 else old_code)
         except Exception as exc:  # noqa: BLE001
             db.conn.rollback()
-            QMessageBox.warning(self, "字典表", f"保存失败：{exc}")
+            MessageBox.warning(self, "字典表", f"保存失败：{exc}")
             self._revert_tree_cell(node, column, old_name if column == 0 else old_code)
         finally:
             db.conn.close()
@@ -1286,7 +1287,7 @@ class DictTableEditor(_EditorBase):
         try:
             insert_row(self._db_path, self._table, dialog.values())
         except LocalTableError as exc:
-            QMessageBox.warning(self, "字典表", str(exc))
+            MessageBox.warning(self, "字典表", str(exc))
             return
         self._reload()
         self.dataChanged.emit(self._category, self._table)
@@ -1295,7 +1296,7 @@ class DictTableEditor(_EditorBase):
         if self._canonical:
             nodes = self.tree.selectedItems()
             if not nodes:
-                QMessageBox.information(self, "字典表", "请先选中要删除的字典域或字典项")
+                MessageBox.information(self, "字典表", "请先选中要删除的字典域或字典项")
                 return
             rowids: list[int] = []
             deleted_domains: list[str] = []
@@ -1331,14 +1332,14 @@ class DictTableEditor(_EditorBase):
                     "\n\n并会清除挂接到这些字典域的字段关联："
                     + "、".join(sorted(set(deleted_domains)))
                 )
-            ret = QMessageBox.question(
+            ret = MessageBox.question(
                 self,
                 "删除字典行",
                 f"确定删除选中的 {len(rowids)} 行（含下级）吗？{detail}",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+                MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+                MessageBox.StandardButton.No,
             )
-            if ret != QMessageBox.StandardButton.Yes:
+            if ret != MessageBox.StandardButton.Yes:
                 return
             self._delete_rowids(rowids)
             if deleted_domains:
@@ -1354,25 +1355,25 @@ class DictTableEditor(_EditorBase):
         # 平铺表沿用原有逻辑
         rows = sorted({index.row() for index in self.table.selectedIndexes()})
         if not rows:
-            QMessageBox.information(self, "字典表", "请先选中要删除的行")
+            MessageBox.information(self, "字典表", "请先选中要删除的行")
             return
         keys = [self._key_for_row(row) for row in rows]
         keys = [key for key in keys if key]
         if not keys:
             return
-        ret = QMessageBox.question(
+        ret = MessageBox.question(
             self,
             "删除字典行",
             f"确定删除选中的 {len(keys)} 行吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
         )
-        if ret != QMessageBox.StandardButton.Yes:
+        if ret != MessageBox.StandardButton.Yes:
             return
         try:
             delete_rows(self._db_path, self._table, keys)
         except LocalTableError as exc:
-            QMessageBox.warning(self, "字典表", str(exc))
+            MessageBox.warning(self, "字典表", str(exc))
             return
         self._reload()
         self.dataChanged.emit(self._category, self._table)
@@ -1482,7 +1483,7 @@ class DictTableEditor(_EditorBase):
             db.conn.commit()
         except Exception as exc:  # noqa: BLE001
             db.conn.rollback()
-            QMessageBox.warning(self, "字典表", f"删除失败：{exc}")
+            MessageBox.warning(self, "字典表", f"删除失败：{exc}")
         finally:
             db.conn.close()
 
@@ -1510,7 +1511,7 @@ class DictTableEditor(_EditorBase):
             ).fetchall()
         except Exception as exc:  # noqa: BLE001
             db.conn.close()
-            QMessageBox.warning(self, "字典表", f"搜索失败：{exc}")
+            MessageBox.warning(self, "字典表", f"搜索失败：{exc}")
             return
         db.conn.close()
         # **保持原来的「字典域 → 字典项」结构**：先建域树，再隐藏不匹配的
@@ -1574,7 +1575,7 @@ class DictTableEditor(_EditorBase):
 
     def _on_export_dict(self) -> None:
         if not self._canonical:
-            QMessageBox.warning(self, "导出字典", "这张表不是标准字典表结构")
+            MessageBox.warning(self, "导出字典", "这张表不是标准字典表结构")
             return
         path = save_file(
             self,
@@ -1593,17 +1594,17 @@ class DictTableEditor(_EditorBase):
         try:
             written, count = export_local_dict_xls(path, self._db_path, self._table)
         except LocalDictExcelError as exc:
-            QMessageBox.warning(self, "导出字典", str(exc))
+            MessageBox.warning(self, "导出字典", str(exc))
             return
         finally:
             QApplication.restoreOverrideCursor()
-        QMessageBox.information(
+        MessageBox.information(
             self, "导出字典", f"已导出 {count} 条字典项到：{written}"
         )
 
     def _on_import_dict(self) -> None:
         if not self._canonical:
-            QMessageBox.warning(self, "导入字典", "这张表不是标准字典表结构")
+            MessageBox.warning(self, "导入字典", "这张表不是标准字典表结构")
             return
         path = open_file_dir(
             self,
@@ -1614,16 +1615,16 @@ class DictTableEditor(_EditorBase):
         )
         if not path:
             return
-        ret = QMessageBox.question(
+        ret = MessageBox.question(
             self,
             "导入字典",
             "导入前是否清空当前字典表的已有条目？",
-            QMessageBox.StandardButton.Yes
-            | QMessageBox.StandardButton.No
-            | QMessageBox.StandardButton.Cancel,
-            QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes
+            | MessageBox.StandardButton.No
+            | MessageBox.StandardButton.Cancel,
+            MessageBox.StandardButton.No,
         )
-        if ret == QMessageBox.StandardButton.Cancel:
+        if ret == MessageBox.StandardButton.Cancel:
             return
         from app.core.domain.local_dict_excel import (
             LocalDictExcelError,
@@ -1636,14 +1637,14 @@ class DictTableEditor(_EditorBase):
                 path,
                 self._db_path,
                 self._table,
-                replace=ret == QMessageBox.StandardButton.Yes,
+                replace=ret == MessageBox.StandardButton.Yes,
             )
         except LocalDictExcelError as exc:
-            QMessageBox.warning(self, "导入字典", str(exc))
+            MessageBox.warning(self, "导入字典", str(exc))
             return
         finally:
             QApplication.restoreOverrideCursor()
-        QMessageBox.information(
+        MessageBox.information(
             self,
             "导入字典",
             f"读取 {report.rows_total} 行，新增 {report.inserted} 条，"
@@ -1730,7 +1731,7 @@ class DictTableEditor(_EditorBase):
         try:
             update_row(self._db_path, self._table, key, {name: value})
         except LocalTableError as exc:
-            QMessageBox.warning(self, "字典表", str(exc))
+            MessageBox.warning(self, "字典表", str(exc))
             self._reload_table()
             return
         self._rows[row_index][name] = value

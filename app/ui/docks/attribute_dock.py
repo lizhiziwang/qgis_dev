@@ -37,10 +37,32 @@ from qgis.core import (
     QgsWkbTypes,
 )
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import (QAbstractTableModel, QEvent, QItemSelection, QItemSelectionModel,
-                              QModelIndex, QObject, QPoint, QPointF, QRect, Qt, QTimer, QVariant, pyqtSignal)
-from qgis.PyQt.QtGui import (QBrush, QColor, QKeySequence, QPainter, QPalette, QPen, QPolygonF,
-                             QStandardItem, QStandardItemModel)
+from qgis.PyQt.QtCore import (
+    QAbstractTableModel,
+    QEvent,
+    QItemSelection,
+    QItemSelectionModel,
+    QModelIndex,
+    QObject,
+    QPoint,
+    QPointF,
+    QRect,
+    Qt,
+    QTimer,
+    QVariant,
+    pyqtSignal,
+)
+from qgis.PyQt.QtGui import (
+    QBrush,
+    QColor,
+    QKeySequence,
+    QPainter,
+    QPalette,
+    QPen,
+    QPolygonF,
+    QStandardItem,
+    QStandardItemModel,
+)
 from qgis.PyQt.QtWidgets import (
     QAbstractItemDelegate,
     QAbstractItemView,
@@ -52,7 +74,6 @@ from qgis.PyQt.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QSizePolicy,
@@ -70,6 +91,7 @@ from app.infra.logging import get_logger
 from app.ui.common import tool_icons
 from app.ui.common.feature_highlight import FeatureHighlighter
 from app.ui.common.icons import Icons
+from app.ui.common.message_box import MessageBox
 from app.ui.common.modeless import show_modeless
 from app.ui.common.theme import ThemeManager, dock_selection_color
 from app.ui.common.value_format import format_value
@@ -365,10 +387,18 @@ class PagedAttributeTableModel(QAbstractTableModel):
         #: 没挂字典的字段不在里面。见 :mod:`app.core.util.dict_values`。
         self._dict_fields: dict[int, FieldDict] = {}
         self._load_dict_fields()
-        #: 结果 **fid 列表**（内存主驻留物；要素按需取，见 ``feature_at``）
-        self._fids: List[int] = []
-        #: fid → 行号（选中集同步要按 fid 反查行，线性找在 2M 行上不可用）
-        self._row_of_fid: dict[int, int] = {}
+        #: 底层结果 **fid 列表**（按当前筛选 / show_ids 流式取到的全量；内存主驻留物）
+        self._all_fids: List[int] = []
+        #: fid → 底层行号（流式去重 / 删除时按 fid 反查，线性找在 2M 行上不可用）
+        self._row_of_all: dict[int, int] = {}
+        #: **可见** fid 列表：没有本地过滤时与 ``_all_fids`` 是**同一个 list**（不复制），
+        #: 「仅选中要素」时是按 ``_local_ids`` 过滤出来的子列表
+        self._fids: List[int] = self._all_fids
+        #: 可见 fid → 行号（无过滤时与 ``_row_of_all`` 是同一个 dict）
+        self._row_of_fid: dict[int, int] = self._row_of_all
+        #: 本地显示过滤：None = 不过滤；set[int] = 只显示这些 fid（含空集）。
+        #: 只决定“已加载结果里显示哪些”，**不重查数据源**（见 :meth:`set_local_filter`）。
+        self._local_ids: Optional[set[int]] = None
         #: **临时补插**的 fid：选中了但还没流式加载到，先补进表里好让对应行能被选中。
         #: 它们不属于筛选结果，取消选中就撤掉（见 :meth:`drop_stale_extras`）。
         self._extra_fids: set[int] = set()
@@ -376,7 +406,7 @@ class PagedAttributeTableModel(QAbstractTableModel):
         self._feature_cache: dict[int, QgsFeature] = {}
         #: 每批加载条数：≤ 阈值时 = 总量（一次全量）；否则固定 STREAM_BATCH
         self.batch_size = 0
-        #: 已加载条数（= _fids 长度；为 0 表示尚未加载）
+        #: 底层已加载条数（= ``_all_fids`` 长度，含被本地过滤挡掉的；为 0 表示尚未加载）
         self.loaded_count = 0
         #: 总数是否已确知。无过滤（1=1）时 featureCount() 直接给出；
         #: show_ids 仅自身时 len() 直接给出；带过滤时需流式结束后补齐
@@ -437,9 +467,15 @@ class PagedAttributeTableModel(QAbstractTableModel):
         self._extra_fids.discard(fid)
         row = self._row_of_fid.get(fid)
         if row is None:
+            # 本地过滤下它可能"在底层结果里、但没显示"：底层也要撤掉，否则切回全部又冒出来
+            if fid in self._row_of_all:
+                self._remove_from_all(fid)
+                if self.total_known:
+                    self.total_features = max(0, self.total_features - 1)
+                self.state_changed.emit()
             return
         self._remove_rows([row])
-        self.loaded_count = len(self._fids)
+        self.loaded_count = len(self._all_fids)
         if self.total_known:
             self.total_features = max(0, self.total_features - 1)
         self.state_changed.emit()
@@ -455,7 +491,7 @@ class PagedAttributeTableModel(QAbstractTableModel):
         added = self._append_fids([int(fid)])
         if not added:
             return
-        self.loaded_count = len(self._fids)
+        self.loaded_count = len(self._all_fids)
         if self.total_known:
             self.total_features += 1
         self.state_changed.emit()
@@ -546,9 +582,15 @@ class PagedAttributeTableModel(QAbstractTableModel):
         return 0, False
 
     def _refresh_totals(self) -> None:
-        """重置流式状态（数据/筛选变化后调用）：快路径总数 + 批次大小。"""
+        """重置流式状态（数据/筛选变化后调用）：快路径总数 + 批次大小。
+
+        **不清** ``_local_ids``：本地过滤（仅选中要素）在重流期间照样生效，
+        新流入的命中行会继续出现在可见列表里。
+        """
         self.total_features, self.total_known = self._fast_total()
         self.loaded_count = 0
+        self._all_fids = []
+        self._row_of_all = {}
         self._fids = []
         self._row_of_fid = {}
         self._extra_fids = set()
@@ -556,6 +598,8 @@ class PagedAttributeTableModel(QAbstractTableModel):
         self.located_row = -1
         self._feature_cache.clear()
         self.truncated = False
+        # 有本地过滤时保持"可见列表 ≠ 底层列表"的形态（无过滤则重新别名同一对象）
+        self._rebuild_view()
         # 小图层一次全量，避免线程抖动；大图层/未知总数用固定批次
         self.batch_size = (
             self.total_features
@@ -660,11 +704,51 @@ class PagedAttributeTableModel(QAbstractTableModel):
         """
         new_ids = [int(i) for i in show_ids] if show_ids else []
         active = bool(new_ids) if subset_active is None else bool(subset_active)
-        if new_ids == self.show_ids and active == self.subset_active:
+        # 换的是**底层查询**（重新向数据源要 fid），本地显示过滤自然作废
+        if (new_ids == self.show_ids and active == self.subset_active
+                and self._local_ids is None):
             return
         self.show_ids = new_ids
         self.subset_active = active
+        self._local_ids = None
         self._reset_and_restart()
+
+    @property
+    def local_ids(self) -> Optional[set[int]]:
+        """当前本地显示过滤（None = 不过滤；空集 = 只显示空集）。"""
+        return self._local_ids
+
+    def set_local_filter(self, ids) -> None:
+        """只改“已加载结果里显示哪些”，**不向数据源重查、不重流**。
+
+        「全部要素 / 仅选中要素」来回切换走这里：底层结果 ``_all_fids`` 已经在
+        后台/内存里，切子集只是重建一次可见行列表，代价 O(已加载条数)，不会再
+        扫一遍数据源（用户报过每次切换都重新刷新加载）。
+        """
+        new = None if ids is None else {int(i) for i in ids}
+        if new == self._local_ids:
+            return
+        self._local_ids = new
+        self.beginResetModel()
+        self._band_rows = set()
+        self.located_row = -1
+        self._rebuild_view()
+        self.endResetModel()
+        self.state_changed.emit()
+
+    def _rebuild_view(self) -> None:
+        """按 ``_local_ids`` 从 ``_all_fids`` 重建可见行列表与 fid→行号。
+
+        没有本地过滤时直接**别名**底层 list / dict（不复制，省一份 2M 行的内存）。
+        """
+        if self._local_ids is None:
+            self._fids = self._all_fids
+            self._row_of_fid = self._row_of_all
+        else:
+            ids = self._local_ids
+            self._fids = [fid for fid in self._all_fids if fid in ids]
+            self._row_of_fid = {fid: i for i, fid in enumerate(self._fids)}
+        self.loaded_count = len(self._all_fids)
 
     def reset_view(self, filter_str: str, show_ids, subset_active: bool | None = None) -> None:
         """同图层重开属性表：一次性换筛选与子集并重流（只重开一轮）。"""
@@ -672,6 +756,7 @@ class PagedAttributeTableModel(QAbstractTableModel):
         self.filter_str = filter_str or "1=1"
         self.show_ids = new_ids
         self.subset_active = bool(new_ids) if subset_active is None else bool(subset_active)
+        self._local_ids = None
         self._reset_and_restart()
 
     def _reset_and_restart(self) -> None:
@@ -739,43 +824,59 @@ class PagedAttributeTableModel(QAbstractTableModel):
     def _insert_fids(self, chunk: List[int]) -> None:
         if not chunk:
             return
-        # 兜底上限：fid 列表超预算时截断插入，随后取消后台流式
-        room = MAX_MODEL_FIDS - len(self._fids)
+        # 兜底上限：**底层** fid 列表超预算时截断插入，随后取消后台流式
+        room = MAX_MODEL_FIDS - len(self._all_fids)
         if room <= 0:
             self._truncate()
             return
-        added = self._append_fids(chunk[:room])
-        self.loaded_count += len(added)
-        if len(self._fids) >= MAX_MODEL_FIDS:
+        self._append_fids(chunk[:room])
+        self.loaded_count = len(self._all_fids)
+        if len(self._all_fids) >= MAX_MODEL_FIDS:
             self._truncate()
 
     def _append_fids(self, fids: List[int]) -> List[int]:
-        """把**还没有的** fid 追加到末尾（去重），维护 fid→行号；返回真正追加的那些。"""
+        """把**底层结果里还没有的** fid 追加到末尾（去重）；返回真正追加的那些。
+
+        有本地过滤（仅选中要素）时，只有命中 ``_local_ids`` 的 fid 才进**可见**列表；
+        底层 ``_all_fids`` 照常收全量（切回「全部要素」时不用重查）。
+        没有本地过滤时可见列表与底层列表是同一个对象，只维护一份。
+        """
         fresh: List[int] = []
         for fid in fids:
             fid = int(fid)
-            if fid in self._row_of_fid:
-                # 它已经有一行了。若之前在"临时补插"集合里，说明这次是流式结果自己也带到了
-                # ——它现在属于正常结果，别再当临时项（否则取消选中时会被误删）。
+            if fid in self._row_of_all:
+                # 它已经在底层结果里了。若之前在"临时补插"集合里，说明这次是流式结果
+                # 自己也带到了——它现在属于正常结果，别再当临时项（否则取消选中会被误删）。
                 self._extra_fids.discard(fid)
                 continue
-            if len(self._fids) + len(fresh) >= MAX_MODEL_FIDS:
+            if len(self._all_fids) + len(fresh) >= MAX_MODEL_FIDS:
                 break
             fresh.append(fid)
         if not fresh:
             return []
-        start = len(self._fids)
-        self.beginInsertRows(QModelIndex(), start, start + len(fresh) - 1)
+        # 无过滤时可见列表就是底层列表（同一个对象），只追加一份；否则按过滤挑一份
+        aliased = self._fids is self._all_fids
+        visible = fresh if self._local_ids is None else [f for f in fresh if f in self._local_ids]
+        view_start = len(self._fids)
+        base_start = len(self._all_fids)
+        if visible:
+            self.beginInsertRows(QModelIndex(), view_start, view_start + len(visible) - 1)
         for offset, fid in enumerate(fresh):
-            self._row_of_fid[fid] = start + offset
-            self._fids.append(fid)
-        self.endInsertRows()
+            self._row_of_all[fid] = base_start + offset
+            self._all_fids.append(fid)
+        if not aliased:
+            for offset, fid in enumerate(visible):
+                self._row_of_fid[fid] = view_start + offset
+                self._fids.append(fid)
+        if visible:
+            self.endInsertRows()
         return fresh
 
     def _remove_rows(self, rows: List[int]) -> None:
-        """删除若干行（``rows`` 降序）并维护 ``_row_of_fid`` 的行号前移。"""
+        """删除若干**可见**行（``rows`` 降序）并从底层结果里同步剔除对应 fid。"""
         if not rows:
             return
+        same_view = self._fids is self._all_fids
         i = 0
         while i < len(rows):
             end = rows[i]
@@ -785,15 +886,30 @@ class PagedAttributeTableModel(QAbstractTableModel):
                 start = rows[j + 1]
                 j += 1
             self.beginRemoveRows(QModelIndex(), start, end)
-            for fid in self._fids[start:end + 1]:
+            removed = self._fids[start:end + 1]
+            for fid in removed:
                 self._row_of_fid.pop(fid, None)
                 self._feature_cache.pop(fid, None)
             del self._fids[start:end + 1]
-            # 删掉的那一段之后，行号整体前移
+            # 删掉的那一段之后，可见行号整体前移
             for idx in range(start, len(self._fids)):
                 self._row_of_fid[self._fids[idx]] = idx
             self.endRemoveRows()
+            if not same_view:
+                # 可见列表是另一份时，底层列表还没删，按 fid 逐个剔除
+                for fid in removed:
+                    self._remove_from_all(fid)
+            # same_view 时底层列表就是刚删的那份，行号已在上面统一前移
             i = j + 1
+
+    def _remove_from_all(self, fid) -> None:
+        """从底层结果里剔除一个 fid（可见列表是副本时用；调用方维护可见行号）。"""
+        idx = self._row_of_all.pop(fid, None)
+        if idx is None or self._all_fids is self._fids:
+            return
+        del self._all_fids[idx]
+        for i in range(idx, len(self._all_fids)):
+            self._row_of_all[self._all_fids[i]] = i
 
     # ------------------------------------------------------------ 选中集同步
 
@@ -801,10 +917,12 @@ class PagedAttributeTableModel(QAbstractTableModel):
     def shows_everything(self) -> bool:
         """表里是不是"没有任何筛选 / 子集"的全量表。
 
-        带筛选（按表达式）或带子集（``show_ids``：质检结果 / 空间查询 / 只看选中…）时
-        都是"**就显示这些**"的约定，不能往里塞别的东西（见 ``apply_layer_selection``）。
+        带筛选（按表达式）、带子集（``show_ids``：质检结果 / 空间查询 / 只看选中…）
+        或正在本地过滤（「仅选中要素」）时都是"**就显示这些**"的约定，不能往里塞
+        别的东西（见 ``apply_layer_selection``）。
         """
-        return not self.subset_active and (self.where or "").strip() in ("", "1=1")
+        return (self._local_ids is None and not self.subset_active
+                and (self.where or "").strip() in ("", "1=1"))
 
     # ------------------------------------------------------------ 排序
 
@@ -820,7 +938,7 @@ class PagedAttributeTableModel(QAbstractTableModel):
     def _order_by(self):
         """当前排序 → ``(字段名, 是否升序)``；不排序、或按 ID 列时返回 ``None``。
 
-        ID 列（第 0 列）就是 fid，交给 python 重排（``_fids`` 全在手上，瞬间完成），
+        ID 列（第 0 列）就是 fid，交给 python 重排（底层 fid 全在手上，瞬间完成），
         不走 provider——``$id`` 当 ORDER BY 表达式在部分 provider 上不可靠。
         """
         if self._sort_column <= 0:
@@ -838,11 +956,12 @@ class PagedAttributeTableModel(QAbstractTableModel):
         """
         ascending = order != Qt.SortOrder.DescendingOrder
         if column == 0:
-            # ID 列：全部 fid 就在手上，直接重排（不劳 provider）
+            # ID 列：全部 fid 就在手上，直接重排**底层列表**（本地过滤下可见列表随之重建）
             self._sort_column, self._sort_ascending = 0, ascending
-            self._fids.sort(reverse=not ascending)
             self.beginResetModel()
-            self._row_of_fid = {fid: i for i, fid in enumerate(self._fids)}
+            self._all_fids.sort(reverse=not ascending)
+            self._row_of_all = {fid: i for i, fid in enumerate(self._all_fids)}
+            self._rebuild_view()
             self._band_rows = set()
             self.endResetModel()
             return
@@ -882,7 +1001,7 @@ class PagedAttributeTableModel(QAbstractTableModel):
 
     @property
     def fids(self) -> List[int]:
-        """已加载结果的 fid 列表（外部/测试只读）。"""
+        """**可见** fid 列表（本地过滤后的；无过滤时即底层全量）。外部/测试只读。"""
         return self._fids
 
     def rowCount(self, parent=QModelIndex()) -> int:
@@ -1630,26 +1749,49 @@ class _AttributeTableView(QTableView):
             return
         super().keyPressEvent(event)
 
+    def selectionCommand(self, index, event=None):  # noqa: N802 —— Qt 命名
+        """鼠标点数据格只移动当前格，**不改选中集**。
+
+        选中（以及图上的图形高亮）统一由**行号栏**驱动（见
+        :meth:`PagedAttributeTableWidget._on_gutter_row_clicked`）；点正文只是想
+        看 / 改这一行，顺手点一下就把整行选中、还换掉地图选中集太吵。
+        键盘（方向键 / Shift 连选）与程序性 ``_select_rows`` 不走这条路，行为不变。
+        """
+        if event is not None and event.type() in (
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.MouseButtonDblClick,
+            QEvent.Type.MouseButtonRelease,
+            QEvent.Type.MouseMove,
+        ):
+            return QItemSelectionModel.SelectionFlag.NoUpdate
+        return super().selectionCommand(index, event)
+
 
 class _LocatedHeaderView(QHeaderView):
-    """行号栏（表格**最左边那一窄列**）：给「当前定位行」画一个 ▶（ArcMap 那样）。
+    """行号栏（表格**最左边那一窄列**）：画行分隔横线 + 「当前定位行」的 ▶。
 
     画在这里而不是画成模型的一列：模型那边第 0 列是 ID、后面跟着字段，插一列会牵动
     数据/编辑/导出/隐藏列一大串；行号栏本来就空着，正合适。
-    没有定位行（比如表是空的）时什么都不画。
+    单击这一列选中整行并在图上高亮，双击定位要素（都**不改行定位的值**），见
+    :meth:`PagedAttributeTableWidget._on_gutter_row_clicked`。
     """
 
-    #: 这一窄列的宽度
-    GUTTER_W = 20
+    #: 这一窄列的宽度（放得下 ▶ 定位标记，四周留白不局促）
+    GUTTER_W = 30
 
     def __init__(self, orientation, parent=None) -> None:
         super().__init__(orientation, parent)
         self.setFixedWidth(self.GUTTER_W)
+        # 行号栏要接收单击 / 双击（sectionClicked / sectionDoubleClicked）
+        self.setSectionsClickable(True)
 
     def paintSection(self, painter, rect, logicalIndex) -> None:  # noqa: N802 —— Qt 命名
         super().paintSection(painter, rect, logicalIndex)
+        if rect.height() <= 0:
+            return
+        self._paint_gutter_cell(painter, rect)
         row = getattr(self.model(), "located_row", -1)
-        if row < 0 or logicalIndex != row or rect.height() <= 0:
+        if row < 0 or logicalIndex != row:
             return
         try:
             from qgis.PyQt.QtCore import QPoint
@@ -1662,8 +1804,33 @@ class _LocatedHeaderView(QHeaderView):
             cx = rect.center().x()
             painter.drawPolygon(QPoint(cx - 3, cy - 4), QPoint(cx - 3, cy + 4), QPoint(cx + 3, cy))
             painter.restore()
-        except RuntimeError:
-            pass  # 收尾阶段 C++ 对象已销毁
+        except Exception:  # noqa: BLE001 —— 绘制里不能抛异常（会直接杀进程）
+            pass
+
+    def _paint_gutter_cell(self, painter, rect) -> None:
+        """行号格：QGIS 那样的浅灰底面 + 清楚的细边框，方便一眼分辨、逐行点击。
+
+        底色比正文略深（暗色主题则略亮）；分隔线用与底色拉开对比的中性色画
+        底部横线和右边线（不是渐变/浮雕）。线色按主题明暗自动取深/浅，
+        避免浅色主题下 ``border`` 跟底色几乎同色、看不出每格边界。
+        """
+        try:
+            theme = ThemeManager.instance().current()
+            face = QColor(theme.window_bg)
+            if face.lightness() >= 128:
+                face = face.darker(106)
+                line = face.darker(132)      # 浅色：浅灰底 + 明显深一档的线
+            else:
+                face = face.lighter(122)
+                line = face.lighter(155)     # 深色：提亮底 + 更亮的线
+            painter.save()
+            painter.fillRect(rect, face)
+            painter.setPen(line)
+            painter.drawLine(rect.left(), rect.bottom(), rect.right(), rect.bottom())
+            painter.drawLine(rect.right(), rect.top(), rect.right(), rect.bottom())
+            painter.restore()
+        except Exception:  # noqa: BLE001 —— 绘制里不能抛异常（会直接杀进程）
+            pass
 
 
 class PagedAttributeTableWidget(QWidget):
@@ -1698,6 +1865,10 @@ class PagedAttributeTableWidget(QWidget):
         self._header_event_targets: dict[QObject, object] = {}
         #: 程序性改表格选中集期间为 True：防止"表格→图层→表格"来回触发成环
         self._suppress_selection_sync = False
+        #: 各显示范围的视图锚点（{是否本地过滤: (顶部要素 fid, 横向滚动值)}）。
+        #: 来回切「全部要素 / 仅选中要素」时各自回到原来的滚动位置；模型 reset 会
+        #: 把视图滚回顶部，所以必须在切换前记、切换后还原（用户报过切回来不在原位）。
+        self._view_anchors: dict[bool, tuple[int, int] | None] = {}
         #: 刚排过序、行号整体变了，等加载完要按 fid 把选中重新标回去
         self._pending_reselect = False
         #: 正在进行的导出（None = 没在导）。分批写，见 _export_csv / _export_chunk
@@ -1900,17 +2071,20 @@ class PagedAttributeTableWidget(QWidget):
         self._on_model_reset()
         self._ensure_located_row()
         self.table_view.verticalScrollBar().valueChanged.connect(self._on_scroll)
-        # 表格选中行 → 图层选中集（**单击/多选都走这里**，不再单独接 clicked：
-        # 选中集一变就同步，行为与 QGIS 属性表一致）；双击只是额外闪一下
+        # 表格选中行 → 图层选中集（**选中由行号栏单击驱动**，见
+        # _on_gutter_row_clicked）；点数据格只移动当前格 / 行定位，不改选中集
+        # （见 _AttributeTableView.selectionCommand）。选中集一变就同步，与 QGIS 一致。
         sel_model = self.table_view.selectionModel()
         if sel_model is not None:
             sel_model.selectionChanged.connect(self._on_table_selection_changed)
         self.table_view.doubleClicked.connect(self._on_row_double_clicked)
-        # 行号栏（最左那一窄列）换成能画 ▶ 的：**「当前定位行」的标记画在这儿**
-        # （ArcMap 那样）。点单元格**不改变**定位行，所以不接 clicked/currentChanged。
-        self.table_view.setVerticalHeader(
-            _LocatedHeaderView(Qt.Orientation.Vertical, self.table_view)
-        )
+        self.table_view.clicked.connect(self._on_cell_clicked)
+        # 行号栏（最左那一窄列）：横线分隔行；单击选中 + 高亮、双击定位；
+        # ▶ 是「当前定位行」标记（ArcMap 那样）
+        vheader = _LocatedHeaderView(Qt.Orientation.Vertical, self.table_view)
+        vheader.sectionClicked.connect(self._on_gutter_row_clicked)
+        vheader.sectionDoubleClicked.connect(self._on_gutter_row_double_clicked)
+        self.table_view.setVerticalHeader(vheader)
         # Ctrl+A 自己接管：行数多时不能真的逐行全选（Qt 要 ~0.4ms/行，见视图类注释）
         self.table_view.select_all_requested.connect(self._on_select_all_requested)
         self._setup_frozen_view()
@@ -2029,18 +2203,77 @@ class PagedAttributeTableWidget(QWidget):
         所以这里用 ``NoUpdate`` 只移"当前项"、不碰选中集；定位标记就是行号栏里的 ▶
         （见 :class:`_LocatedHeaderView`），**不额外给行底色**。
         """
+        self._move_located_row(row, scroll=True, set_current=True)
+
+    def _move_located_row(self, row, *, scroll: bool = False, set_current: bool = False) -> None:
+        """把「当前定位行」挪到 ``row``（可选滚动 / 同步当前格），**不动选择集**。
+
+        点数据单元格只更新行定位的值（底部"转到特定记录"的数字 + 行号栏 ▶），
+        不滚动、不选要素；「转到特定记录」才滚动 / 同步当前格（行号栏点击也不碰它）。
+        """
         model = self.model
         if model is None or model.rowCount() == 0:
             return
         row = max(0, min(int(row), model.rowCount() - 1))
         idx = model.index(row, 0)
-        self.table_view.scrollTo(idx, QAbstractItemView.ScrollHint.PositionAtCenter)
-        sel_model = self.table_view.selectionModel()
-        if sel_model is not None:
-            sel_model.setCurrentIndex(idx, QItemSelectionModel.SelectionFlag.NoUpdate)
+        if scroll:
+            self.table_view.scrollTo(idx, QAbstractItemView.ScrollHint.PositionAtCenter)
+        if set_current:
+            sel_model = self.table_view.selectionModel()
+            if sel_model is not None:
+                sel_model.setCurrentIndex(idx, QItemSelectionModel.SelectionFlag.NoUpdate)
         if model.set_located_row(row):
             self._repaint_located()
         self._sync_row_edit(row)
+
+    def _on_cell_clicked(self, index) -> None:
+        """单击 / 双击**数据单元格**：只把「行定位」的值改到当前行。
+
+        不选中、不改地图高亮（那是行号栏单击的事）；双击也不再缩放/闪烁
+        （那是行号栏双击的事）。
+        """
+        try:
+            if index.isValid():
+                self._move_located_row(index.row())
+        except Exception:  # noqa: BLE001 —— 槽里未捕获异常是原生崩溃
+            logger.debug("更新行定位失败", exc_info=True)
+
+    def _on_gutter_row_clicked(self, row: int) -> None:
+        """单击**行号栏**：选中该行——表格高亮 + 地图图形高亮 + 加入选中集。
+
+        这里**不能**置 :attr:`_suppress_selection_sync`：要的就是让
+        ``selectionChanged`` 把新选中集交给上层（Dock → 图层 ``selectByIds`` →
+        画布重绘），与地图上选中的是同一份选中集。
+
+        **不动「行定位」的值**（底部"转到特定记录"的数字和 ▶ 标记保持原样）——
+        选谁和定位到谁是两回事，见 :meth:`_move_located_row`。
+        """
+        try:
+            model = self.model
+            if model is None or not (0 <= row < model.rowCount()):
+                return
+            sel_model = self.table_view.selectionModel()
+            if sel_model is not None:
+                # 当前格跟过去（便于接着用键盘），但行定位不动
+                sel_model.setCurrentIndex(
+                    model.index(row, 0), QItemSelectionModel.SelectionFlag.NoUpdate
+                )
+            self._select_rows([row])
+        except Exception:  # noqa: BLE001
+            logger.debug("按行号栏选中行失败", exc_info=True)
+
+    def _on_gutter_row_double_clicked(self, row: int) -> None:
+        """双击**行号栏**：原来的双击定位逻辑——缩放到该要素并闪几下。
+
+        同样**不改行定位的值**；行的选中已由同一位置的前一次单击做完。
+        """
+        try:
+            model = self.model
+            if model is None or not (0 <= row < model.rowCount()):
+                return
+            self.feature_activated.emit(int(model.fids[row]))
+        except Exception:  # noqa: BLE001
+            logger.debug("请求定位要素失败", exc_info=True)
 
     def _repaint_located(self) -> None:
         """定位标记变了 → 让表格与行号栏都重画。"""
@@ -2161,9 +2394,15 @@ class PagedAttributeTableWidget(QWidget):
             model.reload_fields()
             if self.mode_combo.currentData() == "selected":
                 try:
-                    model.set_show_ids(self.layer.selectedFeatureIds(), True)
+                    ids = self.layer.selectedFeatureIds()
                 except RuntimeError:
-                    model.set_show_ids([], True)
+                    ids = []
+                if model.show_ids:
+                    model.set_show_ids(ids, True)
+                else:
+                    # 普通表：先换本地过滤，再真正重读一遍底表（本地过滤在重流期间保留）
+                    model.set_local_filter(ids)
+                    model.set_filter(model.filter_str)
             else:
                 model.set_filter(model.filter_str)
         finally:
@@ -2219,26 +2458,124 @@ class PagedAttributeTableWidget(QWidget):
     # ------------------------------------------------------------ 显示范围
 
     def _on_display_mode_changed(self, *_args) -> None:
-        """「全部要素 / 仅选中要素 / 仅指定要素」切换 → 原地重流（不重建表格）。"""
+        """「全部要素 / 仅选中要素 / 仅指定要素」切换。
+
+        普通属性表的「全部 ↔ 仅选中」只在**内存里过滤**已加载的底表（不重查、
+        不重流）；只有"仅指定要素"这类本身就是子集查询的表才走重流。
+        """
         mode = self.mode_combo.currentData()
+        model = self.model
         if mode == "selected":
             self._show_selected_only()
         elif mode == "preset":
             self._set_show_ids(self._preset_ids, True)
-        else:
+        elif model is not None and model.show_ids:
+            # 表本身就是子集查询（仅指定要素 / 质检结果）：回「全部」只能重查
             self._set_show_ids([], False)
+        else:
+            # 普通表：底层全量结果已在内存里，只把本地过滤摘掉，**不重查**
+            self._set_local_ids(None)
 
     def _show_selected_only(self) -> None:
-        """把显示范围设为当前选中集（当前没选中就是"只看空集"）。"""
-        if self.model is None or self.layer is None:
+        """把显示范围设为当前选中集（当前没选中就是"只看空集"）。
+
+        普通表（底层查询是全量）走**本地过滤**：已加载的结果就在内存里，切子集只是
+        重建可见行，不重新扫数据源；本身就是子集查询的表仍按原逻辑重流。
+        """
+        model = self.model
+        if model is None or self.layer is None:
             return
         try:
-            self._set_show_ids(self.layer.selectedFeatureIds(), True)
+            ids = self.layer.selectedFeatureIds()
         except RuntimeError:
-            self._set_show_ids([], True)
+            ids = []
+        if model.show_ids:
+            self._set_show_ids(ids, True)
+        else:
+            self._set_local_ids(ids)
+
+    def _set_local_ids(self, ids) -> None:
+        """换本地显示过滤（None = 全部）并刷新状态栏；期间抑制选中集回流。
+
+        切换前后**保留「当前定位行」**（按要素认，不按行号）：同一要素在新视图里
+        换到哪一行就标哪一行；它不在新视图里（比如切到「仅选中要素」而它没被选中）
+        才回落到默认第一行。
+
+        滚动位置也按显示范围分别记住：模型 reset 会让视图回到顶部，这里在切换前
+        记下"顶部是哪个要素"，切回来时滚回它；同时把图层选中集对应的高亮行重新
+        标回去（reset 会清空表格选中集，但图层选中集本身没变）。
+        """
+        model = self.model
+        keep_fid = None
+        anchor = self._capture_view_anchor()
+        if model is not None:
+            was_filtered = model.local_ids is not None
+            self._view_anchors[was_filtered] = anchor
+            if 0 <= model.located_row < len(model.fids):
+                keep_fid = model.fids[model.located_row]
+        self._suppress_selection_sync = True
+        try:
+            if model is not None:
+                model.set_local_filter(ids)
+        finally:
+            self._suppress_selection_sync = False
+        if model is not None:
+            if keep_fid is not None:
+                row = model.row_of_fid(keep_fid)
+                if row >= 0:
+                    if model.set_located_row(row):
+                        self._repaint_located()
+                    self._sync_row_edit(row)
+            self._reapply_layer_selection_highlight()
+            # 优先回到该显示范围上次的滚动位置；没有记录就用切换前的那个
+            self._restore_view_anchor(self._view_anchors.get(ids is not None) or anchor)
+        self._refresh_load_state()
+
+    def _capture_view_anchor(self):
+        """记录当前视图锚点：顶部可见行的要素 fid + 横向滚动位置。"""
+        model = self.model
+        if model is None:
+            return None
+        top_row = self.table_view.rowAt(0)
+        top_fid = model.fids[top_row] if 0 <= top_row < len(model.fids) else None
+        return (top_fid, self.table_view.horizontalScrollBar().value())
+
+    def _restore_view_anchor(self, anchor) -> None:
+        """把表格滚回锚点（顶部要素 + 横向位置）；该要素不在新视图里就留在顶部。"""
+        model = self.model
+        if model is None:
+            return
+        top_fid, h_scroll = anchor if anchor else (None, 0)
+        if top_fid is not None:
+            row = model.row_of_fid(top_fid)
+            if row >= 0:
+                self.table_view.scrollTo(
+                    model.index(row, 0), QAbstractItemView.ScrollHint.PositionAtTop
+                )
+        self.table_view.horizontalScrollBar().setValue(h_scroll)
+
+    def _reapply_layer_selection_highlight(self) -> None:
+        """模型 reset 会清空表格选中集：按图层选中集把行重新标回去。
+
+        图层选中集本身没变（切显示范围不动选择），所以这里只重建视图高亮；
+        期间置 :attr:`_suppress_selection_sync`，不再走「表格→图层」那条回路。
+        """
+        model = self.model
+        if model is None or self.layer is None:
+            return
+        try:
+            fids = self.layer.selectedFeatureIds()
+        except RuntimeError:
+            return
+        rows = sorted({r for r in (model.row_of_fid(f) for f in fids) if r >= 0})
+        self._suppress_selection_sync = True
+        try:
+            self._select_rows(rows)
+        finally:
+            self._suppress_selection_sync = False
 
     def _set_show_ids(self, ids, active: bool) -> None:
-        """换显示子集并重流；期间抑制"表格选中变化→改图层选中集"的回流。"""
+        """换底层子集查询并重流；期间抑制"表格选中变化→改图层选中集"的回流。"""
         self._suppress_selection_sync = True
         try:
             if self.model is not None:
@@ -2258,7 +2595,22 @@ class PagedAttributeTableWidget(QWidget):
             return
         loaded = self.model.rowCount()
         total = self.model.total_features
-        if self.mode_combo.currentData() == "selected" and not self.model.show_ids:
+        mode = self.mode_combo.currentData()
+        local_ids = getattr(self.model, "local_ids", None)
+        if mode == "selected" and local_ids is not None:
+            # 本地过滤态：显示的是"底表里命中选中集的那些"，不报底表总数（会误导）
+            if not local_ids:
+                self.load_status_label.setText("当前没有选中要素（在地图上选择，或用选择工具框选）")
+            elif self.model.scanning:
+                self.load_status_label.setText(f"正在载入底表，已显示 {loaded} 条选中要素…")
+            elif self.model.has_more:
+                self.load_status_label.setText(f"已显示 {loaded} 条选中要素（底表还在加载）")
+            else:
+                self.load_status_label.setText(f"共 {loaded} 条选中要素")
+            self.load_more_btn.setEnabled(self.model.has_more)
+            self.load_all_btn.setEnabled(self.model.has_more)
+            return
+        if mode == "selected" and not self.model.show_ids:
             self.load_status_label.setText("当前没有选中要素（在地图上选择，或用选择工具框选）")
             self.load_more_btn.setEnabled(False)
             self.load_all_btn.setEnabled(False)
@@ -2324,16 +2676,20 @@ class PagedAttributeTableWidget(QWidget):
             logger.debug("同步表格选中集失败", exc_info=True)
 
     def _on_row_double_clicked(self, index) -> None:
-        """双击单元格：请上层**定位到它并闪几下**（选中本身已由选中集同步做完）。"""
+        """双击**数据单元格**：只更新行定位的值，不做选中 / 地图定位。
+
+        定位（缩放 + 闪烁）改由双击**行号栏**触发，见
+        :meth:`_on_gutter_row_double_clicked`。
+        """
         try:
             model = self.model
             if model is None or not index.isValid():
                 return
             row = index.row()
             if 0 <= row < len(model.fids):
-                self.feature_activated.emit(int(model.fids[row]))
+                self._move_located_row(row)
         except Exception:  # noqa: BLE001
-            logger.debug("请求闪烁要素失败", exc_info=True)
+            logger.debug("更新行定位失败", exc_info=True)
 
     def apply_layer_selection(self, fids) -> int:
         """图层选中集变了 → 让表格选中对应行；没加载的 fid 先临时补进表里。
@@ -2348,9 +2704,13 @@ class PagedAttributeTableWidget(QWidget):
             return 0
         self._set_selection_count(len(fids))
         if self.mode_combo.currentData() == "selected":
-            # 「仅选中要素」模式下，表的**行集合本身就是选中集** → 直接跟着重流，
-            # 不必（也无需）在表里给未加载的要素补插行。
-            self._set_show_ids(fids, True)
+            # 「仅选中要素」模式下，表的**行集合本身就是选中集**，不必在表里给未加载
+            # 的要素补插行。普通表只做**内存过滤**（不重查数据源）；本身就是子集查询
+            # 的表（仅指定要素 / 质检结果等，show_ids 非空）才按原逻辑重流。
+            if model.show_ids:
+                self._set_show_ids(fids, True)
+            else:
+                self._set_local_ids(fids)
             return 0
         self._suppress_selection_sync = True
         try:
@@ -2589,7 +2949,7 @@ class PagedAttributeTableWidget(QWidget):
             layer.deleteFeatures(fids)
         except Exception as exc:  # noqa: BLE001 —— 槽里抛异常会带走进程
             logger.error("属性表删除选中要素失败：%s", exc, exc_info=True)
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "删除失败", f"没能删除选中的要素：{exc}"
             )
         finally:
@@ -2610,20 +2970,20 @@ class PagedAttributeTableWidget(QWidget):
             self._refresh_edit_buttons()
             return
         if layer.isModified():
-            ret = QMessageBox.question(
+            ret = MessageBox.question(
                 self,
                 "停止编辑",
                 f"图层「{layer.name()}」有未保存的修改，是否保存？",
-                QMessageBox.StandardButton.Save
-                | QMessageBox.StandardButton.Discard
-                | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Save,
+                MessageBox.StandardButton.Save
+                | MessageBox.StandardButton.Discard
+                | MessageBox.StandardButton.Cancel,
+                MessageBox.StandardButton.Save,
             )
-            if ret == QMessageBox.StandardButton.Cancel:
+            if ret == MessageBox.StandardButton.Cancel:
                 return
-            if ret == QMessageBox.StandardButton.Save:
+            if ret == MessageBox.StandardButton.Save:
                 if not self.editing_service.stop(layer, save=True):
-                    QMessageBox.warning(
+                    MessageBox.warning(
                         self,
                         "保存失败",
                         f"图层「{layer.name()}」的修改没能保存，仍在编辑状态。\n"
@@ -2835,7 +3195,7 @@ class PagedAttributeTableWidget(QWidget):
                 return
             except RuntimeError:  # 窗口关闭流程里 C++ 对象已销毁
                 pass
-        (QMessageBox.warning if warn else QMessageBox.information)(self, "导出 CSV", text)
+        (MessageBox.warning if warn else MessageBox.information)(self, "导出 CSV", text)
 
     def _apply_filter(self, cond: str) -> None:
         """筛选确认后更新模型筛选并刷新（重新统计，回到首屏首批）。"""
@@ -2972,6 +3332,11 @@ class PagedAttributeTableWidget(QWidget):
         if hasattr(header, "sortClicked"):
             header.sortClicked.connect(self._on_header_clicked)
         fv.doubleClicked.connect(self._on_row_double_clicked)
+        fv.clicked.connect(self._on_cell_clicked)
+        fv_header = fv.verticalHeader()
+        if fv_header is not None:
+            fv_header.sectionClicked.connect(self._on_gutter_row_clicked)
+            fv_header.sectionDoubleClicked.connect(self._on_gutter_row_double_clicked)
         fv.select_all_requested.connect(self._on_select_all_requested)
         fv.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         fv.customContextMenuRequested.connect(self._show_context_menu)
@@ -3198,42 +3563,42 @@ class PagedAttributeTableWidget(QWidget):
         # 系统自维护 / 唯一标识字段只读：不允许删除（菜单项已置灰，这里再兜一层）
         col = self._column_of_key(name)
         if col is not None and self.model is not None and col in self.model.readonly_cols:
-            QMessageBox.information(
+            MessageBox.information(
                 self, "删除字段",
                 f"字段「{name}」为系统自维护 / 唯一标识字段，不允许删除。",
             )
             return
         # 编辑状态不允许删除字段（先保存/停止编辑再改 schema）
         if self.layer.isEditable():
-            QMessageBox.information(
+            MessageBox.information(
                 self, "删除字段",
                 "图层处于编辑状态，请先保存 / 停止编辑后再删除字段。",
             )
             return
         if is_geojson_layer(self.layer):
-            answer = QMessageBox.warning(
+            answer = MessageBox.warning(
                 self,
                 "删除字段",
                 f"GeoJSON 是文本交换格式，删除字段会重写整个文件，"
                 f"大图层可能长时间无响应。\n\n建议先将图层另存为 GeoPackage 再编辑。\n\n"
                 f"仍要删除字段「{name}」吗？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+                MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+                MessageBox.StandardButton.No,
             )
         else:
-            answer = QMessageBox.question(
+            answer = MessageBox.question(
                 self, "删除字段", f"确定从图层中删除字段「{name}」？该操作不可撤销。"
             )
-        if answer != QMessageBox.StandardButton.Yes:
+        if answer != MessageBox.StandardButton.Yes:
             return
         try:
             ok = _delete_field_from_layer(self.layer, name)
         except Exception as exc:  # noqa: BLE001
             logger.error("删除字段失败: %s", exc, exc_info=True)
-            QMessageBox.warning(self, "删除字段", f"删除字段失败：{exc}")
+            MessageBox.warning(self, "删除字段", f"删除字段失败：{exc}")
             return
         if not ok:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "删除字段",
                 f"删除字段「{name}」失败（provider 不支持或图层只读）",
             )
@@ -3250,12 +3615,13 @@ class PagedAttributeTableWidget(QWidget):
 
         index = self.layer.fields().indexOf(name)
         if index in readonly_field_indices(self.layer.fields()):
-            QMessageBox.information(
+            MessageBox.information(
                 self,
                 "字段计算器",
                 f"字段「{name}」为系统自维护 / 唯一标识字段，不允许计算。",
             )
             return
+
         def _refresh(_dlg) -> None:
             # 计算器可能启动了编辑 / 改了字段：同步按钮并刷新列与值
             self._sync_edit_buttons()

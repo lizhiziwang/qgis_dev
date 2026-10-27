@@ -23,7 +23,6 @@ from qgis.PyQt.QtWidgets import (
     QGridLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QSpinBox,
     QWidget,
 )
@@ -40,6 +39,7 @@ from app.infra.edit_settings import (
 )
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.tools.feature_attrs import measure_geometry_value, readonly_field_indices
 
 logger = get_logger(__name__)
@@ -241,23 +241,23 @@ class GeometryCalculatorDialog(BaseDialog):
         field_name = str(self.field_name or "").strip()
         field_index = self.layer.fields().indexOf(field_name)
         if not field_name or field_index < 0:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "几何计算", "目标字段已不存在，无法写入几何计算结果。"
             )
             return
         field = self.layer.fields().at(field_index)
         if field_index in readonly_field_indices(self.layer.fields()):
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "几何计算", f"字段「{field_name}」为系统自维护字段，不可写入。"
             )
             return
         if field.type() not in _NUMERIC_TYPES:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "几何计算", f"字段「{field_name}」不是数值字段，无法写入。"
             )
             return
         if self.property_combo.count() == 0:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "几何计算", "当前图层的几何类型没有长度 / 面积可计算。"
             )
             return
@@ -271,7 +271,7 @@ class GeometryCalculatorDialog(BaseDialog):
         self._remember_choices()
 
         if not self.layer.isEditable() and not self.layer.startEditing():
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "几何计算", "无法进入编辑状态，几何计算结果未写入。"
             )
             return
@@ -286,7 +286,7 @@ class GeometryCalculatorDialog(BaseDialog):
         if self.only_selected_check.isChecked():
             fids = list(self.layer.selectedFeatureIds())
             if not fids:
-                QMessageBox.warning(self, "几何计算", "当前没有选中的要素。")
+                MessageBox.warning(self, "几何计算", "当前没有选中的要素。")
                 return
             features = (self.layer.getFeature(fid) for fid in fids)
         else:
@@ -321,7 +321,7 @@ class GeometryCalculatorDialog(BaseDialog):
             QApplication.restoreOverrideCursor()
 
         if not updates:
-            QMessageBox.information(
+            MessageBox.information(
                 self, "几何计算", "没有需要更新的要素（计算结果与当前值一致）。"
             )
             return
@@ -332,7 +332,7 @@ class GeometryCalculatorDialog(BaseDialog):
                 self.layer.changeAttributeValue(fid, field_index, value)
         except Exception as exc:  # noqa: BLE001
             logger.error("几何计算写入失败：%s", exc, exc_info=True)
-            QMessageBox.warning(self, "几何计算", f"写入失败：{exc}")
+            MessageBox.warning(self, "几何计算", f"写入失败：{exc}")
             return
         finally:
             self.layer.endEditCommand()

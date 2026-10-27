@@ -24,11 +24,12 @@ from pathlib import Path
 
 from qgis.PyQt.QtCore import QObject, Qt, QTimer, QUrl, pyqtSignal
 from qgis.PyQt.QtGui import QDesktopServices
-from qgis.PyQt.QtWidgets import QApplication, QMessageBox
+from qgis.PyQt.QtWidgets import QApplication
 
 from app import __version__
 from app.env.config import AppConfig
 from app.infra.logging import get_logger
+from app.ui.common.message_box import MessageBox
 from app.ui.update.dialog import UpdateDialog
 from app.update.errors import UpdateCancelledError, UpdateError
 from app.update.launcher import InstallLaunch
@@ -46,6 +47,18 @@ _INSTALLER_WAIT_WINDOW_SECONDS = 660
 #: 被安全软件拦下了——此时绝不能退出主程序，否则用户什么都看不到。
 _HEARTBEAT_POLL_MS = 250
 _HEARTBEAT_TIMEOUT_SECONDS = 8.0
+
+#: Linux 更新器安装进度文件的轮询间隔（helper 约每 0.4s 原子重写一次）。
+_STATUS_POLL_MS = 300
+
+#: helper 拿到 root 后第一条进度（starting）应该是立刻写的。超过这个时间还
+#: 没有进度，说明上报被静默禁用（更新目录不可写、被安全软件隔离等）：退回旧
+#: 行为先退出程序，helper 的 wait_process_exit 会立即满足，安装照常完成。
+_STATUS_FIRST_TIMEOUT_SECONDS = 60.0
+
+#: pkexec 这么快就退出、又没写过任何进度 → 多半是用户取消了授权；跑得更久
+#: 才退出的，更可能是 helper 写不了进度 / 异常结束，按失败上报（带日志路径）。
+_INSTALLER_QUICK_EXIT_SECONDS = 15.0
 
 
 class UpdateController(QObject):
@@ -74,6 +87,19 @@ class UpdateController(QObject):
         self._heartbeat_timer = QTimer(self)
         self._heartbeat_timer.setInterval(_HEARTBEAT_POLL_MS)
         self._heartbeat_timer.timeout.connect(self._poll_updater_heartbeat)
+        self._status_timer = QTimer(self)
+        self._status_timer.setInterval(_STATUS_POLL_MS)
+        self._status_timer.timeout.connect(self._poll_install_status)
+        # 用可取消的单次定时器代替 QTimer.singleShot：helper 在等退出期间死掉
+        # 时，必须能撤回已经排程的退出。
+        self._exit_timer = QTimer(self)
+        self._exit_timer.setSingleShot(True)
+        self._exit_timer.timeout.connect(self._request_exit)
+        self._install_phase = ""
+        self._exit_scheduled = False
+        self._install_deferred = False
+        self._status_deadline = 0.0
+        self._status_fallback = False
         self._prompted: set[int] = set()
         self._timer = QTimer(self)
         self._timer.setTimerType(Qt.TimerType.CoarseTimer)
@@ -110,6 +136,8 @@ class UpdateController(QObject):
         """窗口关闭时停止定时器并取消下载（进程即将退出）。"""
         self._timer.stop()
         self._heartbeat_timer.stop()
+        self._status_timer.stop()
+        self._exit_timer.stop()
         if self._cancel is not None:
             self._cancel.set()
 
@@ -122,7 +150,7 @@ class UpdateController(QObject):
     def check(self, *, manual: bool) -> None:
         if self._checking:
             if manual:
-                QMessageBox.information(self._window, "检查更新", "正在检查更新，请稍候…")
+                MessageBox.information(self._window, "检查更新", "正在检查更新，请稍候…")
             return
         self._checking = True
         self._thread = threading.Thread(
@@ -178,13 +206,13 @@ class UpdateController(QObject):
         self._checking = False
         if error:
             if manual:
-                QMessageBox.warning(self._window, "检查更新", error)
+                MessageBox.warning(self._window, "检查更新", error)
             else:
                 logger.warning("自动检查更新失败：%s", error)
             return
         if outcome is None:
             if manual:
-                QMessageBox.information(
+                MessageBox.information(
                     self._window, "检查更新", "服务端还没有发布可用的版本。"
                 )
             return
@@ -195,7 +223,7 @@ class UpdateController(QObject):
                     if outcome.reason == "no_package"
                     else f"当前已是最新版本（{__version__}）。"
                 )
-                QMessageBox.information(self._window, "检查更新", reason)
+                MessageBox.information(self._window, "检查更新", reason)
             return
         self._present(outcome, manual=manual)
 
@@ -217,7 +245,9 @@ class UpdateController(QObject):
 
     def _show_dialog(self, outcome: UpdateOutcome) -> None:
         if self._dialog is not None:
-            if self._downloading:
+            if self._downloading or self._installer_is_waiting():
+                # 下载 / 安装正在进行：周期检查的结果不能覆盖进度界面，
+                # 否则关闭保护和进度条都会被重置，用户还可能再点一次安装。
                 self._dialog.raise_()
                 self._dialog.activateWindow()
                 return
@@ -275,7 +305,7 @@ class UpdateController(QObject):
     def _begin_install(self, outcome: UpdateOutcome) -> None:
         if self._installer_is_waiting():
             # 已有一个更新器在等本进程退出：再启动一个会并发替换安装目录
-            QMessageBox.information(
+            MessageBox.information(
                 self._window, "检查更新", "更新程序已启动，请退出程序完成安装。"
             )
             return
@@ -285,7 +315,7 @@ class UpdateController(QObject):
             self._install_now(outcome, outcome.pending_path)
             return
         if outcome.package is None:
-            QMessageBox.warning(self._window, "检查更新", "当前平台没有匹配的安装包。")
+            MessageBox.warning(self._window, "检查更新", "当前平台没有匹配的安装包。")
             return
         self._downloading = True
         self._cancel = threading.Event()
@@ -340,8 +370,20 @@ class UpdateController(QObject):
         self._installer_launched = True
         self._installer_launched_at = time.monotonic()
         self._launch = launch
+        self._install_phase = ""
+        self._exit_scheduled = False
+        self._install_deferred = False
+        self._exit_timer.stop()
+        self._status_deadline = time.monotonic() + _STATUS_FIRST_TIMEOUT_SECONDS
+        self._status_fallback = False
         if self._dialog is not None:
             self._dialog.set_starting_updater()
+        if launch.status_path is not None:
+            # Linux 新 helper：校验/解压要几十秒，保持主程序运行并显示真实进度，
+            # 等 helper 说“正在等我退出”再关程序。
+            logger.info("更新器支持安装进度，轮询：%s", launch.status_path)
+            self._status_timer.start()
+            return
         if launch.heartbeat_path is None:
             # 非 Windows（提权更新器）：没有心跳文件可等，按原逻辑直接退出
             logger.info("更新器已启动，准备退出主程序")
@@ -358,7 +400,7 @@ class UpdateController(QObject):
         if path is None:
             self._heartbeat_timer.stop()
             return
-        data = _read_heartbeat(path)
+        data = _read_json_file(path)
         if data is not None:
             pid = data.get("pid")
             if isinstance(pid, int) and not _process_alive(pid):
@@ -376,6 +418,124 @@ class UpdateController(QObject):
             self._on_updater_blocked(
                 f"等待更新程序启动超时（{int(_HEARTBEAT_TIMEOUT_SECONDS)} 秒）"
             )
+
+    # ------------------------------------------------------------------ Linux 安装进度
+
+    def _poll_install_status(self) -> None:
+        """轮询 Linux helper 的进度文件，直到它准备替换程序目录。"""
+        launch = self._launch
+        status_path = launch.status_path if launch is not None else None
+        if status_path is None:
+            self._status_timer.stop()
+            return
+        data = _read_json_file(status_path)
+        if data is not None and _install_status_matches(data, launch):
+            phase = str(data.get("phase") or "")
+            self._apply_install_status(data)
+            # helper 在“解压到一半”死掉（SIGKILL / OOM，或磁盘满导致连 error 都
+            # 写不出来）时，进度文件会一直留在磁盘上。不能因为它匹配 jobId 就永远
+            # 显示最后一帧进度：done / error 是终态，其余阶段必须再确认进程活着。
+            if phase not in ("done", "error") and not _updater_process_alive(launch):
+                self._status_timer.stop()
+                self._cancel_scheduled_exit()
+                self._installer_launched = False
+                self._on_install_failed("更新程序意外退出，本次更新没有完成")
+            return
+        if _updater_process_alive(launch):
+            if _pkexec_waiting_auth(launch):
+                # 用户还在管理员授权框上：helper 尚未启动，首条进度超时重新计时。
+                self._status_deadline = time.monotonic() + _STATUS_FIRST_TIMEOUT_SECONDS
+                return
+            if (
+                not self._install_phase
+                and not self._status_fallback
+                and time.monotonic() >= self._status_deadline
+            ):
+                # helper 活着却一条进度都没有：上报被静默禁用（或用户还在管理员
+                # 授权框上输密码）。退回旧流程先退出程序，helper 的
+                # wait_process_exit 立即满足，安装照常完成。不停止轮询：窗口关闭
+                # 若被“未保存工程”拦住，迟到的进度 / helper 退出仍能反映到对话框。
+                logger.warning("更新程序没有上报安装进度，按旧流程先退出主程序")
+                self._status_fallback = True
+                if self._dialog is not None:
+                    self._dialog.set_installing()
+                self._schedule_exit(600)
+            return
+        self._status_timer.stop()
+        if not self._install_phase:
+            if time.monotonic() - self._installer_launched_at >= _INSTALLER_QUICK_EXIT_SECONDS:
+                # 跑了很久却没写过进度：不是取消授权，是 helper 失败/写不了进度
+                self._installer_launched = False
+                self._on_install_failed("更新程序未写入进度就退出，请查看更新器日志")
+            else:
+                # 授权框被取消 / pkexec 立即退出
+                self._on_install_cancelled()
+            return
+        self._installer_launched = False
+        self._on_install_failed("更新程序意外退出，本次更新没有完成")
+
+    def _apply_install_status(self, data: dict) -> None:
+        phase = str(data.get("phase") or "")
+        message = str(data.get("message") or "")
+        percent = _as_int(data.get("percent"))
+        previous = self._install_phase
+        self._install_phase = phase
+        if phase == "error":
+            self._status_timer.stop()
+            # 终态：撤回可能已经排程的退出（例如先看到 wait_for_exit 后才失败），
+            # 不能让程序在报错后又自己关掉。
+            self._cancel_scheduled_exit()
+            # helper 已经退出（或马上退出），允许用户重新发起安装
+            self._installer_launched = False
+            logger.warning("更新程序报告失败：%s", message)
+            self._on_install_failed(message or "更新失败")
+            return
+        if phase == "done":
+            self._status_timer.stop()
+            if not self._install_deferred and self._dialog is not None:
+                self._dialog.set_install_progress(message or "更新完成，正在启动新版本…", 100)
+            self._schedule_exit(300)
+            return
+        if phase in ("starting", "verify", "extract"):
+            if not self._install_deferred and self._dialog is not None:
+                self._dialog.set_install_progress(message, percent)
+            return
+        # wait_for_exit 及之后（backup/swap/launch/health）：helper 已解压完，
+        # 在等本进程退出。未来新增的未知阶段也按这个处理，避免客户端永不退出。
+        if previous != phase and not self._install_deferred and self._dialog is not None:
+            self._dialog.set_install_waiting_exit(message)
+        self._schedule_exit(600)
+
+    def _schedule_exit(self, delay_ms: int) -> None:
+        if self._exit_scheduled:
+            return
+        self._exit_scheduled = True
+        self._exit_timer.start(delay_ms)
+
+    def _cancel_scheduled_exit(self) -> None:
+        if not self._exit_scheduled:
+            return
+        self._exit_scheduled = False
+        self._exit_timer.stop()
+
+    def _on_install_cancelled(self) -> None:
+        """pkexec 没拿到授权就退出：恢复对话框，允许再次发起。"""
+        self._installer_launched = False
+        logger.info("更新程序未启动（可能取消了管理员授权）")
+        if self._install_deferred or self._dialog is None:
+            return
+        self._dialog.set_install_cancelled()
+
+    def _on_install_failed(self, reason: str) -> None:
+        log_path = self._launch.log_path if self._launch is not None else None
+        logger.warning("安装更新失败：%s（日志：%s）", reason, log_path)
+        # 失败是终态：之前“用户取消退出、更新器还在等”的状态到此结束。
+        self._install_deferred = False
+        if self._dialog is None:
+            return
+        # 即使之前用户取消了退出程序也要显示：更新器已经退出，本次更新不可能
+        # 再发生；对话框不能继续显示“退出程序即可安装”。
+        self._dialog.set_install_failed(reason, log_path)
 
     def _on_updater_blocked(self, reason: str) -> None:
         """更新器没能确认启动：保持主程序运行，把原因和日志位置告诉用户。
@@ -398,6 +558,7 @@ class UpdateController(QObject):
                 app.quit()
             return
         logger.info("用户取消退出，更新未安装（更新器会等待超时后放弃）")
+        self._install_deferred = True
         if self._dialog is not None:
             self._dialog.set_install_deferred(
                 "已取消退出程序，本次更新尚未安装。"
@@ -416,13 +577,62 @@ class UpdateController(QObject):
         QDesktopServices.openUrl(url)
 
 
-def _read_heartbeat(path: Path) -> dict | None:
-    """读更新器心跳；文件正在写入（JSON 不完整）时返回 ``None``，下轮再读。"""
+def _read_json_file(path: Path) -> dict | None:
+    """读更新器写的 JSON；文件正在写入（JSON 不完整）时返回 ``None``，下轮再读。"""
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def _install_status_matches(data: dict, launch: InstallLaunch) -> bool:
+    """进度文件必须属于本次任务，避免读到上一次更新留下的残留。"""
+    # schema 不认识的进度文件一律不认：将来 helper 改了协议时客户端按“没有
+    # 进度”处理（首条进度超时后先退出程序），不会被永远卡住。
+    if data.get("schema") != 1:
+        return False
+    if not launch.job_id:
+        return True
+    return str(data.get("jobId") or "") == launch.job_id
+
+
+def _updater_process_alive(launch: InstallLaunch) -> bool:
+    """pkexec / 更新器是否仍在运行。
+
+    优先 ``poll()``：它在子进程退出时顺手回收；只 ``kill(pid, 0)`` 的话僵尸
+    进程也返回成功，授权被取消后客户端会一直等下去。
+    """
+    process = launch.process
+    if process is not None:
+        try:
+            return process.poll() is None
+        except OSError:
+            return True
+    return launch.process_pid is not None and _process_alive(launch.process_pid)
+
+
+def _pkexec_waiting_auth(launch: InstallLaunch) -> bool:
+    """pkexec 是否还停在 polkit 授权框（尚未 exec 更新器）。
+
+    授权期间 helper 根本没启动，不能把用户输密码的时间算进“首条进度超时”。
+    pkexec 授权成功后原地 exec，同一 PID 的 ``/proc/<pid>/comm`` 会从
+    ``pkexec`` 变成 python 等，据此判断。非 Linux / 读不到时返回 False。
+    """
+    pid = launch.process_pid
+    if not pid or os.name == "nt":
+        return False
+    try:
+        comm = Path(f"/proc/{pid}/comm").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return comm.strip() == "pkexec"
+
+
+def _as_int(value) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value
 
 
 def _process_alive(pid: int) -> bool:

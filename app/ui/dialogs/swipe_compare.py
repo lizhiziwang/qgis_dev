@@ -8,29 +8,49 @@ imagery_tile 的填充模式（图层对象存 ``itemData``，``showEvent`` +
 
 from __future__ import annotations
 
+from qgis.core import QgsMapLayer, QgsProject
 from qgis.PyQt.QtWidgets import (
     QButtonGroup,
     QComboBox,
     QHBoxLayout,
     QLabel,
-    QMessageBox,
     QPushButton,
     QRadioButton,
     QVBoxLayout,
 )
-from qgis.core import QgsMapLayer, QgsProject
 
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.layer_combo import combo_current_layer, layer_source
+from app.ui.common.message_box import MessageBox
+
+
+def raster_layers_in_tree_order(project) -> list:
+    """按图层树从上到下的顺序返回工程里的栅格图层。"""
+    try:
+        root = project.layerTreeRoot()
+    except (AttributeError, RuntimeError):
+        return []
+    layers = []
+    for node in root.findLayers():
+        layer = node.layer()
+        if layer is not None and layer.type() == QgsMapLayer.RasterLayer:
+            layers.append(layer)
+    return layers
 
 
 class SwipeCompareDialog(BaseDialog):
     """卷帘对比参数对话框（``exec()`` 模态）。"""
 
     def __init__(self, parent=None) -> None:
-        super().__init__(parent, "卷帘对比")
-        # BaseDialog 默认 800x600，本对话框内容少，收敛尺寸（super 之后设置生效）
-        self.setMinimumSize(460, 300)
+        super().__init__(
+            parent,
+            "卷帘对比",
+            show_min_button=False,
+            show_max_button=False,
+        )
+        # BaseDialog 默认 800x600，本对话框内容少，收敛成紧凑尺寸
+        self.setMinimumSize(380, 240)
+        self.resize(420, 260)
         self.project = QgsProject.instance()
         self._init_ui()
         self.project.layersAdded.connect(self._populate_layers)
@@ -102,10 +122,7 @@ class SwipeCompareDialog(BaseDialog):
         current_src = layer_source(self.base_combo.currentData())
         self.base_combo.clear()
         self.compare_combo.clear()
-        for node in self.project.layerTreeRoot().findLayers():
-            layer = node.layer()
-            if layer is None or layer.type() != QgsMapLayer.RasterLayer:
-                continue
+        for layer in raster_layers_in_tree_order(self.project):
             self.base_combo.addItem(layer.name(), layer)
             self.compare_combo.addItem(layer.name(), layer)
             if current_src is not None and layer.source() == current_src:
@@ -123,10 +140,10 @@ class SwipeCompareDialog(BaseDialog):
         base = combo_current_layer(self.base_combo)
         compare = combo_current_layer(self.compare_combo)
         if base is None or compare is None:
-            QMessageBox.warning(self, "提示", "请先加载至少一个影像图层")
+            MessageBox.warning(self, "提示", "请先加载至少一个影像图层")
             return
         if base is compare:
-            QMessageBox.warning(self, "提示", "左影像与右影像不能相同")
+            MessageBox.warning(self, "提示", "左影像与右影像不能相同")
             return
         self.accept()
 

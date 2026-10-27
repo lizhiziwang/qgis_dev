@@ -34,11 +34,12 @@ def build_spatial_index(layer: "Optional[QgsVectorLayer]") -> "Optional[QgsSpati
 
     若已存在，直接返回缓存。``layer`` 无效返回 ``None``。
 
-    注意：这会把**整层要素（含属性）读进 Python**（2 万要素实测 ~0.5 s），且是
-    快照——编辑后必须 ``clear_spatial_index``。交互路径请改用 provider 的
-    ``setFilterRect`` 过滤（见 ``query.intersect_features``）。
+    注意：这会把**整层要素读进 Python**（2 万要素实测 ~0.5 s）并建索引，且是
+    快照——编辑后必须 ``clear_spatial_index``。只读几何（``setNoAttributes``）：
+    索引只用到外包框，带 180+ 个属性列读一遍会慢 5 倍以上。交互路径请改用
+    provider 的 ``setFilterRect`` 过滤（见 ``query.intersect_features``）。
     """
-    from qgis.core import QgsSpatialIndex  # 延迟 import
+    from qgis.core import QgsFeatureRequest, QgsSpatialIndex  # 延迟 import
 
     if layer is None or not layer.isValid():
         return None
@@ -49,7 +50,7 @@ def build_spatial_index(layer: "Optional[QgsVectorLayer]") -> "Optional[QgsSpati
 
     index = QgsSpatialIndex()
     feats = [
-        f for f in layer.getFeatures()
+        f for f in layer.getFeatures(QgsFeatureRequest().setNoAttributes())
         if f.hasGeometry() and not f.geometry().isEmpty()
     ]
     index.addFeatures(feats)

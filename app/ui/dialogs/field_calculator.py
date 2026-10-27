@@ -28,7 +28,7 @@ from qgis.core import (
     QgsFields,
     QgsVectorLayer,
 )
-from qgis.PyQt.QtCore import QVariant, Qt
+from qgis.PyQt.QtCore import Qt, QVariant
 from qgis.PyQt.QtWidgets import (
     QApplication,
     QCheckBox,
@@ -38,7 +38,6 @@ from qgis.PyQt.QtWidgets import (
     QGroupBox,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -47,6 +46,7 @@ from qgis.PyQt.QtWidgets import (
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.field_combo import make_field_combo_searchable
+from app.ui.common.message_box import MessageBox
 from app.ui.dialogs.expression_builder import ExpressionBuilderWidget
 
 logger = get_logger(__name__)
@@ -284,7 +284,7 @@ class FieldCalculatorDialog(BaseDialog):
     def _apply(self) -> None:
         text = self.builder.expression_text()
         if not text:
-            QMessageBox.warning(self, "字段计算器", "表达式不能为空")
+            MessageBox.warning(self, "字段计算器", "表达式不能为空")
             return
         expr = QgsExpression(text)
 
@@ -297,10 +297,10 @@ class FieldCalculatorDialog(BaseDialog):
         if creating:
             name = self.name_edit.text().strip()
             if not name:
-                QMessageBox.warning(self, "字段计算器", "请填写输出字段名")
+                MessageBox.warning(self, "字段计算器", "请填写输出字段名")
                 return
             if layer.fields().indexFromName(name) >= 0:
-                QMessageBox.warning(self, "字段计算器", f"字段已存在：{name}")
+                MessageBox.warning(self, "字段计算器", f"字段已存在：{name}")
                 return
             qtype, type_name, _, _ = self.type_combo.currentData()
             field = QgsField(name, qtype, type_name, self.length_spin.value(), self.precision_spin.value())
@@ -308,7 +308,7 @@ class FieldCalculatorDialog(BaseDialog):
         else:
             target_name = self.update_combo.currentText()
             if not target_name:
-                QMessageBox.warning(self, "字段计算器", "请选择要更新的字段")
+                MessageBox.warning(self, "字段计算器", "请选择要更新的字段")
                 return
             field = None
 
@@ -317,7 +317,7 @@ class FieldCalculatorDialog(BaseDialog):
 
         fids = layer.selectedFeatureIds() if (only_selected and not virtual) else None
         if only_selected and not virtual and not fids:
-            QMessageBox.warning(self, "字段计算器", "没有选中要素")
+            MessageBox.warning(self, "字段计算器", "没有选中要素")
             return
 
         # ---- 写操作之前先校验表达式（语法 / 字段是否存在 / 类型是否匹配）----
@@ -326,7 +326,7 @@ class FieldCalculatorDialog(BaseDialog):
         # 拦下来（与表达式构建器的预览同一套判定）。
         error = self._validate_expression(expr, fids, target_field)
         if error:
-            QMessageBox.warning(self, "字段计算器", f"表达式无效：\n{error}")
+            MessageBox.warning(self, "字段计算器", f"表达式无效：\n{error}")
             return
 
         if virtual:
@@ -335,7 +335,7 @@ class FieldCalculatorDialog(BaseDialog):
 
         was_editable = layer.isEditable()
         if not was_editable and not layer.startEditing():
-            QMessageBox.warning(self, "字段计算器", "无法进入编辑状态")
+            MessageBox.warning(self, "字段计算器", "无法进入编辑状态")
             return
 
         if creating:
@@ -381,7 +381,7 @@ class FieldCalculatorDialog(BaseDialog):
 
         self._result_field = target_name
         logger.info("字段计算完成：图层=%s，字段=%s，更新 %d 个要素", layer.name(), target_name, updated)
-        QMessageBox.information(self, "字段计算器", f"已更新 {updated} 个要素（字段：{target_name}）")
+        MessageBox.information(self, "字段计算器", f"已更新 {updated} 个要素（字段：{target_name}）")
         self.accept()
 
     def _validate_expression(self, expr: QgsExpression, fids, target_field=None) -> str | None:
@@ -447,17 +447,17 @@ class FieldCalculatorDialog(BaseDialog):
         """创建虚拟字段（定义存工程文件，不写数据源）。"""
         index = self._layer.addExpressionField(expr.expression(), field)
         if index < 0:
-            QMessageBox.warning(self, "字段计算器", f"创建虚拟字段失败：{name}")
+            MessageBox.warning(self, "字段计算器", f"创建虚拟字段失败：{name}")
             return
         self._result_field = name
         logger.info("已创建虚拟字段：图层=%s，字段=%s", self._layer.name(), name)
-        QMessageBox.information(self, "字段计算器", f"已创建虚拟字段：{name}")
+        MessageBox.information(self, "字段计算器", f"已创建虚拟字段：{name}")
         self.accept()
 
     def _fail(self, was_editable: bool, message: str) -> None:
         if not was_editable:
             self._layer.rollBack()
-        QMessageBox.warning(self, "字段计算器", message)
+        MessageBox.warning(self, "字段计算器", message)
 
     # ------------------------------------------------------------- 输出
 

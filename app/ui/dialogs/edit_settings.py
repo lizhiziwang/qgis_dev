@@ -41,13 +41,12 @@ from qgis.PyQt.QtWidgets import (
     QHeaderView,
     QKeySequenceEdit,
     QLabel,
-    QMessageBox,
     QPushButton,
     QStyle,
     QStyledItemDelegate,
     QStyleOptionViewItem,
-    QTabWidget,
     QTableWidgetItem,
+    QTabWidget,
     QToolTip,
     QVBoxLayout,
     QWidget,
@@ -56,11 +55,11 @@ from qgis.PyQt.QtWidgets import (
 from app.infra.edit_settings import (
     AREA_METHODS,
     AREA_UNITS,
-    EditSettings,
     LENGTH_METHODS,
     LENGTH_UNITS,
     SELECT_FILTER_POSITIONS,
     WHEEL_MODES,
+    EditSettings,
 )
 from app.infra.shortcuts import (
     EDIT_TOOL_SHORTCUTS,
@@ -69,6 +68,7 @@ from app.infra.shortcuts import (
     find_conflicts,
 )
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.common.widgets import make_table
 
 #: 录制框最多收几个按键的组合（1 = 单组合键，与系统里既有快捷键一致）
@@ -428,7 +428,7 @@ class EditSettingsDialog(BaseDialog):
         conflicts = self.current_conflicts()
         if conflicts:
             seq, a, b = conflicts[0]
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "快捷键重复", f"「{seq}」被「{a}」与「{b}」同时占用，请改成不同的组合。"
             )
             return

@@ -11,10 +11,10 @@ from __future__ import annotations
 from qgis.core import Qgis, QgsRectangle
 from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QPoint, Qt
-from qgis.PyQt.QtWidgets import QMessageBox
 
 from app.infra.edit_settings import EditSettingsManager
 from app.infra.logging import get_logger
+from app.ui.common.message_box import MessageBox
 
 logger = get_logger(__name__)
 
@@ -27,7 +27,6 @@ from app.ui.tools.select_feature import (
     PointSelectTool,
     RectSelectTool,
 )
-
 
 #: 「选择集」弹窗与画布边缘的间距（像素）
 _SELECT_SET_GAP = 12
@@ -96,10 +95,24 @@ class MapToolsMixin:
         self._sync_swipe_session_active()
 
     def _sync_swipe_session_active(self) -> None:
-        """按卷帘会话是否存活同步工具条按钮高亮。"""
+        """按卷帘会话 / 预选面板状态同步高亮；真正结束时顺手关面板。"""
         tool = getattr(self, "_swipe_tool", None)
         alive = tool is not None and tool.is_alive()
-        self.tool_bar_builder.set_session_active("swipe", alive)
+        panel = getattr(self, "_swipe_panel", None)
+        panel_open = panel is not None and not sip.isdeleted(panel)
+        self.tool_bar_builder.set_session_active("swipe", alive or panel_open)
+        if panel_open and not alive:
+            try:
+                started = panel.is_started()
+            except RuntimeError:
+                started = False
+            if started:  # 会话已结束但面板还开着 → 关掉它
+                close_panel = getattr(self, "_close_swipe_panel", None)
+                if callable(close_panel):
+                    try:
+                        close_panel()
+                    except RuntimeError:
+                        pass
 
     def _on_pan(self) -> None:
         self.canvas.setMapTool(self._pan_tool)
@@ -778,7 +791,7 @@ class MapToolsMixin:
             else:
                 combined.combineExtentWith(extent)
         if combined is None or combined.isNull():
-            QMessageBox.information(self, "提示", "当前无有效图层")
+            MessageBox.information(self, "提示", "当前无有效图层")
             return
         self.canvas.setExtent(combined)
         self.canvas.refresh()

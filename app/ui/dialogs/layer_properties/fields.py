@@ -33,7 +33,6 @@ from qgis.PyQt.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QTableWidget,
     QTableWidgetItem,
@@ -42,11 +41,12 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from app.infra.logging import get_logger
-from app.ui.dialogs.layer_properties.add_field_dialog import AddFieldDialog
-from app.ui.dialogs.layer_properties.base import LayerPropertyTab
 from app.ui.common.field_combo import make_field_combo_searchable
+from app.ui.common.message_box import MessageBox
 from app.ui.common.modeless import show_modeless
 from app.ui.common.widgets import CenteredCheckDelegate
+from app.ui.dialogs.layer_properties.add_field_dialog import AddFieldDialog
+from app.ui.dialogs.layer_properties.base import LayerPropertyTab
 from app.ui.tools.feature_attrs import field_alias, readonly_field_indices
 
 logger = get_logger(__name__)
@@ -55,7 +55,6 @@ _HEADERS = ("显示", "字段名", "字段别名", "字段类型", "字段长度
 
 #: 「操作」列（更新 / 删除 按钮）
 _ACTION_COL = len(_HEADERS) - 1
-
 
 # --------------------------------------------------------------------- 图层写操作
 #
@@ -536,27 +535,28 @@ class FieldsTab(LayerPropertyTab):
         """「添加字段」按钮：弹子对话框拿 spec，append 成 pending 行。
 
         校验：字段名不能与图层已有字段或已有的 pending 行重名（重名 →
-        QMessageBox.warning，不加）。
+        MessageBox.warning，不加）。
         """
         if self._layer is None:
             return
         if self._layer.isEditable():
-            QMessageBox.information(
+            MessageBox.information(
                 self, "添加字段",
                 "图层处于编辑状态，请先保存 / 停止编辑后再添加字段。",
             )
             return
+
         def _add(dlg) -> None:
             spec = dlg.field_spec()
             if spec is None:
-                QMessageBox.warning(self, "添加字段", "字段名不能为空")
+                MessageBox.warning(self, "添加字段", "字段名不能为空")
                 return
             new_name = spec["name"]
             # 重名校验：图层里已有 + 表格里已有 pending
             existing = {self.table.item(r, 1).text() for r in range(self.table.rowCount())
                         if self.table.item(r, 1)}
             if new_name in existing:
-                QMessageBox.warning(
+                MessageBox.warning(
                     self, "添加字段",
                     f"字段名「{new_name}」已存在（与图层字段或已添加的 pending 行冲突）",
                 )
@@ -585,10 +585,10 @@ class FieldsTab(LayerPropertyTab):
         if self._layer is None:
             return
         if self._field_name_of_row(row) in self._readonly_field_names():
-            QMessageBox.information(self, "更新字段", "系统自维护 / 唯一标识字段，不允许修改。")
+            MessageBox.information(self, "更新字段", "系统自维护 / 唯一标识字段，不允许修改。")
             return
         if self._layer.isEditable():
-            QMessageBox.information(
+            MessageBox.information(
                 self, "更新字段",
                 "图层处于编辑状态，请先保存 / 停止编辑后再修改字段。",
             )
@@ -601,21 +601,21 @@ class FieldsTab(LayerPropertyTab):
         new_alias = (alias_item.text() or "").strip() if alias_item else ""
 
         if not new_name:
-            QMessageBox.warning(self, "更新字段", "字段名不能为空")
+            MessageBox.warning(self, "更新字段", "字段名不能为空")
             return
         try:
             if new_name != orig and not _rename_field_in_layer(self._layer, orig, new_name):
-                QMessageBox.warning(
+                MessageBox.warning(
                     self, "更新字段",
                     f"重名字段「{orig}」→「{new_name}」失败（名称冲突或 provider 不支持）",
                 )
                 return
             if not _set_field_alias_on_layer(self._layer, new_name, new_alias):
-                QMessageBox.warning(self, "更新字段", f"更新字段「{new_name}」的别名失败")
+                MessageBox.warning(self, "更新字段", f"更新字段「{new_name}」的别名失败")
                 return
         except Exception as exc:  # noqa: BLE001
             logger.error("更新字段失败: %s", exc, exc_info=True)
-            QMessageBox.warning(self, "更新字段", f"更新字段失败：{exc}")
+            MessageBox.warning(self, "更新字段", f"更新字段失败：{exc}")
             return
 
         name_item.setData(Qt.ItemDataRole.UserRole, new_name)
@@ -640,38 +640,38 @@ class FieldsTab(LayerPropertyTab):
         if self._layer is None or not name:
             return
         if name in self._readonly_field_names():
-            QMessageBox.information(self, "删除字段", "系统自维护 / 唯一标识字段，不允许删除。")
+            MessageBox.information(self, "删除字段", "系统自维护 / 唯一标识字段，不允许删除。")
             return
         if self._layer.isEditable():
-            QMessageBox.information(
+            MessageBox.information(
                 self, "删除字段",
                 "图层处于编辑状态，请先保存 / 停止编辑后再删除字段。",
             )
             return
         if is_geojson_layer(self._layer):
-            answer = QMessageBox.warning(
+            answer = MessageBox.warning(
                 self,
                 "删除字段",
                 f"GeoJSON 是文本交换格式，删除字段会重写整个文件，"
                 f"大图层可能长时间无响应。\n\n建议先将图层另存为 GeoPackage 再编辑。\n\n"
                 f"仍要删除字段「{name}」吗？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+                MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+                MessageBox.StandardButton.No,
             )
         else:
-            answer = QMessageBox.question(
+            answer = MessageBox.question(
                 self, "删除字段", f"确定从图层中删除字段「{name}」？该操作不可撤销。"
             )
-        if answer != QMessageBox.StandardButton.Yes:
+        if answer != MessageBox.StandardButton.Yes:
             return
         try:
             ok = _delete_field_from_layer(self._layer, name)
         except Exception as exc:  # noqa: BLE001
             logger.error("删除字段失败: %s", exc, exc_info=True)
-            QMessageBox.warning(self, "删除字段", f"删除字段失败：{exc}")
+            MessageBox.warning(self, "删除字段", f"删除字段失败：{exc}")
             return
         if not ok:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "删除字段",
                 f"删除字段「{name}」失败（provider 不支持或图层只读）",
             )
@@ -686,7 +686,7 @@ class FieldsTab(LayerPropertyTab):
         def _apply(dlg) -> None:
             new_spec = dlg.field_spec()
             if new_spec is None:
-                QMessageBox.warning(self, "编辑字段", "字段名不能为空")
+                MessageBox.warning(self, "编辑字段", "字段名不能为空")
                 return
             # 无模态窗口开着时表格可能被改：按原字段名重新定位 pending 行
             target_row = row
@@ -702,7 +702,7 @@ class FieldsTab(LayerPropertyTab):
                     -1,
                 )
             if target_row < 0:
-                QMessageBox.information(
+                MessageBox.information(
                     self, "编辑字段", "该 pending 字段已不存在，修改未应用。"
                 )
                 return
@@ -712,7 +712,7 @@ class FieldsTab(LayerPropertyTab):
                 if r != target_row and self.table.item(r, 1)
             }
             if new_spec["name"] in others:
-                QMessageBox.warning(
+                MessageBox.warning(
                     self, "编辑字段", f"字段名「{new_spec['name']}」已存在"
                 )
                 return
@@ -849,5 +849,5 @@ class FieldsTab(LayerPropertyTab):
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("应用字段属性失败: %s", exc, exc_info=True)
-            QMessageBox.warning(self, "图层属性", f"应用字段属性失败：{exc}")
+            MessageBox.warning(self, "图层属性", f"应用字段属性失败：{exc}")
             return False

@@ -50,7 +50,6 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QHeaderView,
     QLabel,
-    QMessageBox,
     QPushButton,
     QTabBar,
     QTableWidget,
@@ -63,6 +62,7 @@ from app.core.domain.editing import edit_command
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.coord_format import format_coord
+from app.ui.common.message_box import MessageBox
 from app.ui.common.widgets import CenteredCheckDelegate
 from app.ui.tools.feature_attrs import feature_label
 
@@ -98,7 +98,6 @@ _ZOOM_PADDING_RATIO = 0.3
 _ROW_ROLE = Qt.ItemDataRole.UserRole
 #: 待提交的空白行的位置 ``(part, ring, 插入下标)``；真实节点行没有这个值
 _PENDING_ROLE = Qt.ItemDataRole.UserRole + 1
-
 
 # ============================================================ 几何遍历（纯函数）
 
@@ -146,7 +145,6 @@ def _ring_label(part: int, ring: int, part_count: int) -> str:
     if part_count <= 1:
         return ring_name
     return f"第{part + 1}个部件 · {ring_name}"
-
 
 # ============================================================ 弹窗
 
@@ -544,7 +542,7 @@ class NodeListDialog(BaseDialog):
         return True
 
     def _warn(self, text: str) -> None:
-        QMessageBox.warning(self, "提示", text)
+        MessageBox.warning(self, "提示", text)
 
     def _insert(self, direction: int) -> None:
         """前插（``direction=-1``）/ 后插：在当前节点的前 / 后**插一个空白行**。

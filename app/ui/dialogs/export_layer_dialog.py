@@ -24,15 +24,15 @@ from typing import TYPE_CHECKING
 from qgis.PyQt.QtCore import Qt, QVariant
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
-    QComboBox,
+    QApplication,
     QCheckBox,
+    QComboBox,
     QDialogButtonBox,
     QFormLayout,
     QHBoxLayout,
     QHeaderView,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QProgressDialog,
     QPushButton,
     QTableWidget,
@@ -40,7 +40,6 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
-from qgis.PyQt.QtWidgets import QApplication
 
 from app.core.domain.create_data import available_drivers
 from app.core.domain.export_layer import (
@@ -56,6 +55,7 @@ from app.core.util.ogr_fields import provider_id_field_indices
 from app.core.util.vector_formats import VECTOR_FORMATS, VectorFormat, resolve_format
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.common.widgets import open_file_dir, save_file
 from app.ui.dialogs.query_builder import QueryBuilderDialog
 from app.ui.tools.feature_attrs import field_alias
@@ -798,7 +798,6 @@ class ExportLayerDialog(BaseDialog):
                 out[original] = safe
         return out
 
-
     def _on_browse(self) -> None:
         """选保存位置：GDB 是目录，用「选文件夹」；其余格式用「另存为」。"""
         fmt = self._current_format()
@@ -879,31 +878,31 @@ class ExportLayerDialog(BaseDialog):
         # 用户确认后才覆盖（容器的替换只动那一个图层，见 export_vector_layer 的说明）。
         existing = existing_target_description(spec)
         if existing:
-            ret = QMessageBox.question(
+            ret = MessageBox.question(
                 self,
                 "替换已存在的数据",
                 f"{existing}。\n\n确定替换？\n（只覆盖这一份；库里的其他图层不受影响）"
                 if spec.is_container
                 else f"{existing}。\n\n确定覆盖？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+                MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+                MessageBox.StandardButton.No,
             )
-            if ret != QMessageBox.StandardButton.Yes:
+            if ret != MessageBox.StandardButton.Yes:
                 return
         # 只导出部分字段：明确问一句，别让用户以为全部字段都写进去了
         if spec.driver != "DXF":
             total = self._exportable_field_count()
             selected = len(spec.field_names or ())
             if selected < total:
-                ret = QMessageBox.question(
+                ret = MessageBox.question(
                     self,
                     "导出字段",
                     f"本次只导出 {selected} 个字段，其余 {total - selected} 个字段"
                     "不会写入目标文件。\n\n确定继续？",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.Yes,
+                    MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+                    MessageBox.StandardButton.Yes,
                 )
-                if ret != QMessageBox.StandardButton.Yes:
+                if ret != MessageBox.StandardButton.Yes:
                     return
         self.accept()
 
@@ -1026,7 +1025,7 @@ def load_exported_layer(parent: QWidget | None, target: str, spec: ExportSpec) -
         if layer is not None:
             layer.deleteLater()
         if parent is not None:
-            QMessageBox.warning(
+            MessageBox.warning(
                 parent,
                 "加载到地图",
                 f"导出成功，但加载到地图失败：\n{target}\n{error}",
@@ -1046,26 +1045,45 @@ def export_with_progress(
 ) -> str | None:
     """带进度提示执行导出（数据管理 / 图层右键「导出」共用）。
 
-    写 GDB / 大图层是同步阻塞调用，没有可用的分阶段回调；用不确定进度条 +
-    阶段文字，至少让用户看到「正在写入图层 / 字典」而不是界面卡死。
+    导出在 UI 线程里逐要素写盘，每 :data:`~app.core.domain.export_layer.PROGRESS_STEP`
+    条回调一次 ``(done, total)``：进度框显示「已导出 N / M（xx%）」，并在回调里
+    处理事件，避免大图层导出时窗口一直"未响应"。总条数未知时显示已处理条数。
     成功返回写出的路径；失败弹提示并返回 ``None``。``load_after`` 为真时
     导出成功后把结果加载进当前工程。
     """
     progress = QProgressDialog(parent)
     progress.setWindowTitle("导出数据")
     progress.setLabelText("正在准备导出…")
-    progress.setRange(0, 0)  # 不确定进度（转圈）
+    progress.setRange(0, 0)  # 条数未知时先转圈，拿到总数后切成确定进度
+    progress.setMinimumWidth(420)
     progress.setCancelButton(None)
     progress.setAutoClose(False)
     progress.setAutoReset(False)
     progress.setMinimumDuration(0)
-    progress.setWindowModality(Qt.WindowModality.WindowModal)
+    # 导出循环里会 processEvents：用应用级模态挡住"再点一次导出 / 关父窗"，
+    # 否则可能在 processEvents 期间重入导出。
+    progress.setWindowModality(Qt.WindowModality.ApplicationModal)
     progress.setWindowFlag(Qt.WindowType.WindowStaysOnTopHint, True)
     progress.show()
     QApplication.processEvents()
 
-    def _show_stage(text: str) -> None:
-        progress.setLabelText(text)
+    def _show_progress(done: int, total: int, text: str) -> None:
+        """显示具体数值：有总数就 N / M + 百分比，没有就显示已处理条数。"""
+        try:
+            done = max(0, int(done))
+            total = int(total)
+        except (TypeError, ValueError):
+            done, total = 0, -1
+        if total > 0:
+            if progress.maximum() != total:
+                progress.setRange(0, total)
+            progress.setValue(min(done, total))
+            percent = min(100, int(done * 100 / total))
+            progress.setLabelText(f"{text}  {done} / {total}（{percent}%）")
+        else:
+            if progress.maximum() != 0:
+                progress.setRange(0, 0)
+            progress.setLabelText(text if done <= 0 else f"{text}  已处理 {done} 条")
         QApplication.processEvents()
 
     QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -1073,7 +1091,7 @@ def export_with_progress(
     target = None
     try:
         try:
-            target = export_vector_layer(layer, spec, progress=_show_stage)
+            target = export_vector_layer(layer, spec, progress=_show_progress)
         except ExportLayerError as exc:
             logger.warning("导出数据失败：%s", exc)
             error_message = f"导出失败：{exc}"
@@ -1088,12 +1106,12 @@ def export_with_progress(
     # **先关进度框再弹错误**：反过来的话，错误框是模态的，进度框会一直挂在
     # 后面转到用户点「确定」为止（用户报过"导出进度一直卡住"）。
     if error_message:
-        QMessageBox.warning(parent, "导出数据", error_message)
+        MessageBox.warning(parent, "导出数据", error_message)
         return None
     loaded = False
     if load_after:
         loaded = load_exported_layer(parent, target, spec)
-    QMessageBox.information(
+    MessageBox.information(
         parent,
         "导出数据",
         f"已导出{'（含字典）' if spec.convert_dict else ''}：\n{target}"

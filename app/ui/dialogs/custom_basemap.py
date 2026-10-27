@@ -34,7 +34,6 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QSpinBox,
     QStackedWidget,
     QVBoxLayout,
@@ -43,6 +42,7 @@ from qgis.PyQt.QtWidgets import (
 
 from app.env.config import OnlineBasemapDef
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 
 #: 服务类型选项：(显示文本, 内部 type 值)
 _SERVICE_OPTIONS = [
@@ -344,7 +344,7 @@ class CustomBasemapDialog(BaseDialog):
     def _on_ok(self) -> None:
         err = self._validate()
         if err is not None:
-            QMessageBox.warning(self, "输入不完整", err)
+            MessageBox.warning(self, "输入不完整", err)
             return
         self.accept()
 

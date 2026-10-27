@@ -10,9 +10,10 @@
 from __future__ import annotations
 
 from qgis.core import QgsVectorLayer
-from qgis.PyQt.QtWidgets import QMessageBox, QVBoxLayout
+from qgis.PyQt.QtWidgets import QVBoxLayout
 
 from app.infra.logging import get_logger
+from app.ui.common.message_box import MessageBox
 from app.ui.dialogs.layer_properties.base import LayerPropertyTab
 from app.ui.dialogs.query_builder_widget import QueryBuilderWidget
 
@@ -83,7 +84,7 @@ class ConditionTab(LayerPropertyTab):
         if condition:
             error = self.widget.condition_error(condition)
             if error is not None:
-                QMessageBox.warning(self, "图层属性", error)
+                MessageBox.warning(self, "图层属性", error)
                 return False
 
         try:
@@ -95,7 +96,7 @@ class ConditionTab(LayerPropertyTab):
             return True
 
         if layer.isEditable():
-            QMessageBox.warning(
+            MessageBox.warning(
                 self,
                 "图层属性",
                 "图层处于编辑状态，无法应用显示条件。请先保存 / 停止编辑后再试。",
@@ -104,7 +105,7 @@ class ConditionTab(LayerPropertyTab):
 
         try:
             if not layer.setSubsetString(condition):
-                QMessageBox.warning(
+                MessageBox.warning(
                     self,
                     "图层属性",
                     "图层提供者拒绝了该显示条件，条件未生效！",
@@ -112,7 +113,7 @@ class ConditionTab(LayerPropertyTab):
                 return False
         except Exception as exc:
             logger.error("应用显示条件失败: %s", exc, exc_info=True)
-            QMessageBox.warning(self, "图层属性", f"应用显示条件失败：{exc}")
+            MessageBox.warning(self, "图层属性", f"应用显示条件失败：{exc}")
             return False
 
         self._refresh_status()

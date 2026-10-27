@@ -68,6 +68,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from app.ui.common.message_box import MessageBox
+
 if TYPE_CHECKING:
     from qgis.core import QgsVectorLayer
     from qgis.gui import QgsMapCanvas
@@ -87,7 +89,6 @@ from qgis.PyQt.QtWidgets import (
     QComboBox,
     QDialog,
     QMainWindow,
-    QMessageBox,
 )
 
 from app.core.domain.drawing import DrawManager
@@ -98,29 +99,31 @@ from app.ui.common import tool_icons
 from app.ui.common.modeless import show_modeless
 from app.ui.common.ribbon import RibbonToolBar
 from app.ui.common.theme import ThemeManager
+from app.ui.dialogs.attribute_entry import AttributeEntryDialog
 from app.ui.dialogs.copy_to_layer import CopyToLayerDialog
 from app.ui.dialogs.custom_attr import CustomAttrDialog
 from app.ui.dialogs.node_list import NodeListDialog
-from app.ui.dialogs.attribute_entry import AttributeEntryDialog
 from app.ui.tools.attribute_entry import AttributeEntryTool
 from app.ui.tools.boundary_edit import BoundaryEditTool
 from app.ui.tools.copy_to_layer import copy_features_to as run_copy_to
 from app.ui.tools.delete_features import delete_selected_features as run_delete
 from app.ui.tools.dig_hole import DigHoleTool
 from app.ui.tools.explode_parts import explode_features as run_explode
+from app.ui.tools.feature_attrs import new_feature_attributes
 from app.ui.tools.feature_edit import FeatureEditTool
 from app.ui.tools.fill_hole import FillHoleTool
 from app.ui.tools.gap_repair import repair_gaps_interactive as run_gap_repair
-from app.ui.tools.feature_attrs import new_feature_attributes
 from app.ui.tools.merge_geometry import merge_features_interactive as run_merge
 from app.ui.tools.move_features import MoveFeaturesTool
 from app.ui.tools.node_list import NodeListTool
-from app.ui.tools.split_feature import SplitFeatureTool
-from app.ui.tools.split_polygon import SplitPolygonTool
 from app.ui.tools.split_by_selection import (
     has_cutter_selection,
+)
+from app.ui.tools.split_by_selection import (
     split_by_selected_features as run_split_by_selection,
 )
+from app.ui.tools.split_feature import SplitFeatureTool
+from app.ui.tools.split_polygon import SplitPolygonTool
 
 logger = get_logger(__name__)
 
@@ -712,14 +715,14 @@ class DigitizingToolbar(QObject):
             keep_visible = False
             if layer.isEditable():
                 if layer.isModified():
-                    box = QMessageBox(self.main_window)
+                    box = MessageBox(self.main_window)
                     box.setWindowTitle("隐藏编辑图层")
-                    box.setIcon(QMessageBox.Icon.Warning)
+                    box.setIcon(MessageBox.Icon.Warning)
                     box.setText(f"图层「{layer.name()}」已隐藏，且还有未保存的修改。")
                     box.setInformativeText("退出编辑前请先处理这些修改：")
-                    save_btn = box.addButton("保存", QMessageBox.ButtonRole.AcceptRole)
-                    drop_btn = box.addButton("放弃", QMessageBox.ButtonRole.DestructiveRole)
-                    cancel_btn = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+                    save_btn = box.addButton("保存", MessageBox.ButtonRole.AcceptRole)
+                    drop_btn = box.addButton("放弃", MessageBox.ButtonRole.DestructiveRole)
+                    cancel_btn = box.addButton("取消", MessageBox.ButtonRole.RejectRole)
                     box.setDefaultButton(save_btn)
                     box.setEscapeButton(cancel_btn)
                     box.exec()
@@ -734,7 +737,7 @@ class DigitizingToolbar(QObject):
                         except Exception:  # noqa: BLE001
                             logger.exception("隐藏编辑图层时保存失败: %s", layer.name())
                         if layer.isEditable():
-                            QMessageBox.warning(
+                            MessageBox.warning(
                                 self.main_window,
                                 "保存失败",
                                 "保存编辑失败，图层仍在编辑状态，已重新显示。\n"
@@ -1159,7 +1162,7 @@ class DigitizingToolbar(QObject):
 
         ok = layer.startEditing()
         if not ok:
-            QMessageBox.warning(self.main_window, "警告", "无法开始编辑！")
+            MessageBox.warning(self.main_window, "警告", "无法开始编辑！")
             self.sync_edit_layer_combo()
             return False
         # editingStarted 钩子通常已经把 _editing 置 True 并发过信号；这里只兜底
@@ -1207,23 +1210,23 @@ class DigitizingToolbar(QObject):
 
         try:
             if layer.isModified():
-                reply = QMessageBox.warning(
+                reply = MessageBox.warning(
                     self.main_window,
                     "警告",
                     "是否保存编辑的内容！",
-                    QMessageBox.StandardButton.Yes
-                    | QMessageBox.StandardButton.No
-                    | QMessageBox.StandardButton.Cancel,
-                    QMessageBox.StandardButton.Yes,
+                    MessageBox.StandardButton.Yes
+                    | MessageBox.StandardButton.No
+                    | MessageBox.StandardButton.Cancel,
+                    MessageBox.StandardButton.Yes,
                 )
-                if reply == QMessageBox.StandardButton.Cancel:
+                if reply == MessageBox.StandardButton.Cancel:
                     # 「取消」只关窗：不提交、不回滚、不退出编辑，也不动激活工具——
                     # 编辑会话与工具状态保持打开弹窗前的样子
                     logger.info("停止编辑已取消（保持编辑态）: layer=%s", layer.name())
                     return
                 # 用户已决定结束编辑：此时才取消激活工具（不管有没有画完都要退出）
                 self.clear_draw_tool()
-                if reply == QMessageBox.StandardButton.Yes:
+                if reply == MessageBox.StandardButton.Yes:
                     try:
                         saved = layer.commitChanges(stopEditing=True)
                     except Exception:  # noqa: BLE001
@@ -1235,7 +1238,7 @@ class DigitizingToolbar(QObject):
                     if not saved:
                         # 保存失败：图层仍在编辑态，不能假装已退出。明确提示原因，
                         # 保持「编辑中」状态一致（编辑按钮仍可用是正确行为）
-                        QMessageBox.warning(
+                        MessageBox.warning(
                             self.main_window,
                             "保存失败",
                             "保存编辑失败，更改尚未写入数据源，仍处于编辑状态！\n"
@@ -1331,7 +1334,7 @@ class DigitizingToolbar(QObject):
         if saved:
             self._toast("编辑内容已保存")
         else:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self.main_window,
                 "保存失败",
                 "保存编辑失败，更改尚未写入数据源，仍处于编辑状态！\n"
@@ -1365,7 +1368,7 @@ class DigitizingToolbar(QObject):
         if layer is None or layer.type() != layer.VectorLayer or not layer.isEditable():
             # 拒绝激活：Qt 已把按钮勾上，按统一状态刷新弹掉勾选
             self._refresh_button_states()
-            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            MessageBox.warning(self.main_window, "警告", "请先开始编辑！")
             return
         # 先清除旧工具
         self.clear_draw_tool()
@@ -1388,7 +1391,7 @@ class DigitizingToolbar(QObject):
             )
             self.draw_manager.finished.connect(self.finish_draw)
 
-        # 激活工具（与旧版 Draw.enable_draw_tool 行为一致：弹 QMessageBox 提示）
+        # 激活工具（与旧版 Draw.enable_draw_tool 行为一致：弹 MessageBox 提示）
         cls = get_tool_class(geom_type)
         self.active_tool = cls(
             self.canvas,
@@ -1396,7 +1399,7 @@ class DigitizingToolbar(QObject):
         )
         self._activate_map_tool(self.active_tool)
         self._mark_active(geom_type)
-        # QMessageBox.information(
+        # MessageBox.information(
         #     self.main_window,
         #     "提示",
         #     f"已激活「添加{geom_type}」工具，点击画布绘制！",
@@ -1413,14 +1416,14 @@ class DigitizingToolbar(QObject):
         """
         layer = self._current_layer()
         if layer is None or layer.type() != layer.VectorLayer:
-            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            MessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
             return
         if not layer.isEditable():
-            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            MessageBox.warning(self.main_window, "警告", "请先开始编辑！")
             return
         # 选中数在点击时再校验一次：按钮可用性已按选中数置灰，这里兜底防直接调用
         if len(layer.selectedFeatureIds()) < 2:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self.main_window, "警告", "请先用选择工具选中两个及以上要合并的要素"
             )
             return
@@ -1435,7 +1438,7 @@ class DigitizingToolbar(QObject):
             return  # 用户取消 / 失败原因已由下游落地
         if result == 0:
             # 一组相邻的都没有：只有相邻接的图形才能合并（细缝/角接触/分离都不算）
-            QMessageBox.warning(
+            MessageBox.warning(
                 self.main_window,
                 "警告",
                 "选中的图形之间没有相邻接的，无法合并。\n"
@@ -1460,16 +1463,15 @@ class DigitizingToolbar(QObject):
             return
         layer = self._current_layer()
         if layer is None or layer.type() != layer.VectorLayer:
-            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            MessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
             return
         if not layer.isEditable():
-            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            MessageBox.warning(self.main_window, "警告", "请先开始编辑！")
             return
         # 不再要求「先选中要素」：本工具自己在地图上点哪个图形就编哪个，
         # 与「节点列表」一致——连续改多个图形时不必来回选
         # 清掉可能激活的绘制工具，避免两个工具并存
         self.clear_draw_tool()
-
 
         self.feature_edit_tool = FeatureEditTool(
             self.canvas,
@@ -1499,15 +1501,15 @@ class DigitizingToolbar(QObject):
         layer = self._current_layer()
         if layer is None or layer.type() != layer.VectorLayer:
             self._refresh_button_states()
-            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            MessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
             return
         if not layer.isEditable():
             self._refresh_button_states()
-            QMessageBox.warning(self.main_window, "提示", "请先开始编辑！")
+            MessageBox.warning(self.main_window, "提示", "请先开始编辑！")
             return
         if layer.geometryType() != QgsWkbTypes.PolygonGeometry:
             self._refresh_button_states()
-            QMessageBox.warning(self.main_window, "提示", "节点列表只支持面图层")
+            MessageBox.warning(self.main_window, "提示", "节点列表只支持面图层")
             return
         self.clear_draw_tool()
         self.node_list_tool = NodeListTool(
@@ -1560,19 +1562,18 @@ class DigitizingToolbar(QObject):
             return
         layer = self._current_layer()
         if layer is None or layer.type() != layer.VectorLayer:
-            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            MessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
             return
         if not layer.isEditable():
-            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            MessageBox.warning(self.main_window, "警告", "请先开始编辑！")
             return
         if layer.geometryType() == QgsWkbTypes.PointGeometry:
-            QMessageBox.warning(self.main_window, "警告", "点图层无法分割，请选择线 / 面图层")
+            MessageBox.warning(self.main_window, "警告", "点图层无法分割，请选择线 / 面图层")
             return
         if not self._require_selection(layer, "分割"):
             return
         # 清掉可能激活的绘制 / 要素编辑工具，避免两个工具并存
         self.clear_draw_tool()
-
 
         self.split_tool = SplitFeatureTool(
             self.canvas,
@@ -1581,7 +1582,7 @@ class DigitizingToolbar(QObject):
         )
         self._activate_map_tool(self.split_tool)
         self._mark_active("split")
-        # QMessageBox.information(
+        # MessageBox.information(
         #     self.main_window,
         #     "提示",
         #     "已激活「线分割」工具：左键双击要素选中后，按住左键画切割线、右键完成分割；Esc 取消 / 退出",
@@ -1604,19 +1605,18 @@ class DigitizingToolbar(QObject):
             return
         layer = self._current_layer()
         if layer is None or layer.type() != layer.VectorLayer:
-            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            MessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
             return
         if not layer.isEditable():
-            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            MessageBox.warning(self.main_window, "警告", "请先开始编辑！")
             return
         if layer.geometryType() == QgsWkbTypes.PointGeometry:
-            QMessageBox.warning(self.main_window, "警告", "点图层无法分割，请选择线 / 面图层")
+            MessageBox.warning(self.main_window, "警告", "点图层无法分割，请选择线 / 面图层")
             return
         if not self._require_selection(layer, "分割"):
             return
         # 清掉可能激活的其它工具，避免并存
         self.clear_draw_tool()
-
 
         self.split_polygon_tool = SplitPolygonTool(
             self.canvas,
@@ -1643,19 +1643,18 @@ class DigitizingToolbar(QObject):
             return
         layer = self._current_layer()
         if layer is None or layer.type() != layer.VectorLayer:
-            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            MessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
             return
         if not layer.isEditable():
-            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            MessageBox.warning(self.main_window, "警告", "请先开始编辑！")
             return
         if layer.geometryType() != QgsWkbTypes.PolygonGeometry:
-            QMessageBox.warning(self.main_window, "警告", "挖洞只支持面图层")
+            MessageBox.warning(self.main_window, "警告", "挖洞只支持面图层")
             return
         if not self._require_selection(layer, "挖洞"):
             return
         # 清掉可能激活的其它工具，避免并存
         self.clear_draw_tool()
-
 
         self.dig_hole_tool = DigHoleTool(
             self.canvas,
@@ -1682,19 +1681,18 @@ class DigitizingToolbar(QObject):
             return
         layer = self._current_layer()
         if layer is None or layer.type() != layer.VectorLayer:
-            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            MessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
             return
         if not layer.isEditable():
-            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            MessageBox.warning(self.main_window, "警告", "请先开始编辑！")
             return
         if layer.geometryType() != QgsWkbTypes.PolygonGeometry:
-            QMessageBox.warning(self.main_window, "警告", "补洞只支持面图层")
+            MessageBox.warning(self.main_window, "警告", "补洞只支持面图层")
             return
         if not self._require_selection(layer, "补洞"):
             return
         # 清掉可能激活的其它工具，避免并存
         self.clear_draw_tool()
-
 
         self.fill_hole_tool = FillHoleTool(
             self.canvas,
@@ -1719,16 +1717,16 @@ class DigitizingToolbar(QObject):
             return
         layer = self._current_layer()
         if layer is None or layer.type() != layer.VectorLayer:
-            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            MessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
             return
         if not layer.isEditable():
-            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            MessageBox.warning(self.main_window, "警告", "请先开始编辑！")
             return
         if layer.geometryType() != QgsWkbTypes.PolygonGeometry:
-            QMessageBox.warning(self.main_window, "警告", "边界修改只支持面图层")
+            MessageBox.warning(self.main_window, "警告", "边界修改只支持面图层")
             return
         if not layer.selectedFeatureIds():
-            QMessageBox.warning(
+            MessageBox.warning(
                 self.main_window, "警告", "请先用点选 / 框选选中要修改边界的图形"
             )
             return
@@ -1760,13 +1758,13 @@ class DigitizingToolbar(QObject):
             return
         layer = self._current_layer()
         if layer is None or layer.type() != layer.VectorLayer:
-            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            MessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
             return
         if not layer.isEditable():
-            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            MessageBox.warning(self.main_window, "警告", "请先开始编辑！")
             return
         if not layer.selectedFeatureIds():
-            QMessageBox.warning(
+            MessageBox.warning(
                 self.main_window, "警告", "请先用点选 / 框选选中要移动的要素"
             )
             return
@@ -1793,10 +1791,10 @@ class DigitizingToolbar(QObject):
         """
         layer = self._current_layer()
         if layer is None or layer.type() != layer.VectorLayer:
-            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            MessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
             return
         if not layer.isEditable():
-            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            MessageBox.warning(self.main_window, "警告", "请先开始编辑！")
             return
         if not layer.selectedFeatureIds():
             # 走浮动提示条：删除这条链上不该再弹模态框打断操作
@@ -1825,13 +1823,13 @@ class DigitizingToolbar(QObject):
         """
         layer = self._current_layer()
         if layer is None or layer.type() != layer.VectorLayer:
-            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            MessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
             return
         if not layer.isEditable():
-            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            MessageBox.warning(self.main_window, "警告", "请先开始编辑！")
             return
         if not has_cutter_selection(layer):
-            QMessageBox.warning(
+            MessageBox.warning(
                 self.main_window,
                 "警告",
                 "请先在**其它图层**上选中要与目标相交的切割要素"
@@ -1847,11 +1845,11 @@ class DigitizingToolbar(QObject):
             return  # 失败原因已由下游落地
         changed, added = result
         if changed == 0:
-            QMessageBox.information(
+            MessageBox.information(
                 self.main_window, "提示", "所选要素没能切开任何图形"
             )
             return
-        QMessageBox.information(
+        MessageBox.information(
             self.main_window,
             "提示",
             f"已切开 {changed} 个要素，新增 {added} 块（可 Ctrl+Z 撤销）",
@@ -1865,7 +1863,7 @@ class DigitizingToolbar(QObject):
         """「撤销」按钮：同画布 Ctrl+Z，对当前编辑图层撤销一步（MainWindow 实现）。"""
         fn = getattr(self.main_window, "_undo_edit", None)
         if not callable(fn):
-            QMessageBox.information(self.main_window, "提示", "当前窗口不支持撤销")
+            MessageBox.information(self.main_window, "提示", "当前窗口不支持撤销")
             return
         fn()
 
@@ -1873,7 +1871,7 @@ class DigitizingToolbar(QObject):
         """「重做」按钮：同画布 Ctrl+Shift+Z / Ctrl+Y，重做一步（MainWindow 实现）。"""
         fn = getattr(self.main_window, "_redo_edit", None)
         if not callable(fn):
-            QMessageBox.information(self.main_window, "提示", "当前窗口不支持重做")
+            MessageBox.information(self.main_window, "提示", "当前窗口不支持重做")
             return
         fn()
 
@@ -1920,21 +1918,20 @@ class DigitizingToolbar(QObject):
         """
         layer = self._current_layer()
         if layer is None or layer.type() != layer.VectorLayer:
-            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            MessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
             return
         if not layer.isEditable():
-            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            MessageBox.warning(self.main_window, "警告", "请先开始编辑！")
             return
         if not layer.selectedFeatureIds():
-            QMessageBox.warning(
+            MessageBox.warning(
                 self.main_window, "警告", "请先用选择工具选中要分解的多部件要素"
             )
             return
 
-
         result = run_explode(layer)
         if result is None:
-            QMessageBox.warning(self.main_window, "警告", "分解失败（详见日志）")
+            MessageBox.warning(self.main_window, "警告", "分解失败（详见日志）")
             return
         changed, added = result
         if changed == 0:
@@ -1952,18 +1949,18 @@ class DigitizingToolbar(QObject):
         """
         layer = self._current_layer()
         if layer is None or layer.type() != layer.VectorLayer:
-            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            MessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
             return
         if not layer.isEditable():
-            QMessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            MessageBox.warning(self.main_window, "警告", "请先开始编辑！")
             return
         if layer.geometryType() != QgsWkbTypes.PolygonGeometry:
-            QMessageBox.warning(self.main_window, "警告", "补缝只支持面图层")
+            MessageBox.warning(self.main_window, "警告", "补缝只支持面图层")
             return
         # 选中数在点击时校验：工具条没有 selectionChanged 监听，按钮可用性
         # 统一由 _refresh_button_states 从图层状态推导，不为此新增信号
         if len(layer.selectedFeatureIds()) < 2:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self.main_window, "警告", "请先用选择工具选中至少两个相邻面要素"
             )
             return
@@ -1973,11 +1970,11 @@ class DigitizingToolbar(QObject):
                 return  # 用户取消 / 失败原因已由下游落地
             changed, filled = result
             if filled == 0:
-                QMessageBox.information(
+                MessageBox.information(
                     self.main_window, "提示", "所选面要素之间未发现封闭缝隙"
                 )
                 return
-            QMessageBox.information(
+            MessageBox.information(
                 self.main_window,
                 "提示",
                 f"已补 {filled} 处缝隙（并入 {changed} 个要素，可 Ctrl+Z 撤销）",
@@ -2016,7 +2013,7 @@ class DigitizingToolbar(QObject):
             None,
         )
         if source is None:
-            QMessageBox.warning(self.main_window, "警告", "请先用选择工具选中要复制的要素")
+            MessageBox.warning(self.main_window, "警告", "请先用选择工具选中要复制的要素")
             return
 
         # 目标候选：工程里的矢量图层，排除源图层自己、且几何类型要相同（对齐 B/S）
@@ -2029,7 +2026,7 @@ class DigitizingToolbar(QObject):
             and layer.geometryType() == source.geometryType()
         ]
         if not targets:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self.main_window,
                 "警告",
                 f"没有可作为目标的图层：需要几何类型与「{source.name()}」相同的其它矢量图层",
@@ -2039,7 +2036,7 @@ class DigitizingToolbar(QObject):
         def _apply_copy(dlg) -> None:
             try:
                 if not source.selectedFeatureIds():
-                    QMessageBox.warning(
+                    MessageBox.warning(
                         self.main_window,
                         "复制到失败",
                         "源图层当前没有选中的要素（选择可能在弹窗期间被清空），请重新选择后再复制。",
@@ -2056,7 +2053,7 @@ class DigitizingToolbar(QObject):
                     hint=self._tool_hint,
                 )
             except Exception as exc:  # noqa: BLE001 —— 源/目标在弹窗期间被删
-                QMessageBox.warning(self.main_window, "复制到失败", str(exc))
+                MessageBox.warning(self.main_window, "复制到失败", str(exc))
                 return
             if result.ok:
                 self._toast(
@@ -2066,7 +2063,7 @@ class DigitizingToolbar(QObject):
                 return
             # 校验失败 / 写入失败：面板已关，这里把原因讲清楚（附带涉及的字段名）
             detail = f"【{'】【'.join(result.fields)}】" if result.fields else ""
-            QMessageBox.warning(
+            MessageBox.warning(
                 self.main_window, "复制到失败", f"{result.reason}{detail}"
             )
 
@@ -2091,7 +2088,7 @@ class DigitizingToolbar(QObject):
         """
         fn = getattr(self.main_window, "apply_edit_settings_panel", None)
         if not callable(fn):
-            QMessageBox.information(self.main_window, "提示", "当前窗口不支持编辑设置")
+            MessageBox.information(self.main_window, "提示", "当前窗口不支持编辑设置")
             return
         fn()
 
@@ -2196,7 +2193,7 @@ class DigitizingToolbar(QObject):
                     return
         if layer is None or layer.type() != layer.VectorLayer:
             self._refresh_button_states()
-            QMessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
+            MessageBox.warning(self.main_window, "警告", "请先选择矢量图层")
             return
         # 属性录入不需要用户先「开始编辑」：自动进入编辑态
         if not self._ensure_editing(layer):
@@ -2204,7 +2201,6 @@ class DigitizingToolbar(QObject):
             return
         # 清掉可能激活的绘制 / 要素编辑 / 分割工具，避免并存
         self.clear_draw_tool()
-
 
         # 属性录入改成**弹窗**了（原先是右侧 Dock）：懒建单实例，点要素时载入。
         # 不再走 place_right_dock —— 它不是 Dock，不参与右侧叠放。
@@ -2253,7 +2249,7 @@ class DigitizingToolbar(QObject):
     def finish_draw(self, geometry: QgsGeometry) -> None:
         """绘制完成：校验 + 创建要素 + 弹属性对话框（与旧版 finish_draw 行为一致）。"""
         if geometry is None:
-            QMessageBox.warning(self.main_window, "警告", "绘制的几何图形无效！")
+            MessageBox.warning(self.main_window, "警告", "绘制的几何图形无效！")
             self.clear_draw_tool()
             return
 
@@ -2268,7 +2264,7 @@ class DigitizingToolbar(QObject):
         geom_name = {0: "点", 1: "线", 2: "面"}.get(layer_geom_type, "未知")
         geom_name_d = {0: "点", 1: "线", 2: "面"}.get(draw_geom_type, "未知")
         if layer_geom_type != draw_geom_type:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self.main_window,
                 "警告",
                 f"绘制类型与图层不匹配！\n图层类型：{geom_name}，绘制类型：{geom_name_d}",
@@ -2281,7 +2277,6 @@ class DigitizingToolbar(QObject):
 
         # 创建要素 + 弹属性对话框
         from qgis.core import QgsVectorLayerUtils
-
 
         feature = QgsVectorLayerUtils.createFeature(layer, geometry)
         feature.setGeometry(geometry)
@@ -2702,7 +2697,7 @@ class DigitizingToolbar(QObject):
         """
         if layer.selectedFeatureIds():
             return True
-        QMessageBox.warning(
+        MessageBox.warning(
             self.main_window, "警告", f"请先用点选 / 框选选中要{action}的要素"
         )
         return False

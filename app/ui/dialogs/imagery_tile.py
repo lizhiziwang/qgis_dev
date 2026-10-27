@@ -14,6 +14,12 @@ from html import escape
 from typing import Optional
 
 from qgis.PyQt.QtCore import QTimer
+from qgis.core import (
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsMapLayer,
+    QgsProject,
+)
 from qgis.PyQt.QtGui import QTextCursor
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
@@ -21,7 +27,6 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QSizePolicy,
@@ -29,13 +34,6 @@ from qgis.PyQt.QtWidgets import (
     QTextBrowser,
     QVBoxLayout,
     QWidget,
-)
-
-from qgis.core import (
-    QgsCoordinateReferenceSystem,
-    QgsCoordinateTransform,
-    QgsMapLayer,
-    QgsProject,
 )
 
 from app.core.domain.imagery_tiles import ImageryTileJob, ImageryTileService
@@ -58,6 +56,7 @@ from app.ui.common.algo_desc import make_description_panel
 from app.ui.common.base_dialog import BaseDialog, make_scrollable
 from app.ui.common.layer_combo import combo_current_layer, populate_layer_combo
 from app.ui.common.tile_progress import MetatileProgressTracker
+from app.ui.common.message_box import MessageBox
 from app.ui.common.widgets import open_file_dir
 
 logger = get_logger(__name__)
@@ -454,14 +453,14 @@ class ImageryTileDialog(BaseDialog):
         # 瓦片数是耗时主导因素：超过阈值先弹窗确认，避免误开超大任务
         n_tiles = self._estimate_tiles(layer, min_z, max_z)
         if n_tiles > TILE_COUNT_WARN_THRESHOLD:
-            ret = QMessageBox.question(
+            ret = MessageBox.question(
                 self,
                 "切片确认",
                 f"预计生成约 {n_tiles:,} 个瓦片，耗时可能较长。\n"
                 f"当前范围为{self.extent_edit.currentText()}（{min_z}-{max_z} 级）。"
                 "是否继续？",
             )
-            if ret != QMessageBox.StandardButton.Yes:
+            if ret != MessageBox.StandardButton.Yes:
                 return
 
         self.execute_btn.setEnabled(False)
