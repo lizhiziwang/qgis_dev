@@ -13,7 +13,7 @@ app:
   # VERSION_CODE 由它自动算出（major*10000+minor*100+patch）。
   # 界面标题、build_info.json、更新清单、安装包版本都从这里读；
   # 升级时安装器会保留本文件，但会把这一行改成新版本号。
-  version: "1.0.6"
+  version: "1.0.9"
   language: zh-Hans       # i18n
   crs: EPSG:4490          # 默认坐标系（中国 2000）
   # 「帮助」菜单（顶部最后一个页签）

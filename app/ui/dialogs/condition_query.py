@@ -46,7 +46,6 @@ from qgis.PyQt.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPushButton,
     QTextEdit,
     QVBoxLayout,
@@ -57,6 +56,7 @@ from app.core.util.dict_values import layer_dict_field_names, load_field_dict
 from app.infra.fs.state import load_state, save_state
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.common.qgis_selection import SELECT_METHODS, selection_behavior
 from app.ui.common.value_format import format_value, unwrap
 from app.ui.tools.feature_attrs import field_alias
@@ -675,7 +675,7 @@ class ConditionQueryDialog(BaseDialog):
 
     def _save_schemes(self) -> None:
         if not save_state(_STATE_NAME, {"schemes": self._schemes}):
-            QMessageBox.warning(
+            MessageBox.warning(
                 self,
                 "保存失败",
                 "查询方案写入配置目录失败（本次会话内仍可继续使用）。",
@@ -766,7 +766,7 @@ class ConditionQueryDialog(BaseDialog):
                     self._populate_layers()
             if layer is None:
                 label = str(info.get("name") or info.get("source") or "未知图层")
-                QMessageBox.warning(
+                MessageBox.warning(
                     self,
                     "图层不存在",
                     f"查询方案「{name}」对应的图层「{label}」不在当前工程中"
@@ -782,7 +782,7 @@ class ConditionQueryDialog(BaseDialog):
     def _on_save_scheme(self) -> None:
         condition = self.condition_edit.toPlainText().strip()
         if not condition:
-            QMessageBox.warning(self, "无法存储", "查询条件为空，无法存储。")
+            MessageBox.warning(self, "无法存储", "查询条件为空，无法存储。")
             return
         current = self.scheme_combo.currentData()
         default_name = str(current) if current else f"方案{len(self._schemes) + 1}"
@@ -791,7 +791,7 @@ class ConditionQueryDialog(BaseDialog):
             return
         name = name.strip()
         if not name:
-            QMessageBox.warning(self, "无法存储", "方案名称不能为空。")
+            MessageBox.warning(self, "无法存储", "方案名称不能为空。")
             return
         existing = next((item for item in self._schemes if item["name"] == name), None)
         info = self._layer_info()
@@ -813,14 +813,14 @@ class ConditionQueryDialog(BaseDialog):
         if not current:
             return
         name = str(current)
-        answer = QMessageBox.question(
+        answer = MessageBox.question(
             self,
             "删除查询方案",
             f"确定删除查询方案「{name}」？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
         )
-        if answer != QMessageBox.StandardButton.Yes:
+        if answer != MessageBox.StandardButton.Yes:
             return
         self._schemes = [item for item in self._schemes if item["name"] != name]
         self._save_schemes()
@@ -833,12 +833,12 @@ class ConditionQueryDialog(BaseDialog):
         """把条件命中的要素按选择方式写入选择集（**不改图层筛选**）。"""
         layer = self.current_layer()
         if layer is None:
-            QMessageBox.warning(self, "无法查询", "请选择要查询的矢量图层。")
+            MessageBox.warning(self, "无法查询", "请选择要查询的矢量图层。")
             return
         condition = self.condition_edit.toPlainText().strip()
         error = self._validate_condition(condition)
         if error is not None:
-            QMessageBox.critical(self, "条件有误", error)
+            MessageBox.critical(self, "条件有误", error)
             return
 
         action = str(self.method_combo.currentData() or "SetSelection")
@@ -846,7 +846,7 @@ class ConditionQueryDialog(BaseDialog):
             layer.selectByExpression(condition, selection_behavior(action))
         except Exception as e:  # noqa: BLE001 —— 提供者拒绝 / 表达式求值异常
             logger.exception("条件查询执行失败")
-            QMessageBox.critical(self, "查询失败", f"查询执行异常！\n{e}")
+            MessageBox.critical(self, "查询失败", f"查询执行异常！\n{e}")
             return
 
         selected = layer.selectedFeatureCount()

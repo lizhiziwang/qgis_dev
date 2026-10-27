@@ -14,7 +14,6 @@ from contextlib import suppress
 
 from qgis.core import Qgis
 from qgis.PyQt import sip
-from qgis.PyQt.QtWidgets import QMessageBox
 
 from app.core.util.data_formats import (
     CONTAINER_EXTS,
@@ -25,15 +24,15 @@ from app.core.util.data_formats import (
 )
 from app.core.util.sublayers import open_sublayer
 from app.infra.logging import get_logger
+from app.ui.common.message_box import MessageBox
 from app.ui.common.widgets import open_file_dir
 
 logger = get_logger(__name__)
 
-
 #: 重设数据源时按「原图层的数据源类型」给的过滤器（同类型文件）
 _RASTER_FILE_FILTER = (
     "栅格数据 (*.tif *.tiff *.img *.jpg *.jpeg *.png *.bmp *.gif "
-    "*.dem *.asc *.vrt *.jp2 *.ecw *.hdf *.nc *.mrf)"
+    "*.dem *.asc *.vrt *.jp2 *.ecw *.hdf *.nc *.mrf *.mbtiles)"
 )
 
 _VECTOR_FILE_FILTERS: dict[str, str] = {
@@ -118,7 +117,7 @@ class FileBrowserMixin:
             self.canvas.refreshAllLayers()
             logger.info("添加数据完成：文件 %d 个、数据库子图层 %d 个", files, sublayers)
         if failures:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self,
                 "部分数据没加载",
                 "以下图层打不开：\n" + "\n".join(failures),
@@ -190,7 +189,7 @@ class FileBrowserMixin:
         if old_is_gdb and (
             not os.path.isdir(path) or not path.lower().endswith(".gdb")
         ):
-            QMessageBox.warning(self, "重设数据源", "请选择 .gdb 文件夹。")
+            MessageBox.warning(self, "重设数据源", "请选择 .gdb 文件夹。")
             return
 
         ext = os.path.splitext(path)[1].lower()
@@ -202,7 +201,7 @@ class FileBrowserMixin:
             and old_ext not in CONTAINER_EXTS
             and ext != old_ext
         ):
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "重设数据源", f"请选择同类型文件（{old_ext}）。"
             )
             return
@@ -215,7 +214,7 @@ class FileBrowserMixin:
 
             new_layer = QgsRasterLayer(path, layer.name())
             if not new_layer.isValid():
-                QMessageBox.warning(
+                MessageBox.warning(
                     self, "重设数据源", f"栅格数据源打不开：\n{path}"
                 )
                 return
@@ -223,7 +222,7 @@ class FileBrowserMixin:
                 self._replace_layer_object(layer, new_layer)
             except Exception as exc:  # noqa: BLE001 —— 槽内异常不能冒出去
                 logger.exception("重设栅格数据源失败")
-                QMessageBox.warning(
+                MessageBox.warning(
                     self, "重设数据源", f"替换图层失败：{exc}"
                 )
             return
@@ -245,20 +244,20 @@ class FileBrowserMixin:
                 return
             new_layer, error = open_sublayer(path, selected[0])
             if new_layer is None:
-                QMessageBox.warning(self, "重设数据源", f"打不开新数据源：\n{error}")
+                MessageBox.warning(self, "重设数据源", f"打不开新数据源：\n{error}")
                 return
             source = str(new_layer.source() or "")
             provider = str(new_layer.providerType() or "")
             replacement = new_layer
         elif is_raster or ext in RASTER_EXTS:
             if not is_raster:
-                QMessageBox.warning(
+                MessageBox.warning(
                     self, "重设数据源", "当前是矢量图层，不能改成栅格数据源。"
                 )
                 return
             probe = QgsRasterLayer(path, layer.name(), "gdal")
             if not probe.isValid():
-                QMessageBox.warning(
+                MessageBox.warning(
                     self, "重设数据源", f"栅格数据源打不开：\n{path}"
                 )
                 return
@@ -267,13 +266,13 @@ class FileBrowserMixin:
             probe.deleteLater()
         else:
             if not is_vector:
-                QMessageBox.warning(
+                MessageBox.warning(
                     self, "重设数据源", "当前是栅格图层，不能改成矢量数据源。"
                 )
                 return
             probe = QgsVectorLayer(path, layer.name(), "ogr")
             if not probe.isValid():
-                QMessageBox.warning(
+                MessageBox.warning(
                     self, "重设数据源", f"矢量数据源打不开：\n{path}"
                 )
                 return
@@ -312,12 +311,12 @@ class FileBrowserMixin:
                 return
             except Exception as exc:  # noqa: BLE001 —— 槽内异常不能冒出去
                 logger.exception("替换图层对象失败")
-                QMessageBox.warning(
+                MessageBox.warning(
                     self, "重设数据源", f"设置数据源失败：\n{source}\n{exc}"
                 )
                 return
         if not ok:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "重设数据源", f"设置数据源失败：\n{source}"
             )
             return
@@ -526,7 +525,7 @@ class FileBrowserMixin:
                     self._load_raster(file_path)
             self.canvas.refreshAllLayers()
         except Exception as e:  # noqa: BLE001
-            QMessageBox.critical(self, "加载错误", f"文件加载失败：{e}")
+            MessageBox.critical(self, "加载错误", f"文件加载失败：{e}")
         finally:
             self._end_layer_loading()
 
@@ -559,7 +558,7 @@ class FileBrowserMixin:
         if added:
             logger.info("容器加载完成：%s（%d 个图层）", path, added)
         if failures:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self,
                 "部分图层没加载",
                 "以下图层打不开：\n" + "\n".join(failures),
@@ -579,17 +578,17 @@ class FileBrowserMixin:
         format_name = {".geojson": "GeoJSON", ".json": "GeoJSON", ".kml": "KML", ".gml": "GML"}.get(
             ext, "文本矢量"
         )
-        answer = QMessageBox.question(
+        answer = MessageBox.question(
             self,
             f"{format_name} 文件较大",
             f"{os.path.basename(file_path)} 约 {size / (1024 * 1024):.1f} MB。\n\n"
             f"{format_name} 是文本交换格式，加载、修改字段和属性表定位都会很慢，"
             "部分驱动还会因整文件解析而内存不足。\n"
             "建议先用「矢量格式转换」转为 GeoPackage 再加载 / 编辑。\n\n仍要加载吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
         )
-        return answer == QMessageBox.StandardButton.Yes
+        return answer == MessageBox.StandardButton.Yes
 
     def _load_vector(self, file_path: str):
         """按矢量加载，成功返回图层，失败返回 ``None``。
@@ -617,7 +616,7 @@ class FileBrowserMixin:
         # 不写死 provider：QgsRasterLayer 默认按 GDAL 打开，多波段 tif / img / dem 都走它
         layer = QgsRasterLayer(file_path, name)
         if not layer.isValid():
-            QMessageBox.warning(self, "加载失败", f"无法识别为栅格数据：{name}")
+            MessageBox.warning(self, "加载失败", f"无法识别为栅格数据：{name}")
             return None
         layer.path_c = file_path
         self._add_layer_to_project(layer)
@@ -637,7 +636,7 @@ class FileBrowserMixin:
         actual_path = resolve_gdb_dir(gdb_path)
         if actual_path is None:
             name = os.path.basename(gdb_path.rstrip("/\\"))
-            QMessageBox.warning(
+            MessageBox.warning(
                 self,
                 "无法打开 GDB",
                 f"{name}\n\n这个目录里没有 gdb / *.gdbtable 文件，"
@@ -684,7 +683,7 @@ class FileBrowserMixin:
                     "\n\n文件可能存在损坏、被其他程序独占，或目录不完整。"
                     "可先用 ArcGIS / ArcGIS Pro 打开确认，再尝试重新复制一份。"
                 )
-            QMessageBox.warning(self, "无法打开 GDB", f"{name}\n{error}{hint}")
+            MessageBox.warning(self, "无法打开 GDB", f"{name}\n{error}{hint}")
             return
         ds.Destroy()
         # 能打开：列图层让用户挑（不再整库全加载）

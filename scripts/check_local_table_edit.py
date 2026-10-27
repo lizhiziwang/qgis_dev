@@ -374,9 +374,10 @@ def case_spatialite_spatial(out: Path) -> str:
 def case_dock_detail(out: Path) -> str:
     """数据管理 Dock：点矢量 / 字典叶子整栏切到详情页，点分组/连接切回列表。"""
     from qgis.PyQt.QtCore import Qt
-    from qgis.PyQt.QtWidgets import QApplication, QDialog, QMessageBox
+    from qgis.PyQt.QtWidgets import QApplication, QDialog
 
     from app.core.util.local_db_util import describe_local_db, local_db_util
+    from app.ui.common.message_box import MessageBox as QMessageBox
     from app.ui.docks.data_manage_dock import DataManageDock
 
     work = out / "dock"
@@ -569,9 +570,10 @@ def case_dock_detail(out: Path) -> str:
 @case
 def case_detail_editors(out: Path) -> str:
     """详情编辑器：矢量字段改名/改类型/加字段保存；字典行改/删。"""
-    from qgis.PyQt.QtWidgets import QApplication, QMessageBox
+    from qgis.PyQt.QtWidgets import QApplication
 
     from app.core.util.local_db_util import local_db_util
+    from app.ui.common.message_box import MessageBox as QMessageBox
     from app.ui.docks.table_detail import DictTableEditor, VectorFieldEditor
 
     work = out / "editors"
@@ -685,7 +687,7 @@ def case_detail_editors(out: Path) -> str:
 @case
 def case_domain_delete(out: Path) -> str:
     """删除本地字典域：引用它的字段关联要一起清掉，其它域不受影响。"""
-    from qgis.PyQt.QtWidgets import QApplication, QMessageBox
+    from qgis.PyQt.QtWidgets import QApplication
 
     from app.core.domain.create_data.dict_tables import create_local_dict_table
     from app.core.domain.dict_manage import DictService
@@ -695,6 +697,7 @@ def case_domain_delete(out: Path) -> str:
         upsert_field_meta,
     )
     from app.core.util.local_db_util import local_db_util
+    from app.ui.common.message_box import MessageBox as QMessageBox
     from app.ui.docks.table_detail import DictTableEditor
 
     work = out / "domain_delete"
@@ -1358,7 +1361,7 @@ def case_local_dict_table(out: Path) -> str:
 @case
 def case_clear_dict(out: Path) -> str:
     """字段编辑器清除字典挂接：类型回文本、保存有确认、元数据清空。"""
-    from qgis.PyQt.QtWidgets import QDialog, QMessageBox
+    from qgis.PyQt.QtWidgets import QDialog
 
     import app.ui.docks.table_detail as td_mod
     from app.core.domain.create_data import FieldSpec
@@ -1368,6 +1371,7 @@ def case_clear_dict(out: Path) -> str:
         upsert_field_meta,
     )
     from app.core.util.local_db_util import local_db_util
+    from app.ui.common.message_box import MessageBox as QMessageBox
     from app.ui.docks.table_detail import VectorFieldEditor
 
     work = out / "clear_dict"
@@ -1508,12 +1512,11 @@ def case_local_picker(out: Path) -> str:
 @case
 def case_save_system_dict(out: Path) -> str:
     """字段挂接系统字典后保存：自动把字典落进当前库并记下本地表名。"""
-    from qgis.PyQt.QtWidgets import QMessageBox
-
     import app.core.domain.dict_manage as dm_mod
     from app.core.domain.dict_manage import DictService
     from app.core.util.field_meta import FieldMeta, read_field_meta, upsert_field_meta
     from app.core.util.local_db_util import local_db_util
+    from app.ui.common.message_box import MessageBox as QMessageBox
     from app.ui.docks.table_detail import VectorFieldEditor
 
     work = out / "save_system"

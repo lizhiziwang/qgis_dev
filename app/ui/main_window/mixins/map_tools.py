@@ -11,10 +11,10 @@ from __future__ import annotations
 from qgis.core import Qgis, QgsRectangle
 from qgis.PyQt import sip
 from qgis.PyQt.QtCore import QPoint, Qt
-from qgis.PyQt.QtWidgets import QMessageBox
 
 from app.infra.edit_settings import EditSettingsManager
 from app.infra.logging import get_logger
+from app.ui.common.message_box import MessageBox
 
 logger = get_logger(__name__)
 
@@ -27,7 +27,6 @@ from app.ui.tools.select_feature import (
     PointSelectTool,
     RectSelectTool,
 )
-
 
 #: 「选择集」弹窗与画布边缘的间距（像素）
 _SELECT_SET_GAP = 12
@@ -792,7 +791,7 @@ class MapToolsMixin:
             else:
                 combined.combineExtentWith(extent)
         if combined is None or combined.isNull():
-            QMessageBox.information(self, "提示", "当前无有效图层")
+            MessageBox.information(self, "提示", "当前无有效图层")
             return
         self.canvas.setExtent(combined)
         self.canvas.refresh()

@@ -66,7 +66,6 @@ from qgis.PyQt.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QRadioButton,
     QScrollArea,
@@ -79,6 +78,7 @@ from qgis.PyQt.QtWidgets import (
 
 from app.infra.logging import get_logger
 from app.ui.common.field_combo import make_field_combo_searchable
+from app.ui.common.message_box import MessageBox
 from app.ui.dialogs.layer_properties.base import LayerPropertyTab
 from app.ui.dialogs.layer_properties.widgets import ColorButton
 from app.ui.tools.feature_attrs import field_alias
@@ -128,7 +128,6 @@ _UNITS = (
     ("地图单位", QgsUnitTypes.RenderUnit.MapUnits),
     ("百分比", QgsUnitTypes.RenderUnit.Percentage),
 )
-
 
 # --------------------------------------------------------------------- 小工具
 
@@ -368,7 +367,7 @@ class _FieldExpressionSelector(QWidget):
                 self.expr_edit.setText(dlg.expression_text())
         except Exception as exc:  # noqa: BLE001
             logger.error("打开表达式编辑器失败: %s", exc, exc_info=True)
-            QMessageBox.warning(self, "标注", f"打开表达式编辑器失败：{exc}")
+            MessageBox.warning(self, "标注", f"打开表达式编辑器失败：{exc}")
 
 
 class _TranslateValueDialog(QDialog):
@@ -1061,13 +1060,13 @@ class LabelingTab(LayerPropertyTab):
             return True
         except Exception as exc:  # noqa: BLE001
             logger.error("应用标注属性失败: %s", exc, exc_info=True)
-            QMessageBox.warning(self, "图层属性", f"应用标注属性失败：{exc}")
+            MessageBox.warning(self, "图层属性", f"应用标注属性失败：{exc}")
             return False
 
     def _read_controls_into(self, settings: QgsPalLayerSettings) -> bool:
         name, is_expr = self._effective_content()
         if not name:
-            QMessageBox.warning(self, "标注", "标注字段 / 表达式不能为空")
+            MessageBox.warning(self, "标注", "标注字段 / 表达式不能为空")
             self.content_selector.combo.setFocus()
             return False
         settings.fieldName = name
@@ -1085,11 +1084,11 @@ class LabelingTab(LayerPropertyTab):
             max_scale = _parse_scale(self.min_scale_edit.text(), "最小比例尺")
             min_scale = _parse_scale(self.max_scale_edit.text(), "最大比例尺")
         except ValueError as exc:
-            QMessageBox.warning(self, "标注", str(exc))
+            MessageBox.warning(self, "标注", str(exc))
             return False
         use_scale = self.scale_check.isChecked()
         if use_scale and max_scale > 0 and min_scale > 0 and max_scale >= min_scale:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "标注", "最小比例尺的分母必须小于最大比例尺的分母"
             )
             return False

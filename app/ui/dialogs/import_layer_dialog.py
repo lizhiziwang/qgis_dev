@@ -46,13 +46,13 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 
 
 class ImportLayerDialog(BaseDialog):
@@ -208,7 +208,7 @@ class ImportLayerDialog(BaseDialog):
         layers, error = dialog.resolve_all() if accepted else ([], "")
         dialog.deleteLater()
         if error:
-            QMessageBox.warning(self, "选择数据源", error)
+            MessageBox.warning(self, "选择数据源", error)
         for layer in layers:
             self._add_layer(layer)
         self._refresh_ok_enabled()
@@ -231,7 +231,7 @@ class ImportLayerDialog(BaseDialog):
         for layer in layers:
             self._add_layer(layer)
         if errors:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self,
                 "选择数据源",
                 "以下数据没有导入：\n" + "\n".join(errors),
@@ -284,7 +284,7 @@ class ImportLayerDialog(BaseDialog):
 
     def _on_accept(self) -> None:
         if not self.selected_layers() or self.db_combo.currentData() is None:
-            QMessageBox.warning(self, "导入图层", "请先选择要导入的图层与目标数据库")
+            MessageBox.warning(self, "导入图层", "请先选择要导入的图层与目标数据库")
             return
         self.accept()
 
@@ -349,7 +349,6 @@ def _source_file_name(layer) -> str:
     except RuntimeError:
         return ""
     return "" if not name or name == layer_name else name
-
 
 # --------------------------------------------------------------------- helpers
 

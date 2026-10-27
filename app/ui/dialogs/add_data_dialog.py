@@ -140,6 +140,7 @@ _FORMAT_FILTERS: tuple[tuple[str, str, frozenset[str], str], ...] = (
     ("DXF (.dxf)", "fmt:dxf", frozenset({".dxf"}), "mIconVector.svg"),
     ("GPX (.gpx)", "fmt:gpx", frozenset({".gpx"}), "mIconGpx.svg"),
     ("GeoTIFF (.tif / .tiff)", "fmt:tif", frozenset({".tif", ".tiff"}), "mIconRaster.svg"),
+    ("MBTiles (.mbtiles)", "fmt:mbtiles", frozenset({".mbtiles"}), "mIconRaster.svg"),
     ("Excel 表格 (.xlsx / .xls)", "fmt:excel", EXCEL_EXTS, "mIconTableLayer.svg"),
     ("CSV 表格 (.csv)", "fmt:csv", frozenset({".csv"}), "mIconDelimitedText.svg"),
 )
@@ -227,7 +228,7 @@ class AddDataDialog(BaseDialog):
         heading.setObjectName("AddDataHeading")
         sub = QLabel(
             "从本机选择矢量 / 栅格数据；GDB、GeoPackage、SQLite 可展开后选择内部图层，"
-            "文件和图层可一起多选。"
+            "MBTiles 直接作为栅格加载，文件和图层可一起多选。"
         )
         sub.setObjectName("AddDataSub")
         outer.addWidget(heading)

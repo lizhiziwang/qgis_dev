@@ -33,7 +33,6 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QRadioButton,
     QScrollArea,
@@ -45,13 +44,17 @@ from qgis.PyQt.QtWidgets import (
 from app.infra.fs.state import load_state, save_state
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.common.wheel_guard import WheelValueGuard
 from app.ui.dialogs.layer_properties.render import (
     SymbolParamsWidget,
     default_symbol,
 )
+from app.ui.dialogs.layer_properties.style_reference import StyleReferenceDialog
 from app.ui.dialogs.layer_properties.symbol_libraries import (
     LibrarySymbol as _LibrarySymbol,
+)
+from app.ui.dialogs.layer_properties.symbol_libraries import (
     delete_user_symbol,
     libraries_dir,
     load_libraries,
@@ -62,7 +65,6 @@ from app.ui.dialogs.layer_properties.symbol_libraries import (
     save_user_symbol,
     symbols_dir,
 )
-from app.ui.dialogs.layer_properties.style_reference import StyleReferenceDialog
 from app.ui.dialogs.layer_properties.widgets import pick_color
 
 logger = get_logger(__name__)
@@ -415,16 +417,16 @@ class SaveSymbolDialog(BaseDialog):
     def accept(self) -> None:
         name, mode, path = self.values()
         if not name:
-            QMessageBox.warning(self, "保存符号", "符号名称不能为空。")
+            MessageBox.warning(self, "保存符号", "符号名称不能为空。")
             return
         if mode == "library":
             if not path:
-                QMessageBox.warning(self, "保存符号", "请选择符号库文件。")
+                MessageBox.warning(self, "保存符号", "请选择符号库文件。")
                 return
             import os
 
             if os.path.exists(path):
-                QMessageBox.warning(
+                MessageBox.warning(
                     self, "保存符号", "该符号库文件已存在，请换一个文件名。"
                 )
                 return
@@ -721,12 +723,12 @@ class SymbolSelectorDialog(BaseDialog):
         if mode == "user":
             stem = save_user_symbol(name, self._current_symbol)
             if stem is None:
-                QMessageBox.warning(self, "保存符号", "保存失败，详见日志。")
+                MessageBox.warning(self, "保存符号", "保存失败，详见日志。")
                 return
             message = f"已保存到用户符号库：{stem}"
         else:
             if not save_symbol_library(path, name, self._current_symbol):
-                QMessageBox.warning(self, "保存符号", "写入符号库失败，详见日志。")
+                MessageBox.warning(self, "保存符号", "写入符号库失败，详见日志。")
                 return
             entries = load_libraries()
             if not any(entry.get("path") == path for entry in entries):
@@ -757,28 +759,28 @@ class SymbolSelectorDialog(BaseDialog):
             if key_match(entry):
                 self._on_library_entry_clicked(entry)
                 break
-        QMessageBox.information(self, "保存符号", message)
+        MessageBox.information(self, "保存符号", message)
 
     def _on_delete_symbol(self) -> None:
         """删除用户符号库里的当前符号（对应 ``config/symbols/xxx.xml``）。"""
         entry = self._selected_item
         if entry is None or entry.source != "user":
-            QMessageBox.information(
+            MessageBox.information(
                 self, "删除符号", "只能删除「用户符号」分组里的符号。"
             )
             return
         path = symbols_dir() / f"{entry.ident}.xml"
-        answer = QMessageBox.question(
+        answer = MessageBox.question(
             self,
             "删除符号",
             f"确定从用户符号库中删除「{entry.name}」吗？\n\n文件：{path}",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
         )
-        if answer != QMessageBox.StandardButton.Yes:
+        if answer != MessageBox.StandardButton.Yes:
             return
         if not delete_user_symbol(entry.ident):
-            QMessageBox.warning(self, "删除符号", "删除失败，详见日志。")
+            MessageBox.warning(self, "删除符号", "删除失败，详见日志。")
             return
         if entry.key in self._favorites:
             self._favorites.discard(entry.key)
@@ -793,7 +795,7 @@ class SymbolSelectorDialog(BaseDialog):
     def _on_toggle_favorite(self) -> None:
         entry = self._selected_item
         if entry is None:
-            QMessageBox.information(self, "收藏符号", "请先在左侧选择一个符号。")
+            MessageBox.information(self, "收藏符号", "请先在左侧选择一个符号。")
             return
         if entry.key in self._favorites:
             self._favorites.discard(entry.key)

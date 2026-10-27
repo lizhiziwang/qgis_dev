@@ -10,8 +10,27 @@ import time
 from typing import Any, List, Optional
 
 from osgeo import ogr
-from qgis.core import QgsVectorLayer
-from qgis.PyQt.QtCore import QAbstractTableModel, QModelIndex, QObject, Qt, pyqtSignal
+from qgis.core import (
+    QgsFeature,
+    QgsField,
+    QgsFields,
+    QgsGeometry,
+    QgsMemoryProviderUtils,
+    QgsProject,
+    QgsVectorLayer,
+    QgsWkbTypes,
+)
+from qgis.PyQt.QtCore import (
+    QAbstractTableModel,
+    QDate,
+    QDateTime,
+    QModelIndex,
+    QObject,
+    Qt,
+    QTime,
+    QVariant,
+    pyqtSignal,
+)
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QFormLayout,
@@ -20,7 +39,7 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
+    QProgressDialog,
     QPushButton,
     QTableView,
     QTextEdit,
@@ -30,6 +49,7 @@ from qgis.PyQt.QtWidgets import (
 from app.core.util.local_layer_loader import layer_source_container
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.dialogs.query_builder import QueryBuilderDialog
 
 logger = get_logger(__name__)
@@ -257,6 +277,201 @@ class _SqlStreamWorker(QObject):
             ds = None
 
 
+#: 结果超过该行数时，「加载为图层」先确认——内存图层要把要素全部物化，
+#: 几十万行会明显吃内存 / 卡顿。
+LOAD_LAYER_WARN_ROWS = 200_000
+
+#: OGR 字段类型 → QgsField 类型
+_OGR_FIELD_TYPES = {
+    ogr.OFTInteger: QVariant.Int,
+    ogr.OFTInteger64: QVariant.LongLong,
+    ogr.OFTReal: QVariant.Double,
+    ogr.OFTString: QVariant.String,
+    ogr.OFTDate: QVariant.Date,
+    ogr.OFTTime: QVariant.Time,
+    ogr.OFTDateTime: QVariant.DateTime,
+    ogr.OFTBinary: QVariant.ByteArray,
+    # 列表字段 memory provider 支持有限，按 OGR 的字符串表示落成文本
+    ogr.OFTIntegerList: QVariant.String,
+    ogr.OFTRealList: QVariant.String,
+    ogr.OFTStringList: QVariant.String,
+}
+
+#: OGR 几何类型（去掉 Z/M 位后的基础类型）→ QgsWkbTypes
+_OGR_GEOM_TYPES = {
+    ogr.wkbPoint: QgsWkbTypes.Type.Point,
+    ogr.wkbLineString: QgsWkbTypes.Type.LineString,
+    ogr.wkbPolygon: QgsWkbTypes.Type.Polygon,
+    ogr.wkbMultiPoint: QgsWkbTypes.Type.MultiPoint,
+    ogr.wkbMultiLineString: QgsWkbTypes.Type.MultiLineString,
+    ogr.wkbMultiPolygon: QgsWkbTypes.Type.MultiPolygon,
+    ogr.wkbGeometryCollection: QgsWkbTypes.Type.GeometryCollection,
+    ogr.wkbCircularString: QgsWkbTypes.Type.CircularString,
+    ogr.wkbCompoundCurve: QgsWkbTypes.Type.CompoundCurve,
+    ogr.wkbCurvePolygon: QgsWkbTypes.Type.CurvePolygon,
+    ogr.wkbMultiCurve: QgsWkbTypes.Type.MultiCurve,
+    ogr.wkbMultiSurface: QgsWkbTypes.Type.MultiSurface,
+}
+
+
+def _ogr_base_geom_type(ogr_type: int):
+    """OGR 几何类型去掉 25D 标志 / ISO 1000 段后返回基础类型。"""
+    t = int(ogr_type)
+    if t & ogr.wkb25DBit:
+        t &= ~ogr.wkb25DBit
+    if t >= 1000:
+        t %= 1000
+    return t
+
+
+def _ogr_value(feat, index: int, ogr_type: int, subtype: int):
+    """把 OGR 要素的一个字段值转成 QgsFeature 能接受的 Python 值。"""
+    if not feat.IsFieldSet(index):
+        return None
+    if ogr_type in (ogr.OFTInteger, ogr.OFTInteger64):
+        if subtype == ogr.OFSTBoolean:
+            return bool(feat.GetFieldAsInteger(index))
+        return feat.GetField(index)
+    if ogr_type == ogr.OFTReal:
+        return feat.GetField(index)
+    if ogr_type in (ogr.OFTDate, ogr.OFTTime, ogr.OFTDateTime):
+        year, month, day, hour, minute, second, _tz = feat.GetFieldAsDateTime(index)
+        if ogr_type == ogr.OFTTime:
+            return QTime(hour, minute, second)
+        date = QDate(year, month, day)
+        if not date.isValid():
+            return None
+        if ogr_type == ogr.OFTDate:
+            return date
+        return QDateTime(date, QTime(hour, minute, second))
+    if ogr_type == ogr.OFTBinary:
+        raw = feat.GetFieldAsBinary(index)
+        return bytes(raw) if raw is not None else None
+    if ogr_type in (ogr.OFTIntegerList, ogr.OFTRealList, ogr.OFTStringList):
+        return feat.GetFieldAsString(index)
+    return feat.GetField(index)
+
+
+def build_sql_result_layer(
+    path: str,
+    sql: str,
+    name: str,
+    crs,
+    *,
+    progress=None,
+):
+    """按 OGR SQL 结果物化一个内存矢量图层（保留几何 / 坐标系 / 字段）。
+
+    复用 :class:`_SqlStreamWorker` 同一套 ``ogr.Open + ExecuteSQL`` 语义，
+    但保留几何与字段类型（结果表里只存了显示用的字符串）。结果集完整重读，
+    不受 :data:`MAX_RESULT_ROWS` 截断影响。
+
+    Args:
+        path: 容器路径（``_container_path``）。
+        sql: 已执行的 SQL（不是编辑框里可能被改过的新文本）。
+        name: 新图层名。
+        crs: 源图层坐标系（结果图层沿用）。
+        progress: 可选回调 ``(已完成, 总数) -> bool``；返回 False 表示取消，
+            此时返回 ``None``。总数未知时为 0。
+
+    Returns:
+        ``(图层, 要素数)``；用户取消时返回 ``None``。
+
+    Raises:
+        RuntimeError: 数据源打不开 / SQL 执行失败 / 建图层失败。
+    """
+    ds = ogr.Open(path, 0)
+    if ds is None:
+        raise RuntimeError(f"无法打开数据源：{path}")
+    result = None
+    try:
+        result = ds.ExecuteSQL(sql)
+        if result is None:
+            raise RuntimeError("SQL 执行失败或没有结果")
+        defn = result.GetLayerDefn()
+
+        fields = QgsFields()
+        field_defs = []  # (字段序号, OGR 类型, 子类型)
+        for i in range(defn.GetFieldCount()):
+            fd = defn.GetFieldDefn(i)
+            ogr_type = fd.GetType()
+            subtype = fd.GetSubType()
+            field_defs.append((i, ogr_type, subtype))
+            qtype = _OGR_FIELD_TYPES.get(ogr_type, QVariant.String)
+            if ogr_type == ogr.OFTInteger and subtype == ogr.OFSTBoolean:
+                qtype = QVariant.Bool
+            fields.append(
+                QgsField(
+                    fd.GetName(),
+                    qtype,
+                    "",
+                    fd.GetWidth(),
+                    fd.GetPrecision(),
+                )
+            )
+
+        geom_type = _OGR_GEOM_TYPES.get(_ogr_base_geom_type(defn.GetGeomType()))
+        if geom_type is None:
+            # wkbUnknown：先探一条有几何的要素推断；确实没有几何就是纯属性表
+            geom_type = QgsWkbTypes.Type.NoGeometry
+            if _ogr_base_geom_type(defn.GetGeomType()) == ogr.wkbUnknown:
+                result.ResetReading()
+                for feat in result:
+                    geom = feat.GetGeometryRef()
+                    if geom is not None:
+                        geom_type = _OGR_GEOM_TYPES.get(
+                            _ogr_base_geom_type(geom.GetGeometryType()),
+                            QgsWkbTypes.Type.NoGeometry,
+                        )
+                        break
+                result.ResetReading()
+
+        layer = QgsMemoryProviderUtils.createMemoryLayer(name, fields, geom_type, crs)
+        if layer is None:
+            raise RuntimeError("创建内存图层失败")
+
+        provider = layer.dataProvider()
+        total = max(result.GetFeatureCount(), 0)
+        batch = []
+        n = 0
+        result.ResetReading()
+        for feat in result:
+            qf = QgsFeature()
+            qf.setAttributes(
+                [_ogr_value(feat, i, ogr_type, subtype) for i, ogr_type, subtype in field_defs]
+            )
+            geom = feat.GetGeometryRef()
+            if geom is not None:
+                try:
+                    wkb = geom.ExportToIsoWkb()
+                except Exception:  # noqa: BLE001 —— 个别驱动只给 25D WKB
+                    wkb = geom.ExportToWkb()
+                # QGIS 4 的 QgsGeometry.fromWkb 是实例方法（原地设置），不是静态构造
+                qgs_geom = QgsGeometry()
+                qgs_geom.fromWkb(wkb)
+                if not qgs_geom.isNull():
+                    qf.setGeometry(qgs_geom)
+            batch.append(qf)
+            n += 1
+            if len(batch) >= 1000:
+                if not provider.addFeatures(batch):
+                    raise RuntimeError("写入查询结果要素失败")
+                batch = []
+                if progress is not None and not progress(n, total):
+                    return None
+        if batch and not provider.addFeatures(batch):
+            raise RuntimeError("写入查询结果要素失败")
+        if progress is not None and not progress(n, total):
+            return None
+        layer.updateExtents()
+        layer.updateFields()
+        return layer, n
+    finally:
+        if result is not None:
+            ds.ReleaseResultSet(result)
+        ds = None
+
+
 class ExecuteSqlDialog(BaseDialog):
     """执行 ogr SQL 并展示结果。"""
 
@@ -265,6 +480,8 @@ class ExecuteSqlDialog(BaseDialog):
         self.setWindowTitle("执行SQL")
         self.layer = layer
         self._sql_worker: Optional[_SqlStreamWorker] = None
+        #: 最近一次真正执行的 SQL（「加载为图层」按它重读，不取编辑框当前文本）
+        self._executed_sql = ""
         self._setup_ui()
 
     def _setup_ui(self) -> None:
@@ -307,15 +524,17 @@ class ExecuteSqlDialog(BaseDialog):
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
         self.subset_filter_input = QLineEdit()
-        self.subset_filter_input.setPlaceholderText("Enter the optional SQL filter or click on the button to open the query builder tool")
+        self.subset_filter_input.setPlaceholderText("输入可选的 SQL 过滤条件，或点击右侧按钮打开查询构建器")
         self.subset_filter_btn = QPushButton("...")
         self.subset_filter_btn.setFixedWidth(30)
+        self.subset_filter_btn.setToolTip("打开查询构建器")
         sub = QHBoxLayout()
         sub.addWidget(self.subset_filter_input)
         sub.addWidget(self.subset_filter_btn)
-        form.addRow("Subset filter", sub)
+        form.addRow("过滤条件", sub)
         self.layer_name_input = QLineEdit()
-        form.addRow("Layer name", self.layer_name_input)
+        self.layer_name_input.setPlaceholderText("留空则自动命名为「图层名_SQL结果」")
+        form.addRow("图层名称", self.layer_name_input)
         load_layout.addLayout(form)
         load_btn = QPushButton("加载图层")
         load_btn.clicked.connect(self._on_load_layer)
@@ -337,7 +556,7 @@ class ExecuteSqlDialog(BaseDialog):
             self._sql_worker = None
         sql = self.sql_input.toPlainText().strip()
         if not sql:
-            QMessageBox.warning(self, "警告", "请输入 SQL 查询！")
+            MessageBox.warning(self, "警告", "请输入 SQL 查询！")
             return
         path = _container_path(self.layer)
         # 仅支持本地文件/容器数据源（shp / gpkg / gdb / geojson / 本地库里的 Sqlite
@@ -349,13 +568,14 @@ class ExecuteSqlDialog(BaseDialog):
             or not path
             or not (os.path.isfile(path) or os.path.isdir(path))
         ):
-            QMessageBox.warning(
+            MessageBox.warning(
                 self,
                 "警告",
                 "仅支持本地文件数据源（shp / gpkg / gdb / geojson 等）的 SQL 查询",
             )
             return
         self._table_model.set_schema([])  # 清空旧结果
+        self._executed_sql = sql
         self.execute_btn.setEnabled(False)
         self.execute_btn.setText("查询中…")
         self.status_label.setText("正在执行 SQL…")
@@ -415,7 +635,77 @@ class ExecuteSqlDialog(BaseDialog):
         super().closeEvent(event)
 
     def _on_load_layer(self) -> None:
-        pass
+        """把查询结果物化成内存矢量图层加入工程（保留几何 / 坐标系 / 字段）。"""
+        if self._sql_worker is not None:
+            MessageBox.information(self, "提示", "查询仍在执行，请等待完成后再加载图层")
+            return
+        total = self._table_model.rowCount()
+        if total <= 0:
+            MessageBox.information(self, "提示", "请先执行查询并获得结果")
+            return
+        sql = self._executed_sql
+        if not sql:
+            MessageBox.information(self, "提示", "请先执行查询并获得结果")
+            return
+        if total > LOAD_LAYER_WARN_ROWS:
+            ret = MessageBox.question(
+                self,
+                "加载为图层",
+                f"查询结果共 {total:,} 条。加载为内存图层需要把全部要素读入内存，"
+                "可能耗时较长并占用较多内存。是否继续？",
+            )
+            if ret != MessageBox.StandardButton.Yes:
+                return
+
+        name = self.layer_name_input.text().strip() or f"{self.layer.name()}_SQL结果"
+        path = _container_path(self.layer)
+        dialog_total = total if total > 0 else 0
+        progress = QProgressDialog("正在加载查询结果…", "取消", 0, dialog_total, self)
+        progress.setWindowTitle("加载为图层")
+        progress.setWindowModality(Qt.WindowModality.WindowModal)
+        progress.setMinimumDuration(300)
+        progress.setAutoClose(False)
+        progress.setAutoReset(False)
+
+        def _on_progress(done: int, count: int) -> bool:
+            if count <= 0:
+                progress.setRange(0, 0)  # 总数未知：转圈
+            else:
+                progress.setValue(min(done, count))
+            return not progress.wasCanceled()
+
+        try:
+            built = build_sql_result_layer(
+                path,
+                sql,
+                name,
+                self.layer.crs(),
+                progress=_on_progress,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("加载查询结果为图层失败")
+            MessageBox.warning(self, "加载为图层", f"加载失败：{exc}")
+            return
+        finally:
+            progress.close()
+
+        if built is None:  # 用户取消
+            self.status_label.setText("已取消加载图层")
+            return
+        layer, count = built
+
+        subset = self.subset_filter_input.text().strip()
+        if subset and not layer.setSubsetString(subset):
+            logger.warning("加载图层时过滤条件无效，已忽略：%s", subset)
+            MessageBox.warning(
+                self,
+                "加载为图层",
+                f"过滤条件无效，已忽略：\n{subset}",
+            )
+
+        QgsProject.instance().addMapLayer(layer)
+        self.status_label.setText(f"已加载图层「{name}」，共 {count} 条")
+        logger.info("SQL 结果已加载为图层：%s（%s 条）", name, count)
 
     def _on_open_query_builder(self) -> None:
         from app.ui.common.modeless import show_modeless

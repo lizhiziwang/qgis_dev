@@ -37,10 +37,32 @@ from qgis.core import (
     QgsWkbTypes,
 )
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import (QAbstractTableModel, QEvent, QItemSelection, QItemSelectionModel,
-                              QModelIndex, QObject, QPoint, QPointF, QRect, Qt, QTimer, QVariant, pyqtSignal)
-from qgis.PyQt.QtGui import (QBrush, QColor, QKeySequence, QPainter, QPalette, QPen, QPolygonF,
-                             QStandardItem, QStandardItemModel)
+from qgis.PyQt.QtCore import (
+    QAbstractTableModel,
+    QEvent,
+    QItemSelection,
+    QItemSelectionModel,
+    QModelIndex,
+    QObject,
+    QPoint,
+    QPointF,
+    QRect,
+    Qt,
+    QTimer,
+    QVariant,
+    pyqtSignal,
+)
+from qgis.PyQt.QtGui import (
+    QBrush,
+    QColor,
+    QKeySequence,
+    QPainter,
+    QPalette,
+    QPen,
+    QPolygonF,
+    QStandardItem,
+    QStandardItemModel,
+)
 from qgis.PyQt.QtWidgets import (
     QAbstractItemDelegate,
     QAbstractItemView,
@@ -52,7 +74,6 @@ from qgis.PyQt.QtWidgets import (
     QInputDialog,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QProgressBar,
     QPushButton,
     QSizePolicy,
@@ -70,6 +91,7 @@ from app.infra.logging import get_logger
 from app.ui.common import tool_icons
 from app.ui.common.feature_highlight import FeatureHighlighter
 from app.ui.common.icons import Icons
+from app.ui.common.message_box import MessageBox
 from app.ui.common.modeless import show_modeless
 from app.ui.common.theme import ThemeManager, dock_selection_color
 from app.ui.common.value_format import format_value
@@ -2927,7 +2949,7 @@ class PagedAttributeTableWidget(QWidget):
             layer.deleteFeatures(fids)
         except Exception as exc:  # noqa: BLE001 —— 槽里抛异常会带走进程
             logger.error("属性表删除选中要素失败：%s", exc, exc_info=True)
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "删除失败", f"没能删除选中的要素：{exc}"
             )
         finally:
@@ -2948,20 +2970,20 @@ class PagedAttributeTableWidget(QWidget):
             self._refresh_edit_buttons()
             return
         if layer.isModified():
-            ret = QMessageBox.question(
+            ret = MessageBox.question(
                 self,
                 "停止编辑",
                 f"图层「{layer.name()}」有未保存的修改，是否保存？",
-                QMessageBox.StandardButton.Save
-                | QMessageBox.StandardButton.Discard
-                | QMessageBox.StandardButton.Cancel,
-                QMessageBox.StandardButton.Save,
+                MessageBox.StandardButton.Save
+                | MessageBox.StandardButton.Discard
+                | MessageBox.StandardButton.Cancel,
+                MessageBox.StandardButton.Save,
             )
-            if ret == QMessageBox.StandardButton.Cancel:
+            if ret == MessageBox.StandardButton.Cancel:
                 return
-            if ret == QMessageBox.StandardButton.Save:
+            if ret == MessageBox.StandardButton.Save:
                 if not self.editing_service.stop(layer, save=True):
-                    QMessageBox.warning(
+                    MessageBox.warning(
                         self,
                         "保存失败",
                         f"图层「{layer.name()}」的修改没能保存，仍在编辑状态。\n"
@@ -3173,7 +3195,7 @@ class PagedAttributeTableWidget(QWidget):
                 return
             except RuntimeError:  # 窗口关闭流程里 C++ 对象已销毁
                 pass
-        (QMessageBox.warning if warn else QMessageBox.information)(self, "导出 CSV", text)
+        (MessageBox.warning if warn else MessageBox.information)(self, "导出 CSV", text)
 
     def _apply_filter(self, cond: str) -> None:
         """筛选确认后更新模型筛选并刷新（重新统计，回到首屏首批）。"""
@@ -3541,42 +3563,42 @@ class PagedAttributeTableWidget(QWidget):
         # 系统自维护 / 唯一标识字段只读：不允许删除（菜单项已置灰，这里再兜一层）
         col = self._column_of_key(name)
         if col is not None and self.model is not None and col in self.model.readonly_cols:
-            QMessageBox.information(
+            MessageBox.information(
                 self, "删除字段",
                 f"字段「{name}」为系统自维护 / 唯一标识字段，不允许删除。",
             )
             return
         # 编辑状态不允许删除字段（先保存/停止编辑再改 schema）
         if self.layer.isEditable():
-            QMessageBox.information(
+            MessageBox.information(
                 self, "删除字段",
                 "图层处于编辑状态，请先保存 / 停止编辑后再删除字段。",
             )
             return
         if is_geojson_layer(self.layer):
-            answer = QMessageBox.warning(
+            answer = MessageBox.warning(
                 self,
                 "删除字段",
                 f"GeoJSON 是文本交换格式，删除字段会重写整个文件，"
                 f"大图层可能长时间无响应。\n\n建议先将图层另存为 GeoPackage 再编辑。\n\n"
                 f"仍要删除字段「{name}」吗？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+                MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+                MessageBox.StandardButton.No,
             )
         else:
-            answer = QMessageBox.question(
+            answer = MessageBox.question(
                 self, "删除字段", f"确定从图层中删除字段「{name}」？该操作不可撤销。"
             )
-        if answer != QMessageBox.StandardButton.Yes:
+        if answer != MessageBox.StandardButton.Yes:
             return
         try:
             ok = _delete_field_from_layer(self.layer, name)
         except Exception as exc:  # noqa: BLE001
             logger.error("删除字段失败: %s", exc, exc_info=True)
-            QMessageBox.warning(self, "删除字段", f"删除字段失败：{exc}")
+            MessageBox.warning(self, "删除字段", f"删除字段失败：{exc}")
             return
         if not ok:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "删除字段",
                 f"删除字段「{name}」失败（provider 不支持或图层只读）",
             )
@@ -3593,12 +3615,13 @@ class PagedAttributeTableWidget(QWidget):
 
         index = self.layer.fields().indexOf(name)
         if index in readonly_field_indices(self.layer.fields()):
-            QMessageBox.information(
+            MessageBox.information(
                 self,
                 "字段计算器",
                 f"字段「{name}」为系统自维护 / 唯一标识字段，不允许计算。",
             )
             return
+
         def _refresh(_dlg) -> None:
             # 计算器可能启动了编辑 / 改了字段：同步按钮并刷新列与值
             self._sync_edit_buttons()

@@ -18,12 +18,12 @@ from qgis.core import (
 from qgis.PyQt.QtWidgets import (
     QDialog,
     QListWidget,
-    QMessageBox,
     QTreeWidget,
 )
 
 from app.infra.logging import get_logger
 from app.ui.common.icons import Icons
+from app.ui.common.message_box import MessageBox
 from app.ui.common.modeless import show_modeless
 from app.ui.dialogs.execute_sql import ExecuteSqlDialog
 from app.ui.dialogs.style_io import (
@@ -224,7 +224,7 @@ class LayerDialogsMixin:
             # 对话框里可能改了标注启用状态；图层标注改动不发信号，手动刷新行尾「标注」开关
             self.layer_dock.refresh_label_state()
         except Exception as e:  # noqa: BLE001
-            QMessageBox.warning(self, "失败", str(e))
+            MessageBox.warning(self, "失败", str(e))
 
     def _on_layer_label_toggle(self, layer, enabled: bool) -> None:
         """图层树行尾的「标注」开关：开关该图层标注（每个图层各自独立，不互斥）。
@@ -352,4 +352,4 @@ class LayerDialogsMixin:
             )
         except Exception as e:  # noqa: BLE001
             logger.error("打开图层属性失败: %s", e, exc_info=True)
-            QMessageBox.warning(self, "失败", str(e))
+            MessageBox.warning(self, "失败", str(e))

@@ -14,7 +14,6 @@ from dataclasses import replace
 from qgis.core import Qgis
 from qgis.PyQt.QtWidgets import (
     QDialog,
-    QMessageBox,
 )
 
 from app.core.domain.basemap import (
@@ -35,6 +34,7 @@ from app.env.config import (
     update_online_basemap_in_yaml,
 )
 from app.infra.logging import get_logger
+from app.ui.common.message_box import MessageBox
 from app.ui.dialogs.custom_basemap import CustomBasemapDialog
 from app.ui.dialogs.edit_basemap import EditBasemapDialog
 from app.ui.dialogs.manage_keys import ManageKeysDialog
@@ -305,7 +305,7 @@ class OnlineBasemapMixin:
     def _delete_online_basemap(self, d) -> bool:
         """Dock 叶子右键「删除连接」：确认后从清单文件移除条目并刷新 Dock 树。
 
-        删除是**破坏性**操作，确认弹窗（Modal QMessageBox）归 MainWindow 所有——
+        删除是**破坏性**操作，确认弹窗（Modal MessageBox）归 MainWindow 所有——
         Dock 只把要删的条目递给本方法。只移除 ``online_basemap_config.yaml`` 里的
         配置条目：工程里**已加载**的底图图层不受影响（source 已焊死），但下次无法
         再从列表添加该连接。找不到 ``d``（清单被外部改动）或确认取消都不落盘。
@@ -322,15 +322,15 @@ class OnlineBasemapMixin:
                     duration=3,
                 )
                 return False
-            ret = QMessageBox.question(
+            ret = MessageBox.question(
                 self,
                 "删除在线底图",
                 f"确定从在线底图清单中删除「{d.name}」吗？\n\n"
                 "已加载到工程的图层不受影响，删除后将无法再从列表添加该连接。",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+                MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+                MessageBox.StandardButton.No,
             )
-            if ret != QMessageBox.StandardButton.Yes:
+            if ret != MessageBox.StandardButton.Yes:
                 return False
 
             remove_online_basemap_from_yaml(path, d)
@@ -496,16 +496,16 @@ class OnlineBasemapMixin:
                 logger.info("重分配+删除分组：%s → %s，count=%d", name, target, len(referenced))
             elif choice == "cascade":
                 # 二次确认：破坏性
-                ret = QMessageBox.question(
+                ret = MessageBox.question(
                     self,
                     "删除分组与底图",
                     f"将同时删除「{name}」下 {len(referenced)} 条在线底图配置。\n"
                     "已加载到工程的图层不受影响，但下次无法再从列表添加。\n\n"
                     "确定继续吗？",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                    QMessageBox.StandardButton.No,
+                    MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+                    MessageBox.StandardButton.No,
                 )
-                if ret != QMessageBox.StandardButton.Yes:
+                if ret != MessageBox.StandardButton.Yes:
                     return False
                 remove_online_basemap_group_from_yaml(path, name, cascade=True)
                 self.messageBar.pushMessage(

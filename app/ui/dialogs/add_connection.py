@@ -16,7 +16,8 @@
     {"kind": "local", "name": "<文件名>", "path": "<绝对路径>",
      "categories": {"spatial": [...], "dict": [...], "image": [...]},
      "counts": {表名: 行数|None},
-     "meta": {表名: 元信息 dict}}  # 几何类型/坐标系/字段列表, 见 describe_local_db
+     "meta": {表名: 元信息 dict},  # 几何类型/坐标系/字段列表, 见 describe_local_db
+     "register_unregistered": True}  # 可选: 连接时把未登记矢量图层登记进数据管理
 
     # 服务器页
     {"kind": "server", "db_type": "postgresql|oracle|sqlserver",
@@ -32,6 +33,7 @@ from pathlib import Path
 
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialogButtonBox,
     QFormLayout,
@@ -44,6 +46,10 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from app.core.domain.local_layer_register import (
+    UnregisteredLayer,
+    find_unregistered_spatial_layers,
+)
 from app.core.util.local_db_util import (
     _CATEGORY_LABEL,
     _CATEGORY_ORDER,
@@ -94,6 +100,8 @@ class AddConnectionDialog(BaseDialog):
         self._default_kind = default_kind
         self._path = ""
         self._catalog: dict | None = None
+        #: 选中库里未登记到数据管理的矢量表（文件校验时扫描）
+        self._unregistered: list[UnregisteredLayer] = []
         self._build_ui()
         self.tabs.setCurrentIndex(1 if default_kind == "server" else 0)
         self._refresh_ok_state()
@@ -155,6 +163,12 @@ class AddConnectionDialog(BaseDialog):
         self.feedback = QLabel("")
         self.feedback.setWordWrap(True)
         v.addWidget(self.feedback)
+        self.register_unregistered_check = QCheckBox("")
+        self.register_unregistered_check.setToolTip(
+            "只写数据管理使用的目录表 user_relation，不改动图层数据"
+        )
+        self.register_unregistered_check.setVisible(False)
+        v.addWidget(self.register_unregistered_check)
         v.addStretch(1)
         return page
 
@@ -252,12 +266,20 @@ class AddConnectionDialog(BaseDialog):
         except ValueError as exc:
             self._path = ""
             self._catalog = None
+            self._unregistered = []
+            self._update_unregistered_check()
             self.path_edit.setText(path)
             self._set_feedback(str(exc), error=True)
             self._refresh_ok_state()
             return False
         self._path = str(Path(path))
         self._catalog = catalog
+        # 库里可能有 OGR / 其它工具写出的图层，但没有本工程的注册行 ——
+        # 扫描出来给用户勾选，连接时一并登记（数据管理只认 user_relation）。
+        try:
+            self._unregistered = find_unregistered_spatial_layers(path)
+        except Exception:  # noqa: BLE001 —— 扫描失败只影响提示，不影响连接
+            self._unregistered = []
         self.path_edit.setText(self._path)
         cats = catalog["categories"]
         total = sum(len(cats.get(k) or []) for k in _CATEGORY_ORDER)
@@ -265,14 +287,29 @@ class AddConnectionDialog(BaseDialog):
             f"{_CATEGORY_LABEL[k]} {len(cats.get(k) or [])}"
             for k in _CATEGORY_ORDER
         )
-        text = (
-            f"识别到 {total} 个已注册图层（{brief}），可连接。"
-            if total
-            else "该文件暂无已注册图层，可连接后再创建/导入数据。"
+        extras = (
+            f"另有 {len(self._unregistered)} 个未登记矢量图层。" if self._unregistered else ""
         )
+        if total:
+            text = f"识别到 {total} 个已注册图层（{brief}），可连接。{extras}"
+        elif self._unregistered:
+            text = f"文件里有 {len(self._unregistered)} 个未登记矢量图层，可连接并登记到数据管理。"
+        else:
+            text = "该文件暂无已注册图层，可连接后再创建/导入数据。"
         self._set_feedback(text, error=False)
+        self._update_unregistered_check()
         self._refresh_ok_state()
         return True
+
+    def _update_unregistered_check(self) -> None:
+        """按扫描结果更新「同时登记未登记图层」勾选框。"""
+        count = len(self._unregistered)
+        check = getattr(self, "register_unregistered_check", None)
+        if check is None:
+            return
+        check.setVisible(count > 0)
+        check.setChecked(count > 0)
+        check.setText(f"把 {count} 个未登记矢量图层登记到数据管理")
 
     def _set_feedback(self, text: str, *, error: bool) -> None:
         self.feedback.setText(text)
@@ -335,7 +372,7 @@ class AddConnectionDialog(BaseDialog):
 
     def _local_connection(self) -> dict:
         """本地页连接 dict（须已通过 set_sqlite_file 校验）。"""
-        return {
+        conn = {
             "kind": "local",
             "name": Path(self._path).stem,
             "path": self._path,
@@ -343,6 +380,11 @@ class AddConnectionDialog(BaseDialog):
             "counts": self._catalog["counts"],
             "meta": self._catalog["meta"],
         }
+        # 只有扫描到未登记图层、且用户保留勾选时才带这个标记；
+        # DataManageDock.add_connection 登记后会把它从连接 dict 里摘掉。
+        if self._unregistered and self.register_unregistered_check.isChecked():
+            conn["register_unregistered"] = True
+        return conn
 
     def _server_connection(self) -> dict:
         """服务器页连接 dict（须已通过 _server_state 校验）。"""

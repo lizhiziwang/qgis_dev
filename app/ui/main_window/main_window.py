@@ -218,6 +218,10 @@ class MainWindow(
     #: ``False`` 以避免模态弹窗阻塞（见 ``tests/ui/conftest.py`` 的 autouse fixture）。
     prompt_save_on_close: bool = True
 
+    #: 关闭窗口时若有影像切片在跑，是否弹窗确认（切片会随程序退出而终止）。
+    #: 无头 / 测试场景可置 ``False``。
+    prompt_slices_on_close: bool = True
+
     def showEvent(self, event: QShowEvent) -> None:
         super().showEvent(event)
         # 窗口显示之后再把左侧页签停在「图层列表」（__init__ 里 raise 会被
@@ -225,6 +229,10 @@ class MainWindow(
         self._raise_left_dock_once()
 
     def closeEvent(self, event: QCloseEvent) -> None:
+        # 影像切片在跑：先确认（关闭程序会把子进程 / 回退线程一起终止）
+        if not self._confirm_slicing_on_close():
+            event.ignore()
+            return
         # 先问正在编辑的图层有没有未提交改动（保存工程不会提交它们），
         # 用户确定后再问是否保存工程；任一环节选“取消”都放弃关闭
         if not self._confirm_editing_layers_on_close():
@@ -250,6 +258,16 @@ class MainWindow(
                     guard.shutdown()
                 except Exception:  # noqa: BLE001
                     pass
+            # 影像切片：终止子进程（回退线程在切片间隙退出），避免关窗时
+            # 后台还在写输出 / 碰即将清空的工程
+            try:
+                from app.core.domain.imagery_tiles.active_tasks import (  # noqa: PLC0415
+                    cancel_all as _cancel_imagery_slices,
+                )
+
+                _cancel_imagery_slices()
+            except Exception:  # noqa: BLE001 —— 关闭流程不能因切片收尾失败而中断
+                logger.debug("终止影像切片失败", exc_info=True)
             self.project.clear()
         finally:
             self._clear_global_messagebar()

@@ -26,7 +26,6 @@ from qgis.PyQt.QtWidgets import (
     QDialogButtonBox,
     QHeaderView,
     QLabel,
-    QMessageBox,
     QTableWidgetItem,
     QVBoxLayout,
     QWidget,
@@ -34,12 +33,12 @@ from qgis.PyQt.QtWidgets import (
 
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.feature_highlight import FeatureHighlighter
-from app.ui.common.widgets import make_table
+from app.ui.common.message_box import MessageBox
 from app.ui.common.value_format import format_value
+from app.ui.common.widgets import make_table
 
 #: 下拉首项：不处理该缝隙（``currentData()`` 为 None）
 _SKIP_TEXT = "不补（跳过）"
-
 
 #: 视为「无值」的文本：真 NULL 之外，数据里常把空值写成字面量字符串
 _NULL_TOKENS = {"", "null", "none", "nil", "nil", "<null>", "undefined"}
@@ -222,7 +221,7 @@ class GapRepairDialog(BaseDialog):
 
     def _on_ok(self) -> None:
         if not self.assignments():
-            QMessageBox.information(
+            MessageBox.information(
                 self, "提示", "请至少为一处缝隙选择目标多边形，或点「取消」"
             )
             return

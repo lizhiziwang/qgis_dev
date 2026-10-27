@@ -25,7 +25,6 @@ from qgis.PyQt.QtCore import QPoint
 from qgis.PyQt.QtGui import QAction
 from qgis.PyQt.QtWidgets import (
     QMenu,
-    QMessageBox,
 )
 
 from app.core.domain.basemap import (
@@ -34,6 +33,7 @@ from app.core.domain.basemap import (
 )
 from app.infra.logging import get_logger
 from app.ui.common.icons import Icons
+from app.ui.common.message_box import MessageBox
 
 
 def _snapshot_tree_node(node):
@@ -113,6 +113,7 @@ def _restore_tree_snapshot(win, snapshot, parent_group, at: int) -> int:
             _restore_tree_snapshot(win, c, sub, i) for i, c in enumerate(children)
         )
     return 0
+
 
 logger = get_logger(__name__)
 
@@ -341,15 +342,15 @@ class LayerActionsMixin:
         if not layers:
             return
         if confirm:
-            ret = QMessageBox.question(
+            ret = MessageBox.question(
                 self,
                 "移除图层",
                 f"确定移除选中的 {len(layers)} 个图层吗？\n\n"
                 "此操作不会删除磁盘上的数据文件。",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+                MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+                MessageBox.StandardButton.No,
             )
-            if ret != QMessageBox.StandardButton.Yes:
+            if ret != MessageBox.StandardButton.Yes:
                 return
         removed = 0
         for layer in layers:
@@ -511,15 +512,15 @@ class LayerActionsMixin:
                 "当前没有可移除的图层", level=Qgis.MessageLevel.Info, duration=2
             )
             return
-        ret = QMessageBox.question(
+        ret = MessageBox.question(
             self,
             "移除所有图层",
             f"确定移除所有 {len(layers)} 个图层吗？\n\n"
             "图层组会保留（组内图层全部移除）；此操作不会删除磁盘上的数据文件。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
         )
-        if ret != QMessageBox.StandardButton.Yes:
+        if ret != MessageBox.StandardButton.Yes:
             return
 
         removed = 0
@@ -696,7 +697,7 @@ class LayerActionsMixin:
         elif isinstance(layer, QgsRasterLayer):
             copy = QgsRasterLayer(layer.source(), f"{layer.name()}_副本")
             if not copy.isValid():
-                QMessageBox.warning(self, "复制图层", "无法复制该栅格图层")
+                MessageBox.warning(self, "复制图层", "无法复制该栅格图层")
                 return
         else:
             return
@@ -733,7 +734,7 @@ class LayerActionsMixin:
             return
         xml = getattr(self, "_style_clipboard", None)
         if not xml:
-            QMessageBox.information(self, "粘贴样式", "请先「复制样式」")
+            MessageBox.information(self, "粘贴样式", "请先「复制样式」")
             return
         sm = layer.styleManager()
         sm.addStyle("pasted", QgsMapLayerStyle(xml))
@@ -853,14 +854,14 @@ class LayerActionsMixin:
         if layer is None:
             return
         if confirm:
-            ret = QMessageBox.question(
+            ret = MessageBox.question(
                 self,
                 "移除图层",
                 f"是否确定移除该图层「{layer.name()}」？",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+                MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+                MessageBox.StandardButton.No,
             )
-            if ret != QMessageBox.StandardButton.Yes:
+            if ret != MessageBox.StandardButton.Yes:
                 return
         layer_id = layer.id()
         layer_name = layer.name()

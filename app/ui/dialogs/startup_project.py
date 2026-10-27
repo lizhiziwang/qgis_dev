@@ -31,7 +31,6 @@ from qgis.PyQt.QtWidgets import (
     QLineEdit,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPushButton,
     QTreeWidget,
     QTreeWidgetItem,
@@ -40,6 +39,7 @@ from qgis.PyQt.QtWidgets import (
 )
 
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.common.recent_projects import load_recent
 from app.ui.common.theme import ThemeManager, startup_project_qss
 from app.ui.common.widgets import open_file_dir
@@ -274,10 +274,10 @@ class StartupProjectDialog(BaseDialog):
     def _open_selected(self) -> None:
         path = self._path_edit.text().strip()
         if not path:
-            QMessageBox.information(self, "提示", "请选择或输入要打开的工程文件")
+            MessageBox.information(self, "提示", "请选择或输入要打开的工程文件")
             return
         if not Path(path).is_file():
-            QMessageBox.warning(self, "打开失败", f"文件不存在：\n{path}")
+            MessageBox.warning(self, "打开失败", f"文件不存在：\n{path}")
             return
         self.accept()
 

@@ -2079,9 +2079,10 @@ def case_data_manage_menus(out: Path) -> str:
     库节点要有删除连接 / 打开所在位置 / 创建数据 / 导入数据；图层节点要有
     追加数据 / 导出数据（可带条件，条件来自属性查询器但**不改图层的筛选**）。
     """
-    from qgis.PyQt.QtWidgets import QMessageBox, QPushButton
+    from qgis.PyQt.QtWidgets import QPushButton
     from qgis.core import QgsFeature, QgsVectorLayer
 
+    from app.ui.common.message_box import MessageBox as QMessageBox
     from app.ui.dialogs.add_connection import AddConnectionDialog
     from app.ui.dialogs.create_data_dialog import CreateDataDialog
     from app.ui.dialogs.export_layer_dialog import ExportLayerDialog
@@ -2510,13 +2511,13 @@ def case_import_multi_and_edit_prompts(out: Path) -> str:
     - 导出目标已存在（单文件 / 容器里的同名图层）要先问是否替换；
     - 数据源与导入方式**两组单选必须分开**：勾「替换」不能把数据源的勾选清掉。
     """
-    from qgis.PyQt.QtWidgets import QMessageBox
     from app.core.domain.import_layer import unique_table_name  # noqa: F401 —— 下面用到
     from qgis.core import QgsFeature, QgsGeometry, QgsPointXY, QgsVectorLayer
 
     from app.core.domain.export_layer import ExportSpec, existing_target_description
     from app.core.domain.import_layer import import_vector_layer_to_db
     from app.core.util.local_db_util import describe_local_db
+    from app.ui.common.message_box import MessageBox as QMessageBox
     from app.ui.dialogs.create_data_fields_step import ExternalDatasetDialog
     from app.ui.dialogs.export_layer_dialog import ExportLayerDialog
     from app.ui.dialogs.import_layer_dialog import ImportLayerDialog

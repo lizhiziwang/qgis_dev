@@ -25,6 +25,10 @@ class ProcessingLogFeedback(QgsProcessingFeedback):
     """
 
     log_line = pyqtSignal(str, str)
+    #: 算法通过 ``setProgressText`` 给出的阶段性说明（如元瓦片进度）。
+    #: 当前 tilesxyz 算法只发 ``progressChanged``，这里仍保留通道，
+    #: 以便算法升级/其它瓦片算法直接复用。
+    progress_text = pyqtSignal(str)
 
     def __init__(self) -> None:
         super().__init__()
@@ -35,6 +39,12 @@ class ProcessingLogFeedback(QgsProcessingFeedback):
 
     def pushInfo(self, info: str) -> None:
         self.log_line.emit("INFO", str(info))
+
+    def setProgressText(self, text: str) -> None:
+        """算法阶段性进度文字（QgsProcessingFeedback 虚方法）。"""
+        text = str(text).strip()
+        if text:
+            self.progress_text.emit(text)
 
     def pushCommandInfo(self, info: str) -> None:
         self.log_line.emit("CMD", str(info))

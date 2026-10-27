@@ -17,7 +17,6 @@ from qgis.PyQt.QtWidgets import (
     QInputDialog,
     QLineEdit,
     QMainWindow,
-    QMessageBox,
     QToolBar,
 )
 
@@ -37,6 +36,7 @@ from app.core.domain.flow.topo import FlowCycleError, topo_sort
 from app.ui.common import tool_icons
 from app.ui.common.frameless import FramelessMixin
 from app.ui.common.icons import Icons
+from app.ui.common.message_box import MessageBox
 from app.ui.common.theme import ThemeManager, toolbar_qss, window_qss
 
 from .log_panel import LogDock
@@ -252,7 +252,7 @@ class FlowEditorWindow(FramelessMixin, QMainWindow):
             self.executor.prepare_run(self.scene.graph, overrides)
         except FlowCycleError as exc:  # noqa: BLE001
             self.log_panel.log(f"流程有环：{exc}", "error")
-            QMessageBox.warning(self, "无法运行", f"流程中存在循环依赖：\n{exc}")
+            MessageBox.warning(self, "无法运行", f"流程中存在循环依赖：\n{exc}")
             return
         self._set_running(True)
         # interval=0：事件队列一空就执行下一个节点，节点变绿后立即重绘
@@ -269,7 +269,7 @@ class FlowEditorWindow(FramelessMixin, QMainWindow):
         except FlowNodeExecutionError as exc:
             self._finish_run()
             self.log_panel.log(f"流程中止：{exc}", "error")
-            QMessageBox.critical(self, "运行失败", str(exc))
+            MessageBox.critical(self, "运行失败", str(exc))
             return
         except Exception as exc:  # noqa: BLE001
             self._finish_run()
@@ -329,12 +329,12 @@ class FlowEditorWindow(FramelessMixin, QMainWindow):
             self.log_panel.log(f"无法单步执行：{exc}", "warn")
 
     def _reset_params(self) -> None:
-        ret = QMessageBox.question(
+        ret = MessageBox.question(
             self, "重置参数",
             "确定重置所有节点的输入默认值 / 输出配置，并断开全部连线吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
         )
-        if ret != QMessageBox.StandardButton.Yes:
+        if ret != MessageBox.StandardButton.Yes:
             return
         self.scene.graph.reset_defaults()
         self.scene.rebuild()
@@ -347,12 +347,12 @@ class FlowEditorWindow(FramelessMixin, QMainWindow):
             order = topo_sort(self.scene.graph)
         except FlowCycleError as exc:  # noqa: BLE001
             self.log_panel.log(f"校验失败：{exc}", "error")
-            QMessageBox.warning(self, "拓扑校验", f"存在循环依赖：\n{exc}")
+            MessageBox.warning(self, "拓扑校验", f"存在循环依赖：\n{exc}")
             return
         self.log_panel.log(
             f"拓扑校验通过：{len(order)} 个节点 → {' → '.join(order)}", "success"
         )
-        QMessageBox.information(self, "拓扑校验", f"校验通过，共 {len(order)} 个节点。")
+        MessageBox.information(self, "拓扑校验", f"校验通过，共 {len(order)} 个节点。")
 
     def _toggle_highlight(self, checked: bool) -> None:
         if checked:
@@ -406,7 +406,7 @@ class FlowEditorWindow(FramelessMixin, QMainWindow):
             text = Path(path).read_text(encoding="utf-8")
             graph, warnings = FlowCodec.from_json(text)
         except Exception as exc:  # noqa: BLE001
-            QMessageBox.critical(self, "打开失败", f"无法读取流程配置：\n{exc}")
+            MessageBox.critical(self, "打开失败", f"无法读取流程配置：\n{exc}")
             return
         self.scene.set_graph(graph)
         self._current_file = path
@@ -415,7 +415,7 @@ class FlowEditorWindow(FramelessMixin, QMainWindow):
         for w in warnings:
             self.log_panel.log(w, "warn")
         if warnings:
-            QMessageBox.warning(self, "导入提示", "\n".join(warnings))
+            MessageBox.warning(self, "导入提示", "\n".join(warnings))
         self._update_title()
         self.log_panel.log(f"已打开 {path}", "info")
 
@@ -451,16 +451,16 @@ class FlowEditorWindow(FramelessMixin, QMainWindow):
     def _confirm_discard(self) -> bool:
         if not self._dirty:
             return True
-        ret = QMessageBox.question(
+        ret = MessageBox.question(
             self, "未保存的更改",
             "流程尚未保存，是否先保存？",
-            QMessageBox.StandardButton.Save
-            | QMessageBox.StandardButton.Discard
-            | QMessageBox.StandardButton.Cancel,
+            MessageBox.StandardButton.Save
+            | MessageBox.StandardButton.Discard
+            | MessageBox.StandardButton.Cancel,
         )
-        if ret == QMessageBox.StandardButton.Save:
+        if ret == MessageBox.StandardButton.Save:
             return self._save_flow()
-        return ret == QMessageBox.StandardButton.Discard
+        return ret == MessageBox.StandardButton.Discard
 
     def closeEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
         self._run_timer.stop()  # 关闭时别再滴答执行节点

@@ -72,7 +72,6 @@ from qgis.PyQt.QtWidgets import (
     QInputDialog,
     QLabel,
     QMenu,
-    QMessageBox,
     QPushButton,
     QSplitter,
     QStackedWidget,
@@ -84,6 +83,12 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
+from app.core.domain.local_layer_register import (
+    LocalRegisterError,
+    UnregisteredLayer,
+    find_unregistered_spatial_layers,
+    register_spatial_layers,
+)
 from app.core.util.local_db_util import (
     _CATEGORY_LABEL,
     _CATEGORY_ORDER,
@@ -94,9 +99,11 @@ from app.core.util.local_db_util import (
 from app.infra.logging import get_logger
 from app.ui.common import tool_icons
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.common.theme import ThemeManager
 from app.ui.common.widgets import reveal_in_file_manager, save_file
 from app.ui.dialogs.add_connection import AddConnectionDialog
+from app.ui.dialogs.register_layers import RegisterLayersDialog
 
 logger = get_logger(__name__)
 
@@ -388,6 +395,11 @@ class DataManageDock(QWidget):
         都照这个顺序排；导出的工程状态也按这个顺序存，重启后顺序不变。
         用户刚建 / 刚导入的那个库永远在最上面（用户明确要的：最后建的放最上）。
         """
+        # 调用方可能拿到 None（弹窗校验未通过被直接 accept），这里兜一层，
+        # 避免 dict(None) 抛 TypeError（QA BUG-04）。
+        if not isinstance(db, dict) or not db:
+            logger.warning("忽略无效的数据库连接信息：%r", db)
+            return
         conn = dict(db)
         if conn.get("kind") == "server":
             self._server_connections.append(conn)
@@ -401,6 +413,12 @@ class DataManageDock(QWidget):
             self.databasesChanged.emit()
             return
         path = str(conn.get("path") or "")
+        # 新建连接时用户在弹窗里勾了「把未登记矢量图层登记到数据管理」：
+        # 只写目录表 user_relation，然后再按登记后的结果重扫连接快照。
+        # 先登记再规范化字典名：登记会顺带建出 user_relation，少一条告警。
+        register_unregistered = bool(conn.pop("register_unregistered", False))
+        if register_unregistered:
+            self._register_unregistered(conn)
         if path:
             with suppress(Exception):
                 from app.core.domain.create_data.dict_tables import (
@@ -408,6 +426,8 @@ class DataManageDock(QWidget):
                 )
 
                 normalize_local_dict_names(path)
+        if not register_unregistered:
+            self._scan_unregistered_cache(conn)
         self._databases.insert(0, conn)
         self._rebuild_tree()
         # 本地根固定在第 0 个顶层节点; 刚加入的就是其**第一个**子节点（新的在上）
@@ -450,7 +470,81 @@ class DataManageDock(QWidget):
         db["categories"] = catalog["categories"]
         db["counts"] = catalog["counts"]
         db["meta"] = catalog["meta"]
+        self._scan_unregistered_cache(db)
         return True
+
+    def _scan_unregistered_cache(self, db: dict) -> list[UnregisteredLayer]:
+        """扫描库里未登记的矢量表并写回 ``db["unregistered"]``（best-effort）。
+
+        扫描只查元数据表，开销很小；结果给右键菜单「登记未登记图层…」用，
+        避免每次右键都现扫一遍库。
+        """
+        path = str(db.get("path") or "")
+        layers: list[UnregisteredLayer] = []
+        if path:
+            try:
+                layers = find_unregistered_spatial_layers(path)
+            except Exception:  # noqa: BLE001 —— 扫描失败不影响目录展示
+                logger.warning(
+                    "数据管理[未登记图层] 扫描失败: %s", path, exc_info=True
+                )
+        db["unregistered"] = layers
+        return layers
+
+    def _register_unregistered(
+        self, db: dict, names: list[str] | None = None
+    ) -> int:
+        """把 ``db`` 里未登记的矢量表写进 ``user_relation``，返回登记数量。
+
+        ``names`` 为 ``None`` 表示登记扫描到的全部（新建连接时勾选「同时登记」）；
+        传入列表时只登记选中的（右键菜单多选）。失败弹警告并返回 0 ——
+        库已经连上了，登记失败不应把连接也回滚。
+        """
+        path = str(db.get("path") or "")
+        if not path:
+            return 0
+        layers = list(db.get("unregistered") or [])
+        if not layers:
+            layers = self._scan_unregistered_cache(db)
+        if names is not None:
+            wanted = set(names)
+            layers = [item for item in layers if item.name in wanted]
+        if not layers:
+            return 0
+        try:
+            count = register_spatial_layers(path, [item.name for item in layers])
+        except LocalRegisterError as exc:
+            logger.warning("数据管理[未登记图层] 登记失败: %s", path, exc_info=True)
+            QMessageBox.warning(self, "登记未登记图层", str(exc))
+            return 0
+        # 登记结果已变：重扫目录 + 未登记清单，调用方据此重画
+        self._refresh_db_cache(db)
+        logger.info("数据管理：已登记 %d 个未登记矢量图层（%s）", count, path)
+        return count
+
+    def _open_register_layers_dialog(self, db: dict) -> None:
+        """右键「登记未登记图层…」：多选后写 ``user_relation`` 并重画。"""
+        live = self._cache_db(db) or db
+        layers = list(live.get("unregistered") or [])
+        if not layers:
+            layers = self._scan_unregistered_cache(live)
+        if not layers:
+            QMessageBox.information(
+                self, "登记未登记图层", "这个库里没有未登记的矢量图层。"
+            )
+            return
+        dialog = RegisterLayersDialog(self, layers)
+        accepted = dialog.exec()
+        names = dialog.selected_names() if accepted else []
+        dialog.deleteLater()
+        if not accepted or not names:
+            return
+        count = self._register_unregistered(live, names)
+        if count:
+            self.refresh_database(live)
+            QMessageBox.information(
+                self, "登记未登记图层", f"已登记 {count} 个图层到数据管理。"
+            )
 
     def refresh_database(self, db: dict) -> None:
         """库内容变更后重扫该库并重画（导入 / 删除 / 创建数据往库里加图层后用）。
@@ -681,16 +775,18 @@ class DataManageDock(QWidget):
                 )
 
                 normalize_local_dict_names(path)
-            databases.append(
-                {
-                    "kind": "local",
-                    "name": str(item.get("name") or Path(path).stem),
-                    "path": path,
-                    "categories": catalog["categories"],
-                    "counts": catalog["counts"],
-                    "meta": catalog["meta"],
-                }
-            )
+            db = {
+                "kind": "local",
+                "name": str(item.get("name") or Path(path).stem),
+                "path": path,
+                "categories": catalog["categories"],
+                "counts": catalog["counts"],
+                "meta": catalog["meta"],
+            }
+            # 老工程恢复出来的库同样可能有 OGR 写出的未登记图层：
+            # 先扫好，右键菜单才能直接给出「登记未登记图层…」。
+            self._scan_unregistered_cache(db)
+            databases.append(db)
         self._databases = databases
         self._server_connections = [
             dict(c) for c in (state.get("server") or []) if isinstance(c, dict)
@@ -1326,6 +1422,16 @@ class DataManageDock(QWidget):
                     "导入图层", self._on_import, db, True))
             )
             if db.get("kind") == "local":
+                # 库里有 OGR / 其它工具写出的矢量表、但没有 user_relation 注册行：
+                # 给一个手动登记的入口（新建连接时也可在弹窗里勾选一并登记）。
+                if db.get("unregistered"):
+                    head.append(
+                        (
+                            f"登记未登记图层…（{len(db['unregistered'])}）",
+                            "plus_circle",
+                            lambda: self._open_register_layers_dialog(db),
+                        )
+                    )
                 head.append(
                     ("创建数据", "plus_circle", lambda: self._fire(
                         "创建数据", self._on_create_data, db))
@@ -1402,7 +1508,7 @@ class DataManageDock(QWidget):
             except LocalTableError as exc:
                 ok, error = False, str(exc)
         if not ok:
-            QMessageBox.warning(self, "编辑名称", error or "重命名失败")
+            MessageBox.warning(self, "编辑名称", error or "重命名失败")
             return
         self._current_detail = None
         self.refresh_database(live)
@@ -1438,7 +1544,7 @@ class DataManageDock(QWidget):
         live = self._cache_db(db) or db
         path = str(live.get("path") or "")
         if not path:
-            QMessageBox.warning(self, "添加字典表", "缺少库文件路径")
+            MessageBox.warning(self, "添加字典表", "缺少库文件路径")
             return
         from app.core.domain.create_data.dict_tables import (
             DictTableError,
@@ -1469,12 +1575,12 @@ class DataManageDock(QWidget):
                 path, name, source_category=source, dict_service=service
             )
         except DictTableError as exc:
-            QMessageBox.warning(self, "添加字典表", str(exc))
+            MessageBox.warning(self, "添加字典表", str(exc))
             return
         self.refresh_database(live)
         self._select_leaf(live, "dict", name)
         self._show_detail(live, "dict", name)
-        QMessageBox.information(
+        MessageBox.information(
             self,
             "添加字典表",
             f"已创建字典表「{name}」" + (f"，复制 {count} 条字典项" if count else "（空表）"),
@@ -1500,9 +1606,9 @@ class DataManageDock(QWidget):
         try:
             written, count = export_field_structure_xls(target, path, name)
         except FieldStructureError as exc:
-            QMessageBox.warning(self, "导出字段结构", str(exc))
+            MessageBox.warning(self, "导出字段结构", str(exc))
             return
-        QMessageBox.information(
+        MessageBox.information(
             self,
             "导出字段结构",
             f"已导出 {count} 个字段到：\n{written}",
@@ -1519,10 +1625,10 @@ class DataManageDock(QWidget):
             issues = check_field_structure(path, name, dict_service=DictService())
         except Exception as exc:  # noqa: BLE001 —— 槽内异常会 native 崩溃
             logger.error("字段结构检查失败：%s", exc, exc_info=True)
-            QMessageBox.warning(self, "检查字段结构", f"检查失败：{exc}")
+            MessageBox.warning(self, "检查字段结构", f"检查失败：{exc}")
             return
         if not issues:
-            QMessageBox.information(self, "检查字段结构", "字段结构检查通过")
+            MessageBox.information(self, "检查字段结构", "字段结构检查通过")
             return
         from app.ui.common.modeless import show_modeless
         from app.ui.dialogs.field_check_dialog import FieldCheckDialog

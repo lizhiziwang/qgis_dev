@@ -11,7 +11,6 @@ if TYPE_CHECKING:
 from qgis.core import QgsGeometry, QgsPointXY, QgsWkbTypes
 from qgis.gui import QgsRubberBand
 from qgis.PyQt.QtCore import Qt
-from qgis.PyQt.QtWidgets import QMessageBox
 from qgis.PyQt.QtGui import QColor
 
 from app.infra.logging import get_logger
@@ -81,7 +80,10 @@ class PolygonDrawTool(BaseDrawTool):
                 self.geom = geometry
                 self.commit_geometry(geometry)
             else:
-                QMessageBox.warning(self.canvas, "警告", "面要素至少需要 3 个节点！")
+                # 延迟导入：core 不在模块级依赖 ui，弹窗必然发生在画布交互中
+                from app.ui.common.message_box import MessageBox
+
+                MessageBox.warning(self.canvas, "警告", "面要素至少需要 3 个节点！")
                 if self.draw_manager is not None:
                     self.draw_manager.clear_draw_tool()
 

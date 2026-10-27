@@ -63,8 +63,8 @@ from qgis.core import (
     QgsInvertedPolygonRenderer,
     QgsLineSymbol,
     QgsLineSymbolLayer,
-    QgsMarkerSymbol,
     QgsMapLayer,
+    QgsMarkerSymbol,
     QgsPointDisplacementRenderer,
     QgsProject,
     QgsReadWriteContext,
@@ -83,7 +83,6 @@ from qgis.core import (
 )
 from qgis.PyQt.QtCore import QSize, Qt, QVariant, pyqtSignal
 from qgis.PyQt.QtGui import QColor, QIcon, QPainter, QPixmap
-from qgis.PyQt.QtXml import QDomDocument
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QCheckBox,
@@ -96,7 +95,6 @@ from qgis.PyQt.QtWidgets import (
     QHeaderView,
     QInputDialog,
     QLabel,
-    QMessageBox,
     QPushButton,
     QSlider,
     QTableWidget,
@@ -104,10 +102,12 @@ from qgis.PyQt.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+from qgis.PyQt.QtXml import QDomDocument
 
 from app.core.util.dict_values import load_field_dict
 from app.infra.logging import get_logger
 from app.ui.common.field_combo import make_field_combo_searchable
+from app.ui.common.message_box import MessageBox
 from app.ui.dialogs.layer_properties.base import LayerPropertyTab
 from app.ui.dialogs.layer_properties.widgets import ColorButton
 from app.ui.tools.feature_attrs import field_alias
@@ -272,7 +272,6 @@ _RENDERER_NAMES = (
     (QgsInvertedPolygonRenderer, "反转多边形"),
     (QgsPointDisplacementRenderer, "点位移"),
 )
-
 
 # --------------------------------------------------------------------- 工具函数
 
@@ -1562,17 +1561,17 @@ class RenderTab(LayerPropertyTab):
             return
         field = self.field_combo.currentData()
         if not field:
-            QMessageBox.information(self, "图层属性", "该图层没有可用的字段。")
+            MessageBox.information(self, "图层属性", "该图层没有可用的字段。")
             return
         if self._cats and not self._confirm_discard():
             return
         try:
             values = _unique_values(self._layer, field)
         except ValueError as exc:
-            QMessageBox.warning(self, "图层属性", str(exc))
+            MessageBox.warning(self, "图层属性", str(exc))
             return
         if values is None:
-            QMessageBox.warning(self, "图层属性", f"读不到字段「{field}」的去重值。")
+            MessageBox.warning(self, "图层属性", f"读不到字段「{field}」的去重值。")
             return
 
         template = default_symbol(self._geom)
@@ -1609,14 +1608,14 @@ class RenderTab(LayerPropertyTab):
 
     def _confirm_discard(self) -> bool:
         """重新分类前的确认（已设的各类样式会没）。"""
-        answer = QMessageBox.question(
+        answer = MessageBox.question(
             self,
             "图层属性",
             "重新分类会丢弃已设置的各类样式，确定继续吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
         )
-        return answer == QMessageBox.StandardButton.Yes
+        return answer == MessageBox.StandardButton.Yes
 
     def _rebuild_cat_table(self) -> None:
         """按 ``_cats`` 重建类别表（程序性，全程 ``_loading`` 包住）。"""
@@ -1755,7 +1754,7 @@ class RenderTab(LayerPropertyTab):
             return
         value = self._coerce_category_value(text.strip())
         if any(str(cat.value) == str(value) for cat in self._cats):
-            QMessageBox.information(self, "新增类别", "该类别值已存在。")
+            MessageBox.information(self, "新增类别", "该类别值已存在。")
             return
         symbol = default_symbol(self._geom)
         if symbol is None:
@@ -1787,7 +1786,7 @@ class RenderTab(LayerPropertyTab):
         if not rows and 0 <= self._selected < len(self._cats):
             rows = [self._selected]
         if not rows:
-            QMessageBox.information(self, "删除类别", "请先选中要删除的类别。")
+            MessageBox.information(self, "删除类别", "请先选中要删除的类别。")
             return
         for row in reversed(rows):
             if 0 <= row < len(self._cats):
@@ -1805,14 +1804,14 @@ class RenderTab(LayerPropertyTab):
         """删除全部类别（需确认）。"""
         if not self._cats:
             return
-        answer = QMessageBox.question(
+        answer = MessageBox.question(
             self,
             "删除全部类别",
             "确定删除全部类别吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
         )
-        if answer != QMessageBox.StandardButton.Yes:
+        if answer != MessageBox.StandardButton.Yes:
             return
         self._cats = []
         self._dirty = True
@@ -1826,15 +1825,15 @@ class RenderTab(LayerPropertyTab):
         """删除图层数据里已不存在的类别值。"""
         field = self.field_combo.currentData()
         if not field:
-            QMessageBox.information(self, "删除未使用类别", "请先选择分类字段。")
+            MessageBox.information(self, "删除未使用类别", "请先选择分类字段。")
             return
         try:
             values = _unique_values(self._layer, field)
         except ValueError as exc:
-            QMessageBox.warning(self, "删除未使用类别", str(exc))
+            MessageBox.warning(self, "删除未使用类别", str(exc))
             return
         if values is None:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "删除未使用类别", f"读不到字段「{field}」的去重值。"
             )
             return
@@ -1843,7 +1842,7 @@ class RenderTab(LayerPropertyTab):
         self._cats = [cat for cat in self._cats if str(cat.value) in used]
         removed = before - len(self._cats)
         if not removed:
-            QMessageBox.information(self, "删除未使用类别", "没有未使用的类别。")
+            MessageBox.information(self, "删除未使用类别", "没有未使用的类别。")
             return
         self._dirty = True
         self._selected = 0 if self._cats else -1
@@ -1853,7 +1852,7 @@ class RenderTab(LayerPropertyTab):
         self._sync_visibility()
         self._refresh_preview()
         self._refresh_hint()
-        QMessageBox.information(
+        MessageBox.information(
             self, "删除未使用类别", f"已删除 {removed} 个未使用的类别。"
         )
 
@@ -1948,14 +1947,14 @@ class RenderTab(LayerPropertyTab):
     def _renderer_from_file(self, path: str):
         """读取外部 QGIS 样式文件（图层 QML/XML，或单个符号 XML/QML）。"""
         if not path or not os.path.isfile(path):
-            QMessageBox.warning(self, "导入样式", "样式文件不存在。")
+            MessageBox.warning(self, "导入样式", "样式文件不存在。")
             return None
         message = ""
         renderer = None
         # 先看文件里的渲染器符号类型，避免把面样式加载到点 / 线图层上
         file_match = self._file_renderer_symbols_match(path)
         if file_match is False:
-            QMessageBox.warning(
+            MessageBox.warning(
                 self, "导入样式", "样式文件中的符号类型与当前图层几何类型不一致。"
             )
             return None
@@ -1996,7 +1995,7 @@ class RenderTab(LayerPropertyTab):
             symbol = self._symbol_from_file(path)
             if symbol is not None and symbol.type() == self._symbol_type():
                 return QgsSingleSymbolRenderer(symbol.clone())
-        QMessageBox.warning(
+        MessageBox.warning(
             self,
             "导入样式",
             "无法从该文件读取与当前图层几何类型一致的样式。"
@@ -2143,7 +2142,7 @@ class RenderTab(LayerPropertyTab):
             self._activate_target()
             self._refresh_hint()
             return
-        QMessageBox.information(
+        MessageBox.information(
             self,
             "导入样式",
             f"暂不支持导入「{_renderer_name(renderer)}」样式，"
@@ -2158,7 +2157,7 @@ class RenderTab(LayerPropertyTab):
         fields = layer.fields()
         names = [fields.at(i).name() for i in range(fields.size())]
         if not names:
-            QMessageBox.warning(self, "导入样式", "当前图层没有可用于分类的字段。")
+            MessageBox.warning(self, "导入样式", "当前图层没有可用于分类的字段。")
             return None
         choices = []
         for index in range(fields.size()):
@@ -2316,14 +2315,14 @@ class RenderTab(LayerPropertyTab):
                 f"该图层当前的渲染方式为「{_renderer_name(renderer)}」，"
                 f"确定替换为{name}吗？原有渲染配置会丢失。"
             )
-        answer = QMessageBox.question(
+        answer = MessageBox.question(
             self,
             "图层属性",
             text,
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
         )
-        return answer == QMessageBox.StandardButton.Yes
+        return answer == MessageBox.StandardButton.Yes
 
     def apply(self, layer) -> bool:
         """把控件值写回图层。两条路见模块 docstring。"""
@@ -2357,7 +2356,7 @@ class RenderTab(LayerPropertyTab):
                 layer.setRenderer(QgsSingleSymbolRenderer(symbol.clone()))
         except Exception as exc:  # noqa: BLE001
             logger.error("应用渲染设置失败: %s", exc, exc_info=True)
-            QMessageBox.warning(self, "图层属性", f"应用渲染设置失败：{exc}")
+            MessageBox.warning(self, "图层属性", f"应用渲染设置失败：{exc}")
             return False
         self._geom = kind
         self._refresh_preview()
@@ -2369,7 +2368,7 @@ class RenderTab(LayerPropertyTab):
         if not field or not self._cats:
             # 外壳在前一页可能已改过图层，本页返回 False 时不能再留下半成品，
             # 所以这里在任何写操作之前就把住
-            QMessageBox.warning(self, "图层属性", "还没有类别，请先选择字段并点「分类」。")
+            MessageBox.warning(self, "图层属性", "还没有类别，请先选择字段并点「分类」。")
             return False
         renderer = layer.renderer()
         if not isinstance(
@@ -2393,7 +2392,7 @@ class RenderTab(LayerPropertyTab):
             layer.setRenderer(new_renderer)
         except Exception as exc:  # noqa: BLE001
             logger.error("应用分类渲染设置失败: %s", exc, exc_info=True)
-            QMessageBox.warning(self, "图层属性", f"应用分类渲染设置失败：{exc}")
+            MessageBox.warning(self, "图层属性", f"应用分类渲染设置失败：{exc}")
             return False
         self._geom = kind
         self._refresh_preview()

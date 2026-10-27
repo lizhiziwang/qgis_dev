@@ -3,6 +3,10 @@
 使用 GDAL/OGR（经 :class:`QgsVectorFileWriter`）把矢量图层写出为常见格式，
 不依赖 QGIS Processing 插件。格式清单集中定义在 :data:`VECTOR_FORMATS`，
 参数对话框与说明文档共用同一份元数据。
+
+GeoPackage / SQLite 是本工程「数据管理」能直接接管的容器：写出后会补一行
+``user_relation`` 注册（见 :meth:`VectorConvertService._register_managed_layer`），
+并且写入已有库时只替换同名图层，不整库重建。
 """
 
 from __future__ import annotations
@@ -20,6 +24,36 @@ if TYPE_CHECKING:
     from qgis.core import QgsFeedback, QgsVectorLayer
 
 logger = get_logger(__name__)
+
+#: 能作为「本工程数据管理库」的驱动 —— 写出后要补一行 ``user_relation`` 注册。
+#: 数据管理的目录只读注册表、不扫物理表（见 ``local_db_util.query_all_table_name``），
+#: GDAL 直写的库没有这张注册行，不补就「有数据但面板里看不到」。
+_MANAGED_DB_DRIVERS = frozenset({"GPKG", "SQLite"})
+
+#: 本工程按「库」打开（可多图层）的后缀；加载 / 统计要素数要走表名定位。
+_LOCAL_DB_EXTENSIONS = frozenset({".gpkg", ".sqlite", ".sqlite3", ".db"})
+
+
+def _actual_table_name(path: str, layer_name: str) -> str | None:
+    """查写出后的真实表名（SQLite 驱动可能把名字改成小写）；查不到返回 ``None``。
+
+    只在本地库后缀上调用；普通文件格式没有「表名」这个概念。
+    """
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(path, timeout=5.0)
+        try:
+            row = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' "
+                "AND lower(name) = lower(?)",
+                (layer_name,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return str(row[0]) if row is not None else None
 
 
 @dataclass(frozen=True)
@@ -233,7 +267,17 @@ class VectorConvertService:
         options.fileEncoding = "UTF-8"
         options.layerOptions = list(job.fmt.layer_options)
         options.layerName = layer_name
-        options.actionOnExistingFile = QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteFile
+        existed = os.path.exists(path)
+        if existed and job.fmt.driver in _MANAGED_DB_DRIVERS:
+            # 已有的 GPKG / SQLite 只替换同名图层。默认的 CreateOrOverwriteFile
+            # 会把**整个库**删掉重建，库里其它图层连同数据管理注册行一起丢失。
+            options.actionOnExistingFile = (
+                QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteLayer
+            )
+        else:
+            options.actionOnExistingFile = (
+                QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteFile
+            )
         options.skipAttributeCreation = job.fmt.skip_attributes
         options.onlySelectedFeatures = job.only_selected
         if feedback is not None:
@@ -256,15 +300,69 @@ class VectorConvertService:
             options,
         )
         if int(error) != 0:
-            # 失败时删除半成品，避免用户误以为已完整写出
-            _remove_partial_output(path)
+            # 只清理本次新建的半成品。覆盖既有文件（尤其是已有 GPKG / SQLite）
+            # 时删掉会把用户原来的库 / 其它图层一起毁掉。
+            if not existed:
+                _remove_partial_output(path)
             raise RuntimeError(f"格式转换失败（{job.fmt.label}）：{message or '未知错误'}")
         result_path = new_path or path
+        if job.fmt.driver in _MANAGED_DB_DRIVERS:
+            # 数据管理按 user_relation 展示，GDAL 不会写这行注册；缺了它，
+            # 用户把产出库加进数据管理会看到「没有任何图层」。
+            self._register_managed_layer(result_path, layer_name)
         logger.info("矢量格式转换写出完成：%s（格式=%s）", result_path, job.fmt.label)
         return result_path
 
-    def count_output_features(self, path: str, fmt: VectorFormatSpec) -> int:
+    @staticmethod
+    def _register_managed_layer(path: str, layer_name: str) -> None:
+        """把刚写出的图层登记进库内 ``user_relation``（type=spatial）。
+
+        整份文件的写出（新建 / 覆盖单文件格式）不需要清理旧注册；但已有库走
+        ``CreateOrOverwriteLayer`` 时同名注册行还在，所以先按真实表名删一次再写，
+        保证反复转换同一图层不会出现重复行。
+
+        登记失败只记 warning：数据已经完整写出，注册只是数据管理的展示补充。
+        """
+        from app.core.util.local_db_util import local_db_util
+
+        actual = layer_name
+        try:
+            # SQLite 驱动可能把表名改成小写：按真实名字注册，否则面板上
+            # 双击打开 / 删除都对不上表。
+            found = _actual_table_name(path, layer_name)
+            if found is None:
+                logger.warning(
+                    "格式转换结果里找不到图层表，跳过数据管理登记：%s（%s）",
+                    layer_name,
+                    path,
+                )
+                return
+            actual = found
+            db = local_db_util(path)
+            try:
+                # 老库 / 刚由 OGR 建出的库可能还没有 user_relation：DELETE 失败
+                # 没关系，紧接着的 add_domain_table 会幂等建表再登记。
+                with contextlib.suppress(Exception):
+                    db.cursor.execute(
+                        "DELETE FROM user_relation WHERE table_name = ?", (actual,)
+                    )
+                db.add_domain_table(actual, "spatial")
+            finally:
+                db.conn.close()
+        except Exception:  # noqa: BLE001 —— 注册失败不毁已写出的数据
+            logger.warning(
+                "格式转换结果登记到数据管理失败：%s（%s）", layer_name, path, exc_info=True
+            )
+            return
+        logger.info("格式转换结果已登记到数据管理：%s（%s）", actual, path)
+
+    def count_output_features(
+        self, path: str, fmt: VectorFormatSpec, layer_name: str = ""
+    ) -> int:
         """统计输出文件里的要素数，供写出后校验；无法统计时返回 ``-1``。
+
+        已有 GPKG / SQLite 追加图层时文件里有多层，必须按 ``layer_name``
+        定位刚写出的那层，不能取第 0 层。
 
         KML / GML 的 OGR 驱动会整文件解析，统计可能反而触发 OOM，直接跳过。
         该函数可在后台线程调用。
@@ -278,7 +376,18 @@ class VectorConvertService:
             ds = ogr.Open(path, 0)
             if ds is None:
                 return -1
-            layer = ds.GetLayer(0)
+            layer = None
+            if layer_name:
+                wanted = layer_name.casefold()
+                for index in range(ds.GetLayerCount()):
+                    candidate = ds.GetLayerByIndex(index)
+                    if candidate is not None and candidate.GetName().casefold() == wanted:
+                        layer = candidate
+                        break
+            if layer is None:
+                if layer_name and ds.GetLayerCount() > 1:
+                    return -1
+                layer = ds.GetLayer(0)
             return -1 if layer is None else int(layer.GetFeatureCount())
         except Exception:
             logger.debug("统计输出要素数失败: %s", path, exc_info=True)
@@ -287,13 +396,26 @@ class VectorConvertService:
             ds = None
 
     def load_result(self, path: str, layer_name: str = "") -> QgsVectorLayer:
-        """主线程把输出文件加载为图层（不加入工程）。"""
+        """主线程把输出文件加载为图层（不加入工程）。
+
+        GPKG / SQLite 可能是多图层库（往已有库追加），要按表名定位刚写出的
+        图层 —— 直接 ``QgsVectorLayer(path, …)`` 会打开库里的第 0 层。
+        """
         from qgis.core import QgsVectorLayer
 
         name = layer_name or os.path.splitext(os.path.basename(path))[0]
-        result = QgsVectorLayer(path, name, "ogr")
-        if not result.isValid():
-            raise RuntimeError(f"转换结果无法加载：{path}")
+        ext = os.path.splitext(path)[1].lower()
+        if ext in _LOCAL_DB_EXTENSIONS:
+            from app.core.util.local_layer_loader import open_local_vector_table
+
+            table = _actual_table_name(path, name) or name
+            result, error = open_local_vector_table(path, table)
+            if result is None:
+                raise RuntimeError(f"转换结果无法加载：{path}（{error}）")
+        else:
+            result = QgsVectorLayer(path, name, "ogr")
+            if not result.isValid():
+                raise RuntimeError(f"转换结果无法加载：{path}")
         logger.info("矢量格式转换完成：%s（%s 要素）", path, result.featureCount())
         return result
 

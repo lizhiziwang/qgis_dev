@@ -26,12 +26,13 @@ from qgis.PyQt.QtGui import (
     QResizeEvent,
     QShortcut,
 )
-from qgis.PyQt.QtWidgets import QApplication, QDialog, QDockWidget, QMessageBox, QToolBar
+from qgis.PyQt.QtWidgets import QApplication, QDialog, QDockWidget, QToolBar
 
 from app.env.config import HelpConfig
 from app.infra.logging import get_logger
 from app.infra.shortcuts import DEFAULT_SHORTCUTS, effective_sequences, load_overrides
 from app.ui.common import tool_icons
+from app.ui.common.message_box import MessageBox
 from app.ui.common.ribbon import RibbonToolBar
 from app.ui.common.theme import (
     TOOLBAR_ITEM_GAP,
@@ -290,7 +291,7 @@ class WindowChromeMixin:
         """「帮助 → 检查更新」（手动检查始终反馈结果）。"""
         controller = getattr(self, "_update_controller", None)
         if controller is None:
-            QMessageBox.information(self, "检查更新", "更新模块不可用，请查看日志。")
+            MessageBox.information(self, "检查更新", "更新模块不可用，请查看日志。")
             logger.warning("点击检查更新，但更新控制器尚未创建")
             return
         controller.check_now()
@@ -537,7 +538,7 @@ class WindowChromeMixin:
         path = raw if raw.is_absolute() else Path(self._paths.project_root) / raw
         if not path.is_file():
             logger.warning("使用手册不存在：%s", path)
-            QMessageBox.information(
+            MessageBox.information(
                 self,
                 "使用手册",
                 f"未找到使用手册文件：\n{path}\n\n"
@@ -547,7 +548,7 @@ class WindowChromeMixin:
             return
         if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(path))):
             logger.error("打开使用手册失败：%s", path)
-            QMessageBox.warning(
+            MessageBox.warning(
                 self,
                 "使用手册",
                 f"无法打开使用手册：\n{path}\n\n请确认已安装可打开该文档的程序。",
@@ -580,7 +581,7 @@ class WindowChromeMixin:
         url = f"{base}{separator}{query}"
         if not QDesktopServices.openUrl(QUrl(url)):
             logger.error("打开反馈页面失败 url=%s", url)
-            QMessageBox.warning(self, "问题反馈", f"无法打开浏览器，请手动访问：\n{url}")
+            MessageBox.warning(self, "问题反馈", f"无法打开浏览器，请手动访问：\n{url}")
 
     def _feedback_identity(self) -> tuple[str, str]:
         """当前登录用户的 ``(user_id, user_name)``；没有会话时返回两个空串。
@@ -614,7 +615,7 @@ class WindowChromeMixin:
         """用系统默认浏览器打开帮助类链接；失败时弹窗给出可手动访问的地址。"""
         if not QDesktopServices.openUrl(QUrl(url)):
             logger.error("打开%s页面失败：%s", title, url)
-            QMessageBox.warning(self, title, f"无法打开浏览器，请手动访问：\n{url}")
+            MessageBox.warning(self, title, f"无法打开浏览器，请手动访问：\n{url}")
 
     def _on_tab_changed(self, index: int) -> None:
         """tab 切换：只显示当前 tab 对应的工具条，其余隐藏（模拟"换工具栏"）。

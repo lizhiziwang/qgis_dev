@@ -24,7 +24,6 @@ from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QScrollArea,
     QVBoxLayout,
@@ -34,6 +33,7 @@ from qgis.PyQt.QtWidgets import (
 from app.core.domain.flow.model import InputSpec, NodeSpec, unbound_inputs
 from app.core.domain.flow.types import PortType
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 
 #: 文件类端口 → 浏览对话框文件过滤器
 _FILE_FILTERS: dict[PortType, str] = {
@@ -245,7 +245,7 @@ class RunParamsDialog(BaseDialog):
     def accept(self) -> None:  # noqa: N802 —— Qt 命名
         problem = self._validate()
         if problem is not None:
-            QMessageBox.warning(self, "参数不完整", problem)
+            MessageBox.warning(self, "参数不完整", problem)
             return
         super().accept()
 

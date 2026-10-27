@@ -24,12 +24,11 @@ from qgis.PyQt.QtWidgets import (
     QDialogButtonBox,
     QLabel,
     QListWidget,
-    QMessageBox,
     QVBoxLayout,
 )
 
-
 from app.infra.logging import get_logger
+from app.ui.common.message_box import MessageBox
 
 logger = get_logger(__name__)
 
@@ -127,7 +126,7 @@ class LayerTreeOpsMixin:
         """
         candidates = self._editable_layers()
         if not candidates:
-            QMessageBox.information(
+            MessageBox.information(
                 self, "提示", "工程中没有可见且可编辑的矢量图层，请先勾选显示图层"
             )
             return None
@@ -254,14 +253,14 @@ class LayerTreeOpsMixin:
         :returns: ``True`` = 可以继续切换（已保存，或用户选择放弃）；
             ``False`` = 用户取消，流程要中止。
         """
-        box = QMessageBox(self)
+        box = MessageBox(self)
         box.setWindowTitle("切换编辑图层")
-        box.setIcon(QMessageBox.Icon.Warning)
+        box.setIcon(MessageBox.Icon.Warning)
         box.setText(f"图层「{layer.name()}」有未保存的修改。")
         box.setInformativeText("切换到其它图层前，请先处理这些修改：")
-        save_btn = box.addButton("保存", QMessageBox.ButtonRole.AcceptRole)
-        drop_btn = box.addButton("放弃", QMessageBox.ButtonRole.DestructiveRole)
-        cancel_btn = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        save_btn = box.addButton("保存", MessageBox.ButtonRole.AcceptRole)
+        drop_btn = box.addButton("放弃", MessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = box.addButton("取消", MessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(save_btn)
         box.setEscapeButton(cancel_btn)
         box.exec()
@@ -493,15 +492,15 @@ class LayerTreeOpsMixin:
             parts.append(f"{len(layer_nodes)} 个图层")
         if group_nodes:
             parts.append(f"{len(group_nodes)} 个图层组（共 {group_layer_count} 个图层）")
-        ret = QMessageBox.question(
+        ret = MessageBox.question(
             self,
             "删除图层",
             f"确定删除选中的{'和'.join(parts)}吗？\n\n"
             "图层组会连同组内全部图层一起删除；此操作不会删除磁盘上的数据文件。",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No,
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
         )
-        if ret != QMessageBox.StandardButton.Yes:
+        if ret != MessageBox.StandardButton.Yes:
             return
 
         for node in layer_nodes:
@@ -539,14 +538,14 @@ class LayerTreeOpsMixin:
         name = group.name()
         if confirm:
             text = f"确定删除「{name}」及其 {len(layers)} 个图层吗？" if layers else f"确定删除空图层组「{name}」吗？"
-            ret = QMessageBox.question(
+            ret = MessageBox.question(
                 self,
                 "删除图层组",
                 text,
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No,
+                MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+                MessageBox.StandardButton.No,
             )
-            if ret != QMessageBox.StandardButton.Yes:
+            if ret != MessageBox.StandardButton.Yes:
                 return
         # 1) 先逐个走 _remove_layer：拿到完整清理（退出编辑态/清选中引用/
         #    gpkg 别名/延迟刷新）。若只摘组节点，bridge 会直接 delete 里面的

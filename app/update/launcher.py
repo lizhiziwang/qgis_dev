@@ -21,6 +21,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -45,6 +46,12 @@ LINUX_APP_DIR = Path("/opt/qgis_app")
 
 #: Linux 更新器日志（root 可写）
 LINUX_HELPER_LOG = Path("/var/log/qgis_dev-updater.log")
+
+#: 更新器脚本里的能力版本（HELPER_VERSION）；>=2 才会写安装进度文件
+_HELPER_PROGRESS_VERSION = 2
+
+#: 安装进度文件（与任务 JSON 同目录，由 root 更新器原子写入）
+_LINUX_STATUS_FILE = "install-status.json"
 
 _WINDOWS_INSTALLER_SUFFIXES = (".exe", ".msi")
 _LINUX_INSTALLER_SUFFIXES = (".tar.gz", ".tgz")
@@ -77,6 +84,14 @@ class InstallLaunch:
     package_path: Path | None = None
     #: 更新器启动心跳（主程序轮询到它才退出）；无心跳的平台为 ``None``
     heartbeat_path: Path | None = None
+    #: Linux 安装进度文件（新 helper 才会写；None = 退回“启动后直接退出”）
+    status_path: Path | None = None
+    #: pkexec 进程 pid（日志 / 兜底判断；存活判断优先用 ``process.poll()``）
+    process_pid: int | None = None
+    #: pkexec 进程对象：子进程退出后必须 poll() 回收，否则僵尸进程让存活判断永远为真
+    process: subprocess.Popen | None = None
+    #: 本次任务 id（进度文件里也带，防止读到上一次的残留）
+    job_id: str = ""
     #: 更新器日志路径（启动失败时展示给用户）
     log_path: Path | None = None
 
@@ -177,17 +192,27 @@ class UpdaterLauncher:
         if not self.can_auto_install(package_path):
             return InstallLaunch(False, self.manual_hint(package_path), package_path)
         update_paths.ensure_dirs()
-        heartbeat: Path | None = None
         if sys.platform.startswith("win"):
             heartbeat = self._launch_windows(result, package_path)
-        else:
-            self._launch_linux(result, package_path)
+            return InstallLaunch(
+                True,
+                "",
+                package_path,
+                heartbeat_path=heartbeat,
+                log_path=update_paths.updater_log_file(),
+            )
+        status_path, process, job_id = self._launch_linux(result, package_path)
         return InstallLaunch(
             True,
             "",
             package_path,
-            heartbeat_path=heartbeat,
-            log_path=update_paths.updater_log_file(),
+            status_path=status_path,
+            process_pid=process.pid if process is not None else None,
+            process=process,
+            job_id=job_id,
+            # Linux 更新器写的是 /var/log/qgis_dev-updater.log；updater_dir 里的
+            # updater.log 只有 Windows 脚本会写。
+            log_path=LINUX_HELPER_LOG,
         )
 
     # ------------------------------------------------------------------ Windows
@@ -268,7 +293,9 @@ class UpdaterLauncher:
 
     # ------------------------------------------------------------------ Linux
 
-    def _launch_linux(self, result: CheckResult, package_path: Path) -> None:
+    def _launch_linux(
+        self, result: CheckResult, package_path: Path
+    ) -> tuple[Path | None, subprocess.Popen | None, str]:
         job = self._base_job(result, package_path)
         job.update(
             {
@@ -284,9 +311,21 @@ class UpdaterLauncher:
                 "healthTimeoutSeconds": 240,
             }
         )
+        # 自动更新只替换 /opt/qgis_app，不替换 helper：新客户端配旧 helper 时
+        # 不能等一个永远不出现的进度文件，直接退回旧行为。
+        status_path: Path | None = None
+        if linux_helper_supports_progress():
+            status_path = update_paths.updater_dir() / _LINUX_STATUS_FILE
+            job["statusFile"] = str(status_path)
+            try:
+                status_path.unlink()
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.warning("无法清理旧的安装进度文件 %s：%s", status_path, exc)
         job_path = _write_job(job)
         try:
-            subprocess.Popen(
+            process = subprocess.Popen(
                 ["pkexec", str(LINUX_HELPER), str(job_path)],
                 close_fds=True,
                 stdin=subprocess.DEVNULL,
@@ -297,7 +336,16 @@ class UpdaterLauncher:
             )
         except OSError as exc:
             raise UpdateInstallError(f"启动提权更新器失败：{exc}") from exc
-        logger.info("Linux 更新器已启动：job=%s package=%s", job_path, package_path)
+        logger.info(
+            "Linux 更新器已启动：job=%s package=%s status=%s pid=%s",
+            job_path,
+            package_path,
+            status_path,
+            process.pid,
+        )
+        if status_path is None:
+            return None, process, ""
+        return status_path, process, str(job.get("jobId") or "")
 
     # ------------------------------------------------------------------ 任务
 
@@ -308,7 +356,7 @@ class UpdaterLauncher:
         if package is None:
             raise UpdateInstallError("清单中没有可安装的包")
         return {
-            "jobId": f"{result.manifest.version_code}-{int(time.time())}",
+            "jobId": f"{result.manifest.version_code}-{int(time.time())}-{os.getpid()}",
             "pid": os.getpid(),
             "appDir": str(self._app_dir),
             "exePath": str(self._exe_path),
@@ -358,6 +406,27 @@ def _has_suffix(path: Path, suffixes: tuple[str, ...]) -> bool:
     return any(name.endswith(suffix) for suffix in suffixes)
 
 
+def linux_helper_supports_progress(helper: Path | None = None) -> bool:
+    """提权更新器是否支持安装进度（脚本里有 ``HELPER_VERSION >= 2``）。
+
+    读取 helper 本体而不是额外版本文件：helper 由 deb 安装、root:root 0755，
+    普通用户可读；这样旧 deb（1.0.8 及以前）配新客户端时会自动退回老流程，
+    不会卡在“等待进度文件”。
+    """
+    helper = LINUX_HELPER if helper is None else helper
+    try:
+        text = helper.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return False
+    match = re.search(r"^HELPER_VERSION\s*=\s*(\d+)\s*$", text, re.MULTILINE)
+    if match is None:
+        return False
+    try:
+        return int(match.group(1)) >= _HELPER_PROGRESS_VERSION
+    except ValueError:
+        return False
+
+
 def _current_user() -> str:
     try:
         import getpass
@@ -367,4 +436,4 @@ def _current_user() -> str:
         return ""
 
 
-__all__ = ["LINUX_APP_DIR", "LINUX_HELPER", "InstallLaunch", "UpdaterLauncher"]
+__all__ = ["LINUX_APP_DIR", "LINUX_HELPER", "InstallLaunch", "UpdaterLauncher", "linux_helper_supports_progress"]

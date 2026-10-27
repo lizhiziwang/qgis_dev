@@ -51,9 +51,11 @@ from qgis.core import (  # noqa: E402
 from qgis.gui import QgsMapCanvas  # noqa: E402
 from qgis.PyQt.QtCore import QPoint, Qt, QVariant  # noqa: E402
 from qgis.PyQt.QtGui import QColor  # noqa: E402
-from qgis.PyQt.QtWidgets import QMainWindow, QMessageBox  # noqa: E402
+from qgis.PyQt.QtWidgets import QMainWindow  # noqa: E402
 
-# 无头跑：所有 QMessageBox 一律自动点掉（information=确定，warning 默认=否，
+from app.ui.common.message_box import MessageBox as QMessageBox  # noqa: E402
+
+# 无头跑：所有消息框一律自动点掉（information=确定，warning 默认=否，
 # 让「停止编辑是否保存」走到 No 分支；需要 Yes 分支时用 _patch_warning 临时切）。
 def _auto_ok(*_a, **_k):
     return QMessageBox.StandardButton.Ok

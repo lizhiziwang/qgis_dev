@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-from app.ui.common.base_dialog import BaseDialog
 from qgis.PyQt.QtWidgets import (
     QComboBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPushButton,
     QVBoxLayout,
 )
+
+from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 
 
 class AddLocalDictDialog(BaseDialog):
@@ -52,7 +53,7 @@ class AddLocalDictDialog(BaseDialog):
 
     def _validate(self) -> None:
         if not self.name_edit.text().strip():
-            QMessageBox.warning(self, "添加字典表", "字典表名称不能为空")
+            MessageBox.warning(self, "添加字典表", "字典表名称不能为空")
             return
         self.accept()
 

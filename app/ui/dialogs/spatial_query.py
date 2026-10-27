@@ -34,7 +34,6 @@ from qgis.PyQt.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QVBoxLayout,
@@ -47,6 +46,7 @@ from app.core.domain.query.select_by_location import (
 )
 from app.infra.logging import get_logger
 from app.ui.common.base_dialog import BaseDialog
+from app.ui.common.message_box import MessageBox
 from app.ui.common.qgis_selection import SELECT_METHODS, selection_behavior
 
 if TYPE_CHECKING:
@@ -326,11 +326,11 @@ class SpatialQueryDialog(BaseDialog):
         """按选择方式把各目标图层的命中要素写入选择集。"""
         source = self.source_layer()
         if source is None:
-            QMessageBox.warning(self, "无法查询", "请选择源图层。")
+            MessageBox.warning(self, "无法查询", "请选择源图层。")
             return
         targets = self.checked_layers()
         if not targets:
-            QMessageBox.warning(self, "无法查询", "请至少勾选一个目标图层。")
+            MessageBox.warning(self, "无法查询", "请至少勾选一个目标图层。")
             return
 
         geometries = self._source_geometries(source)
@@ -340,7 +340,7 @@ class SpatialQueryDialog(BaseDialog):
                 if self.use_selected_check.isChecked()
                 else "源图层中没有可用的要素几何。"
             )
-            QMessageBox.warning(self, "无法查询", message)
+            MessageBox.warning(self, "无法查询", message)
             return
 
         predicate = str(self.method_combo.currentData() or "intersects")
