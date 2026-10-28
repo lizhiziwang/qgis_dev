@@ -1055,6 +1055,28 @@ def app_qss(t: Theme) -> str:
     QToolButton:checked {{ background-color: {t.btn_hover}; }}
     QToolButton:disabled {{ color: {t.text_secondary}; }}
 
+    /* 分析工具范围选择行：QGIS 原生 QgsExtentWidget 自带的「…」按钮被换成
+       「在地图上绘制」图标按钮 + ▼ 菜单按钮两颗（见 generic_alg）。全局面板里
+       QToolButton 是透明底，这里按输入框的样子画白底细边框，和 QGIS 一致。 */
+    QToolButton#ExtentActionButton {{
+        background-color: {t.input_bg};
+        border: 1px solid {t.input_border};
+        border-radius: 3px;
+        padding: 0px;
+    }}
+    QToolButton#ExtentActionButton:hover {{
+        background-color: {t.btn_hover};
+        border-color: {t.input_focus};
+    }}
+    QToolButton#ExtentActionButton:pressed {{
+        background-color: {t.btn_pressed};
+    }}
+    /* 菜单按钮用自绘 ▼ 图标，隐藏原生菜单指示器，避免图标旁再多一个小三角 */
+    QToolButton#ExtentActionButton::menu-indicator {{
+        image: none;
+        width: 0px;
+    }}
+
     QCheckBox, QRadioButton {{ color: {t.menu_text}; }}
     QCheckBox:disabled, QRadioButton:disabled {{ color: {t.text_secondary}; }}
 

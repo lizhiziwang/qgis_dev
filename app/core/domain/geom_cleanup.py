@@ -131,4 +131,118 @@ def copy_with_widened_string_fields(
         return layer
 
 
-__all__ = ["copy_with_widened_string_fields"]
+def copy_with_valid_polygons(layer: QgsVectorLayer) -> QgsVectorLayer:
+    """去掉空几何、修复无效多边形，返回可直接用于掩膜 / 裁剪的临时图层。
+
+    ``gdalwarp -cutline`` 对掩膜的要求比 QGIS 画布严格：
+    - 有要素几何为空 → ``Cutline feature without a geometry``；
+    - 多边形自相交等无效几何 → ``Cutline polygon is invalid``；
+    QGIS 的「按掩膜裁剪」没有跳过 / 修复选项，只能在执行前清洗。
+
+    掩膜只用到几何，因此结果图层**不拷贝属性字段**（也省掉大掩膜的逐要素
+    属性开销）。全部要素都有效时原样返回，不产生额外图层。
+
+    Args:
+        layer: 掩膜矢量图层（多边形）。
+
+    Returns:
+        清洗后的 memory 图层；无需清洗或清洗失败时返回原图层。
+    """
+    from qgis.core import (
+        Qgis,
+        QgsFeature,
+        QgsGeometry,
+        QgsVectorLayer,
+        QgsWkbTypes,
+    )
+
+    try:
+        if QgsWkbTypes.geometryType(layer.wkbType()) != Qgis.GeometryType.Polygon:
+            return layer
+
+        geometries = []
+        dropped = repaired = skipped = 0
+        for source in layer.getFeatures():
+            geometry = source.geometry()
+            if geometry.isNull() or geometry.isEmpty():
+                dropped += 1
+                continue
+            if not geometry.isGeosValid():
+                fixed = geometry.makeValid()
+                if (
+                    fixed is None
+                    or fixed.isEmpty()
+                    or not fixed.isGeosValid()
+                ):
+                    skipped += 1
+                    continue
+                geometry = fixed
+                repaired += 1
+            # 深拷贝：源要素在下一轮循环就被释放，直接引用会悬垂
+            geometries.append(QgsGeometry(geometry))
+
+        if not dropped and not repaired and not skipped:
+            return layer
+        if not geometries:
+            logger.warning("%s：所有要素几何均无效，退回原图层", layer.name())
+            return layer
+
+        wkb = QgsWkbTypes.multiType(layer.wkbType())
+        uri = QgsWkbTypes.displayString(wkb)
+        crs = layer.crs()
+        if crs.isValid() and crs.authid():
+            uri += f"?crs={crs.authid()}"
+        cleaned = QgsVectorLayer(uri, f"{layer.name()}（几何已修复）", "memory")
+        features = []
+        for geometry in geometries:
+            feature = QgsFeature()
+            feature.setGeometry(geometry)
+            features.append(feature)
+        ok, _added = cleaned.dataProvider().addFeatures(features)
+        if not ok:
+            logger.warning("%s：清洗后写入临时图层失败，退回原图层", layer.name())
+            return layer
+        logger.info(
+            "%s 掩膜几何清洗：跳过空几何 %d 个、修复无效几何 %d 个、无法修复跳过 %d 个",
+            layer.name(),
+            dropped + skipped,
+            repaired,
+            skipped,
+        )
+        return cleaned
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("掩膜几何清洗失败，退回原图层: %s", exc, exc_info=True)
+        return layer
+
+
+def copy_field_aliases(source: QgsVectorLayer, target: QgsVectorLayer) -> None:
+    """按**字段名**把 ``source`` 的字段别名补到 ``target``。
+
+    ``native:*`` 算法的 memory sink、``QgsVectorFileWriter`` 的部分格式输出
+    不携带字段别名（实测 ``QgsField.alias()`` 为空），转换后用户会以为字段被
+    改名。不能按索引补：GPKG 输出前面可能多一个 ``fid``。别名只是展示信息，
+    失败只记日志，不影响结果。
+    """
+    try:
+        aliases = {
+            field.name(): field.alias()
+            for field in source.fields()
+            if field.alias()
+        }
+        if not aliases:
+            return
+        target_fields = target.fields()
+        for index in range(target_fields.count()):
+            field = target_fields.at(index)
+            alias = aliases.get(field.name())
+            if alias and field.alias() != alias:
+                target.setFieldAlias(index, alias)
+    except Exception as exc:
+        logger.warning("恢复字段别名失败：%s", exc, exc_info=True)
+
+
+__all__ = [
+    "copy_field_aliases",
+    "copy_with_valid_polygons",
+    "copy_with_widened_string_fields",
+]

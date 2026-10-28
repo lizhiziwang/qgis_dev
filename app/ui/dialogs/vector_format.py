@@ -30,8 +30,19 @@ from app.core.domain.vector_format.task import VectorConvertTask
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.ui.common.algo_desc import make_description_panel
-from app.ui.common.base_dialog import BaseDialog, make_scrollable
+from app.ui.common.base_dialog import (
+    ANALYSIS_DIALOG_MAX_HEIGHT,
+    BaseDialog,
+    make_scrollable,
+)
+from app.ui.common.layer_combo import (
+    LayerNameWatcher,
+    live_layer,
+    retitle_layer_combo,
+)
+from app.ui.common.layer_order import layers_in_tree_order
 from app.ui.common.message_box import MessageBox
+from app.ui.common.validation import focus_and_highlight
 
 logger = get_logger(__name__)
 
@@ -100,6 +111,9 @@ class _SublayerChoiceDialog(QDialog):
 class VectorFormatDialog(BaseDialog):
     """矢量数据格式转换 Dialog（同步执行）。"""
 
+    #: 分析工具弹窗统一高度上限，超出后参数区滚动
+    max_window_height = ANALYSIS_DIALOG_MAX_HEIGHT
+
     def __init__(self, parent=None, title: str = "") -> None:
         super().__init__(parent, title)
         self.setMinimumSize(760, 520)
@@ -111,9 +125,22 @@ class VectorFormatDialog(BaseDialog):
         self._job: VectorConvertJob | None = None
         #: 通过「浏览…」加载的本地文件图层（不属于工程，随对话框保留）
         self._file_layers: list = []
+        #: 正在监听 selectionChanged 的输入图层（清空选择时自动取消勾选）
+        self._selection_layer = None
         self._init_ui()
         self.project.layersAdded.connect(self._refresh_input_layers)
         self.project.layersRemoved.connect(self._refresh_input_layers)
+        # 图层在面板里改名后下拉框文字同步（对话框实例会被工具树缓存复用）
+        self._name_watcher = LayerNameWatcher(
+            self.project, self._on_layer_renamed, self
+        )
+        # 输入图层选择集清空时取消「仅导出选中要素」；仍有选择集则保持勾选
+        self.input_combo.currentIndexChanged.connect(self._sync_selection_watch)
+        self._sync_selection_watch()
+
+    def _on_layer_renamed(self) -> None:
+        """图层面板改名后只刷新下拉文字，保留当前选择。"""
+        retitle_layer_combo(self.input_combo)
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout()
@@ -214,7 +241,9 @@ class VectorFormatDialog(BaseDialog):
         """把工程矢量图层与本地浏览加载的图层填充进下拉框。"""
         self.input_combo.clear()
         seen_sources: set[str] = set()
-        for layer in self.project.mapLayers().values():
+        # 工程图层顺序取图层面板从上到下（mapLayers() 按图层 id 排，看着是乱序）；
+        # 本地浏览加载的图层排在后面
+        for layer in layers_in_tree_order(self.project):
             if layer.type() == QgsMapLayer.VectorLayer:
                 self.input_combo.addItem(layer.name(), layer)
                 with contextlib.suppress(RuntimeError):
@@ -350,6 +379,35 @@ class VectorFormatDialog(BaseDialog):
                 continue
         return None
 
+    def _sync_selection_watch(self, *_args) -> None:
+        """切换输入图层时改听新图层的 selectionChanged。"""
+        layer = live_layer(self.input_combo.currentData())
+        if layer is self._selection_layer:
+            return
+        old = self._selection_layer
+        if old is not None:
+            with contextlib.suppress(TypeError, RuntimeError):
+                old.selectionChanged.disconnect(self._on_input_selection_changed)
+        self._selection_layer = layer
+        if layer is not None:
+            try:
+                layer.selectionChanged.connect(self._on_input_selection_changed)
+            except (AttributeError, RuntimeError):
+                self._selection_layer = None
+
+    def _on_input_selection_changed(self, *_args) -> None:
+        """选择集被清空时自动取消「仅导出选中要素」；不主动改其它状态。"""
+        layer = self._selection_layer
+        if layer is None:
+            return
+        try:
+            empty = layer.selectedFeatureCount() == 0
+        except RuntimeError:
+            self._selection_layer = None
+            return
+        if empty and self.only_selected_check.isChecked():
+            self.only_selected_check.setChecked(False)
+
     def _refresh_input_layers(self, *args) -> None:
         """工程图层变化后刷新输入下拉，尽量保持当前选择。"""
         current = self.input_combo.currentData()
@@ -358,6 +416,7 @@ class VectorFormatDialog(BaseDialog):
             idx = self.input_combo.findData(current)
             if idx >= 0:
                 self.input_combo.setCurrentIndex(idx)
+        self._sync_selection_watch()
 
     def _on_format_changed(self, index: int) -> None:
         spec = self.format_combo.itemData(index)
@@ -373,19 +432,21 @@ class VectorFormatDialog(BaseDialog):
 
     def _on_execute(self) -> None:
         if self._task is not None:
-            send("warning", "转换正在进行，请等待完成", duration=3)
+            MessageBox.warning(self, "格式转换（矢量）", "转换正在进行，请等待完成")
             return
         layer = self.input_combo.currentData()
         if layer is None:
-            send("warning", "请选择输入图层（工程图层或浏览本地文件）", duration=3)
+            focus_and_highlight(
+                self.input_combo, "请选择输入图层（工程图层或浏览本地文件）"
+            )
             return
         spec = self.format_combo.currentData()
         if spec is None:
-            send("warning", "请选择输出格式", duration=3)
+            focus_and_highlight(self.format_combo, "请选择输出格式")
             return
         path = self.output_path_edit.text().strip()
         if not path:
-            send("warning", "请选择输出文件路径", duration=3)
+            focus_and_highlight(self.output_path_edit, "请选择输出文件路径")
             return
         path = _with_extension(path, spec.extension)
         self.output_path_edit.setText(path)
@@ -415,7 +476,10 @@ class VectorFormatDialog(BaseDialog):
 
         only_selected = self.only_selected_check.isChecked()
         if only_selected and layer.selectedFeatureCount() == 0:
-            send("warning", "已勾选「仅导出选中要素」，但输入图层没有选中要素", duration=3)
+            focus_and_highlight(
+                self.only_selected_check,
+                "已勾选「仅导出选中要素」，但输入图层没有选中要素",
+            )
             return
 
         job = VectorConvertJob(
@@ -462,11 +526,11 @@ class VectorFormatDialog(BaseDialog):
             count_text = f"，已导出选中要素 {written} 个（源图层共 {job.layer.featureCount()} 个）"
         if expected >= 0 and written >= 0 and written != expected:
             logger.warning("矢量格式转换要素数不一致：预期 %s，实际 %s", expected, written)
-            send(
-                "warning",
+            MessageBox.warning(
+                self,
+                "格式转换（矢量）",
                 f"导出要素数与预期不一致：预期 {expected}，实际 {written}。"
                 "请检查源图层是否有无效几何，或是否启用了筛选 / 选中集。",
-                duration=8,
             )
         loaded = self.load_check.isChecked()
         note = ""
@@ -483,7 +547,9 @@ class VectorFormatDialog(BaseDialog):
                 note = f"（文件约 {size / (1024 * 1024):.0f} MB，已跳过加载；大文件请用 GeoPackage 查看 / 编辑）"
             else:
                 try:
-                    result = self.convert_service.load_result(path, job.layer_name)
+                    result = self.convert_service.load_result(
+                        path, job.layer_name, source_layer=job.layer
+                    )
                     self.project.addMapLayer(result)
                     if job.only_selected:
                         count_text = (
@@ -495,12 +561,14 @@ class VectorFormatDialog(BaseDialog):
                     logger.warning("矢量格式转换成功，但结果加载失败: %s", exc, exc_info=True)
                     loaded = False
                     note = "（文件已写出，但加载失败；大文件请用 GeoPackage）"
-                    send("warning", f"结果已写出，但加载到工程失败：{exc}", duration=5)
+                    MessageBox.warning(
+                        self, "格式转换（矢量）", f"结果已写出，但加载到工程失败：{exc}"
+                    )
         if not loaded and not note:
             note = "（未加载到工程）"
         send(
             "success",
-            f"格式转换完成：{job.fmt.label}{count_text} → {job.output_path}{note}",
+            f"格式转换（矢量）完成：{job.fmt.label}{count_text} → {job.output_path}{note}",
             duration=3,
         )
         if loaded:
@@ -509,15 +577,23 @@ class VectorFormatDialog(BaseDialog):
     def _on_task_failed(self, message: str) -> None:
         self.loading.setRange(0, 100)
         self.loading.setValue(0)
-        send("critical", f"矢量格式转换失败：{message}", duration=5)
+        MessageBox.critical(self, "格式转换（矢量）", f"矢量格式转换失败：{message}")
 
     def _on_task_finished(self) -> None:
         task = self._task
+        job = self._job
         self._task = None
         self._job = None
         self.loading.setRange(0, 100)
-        # 避免下次打开对话框时沿用「仅导出选中要素」导致误以为数据缺失
-        self.only_selected_check.setChecked(False)
+        # 只有输入图层的选择集确实为空时才复位「仅导出选中要素」；用户仍选着
+        # 要素就保持勾选（原来每次执行完都强制取消，用户需要反复重新勾选）。
+        if job is not None:
+            try:
+                selection_empty = job.layer.selectedFeatureCount() == 0
+            except RuntimeError:
+                selection_empty = True
+            if selection_empty:
+                self.only_selected_check.setChecked(False)
         self.execute_btn.setEnabled(True)
         if task is not None:
             task.wait(1000)

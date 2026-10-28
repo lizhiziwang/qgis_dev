@@ -56,6 +56,7 @@ _GLYPHS: dict[str, str] = {
     "new_project": "",   # file-alt 新建工程
     "exit": "",          # power-off 退出
     "log": "",           # clipboard-list 日志
+    "export_image": "",  # file-image 导出图片
     # ---- 流程节点编排工具（app/ui/flow_editor）----
     "play": "",           # play 运行全部
     "step": "",           # step-forward 单步执行

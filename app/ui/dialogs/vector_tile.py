@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
+from dataclasses import replace
+from functools import partial
 from typing import Optional
 
 from qgis.core import (
@@ -12,9 +15,11 @@ from qgis.core import (
     QgsMapLayer,
     QgsProject,
     QgsRectangle,
+    QgsVectorFileWriter,
 )
 from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
+    QApplication,
     QComboBox,
     QHBoxLayout,
     QLabel,
@@ -33,12 +38,16 @@ from qgis.PyQt.QtWidgets import (
 
 from app.core.domain.tiles import TileJob, TileService, write_vector_tile_viewer
 from app.core.domain.tiles.inspect import inspect_vector_tiles
+from app.core.util.text_encoding import repair_mojibake
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.infra.viewer_server import open_viewer
 from app.ui.common.algo_desc import make_description_panel
-from app.ui.common.base_dialog import BaseDialog
-from app.ui.common.layer_combo import layer_source, live_layer
+from app.ui.common.base_dialog import ANALYSIS_DIALOG_MAX_HEIGHT, BaseDialog
+from app.ui.common.layer_combo import LayerNameWatcher, layer_source, live_layer
+from app.ui.common.layer_order import layers_in_tree_order
+from app.ui.common.message_box import MessageBox
+from app.ui.common.validation import focus_and_highlight
 from app.ui.common.widgets import CenteredCheckDelegate, open_file_dir
 from app.ui.dialogs.vector_tile_advanced import (
     DEFAULT_TEMPLATE,
@@ -53,15 +62,28 @@ logger = get_logger(__name__)
 #: 预估瓦片数超过该值时，执行前弹窗确认（默认最大等级 14，大范围数据可能极慢）
 TILE_COUNT_WARN_THRESHOLD = 20_000
 
+#: 执行前耗时预估（仅用于提示，不是精确值）：实测 148,278 个面要素的 GDB 图层，
+#: 0-7 级约 87 秒；单独跑 10 级 / 12 级各约 96 秒——算法**每级都要重新遍历一遍
+#: 全部要素**，耗时主要跟「要素数 × 层级数」走，瓦片数多寡反而是次要因素。
+#: 低层级逐要素开销较小，8 级起基本按该速率线性增长。
+_SECONDS_PER_FEATURE_LOW = 0.00005
+_SECONDS_PER_FEATURE_HIGH = 0.00065
+_LOW_ZOOM_MAX = 7
+#: 预估耗时超过该值（秒）时，即便瓦片数很少也先弹窗确认
+_ESTIMATE_WARN_SECONDS = 60
+
 
 class VectorTileDialog(BaseDialog):
     """矢量瓦片生成 Dialog。"""
+
+    #: 分析工具弹窗统一高度上限，超出后参数区滚动
+    max_window_height = ANALYSIS_DIALOG_MAX_HEIGHT
 
     def __init__(self, parent=None, title: str = "", dia_type: Optional[str] = None) -> None:
         super().__init__(parent, title)
         self.dia_type = dia_type
         if not self.dia_type:
-            send("warning", "功能待开发", duration=3)
+            MessageBox.warning(self, "矢量瓦片", "功能待开发")
             self.close()
             return
         self.project = QgsProject.instance()
@@ -69,10 +91,24 @@ class VectorTileDialog(BaseDialog):
         # 否则后加入的矢量图层不会出现在输入列表里。
         self.project.layersAdded.connect(self._on_project_layers_changed)
         self.project.layersRemoved.connect(self._on_project_layers_changed)
+        # 图层在面板里改名后列表文字同步（按 source 保留勾选状态）
+        self._name_watcher = LayerNameWatcher(
+            self.project, self._on_layer_renamed, self
+        )
         self.select_layers: list = []
         self.out_extent: QgsRectangle | None = None
         self._extent_authid = ""
-        self.task = None
+        #: 当前这套任务并行运行的子任务（按缩放级拆分；空 = 没在跑）
+        self.tasks: list = []
+        #: 当前并行组的分组 / 进度状态（key 都是子任务对象）
+        self._group_ranges: list[tuple[int, int]] = []
+        self._group_task_levels: dict = {}
+        self._group_progress: dict = {}
+        self._group_bindings: dict = {}
+        self._group_label = ""
+        self._group_failed = ""
+        #: 输出字段过滤用的临时 GeoPackage 目录（整轮结束后删除）
+        self._field_work_dir = ""
         self.tile_service = TileService()
         #: 高级选项（模板以主面板输入框为准，这里存清空 / 查看器开关）
         self._advanced = VectorTileAdvancedOptions()
@@ -89,6 +125,10 @@ class VectorTileDialog(BaseDialog):
         #: 本轮扫描到的要素总数
         self._feature_count = 0
         self._init_ui()
+
+    def _on_layer_renamed(self) -> None:
+        """图层面板改名后重建列表，勾选状态按 source 保留。"""
+        self._populate_layers()
 
     # ============================================================== UI
 
@@ -268,7 +308,7 @@ class VectorTileDialog(BaseDialog):
         self.list_widget.blockSignals(True)
         try:
             self.list_widget.clear()
-            for layer in list(self.project.mapLayers().values()):
+            for layer in layers_in_tree_order(self.project):
                 layer = live_layer(layer)
                 if layer is None or layer.type() != QgsMapLayer.VectorLayer:
                     continue
@@ -297,7 +337,7 @@ class VectorTileDialog(BaseDialog):
             if self.list_widget.item(row).checkState() == Qt.CheckState.Checked
         }
         selected = []
-        for layer in list(self.project.mapLayers().values()):
+        for layer in layers_in_tree_order(self.project):
             layer = live_layer(layer)
             if layer is None or layer.type() != QgsMapLayer.VectorLayer:
                 continue
@@ -316,7 +356,7 @@ class VectorTileDialog(BaseDialog):
         """每次显示都重刷图层列表：对话框实例被复用，首次打开后再加入的图层也能选到。"""
         super().showEvent(event)
         self._populate_layers()
-        if self.task is None and not self._queue:
+        if not self.tasks and not self._queue:
             self.execute_btn.setEnabled(True)
             self.cancel_btn.setEnabled(False)
             self.advanced_btn.setEnabled(True)
@@ -475,21 +515,35 @@ class VectorTileDialog(BaseDialog):
             return "请至少勾选一个输入图层"
         return self._validate_options()
 
+    def _show_validation_error(self, error: str) -> None:
+        """把校验错误定位到对应控件（组件级提示，不写主窗口浮动条）。"""
+        widget = None
+        if error == "最小等级不能大于最大等级":
+            widget = self.max_zoom_spin
+        elif error.startswith("文件模板"):
+            widget = self.xyz_temp
+        elif error.startswith("请至少勾选"):
+            widget = self.list_widget
+        if widget is not None:
+            focus_and_highlight(widget, error)
+        else:
+            MessageBox.warning(self, "矢量瓦片", error)
+
     def _on_execute(self) -> None:
-        if self.task is not None or self._queue:
-            send("warning", "已有矢量瓦片任务正在执行", duration=3)
+        if self.tasks or self._queue:
+            MessageBox.warning(self, "矢量瓦片", "已有矢量瓦片任务正在执行")
             return
         error = self._validate_common()
         if error:
-            send("warning", error, duration=4)
+            self._show_validation_error(error)
             return
         out_dir = self.output_edit.text().strip()
         if not out_dir:
-            send("warning", "请先选择输出目录", duration=3)
+            focus_and_highlight(self.output_edit, "请先选择输出目录")
             return
         extent, error = self._resolve_extent(self._checked_layers())
         if extent is None:
-            send("warning", error, duration=4)
+            focus_and_highlight(self.extent_edit, error)
             return
 
         template = self._current_template()
@@ -497,7 +551,7 @@ class VectorTileDialog(BaseDialog):
         layers = [live_layer(layer) for layer in self.select_layers]
         layers = [layer for layer in layers if layer is not None]
         if not layers:
-            send("warning", "勾选的图层已失效，请重新勾选", duration=4)
+            focus_and_highlight(self.list_widget, "勾选的图层已失效，请重新勾选")
             return
         job = TileJob(
             output_dir=out_dir,
@@ -508,19 +562,30 @@ class VectorTileDialog(BaseDialog):
             max_zoom=self.max_zoom_spin.value(),
             extent=extent,
         )
-        self._start_jobs([(job, "、".join(layer.name() for layer in layers))])
+        self._start_jobs(
+            [(job, "、".join(layer.name() for layer in layers))], layers
+        )
 
     def _open_advanced(self) -> None:
         """打开高级设置（文件模板 / 清空输出目录 / 网页查看器）。"""
-        if self.task is not None or self._queue:
-            send("warning", "任务执行中，暂时不能修改高级设置", duration=3)
+        if self.tasks or self._queue:
+            MessageBox.warning(self, "矢量瓦片", "任务执行中，暂时不能修改高级设置")
             return
         current = VectorTileAdvancedOptions(
             template=self._current_template(),
             clear_output=self._advanced.clear_output,
             viewer=self._advanced.viewer,
         )
-        dialog = VectorTileAdvancedDialog(self, current)
+        dialog = VectorTileAdvancedDialog(
+            self,
+            current,
+            layers=self._checked_layers()
+            or [
+                layer
+                for layer in layers_in_tree_order(self.project)
+                if layer.type() == QgsMapLayer.VectorLayer
+            ],
+        )
         accepted = dialog.exec()
         options = dialog.options() if accepted else None
         dialog.deleteLater()
@@ -537,22 +602,22 @@ class VectorTileDialog(BaseDialog):
 
     def _open_batch(self) -> None:
         """打开批量处理：每个勾选图层输出到独立子目录并顺序执行。"""
-        if self.task is not None or self._queue:
-            send("warning", "任务执行中，暂时不能启动批量处理", duration=3)
+        if self.tasks or self._queue:
+            MessageBox.warning(self, "矢量瓦片", "任务执行中，暂时不能启动批量处理")
             return
         error = self._validate_options()
         if error:
-            send("warning", error, duration=4)
+            self._show_validation_error(error)
             return
         layers = [
             layer
             for layer in (
-                live_layer(item) for item in list(self.project.mapLayers().values())
+                live_layer(item) for item in layers_in_tree_order(self.project)
             )
             if layer is not None and layer.type() == QgsMapLayer.VectorLayer
         ]
         if not layers:
-            send("warning", "工程中没有矢量图层", duration=3)
+            focus_and_highlight(self.list_widget, "工程中没有矢量图层")
             return
         dialog = VectorTileBatchDialog(
             self,
@@ -577,19 +642,19 @@ class VectorTileDialog(BaseDialog):
         for target in targets:
             layer = live_layer(target.layer)
             if layer is None:
-                send("warning", "批量列表中有图层已失效，请重新打开批量处理", duration=4)
+                MessageBox.warning(self, "矢量瓦片", "批量列表中有图层已失效，请重新打开批量处理")
                 return
             try:
                 name, source = layer.name(), layer.source()
             except (AttributeError, RuntimeError):
-                send("warning", "批量列表中有图层已失效，请重新打开批量处理", duration=4)
+                MessageBox.warning(self, "矢量瓦片", "批量列表中有图层已失效，请重新打开批量处理")
                 return
             if use_layer_extent:
                 try:
                     rect = layer.extent()
                     layer_crs = layer.crs()
                 except (AttributeError, RuntimeError):
-                    send("warning", f"图层「{name}」已失效", duration=4)
+                    MessageBox.warning(self, "矢量瓦片", f"图层「{name}」已失效")
                     return
                 authid = layer_crs.authid() if layer_crs.isValid() else self._project_authid()
                 if rect.isNull() or rect.isEmpty():
@@ -602,7 +667,9 @@ class VectorTileDialog(BaseDialog):
             else:
                 extent = fallback_extent
             if extent is None:
-                send("warning", f"图层「{name}」无法确定输出范围：{fallback_error}", duration=4)
+                MessageBox.warning(
+                    self, "矢量瓦片", f"图层「{name}」无法确定输出范围：{fallback_error}"
+                )
                 return
             jobs.append((
                 TileJob(
@@ -616,23 +683,91 @@ class VectorTileDialog(BaseDialog):
                 ),
                 name,
             ))
-        self._start_jobs(jobs)
+        self._start_jobs(jobs, [target.layer for target in targets])
 
-    def _start_jobs(self, jobs: list[tuple[TileJob, str]]) -> None:
-        """校验输出目录、确认瓦片规模、按需清空，然后启动顺序执行队列。"""
+    @staticmethod
+    def _estimate_seconds(layers, min_zoom: int, max_zoom: int) -> tuple[int, int]:
+        """按「要素数 × 层级数」粗估切片耗时，返回 ``(秒, 要素总数)``。
+
+        算法每个缩放级都会把全部要素重新过一遍，所以瓦片数很少也可能跑很久
+        （例如 148,278 个面、0-14 级约 1,200 个瓦片，但需要十几分钟）。
+        取不到要素数时返回 ``(0, 0)``，不弹提示。
+        """
+        features = 0
+        for layer in layers or []:
+            try:
+                count = int(layer.featureCount())
+            except (AttributeError, RuntimeError, TypeError):
+                continue
+            if count > 0:
+                features += count
+        if features <= 0 or max_zoom < min_zoom:
+            return 0, 0
+        low_levels = sum(
+            1 for z in range(min_zoom, max_zoom + 1) if z <= _LOW_ZOOM_MAX
+        )
+        high_levels = (max_zoom - min_zoom + 1) - low_levels
+        seconds = features * (
+            low_levels * _SECONDS_PER_FEATURE_LOW
+            + high_levels * _SECONDS_PER_FEATURE_HIGH
+        )
+        return int(seconds), features
+
+    def _start_jobs(self, jobs: list[tuple[TileJob, str]], layers=None) -> None:
+        """校验输出目录、确认瓦片规模 / 预估耗时、按需清空，然后启动顺序执行队列。"""
         if not jobs:
             return
-        # 默认最大等级 14 在大范围数据上可能产生数十万瓦片，先估算并确认
+        # 默认最大等级 14 在大范围数据上可能产生数十万瓦片；而且算法每个缩放级
+        # 都会重新遍历全部要素，要素多 / 层级多时即使瓦片很少也会跑很久。
         n_tiles = sum(
             self._estimate_tiles(job.extent, job.min_zoom, job.max_zoom)
             for job, _label in jobs
         )
-        if n_tiles > TILE_COUNT_WARN_THRESHOLD:
+        min_zoom = jobs[0][0].min_zoom
+        max_zoom = jobs[0][0].max_zoom
+        estimate_seconds, features = self._estimate_seconds(
+            layers if layers is not None else self._checked_layers(),
+            min_zoom,
+            max_zoom,
+        )
+        # 并行导出的墙钟时间按最慢一段 + 进程启动开销估算
+        from app.core.domain.tiles.parallel import split_zoom_ranges  # noqa: PLC0415
+
+        selected_layers = layers if layers is not None else self._checked_layers()
+        serial_only = any(
+            getattr(lyr, "providerType", lambda: "memory")() not in ("ogr", "spatialite")
+            for lyr in selected_layers
+        )
+        parallel_groups = (
+            1
+            if serial_only
+            else max(1, len(split_zoom_ranges(min_zoom, max_zoom)))
+        )
+        # 并行并不是线性加速（子进程启动 / 磁盘与 CPU 争用），乘 1.3 保守估算
+        estimated_wall = int(estimate_seconds / parallel_groups * 1.3) + 15
+        if (
+            n_tiles > TILE_COUNT_WARN_THRESHOLD
+            or estimated_wall >= _ESTIMATE_WARN_SECONDS
+        ):
+            details = []
+            if n_tiles > TILE_COUNT_WARN_THRESHOLD:
+                details.append(f"预计生成约 {n_tiles:,} 个瓦片")
+            if estimated_wall >= _ESTIMATE_WARN_SECONDS:
+                minutes = max(1, round(estimated_wall / 60))
+                group_text = (
+                    f"并行 {parallel_groups} 组"
+                    if parallel_groups > 1
+                    else "单进程执行"
+                )
+                details.append(
+                    f"{features:,} 个要素 × {max_zoom - min_zoom + 1} 个缩放层级，"
+                    f"{group_text}，预计耗时约 {minutes} 分钟"
+                )
+            message = "；\n".join(details) + f"。\n缩放级别 {min_zoom}-{max_zoom}，是否继续？"
             answer = QMessageBox.question(
                 self,
                 "切片确认",
-                f"当前设置预计生成约 {n_tiles:,} 个瓦片，耗时可能很长。\n"
-                f"缩放级别 {jobs[0][0].min_zoom}-{jobs[0][0].max_zoom}。是否继续？",
+                message,
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
             )
@@ -643,7 +778,7 @@ class VectorTileDialog(BaseDialog):
             for path in dirs:
                 os.makedirs(path, exist_ok=True)
         except OSError as exc:
-            send("critical", f"无法创建输出目录：{exc}", duration=5)
+            MessageBox.critical(self, "矢量瓦片", f"无法创建输出目录：{exc}")
             return
 
         if self._advanced.clear_output and not self._confirm_clear(dirs):
@@ -651,6 +786,10 @@ class VectorTileDialog(BaseDialog):
         if self._advanced.clear_output:
             for path in dirs:
                 self._clear_dir_contents(path)
+
+        jobs = self._apply_field_filter(jobs)
+        if not jobs:
+            return
 
         self._queue = list(jobs)
         self._queue_total = len(jobs)
@@ -670,6 +809,111 @@ class VectorTileDialog(BaseDialog):
         self.loading.setRange(0, 0)
         self._start_next_job()
 
+    def _apply_field_filter(self, jobs: list[tuple[TileJob, str]]) -> list[tuple[TileJob, str]]:
+        """按「高级 → 输出字段」生成临时图层，替换作业里的数据源。
+
+        QGIS 矢量瓦片算法没有字段筛选参数，只能先把图层写成只含所选字段的
+        GeoPackage 再切。全部字段导出时，一个瓦片可能几十 MB（要素属性占大头），
+        网页查看器会非常慢；这一步是“打开查看器很快”的关键。
+        """
+        self._cleanup_field_temps()
+        fields = getattr(self._advanced, "fields", None)
+        if not fields:
+            return jobs
+        try:
+            self._field_work_dir = tempfile.mkdtemp(prefix="qgis_vt_fields_")
+        except OSError as exc:
+            MessageBox.warning(self, "矢量瓦片", f"创建输出字段副本目录失败：{exc}")
+            return jobs
+
+        source_layers: dict[str, object] = {}
+        try:
+            for layer in self.project.mapLayers().values():
+                try:
+                    source_layers[layer.source()] = layer
+                except RuntimeError:
+                    continue
+        except RuntimeError:
+            source_layers = {}
+
+        self.status_label.setText("正在准备输出字段副本…")
+        self.status_label.setToolTip("")
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents()
+        out_jobs: list[tuple[TileJob, str]] = []
+        counter = 0
+        try:
+            for job, label in jobs:
+                sources: list[str] = []
+                for source in job.layer_sources:
+                    layer = source_layers.get(source)
+                    if layer is None:
+                        sources.append(source)
+                        continue
+                    indices = [
+                        layer.fields().indexOf(name)
+                        for name in fields
+                        if layer.fields().indexOf(name) >= 0
+                    ]
+                    if not indices:
+                        sources.append(source)
+                        continue
+                    layer_name = f"tiles_{counter}"
+                    path = os.path.join(self._field_work_dir, f"layer_{counter}.gpkg")
+                    counter += 1
+                    options = QgsVectorFileWriter.SaveVectorOptions()
+                    options.driverName = "GPKG"
+                    options.fileEncoding = "UTF-8"
+                    options.layerName = layer_name
+                    options.actionOnExistingFile = (
+                        QgsVectorFileWriter.ActionOnExistingFile.CreateOrOverwriteFile
+                    )
+                    options.attributes = indices
+                    # GDB 读出的字段名也可能是「UTF-8 被当成 Latin-1」的乱码；
+                    # pbf 的属性键取的是字段名，顺手把副本里的字段名修正。
+                    # attributesExportNames 需要与源字段一一对应的全量列表。
+                    source_names = [field.name() for field in layer.fields()]
+                    fixed_names = [repair_mojibake(name) for name in source_names]
+                    if fixed_names != source_names:
+                        options.attributesExportNames = fixed_names
+                    try:
+                        error, message, new_path, _layer = (
+                            QgsVectorFileWriter.writeAsVectorFormatV3(
+                                layer,
+                                path,
+                                self.project.transformContext(),
+                                options,
+                            )
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "矢量瓦片：准备字段副本失败，使用原图层 %s：%s",
+                            layer.name(),
+                            exc,
+                            exc_info=True,
+                        )
+                        sources.append(source)
+                        continue
+                    if int(error) != 0:
+                        logger.warning(
+                            "矢量瓦片：字段副本写出失败，使用原图层 %s：%s",
+                            layer.name(),
+                            message,
+                        )
+                        sources.append(source)
+                        continue
+                    sources.append(f"{new_path}|layername={layer_name}")
+                out_jobs.append((replace(job, layer_sources=sources), label))
+        finally:
+            QApplication.restoreOverrideCursor()
+        return out_jobs
+
+    def _cleanup_field_temps(self) -> None:
+        """删除「输出字段」用的临时 GeoPackage 目录。"""
+        path, self._field_work_dir = self._field_work_dir, ""
+        if path:
+            shutil.rmtree(path, ignore_errors=True)
+
     def _start_next_job(self) -> None:
         if self._cancel_requested:
             self._finish_queue(cancelled=True)
@@ -684,59 +928,158 @@ class VectorTileDialog(BaseDialog):
         )
         self.status_label.setToolTip(job.output_dir)
         self.loading.setRange(0, 0)
+        self._start_job_group(job, label)
+
+    def _start_job_group(self, job: TileJob, label: str) -> None:
+        """按缩放级并行：任务内部起多个子进程（见 ``tiles/parallel.py``）。
+
+        同进程多线程并发跑 processing 在大会原生崩溃，所以子进程隔离；
+        对话框这里只面对一个任务，进度 / 生命周期信号与单任务一致。
+        """
+        self._group_label = label
+        self._group_task_levels = {}
+        self._group_progress = {}
+        self._group_bindings = {}
+        self._group_failed = ""
+        self.tasks = []
         try:
-            task = self.tile_service.create(job)
+            task = self.tile_service.create_group(job)
+            self._group_ranges = list(
+                getattr(task, "ranges", [(job.min_zoom, job.max_zoom)])
+            )
+            on_progress = partial(self._on_group_progress, task)
+            on_text = self._on_task_progress_text
+            on_completed = partial(self._on_group_task_completed, task)
+            on_terminated = partial(self._on_group_task_terminated, task)
             # 先连信号再提交：极快的任务可能在 addTask 后立即完成
-            task.progress_updated.connect(self._on_task_progress)
-            task.progress_text.connect(self._on_task_progress_text)
-            task.taskCompleted.connect(self._on_task_completed)
-            task.taskTerminated.connect(self._on_task_terminated)
-            self.task = task
-            self.tile_service.start(task)
+            task.progress_updated.connect(on_progress)
+            task.progress_text.connect(on_text)
+            task.taskCompleted.connect(on_completed)
+            task.taskTerminated.connect(on_terminated)
+            self._group_task_levels[task] = sum(
+                zmax - zmin + 1 for zmin, zmax in self._group_ranges
+            )
+            self._group_progress[task] = 0
+            self._group_bindings[task] = (
+                (task.progress_updated, on_progress),
+                (task.progress_text, on_text),
+                (task.taskCompleted, on_completed),
+                (task.taskTerminated, on_terminated),
+            )
+            self.tasks.append(task)
         except Exception as exc:  # noqa: BLE001
             logger.error("启动矢量瓦片任务失败：%s", exc, exc_info=True)
-            self.task = None
+            self._request_cancel_group()
+            self._disconnect_group_bindings()
+            self.tasks = []
             self._finish_queue(failed=f"启动失败：{exc}")
+            return
+        self.tile_service.start(self.tasks[0])
 
-    def _on_task_progress(self, value: int) -> None:
+    def _on_group_progress(self, task, value: int) -> None:
+        """某个子任务的进度 → 当前这套作业的加权进度（按各段层级数折算）。"""
+        if task not in self._group_progress:
+            return
         if self.loading.minimum() == 0 and self.loading.maximum() == 0:
             self.loading.setRange(0, 100)
         value = max(0, min(100, int(value)))
+        self._group_progress[task] = value
+        total_levels = sum(self._group_task_levels.values()) or 1
+        done = sum(
+            self._group_task_levels[t] * (p / 100.0)
+            for t, p in self._group_progress.items()
+        )
+        job_pct = done / total_levels * 100.0
         overall = (
-            (self._queue_index + value / 100.0) / max(1, self._queue_total) * 100.0
+            (self._queue_index + job_pct / 100.0)
+            / max(1, self._queue_total)
+            * 100.0
         )
         self.loading.setValue(int(round(overall)))
-        self.status_label.setText(self._job_progress_text(value))
+        self.status_label.setText(self._job_progress_text(int(round(job_pct))))
 
     def _job_progress_text(self, value: int) -> str:
         """当前这套瓦片的「缩放级别 + 百分比」说明（前面带批处理序号）。"""
         job, label = self._queue[self._queue_index]
+        prefix = (
+            f"第 {self._queue_index + 1}/{self._queue_total} 套："
+            if self._queue_total > 1
+            else ""
+        )
+        if len(self._group_ranges) > 1:
+            return (
+                f"{prefix}{label} · 缩放级别 {job.min_zoom}-{job.max_zoom}"
+                f"（并行 {len(self._group_ranges)} 组）· {value}%"
+            )
         total_zooms = max(1, job.max_zoom - job.min_zoom + 1)
         if value >= 100:
             level = total_zooms
         else:
             level = min(total_zooms, int(value / 100.0 * total_zooms) + 1)
         zoom = job.min_zoom + level - 1
-        prefix = (
-            f"第 {self._queue_index + 1}/{self._queue_total} 套："
-            if self._queue_total > 1
-            else ""
-        )
         return (
             f"{prefix}{label} · 缩放级别 {zoom}（{level}/{total_zooms}）"
             f" · {value}%"
         )
 
     def _on_task_progress_text(self, text: str) -> None:
+        if len(getattr(self, "_group_ranges", [])) > 1:
+            return  # 并行时各子任务文字会互相覆盖，进度条已给整体百分比
         self.status_label.setText(f"{text} · {self.loading.value()}%")
 
-    def _on_task_completed(self) -> None:
-        task = self.task
-        if task is None:
+    def _on_group_task_completed(self, task) -> None:
+        """一个子任务成功；整组都完成后收尾这套作业。"""
+        if task not in self._group_task_levels:
+            return  # 已被另一条生命周期信号处理
+        self.tasks = [t for t in self.tasks if t is not task]
+        if not self.tasks:
+            self._finish_job_group()
+
+    def _on_group_task_terminated(self, task) -> None:
+        """子任务失败 / 取消；等整组都停下后再统一收尾。"""
+        if task not in self._group_task_levels:
             return
-        self.task = None
-        job = task.job
-        label = self._queue[self._queue_index][1]
+        exc = getattr(task, "exception", None)
+        self.tasks = [t for t in self.tasks if t is not task]
+        if exc is not None and not self._group_failed:
+            self._group_failed = str(exc)
+            # 一个子任务失败就把其余一组停掉，避免继续白跑
+            self._request_cancel_group()
+        if self.tasks:
+            return
+        if self._cancel_requested:
+            self._finish_queue(cancelled=True)
+        elif self._group_failed:
+            self._finish_queue(failed=self._group_failed)
+        else:
+            self._finish_queue(failed="矢量瓦片任务被终止")
+
+    def _request_cancel_group(self) -> None:
+        """请求取消当前组内所有子任务（等待它们的终止信号收尾）。"""
+        for task in list(getattr(self, "tasks", []) or []):
+            try:
+                self.tile_service.cancel(task)
+            except RuntimeError:
+                pass
+
+    def _disconnect_group_bindings(self) -> None:
+        for bindings in getattr(self, "_group_bindings", {}).values():
+            for signal, slot in bindings:
+                try:
+                    signal.disconnect(slot)
+                except (TypeError, RuntimeError):
+                    pass
+        self._group_bindings = {}
+
+    def _finish_job_group(self) -> None:
+        """当前这套作业的所有缩放组都成功：统计 / 生成查看器 / 进入下一套。"""
+        job = self._queue[self._queue_index][0]
+        label = self._group_label
+        self.tasks = []
+        self._disconnect_group_bindings()
+        self._group_task_levels = {}
+        self._group_progress = {}
+        self._group_ranges = []
         count = self._count_pbf(job.output_dir)
         self._queue_tiles += count
         self._queue_completed += 1
@@ -771,17 +1114,6 @@ class VectorTileDialog(BaseDialog):
         else:
             self._finish_queue()
 
-    def _on_task_terminated(self) -> None:
-        task = self.task
-        if task is None:
-            return
-        self.task = None
-        exc = getattr(task, "exception", None)
-        self._finish_queue(
-            cancelled=bool(self._cancel_requested or task.isCanceled()),
-            failed="" if exc is None else str(exc),
-        )
-
     def _finish_queue(self, *, cancelled: bool = False, failed: str = "") -> None:
         total = self._queue_total
         completed = self._queue_completed
@@ -793,6 +1125,14 @@ class VectorTileDialog(BaseDialog):
         self._queue_index = 0
         self._no_feature_runs = []
         self._feature_count = 0
+        self.tasks = []
+        self._disconnect_group_bindings()
+        self._group_ranges = []
+        self._group_task_levels = {}
+        self._group_progress = {}
+        self._group_failed = ""
+        self._group_label = ""
+        self._cleanup_field_temps()
         self.loading.setRange(0, 100)
         self.execute_btn.setEnabled(True)
         self.cancel_btn.setEnabled(False)
@@ -808,12 +1148,12 @@ class VectorTileDialog(BaseDialog):
             self.loading.setValue(0)
             self.status_label.setText(f"第 {completed + 1}/{max(1, total)} 套失败：{failed}")
             logger.error("矢量瓦片任务失败：%s", failed)
-            send("critical", f"矢量瓦片生成失败：{failed}", duration=5)
+            MessageBox.critical(self, "矢量瓦片", f"矢量瓦片生成失败：{failed}")
             return
         self.loading.setValue(100)
         if tiles <= 0:
             self.status_label.setText("完成，但没有生成瓦片")
-            send("warning", "矢量瓦片任务完成，但输出目录中没有瓦片", duration=5)
+            MessageBox.warning(self, "矢量瓦片", "矢量瓦片任务完成，但输出目录中没有瓦片")
             return
         if no_feature:
             # 有 pbf 但全是空瓦片：多半是最大等级太低，面/线被抽稀掉
@@ -830,7 +1170,8 @@ class VectorTileDialog(BaseDialog):
                 "或更高后重新生成。"
             )
             logger.warning("矢量瓦片完成但 %d 套没有要素", len(no_feature))
-            send("warning", hint, duration=8)
+            MessageBox.warning(self, "矢量瓦片", hint)
+            focus_and_highlight(self.max_zoom_spin, "建议提高最大等级后重新生成")
             return
         feature_text = f"，{features} 个要素" if features else ""
         self.status_label.setText(f"完成：{total} 套，共 {tiles} 个瓦片{feature_text}")
@@ -840,11 +1181,10 @@ class VectorTileDialog(BaseDialog):
         send("success", message, duration=3)
 
     def _on_cancel(self) -> None:
-        task = self.task
-        if task is None:
+        if not self.tasks:
             return
         self._cancel_requested = True
-        self.tile_service.cancel(task)
+        self._request_cancel_group()
         self.cancel_btn.setEnabled(False)
         self.cancel_btn.setText("取消中…")
         self.status_label.setText("正在取消…")
@@ -910,29 +1250,27 @@ class VectorTileDialog(BaseDialog):
     def _open_viewer(self) -> None:
         path = self._viewer_path
         if not path or not os.path.isfile(path):
-            send("warning", "网页查看器不存在，请在「高级」里勾选后重新执行", duration=3)
+            MessageBox.warning(
+                self, "矢量瓦片", "网页查看器不存在，请在「高级」里勾选后重新执行"
+            )
             self.viewer_btn.setEnabled(False)
             return
         if not open_viewer(path):
-            send("warning", f"无法打开浏览器，请手动打开：{path}", duration=5)
+            MessageBox.warning(self, "矢量瓦片", f"无法打开浏览器，请手动打开：{path}")
 
     def _stop_running_task(self) -> None:
-        """关闭窗口时取消在跑的任务，避免任务继续给已关窗口发信号。"""
-        task = self.task
-        if task is not None:
+        """关闭窗口时取消在跑的全部子任务，避免任务继续给已关窗口发信号。"""
+        if self.tasks:
             self._cancel_requested = True
-            self.tile_service.cancel(task)
-            for signal, slot in (
-                (task.progress_updated, self._on_task_progress),
-                (task.progress_text, self._on_task_progress_text),
-                (task.taskCompleted, self._on_task_completed),
-                (task.taskTerminated, self._on_task_terminated),
-            ):
-                try:
-                    signal.disconnect(slot)
-                except (TypeError, RuntimeError):
-                    pass
-        self.task = None
+            self._request_cancel_group()
+            self._disconnect_group_bindings()
+        self.tasks = []
+        self._group_ranges = []
+        self._group_task_levels = {}
+        self._group_progress = {}
+        self._group_failed = ""
+        self._group_label = ""
+        self._cleanup_field_temps()
         self._queue = []
         self._queue_total = 0
         self._queue_index = 0
@@ -943,12 +1281,47 @@ class VectorTileDialog(BaseDialog):
         self.batch_btn.setEnabled(True)
         self.loading.setRange(0, 100)
 
+    def is_exporting(self) -> bool:
+        """是否正在导出矢量瓦片（当前并行组或待执行队列未结束）。"""
+        return bool(getattr(self, "tasks", None)) or bool(
+            getattr(self, "_queue", None)
+        )
+
+    def stop_export(self) -> None:
+        """供主窗口关闭流程调用：不再询问，直接终止当前导出。"""
+        self._stop_running_task()
+
+    def _confirm_stop_export(self) -> bool:
+        """导出进行中关闭窗口 / 程序时确认；返回 ``True`` 表示可以终止退出。"""
+        if not self.is_exporting():
+            return True
+        box = MessageBox(self)
+        box.setIcon(MessageBox.Icon.Warning)
+        box.setWindowTitle("矢量瓦片导出")
+        box.setText("矢量瓦片正在导出。")
+        box.setInformativeText(
+            "关闭会中断导出，尚未生成的瓦片不会继续生成"
+            "（已生成的瓦片保留在输出目录）。"
+        )
+        stop_btn = box.addButton(
+            "终止导出并关闭", MessageBox.ButtonRole.DestructiveRole
+        )
+        cancel_btn = box.addButton("继续导出", MessageBox.ButtonRole.RejectRole)
+        box.setDefaultButton(cancel_btn)
+        box.exec()
+        return box.clickedButton() is stop_btn
+
     def reject(self) -> None:  # noqa: N802 —— Qt 命名
         """标题栏关闭 / Esc 走 ``reject()``（不发 ``closeEvent``），这里同样收尾。"""
+        if not self._confirm_stop_export():
+            return
         self._stop_running_task()
         super().reject()
 
     def closeEvent(self, event) -> None:  # noqa: N802 —— Qt 命名
         """「关闭」按钮走 ``close()``，收尾逻辑与 :meth:`reject` 一致。"""
+        if not self._confirm_stop_export():
+            event.ignore()
+            return
         self._stop_running_task()
         super().closeEvent(event)

@@ -53,10 +53,21 @@ from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.infra.viewer_server import open_viewer
 from app.ui.common.algo_desc import make_description_panel
-from app.ui.common.base_dialog import BaseDialog, make_scrollable
+from app.ui.common.base_dialog import (
+    ANALYSIS_DIALOG_MAX_HEIGHT,
+    BaseDialog,
+    make_scrollable,
+)
 from app.ui.common.message_box import MessageBox
-from app.ui.common.layer_combo import combo_current_layer, populate_layer_combo
+from app.ui.common.layer_combo import (
+    LayerNameWatcher,
+    combo_current_layer,
+    populate_layer_combo,
+    retitle_layer_combo,
+)
+from app.ui.common.layer_order import layers_in_tree_order
 from app.ui.common.tile_progress import MetatileProgressTracker
+from app.ui.common.validation import focus_and_highlight
 from app.ui.common.widgets import save_file
 
 logger = get_logger(__name__)
@@ -73,6 +84,9 @@ _LOG_COLORS = {
 
 class ImageryMbtilesDialog(BaseDialog):
     """MBTiles 影像切片 Dialog（后台任务执行）。"""
+
+    #: 分析工具弹窗统一高度上限，超出后参数区滚动
+    max_window_height = ANALYSIS_DIALOG_MAX_HEIGHT
 
     def __init__(self, parent=None, title: str = "", dia_type: Optional[str] = None) -> None:
         super().__init__(parent, title)
@@ -98,6 +112,14 @@ class ImageryMbtilesDialog(BaseDialog):
         # 否则后加入的影像图层不会出现在输入列表里。
         self.project.layersAdded.connect(self._on_project_layers_changed)
         self.project.layersRemoved.connect(self._on_project_layers_changed)
+        # 图层在面板里改名后下拉框文字同步（对话框实例会被工具树缓存复用）
+        self._name_watcher = LayerNameWatcher(
+            self.project, self._on_layer_renamed, self
+        )
+
+    def _on_layer_renamed(self) -> None:
+        """图层面板改名后只刷新下拉文字，保留当前选择。"""
+        retitle_layer_combo(self.input_combo)
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout()
@@ -264,7 +286,7 @@ class ImageryMbtilesDialog(BaseDialog):
         """
         populate_layer_combo(
             self.input_combo,
-            self.project.mapLayers().values(),
+            layers_in_tree_order(self.project),
             layer_type=QgsMapLayer.RasterLayer,
         )
 
@@ -452,7 +474,9 @@ class ImageryMbtilesDialog(BaseDialog):
                     os.remove(candidate)
             except OSError as exc:
                 logger.error("删除旧 MBTiles 失败：%s（%s）", candidate, exc)
-                send("critical", f"无法删除旧文件：{candidate}\n{exc}", duration=5)
+                MessageBox.critical(
+                    self, "MBTiles 切片", f"无法删除旧文件：{candidate}\n{exc}"
+                )
                 return False
         preview_dir = self._preview_dir_for(output_file)
         if os.path.isdir(preview_dir):
@@ -465,16 +489,16 @@ class ImageryMbtilesDialog(BaseDialog):
     def _on_execute(self) -> None:
         layer = combo_current_layer(self.input_combo)
         if layer is None:
-            send("warning", "请先在工程中加载一个影像图层", duration=3)
+            focus_and_highlight(self.input_combo, "请先在工程中加载一个影像图层")
             return
         min_z = self.min_zoom_spin.value()
         max_z = self.max_zoom_spin.value()
         if min_z > max_z:
-            send("warning", "最小等级不能大于最大等级", duration=3)
+            focus_and_highlight(self.max_zoom_spin, "最小等级不能大于最大等级")
             return
         out = self.output_edit.text().strip()
         if not out:
-            send("warning", "请先选择输出 MBTiles 文件路径", duration=3)
+            focus_and_highlight(self.output_edit, "请先选择输出 MBTiles 文件路径")
             return
         if not out.lower().endswith(".mbtiles"):
             out += ".mbtiles"
@@ -534,7 +558,7 @@ class ImageryMbtilesDialog(BaseDialog):
                 if spec is not None:
                     spec.cleanup()
                 self._reset_task_ui()
-                send("critical", "MBTiles 切片任务创建失败", duration=5)
+                MessageBox.critical(self, "MBTiles 切片", "MBTiles 切片任务创建失败")
                 return
             # progress_updated / log_message 在 worker 线程发出 → 跨线程
             # QueuedConnection 投递到普通 Python 方法（投递到 QObject 槽在本环境
@@ -556,7 +580,7 @@ class ImageryMbtilesDialog(BaseDialog):
             if spec is not None:
                 spec.cleanup()
             self._reset_task_ui()
-            send("critical", f"MBTiles 切片启动失败：{exc}", duration=5)
+            MessageBox.critical(self, "MBTiles 切片", f"MBTiles 切片启动失败：{exc}")
 
     def _on_cancel(self) -> None:
         """请求取消正在跑的切片任务（子进程直接终止）。"""
@@ -632,7 +656,9 @@ class ImageryMbtilesDialog(BaseDialog):
             # 算法报「完成」但库里没有瓦片：多为范围 / CRS 问题，明确提示
             self.status_label.setText("完成，但文件里没有瓦片")
             logger.warning("MBTiles 切片任务完成但没有瓦片：%s", out)
-            send("warning", f"MBTiles 切片完成，但文件里没有瓦片：{out}", duration=5)
+            MessageBox.warning(
+                self, "MBTiles 切片", f"MBTiles 切片完成，但文件里没有瓦片：{out}"
+            )
             return
         self.status_label.setText(f"完成：{n} 个瓦片")
         self.status_label.setToolTip(self._progress.tooltip())
@@ -654,7 +680,7 @@ class ImageryMbtilesDialog(BaseDialog):
         if exc is not None:
             self.status_label.setText("切片失败")
             logger.error("MBTiles 切片失败: %s", exc, exc_info=True)
-            send("critical", f"MBTiles 切片失败：{exc}", duration=5)
+            MessageBox.critical(self, "MBTiles 切片", f"MBTiles 切片失败：{exc}")
         else:
             self.status_label.setText("已取消")
             send("warning", "MBTiles 切片已取消", duration=3)
@@ -663,11 +689,15 @@ class ImageryMbtilesDialog(BaseDialog):
         """用默认浏览器打开 MBTiles 预览页。"""
         path = self._viewer_path
         if not path or not os.path.isfile(path):
-            send("warning", "网页查看器不存在，请重新勾选「生成网页查看器」后执行", duration=3)
+            MessageBox.warning(
+                self,
+                "MBTiles 切片",
+                "网页查看器不存在，请重新勾选「生成网页查看器」后执行",
+            )
             self.viewer_btn.setEnabled(False)
             return
         if not open_viewer(path):
-            send("warning", f"无法打开浏览器，请手动打开：{path}", duration=5)
+            MessageBox.warning(self, "MBTiles 切片", f"无法打开浏览器，请手动打开：{path}")
 
     @staticmethod
     def _count_mbtiles_tiles(path: str) -> int:

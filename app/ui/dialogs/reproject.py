@@ -24,7 +24,15 @@ from app.core.domain.reproject import ReprojectJob, ReprojectService
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.ui.common.algo_desc import make_description_panel
-from app.ui.common.base_dialog import BaseDialog, make_scrollable
+from app.ui.common.base_dialog import (
+    ANALYSIS_DIALOG_MAX_HEIGHT,
+    BaseDialog,
+    make_scrollable,
+)
+from app.ui.common.layer_combo import LayerNameWatcher, retitle_layer_combo
+from app.ui.common.layer_order import layers_in_tree_order
+from app.ui.common.message_box import MessageBox
+from app.ui.common.validation import focus_and_highlight
 from app.ui.dialogs.create_data_dialog import CrsComboBox
 from app.ui.dialogs.crs_pick_dialog import CrsPickDialog
 
@@ -39,6 +47,9 @@ class ReprojectDialog(BaseDialog):
     阻塞，进度经 ``progress_updated`` 信号更新进度条，可随时取消。
     结果自动加入工程。
     """
+
+    #: 分析工具弹窗统一高度上限，超出后参数区滚动
+    max_window_height = ANALYSIS_DIALOG_MAX_HEIGHT
 
     def __init__(self, parent=None, title: str = "") -> None:
         super().__init__(parent, title)
@@ -57,6 +68,14 @@ class ReprojectDialog(BaseDialog):
         # 工程图层增删时刷新输入下拉：先开窗口后加图层（含窗口复用场景）也能立即看到
         self.project.layersAdded.connect(self._refresh_input_layers)
         self.project.layersRemoved.connect(self._refresh_input_layers)
+        # 图层在面板里改名后下拉框文字同步（对话框实例会被工具树缓存复用）
+        self._name_watcher = LayerNameWatcher(
+            self.project, self._on_layer_renamed, self
+        )
+
+    def _on_layer_renamed(self) -> None:
+        """图层面板改名后只刷新下拉文字，保留当前选择。"""
+        retitle_layer_combo(self.input_combo)
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout()
@@ -181,7 +200,7 @@ class ReprojectDialog(BaseDialog):
             current=combo.authid() or combo.currentText().strip(),
             layers=[
                 layer
-                for layer in self.project.mapLayers().values()
+                for layer in layers_in_tree_order(self.project)
                 if layer.type() == QgsMapLayer.VectorLayer
             ],
         )
@@ -192,9 +211,12 @@ class ReprojectDialog(BaseDialog):
             combo.set_crs(value)
 
     def _populate_layers(self) -> None:
-        """把工程里的矢量图层填充进下拉框（图层对象存 itemData）。"""
+        """把工程里的矢量图层填充进下拉框（图层对象存 itemData）。
+
+        顺序取图层面板从上到下（``mapLayers()`` 按图层 id 排，看着是乱序）。
+        """
         self.input_combo.clear()
-        for layer in self.project.mapLayers().values():
+        for layer in layers_in_tree_order(self.project):
             if layer.type() == QgsMapLayer.VectorLayer:
                 self.input_combo.addItem(layer.name(), layer)
 
@@ -228,11 +250,11 @@ class ReprojectDialog(BaseDialog):
     def _on_execute(self) -> None:
         layer = self.input_combo.currentData()
         if layer is None:
-            send("warning", "请先在工程中加载一个矢量图层", duration=3)
+            focus_and_highlight(self.input_combo, "请先在工程中加载一个矢量图层")
             return
         target_crs = self.crs_combo.crs()
         if not target_crs.isValid():
-            send("warning", "请选择有效的目标坐标系", duration=3)
+            focus_and_highlight(self.crs_combo, "请选择有效的目标坐标系")
             return
 
         job = ReprojectJob(
@@ -259,7 +281,7 @@ class ReprojectDialog(BaseDialog):
         except Exception as exc:
             logger.error("重投影任务准备失败: %s", exc, exc_info=True)
             self.execute_btn.setEnabled(True)
-            send("critical", f"重投影失败：{exc}", duration=5)
+            MessageBox.critical(self, "重投影（矢量）", f"重投影失败：{exc}")
             return
 
         # context / feedback 必须持有到任务结束（task 内部是裸指针，被 GC 会悬垂）
@@ -308,7 +330,7 @@ class ReprojectDialog(BaseDialog):
             self.loading.setValue(0)
             detail = f"：{error}" if error else ""
             logger.error("重投影失败%s", detail)
-            send("critical", f"重投影失败{detail}", duration=5)
+            MessageBox.critical(self, "重投影（矢量）", f"重投影失败{detail}")
             return
 
         try:
@@ -316,7 +338,7 @@ class ReprojectDialog(BaseDialog):
         except Exception as exc:
             logger.error("重投影结果装配失败: %s", exc, exc_info=True)
             self.loading.setValue(0)
-            send("critical", f"重投影失败：{exc}", duration=5)
+            MessageBox.critical(self, "重投影（矢量）", f"重投影失败：{exc}")
             return
 
         self.loading.setValue(100)
@@ -340,7 +362,7 @@ class ReprojectDialog(BaseDialog):
             return
         detail = f"：{error}" if error else ""
         logger.error("重投影失败%s", detail)
-        send("critical", f"重投影失败{detail}", duration=5)
+        MessageBox.critical(self, "重投影（矢量）", f"重投影失败{detail}")
 
     def _reset_task_ui(self) -> None:
         """复位「执行中」状态（按钮 / 任务引用），保留 context / feedback。"""

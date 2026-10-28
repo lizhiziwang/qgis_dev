@@ -14,10 +14,12 @@ sip 包装则抛 ``RuntimeError``。对话框监听 ``layersRemoved`` 刷新下�
 
 from __future__ import annotations
 
+import contextlib
 from typing import Iterable, Optional
 
 from qgis.core import QgsMapLayer
 from qgis.PyQt import sip
+from qgis.PyQt.QtCore import QObject
 from qgis.PyQt.QtWidgets import QComboBox
 
 
@@ -78,4 +80,64 @@ def populate_layer_combo(
             combo.setCurrentIndex(combo.count() - 1)
 
 
-__all__ = ["combo_current_layer", "layer_source", "live_layer", "populate_layer_combo"]
+def retitle_layer_combo(combo: QComboBox) -> None:
+    """图层改名后刷新下拉框条目文字（itemData 里存的是图层对象）。
+
+    只改文字、不动顺序与当前选择，比重建下拉框安全；已失效的图层条目保留
+    原文字（通常马上会被 ``layersRemoved`` 触发的重建清掉）。
+    """
+    for index in range(combo.count()):
+        layer = live_layer(combo.itemData(index))
+        if layer is not None:
+            combo.setItemText(index, layer.name())
+
+
+class LayerNameWatcher(QObject):
+    """工程图层改名时调用 ``callback``；随图层增删自动维护 ``nameChanged`` 连接。
+
+    对话框实例常被工具树缓存复用，图层在面板里改名后下拉框文字不会自己变。
+    用法：``self._name_watcher = LayerNameWatcher(project, self._on_layer_renamed, self)``，
+    回调里调 :func:`retitle_layer_combo` 或重新填充下拉框即可。
+    """
+
+    def __init__(self, project, callback, parent=None) -> None:
+        super().__init__(parent)
+        self._project = project
+        self._callback = callback
+        self._hooked: set[str] = set()
+        project.layersAdded.connect(self._sync_hooks)
+        project.layersRemoved.connect(self._sync_hooks)
+        self._sync_hooks()
+
+    def _sync_hooks(self, *_args) -> None:
+        live: set[str] = set()
+        try:
+            layers = list(self._project.mapLayers().values())
+        except RuntimeError:
+            layers = []
+        for layer in layers:
+            layer_id = layer.id()
+            live.add(layer_id)
+            if layer_id in self._hooked:
+                continue
+            try:
+                layer.nameChanged.connect(self._on_name_changed)
+                self._hooked.add(layer_id)
+            except (AttributeError, RuntimeError):
+                continue
+        # 已移除的图层不再跟踪（C++ 对象销毁时连接自动断开）
+        self._hooked.intersection_update(live)
+
+    def _on_name_changed(self, *_args) -> None:
+        with contextlib.suppress(RuntimeError):
+            self._callback()
+
+
+__all__ = [
+    "LayerNameWatcher",
+    "combo_current_layer",
+    "layer_source",
+    "live_layer",
+    "populate_layer_combo",
+    "retitle_layer_combo",
+]

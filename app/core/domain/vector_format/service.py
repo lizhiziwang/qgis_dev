@@ -17,7 +17,7 @@ import shutil
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from app.core.domain.geom_cleanup import copy_with_widened_string_fields
+from app.core.domain.geom_cleanup import copy_field_aliases, copy_with_widened_string_fields
 from app.infra.logging import get_logger
 
 if TYPE_CHECKING:
@@ -265,7 +265,7 @@ class VectorConvertService:
         options = QgsVectorFileWriter.SaveVectorOptions()
         options.driverName = job.fmt.driver
         options.fileEncoding = "UTF-8"
-        options.layerOptions = list(job.fmt.layer_options)
+        options.layerOptions = self._layer_options(job.fmt, layer)
         options.layerName = layer_name
         existed = os.path.exists(path)
         if existed and job.fmt.driver in _MANAGED_DB_DRIVERS:
@@ -312,6 +312,26 @@ class VectorConvertService:
             self._register_managed_layer(result_path, layer_name)
         logger.info("矢量格式转换写出完成：%s（格式=%s）", result_path, job.fmt.label)
         return result_path
+
+    @staticmethod
+    def _layer_options(fmt: VectorFormatSpec, layer: QgsVectorLayer) -> list[str]:
+        """按目标格式 / 输入字段生成创建选项。
+
+        GPKG 的要素 ID 列默认叫 ``fid``（必须是整数主键）。GDB 图层若自带
+        名为 ``fid`` 的字段（常见为 Real），GDAL 会报
+        ``Wrong field type for fid`` 并整体失败。这里把 FID 列改名成不冲突的
+        名字，用户字段 ``fid`` 原样保留。
+        """
+        options = list(fmt.layer_options)
+        if fmt.driver != "GPKG":
+            return options
+        field_names = {field.name().casefold() for field in layer.fields()}
+        if "fid" not in field_names:
+            return options
+        fid_name = "ogr_fid"
+        while fid_name.casefold() in field_names:
+            fid_name += "_1"
+        return [*options, f"FID={fid_name}"]
 
     @staticmethod
     def _register_managed_layer(path: str, layer_name: str) -> None:
@@ -395,11 +415,18 @@ class VectorConvertService:
         finally:
             ds = None
 
-    def load_result(self, path: str, layer_name: str = "") -> QgsVectorLayer:
+    def load_result(
+        self,
+        path: str,
+        layer_name: str = "",
+        source_layer: QgsVectorLayer | None = None,
+    ) -> QgsVectorLayer:
         """主线程把输出文件加载为图层（不加入工程）。
 
         GPKG / SQLite 可能是多图层库（往已有库追加），要按表名定位刚写出的
         图层 —— 直接 ``QgsVectorLayer(path, …)`` 会打开库里的第 0 层。
+        ``source_layer`` 给定时把它的字段别名补到结果（部分格式 / 驱动写出时
+        不保留别名）。
         """
         from qgis.core import QgsVectorLayer
 
@@ -417,6 +444,8 @@ class VectorConvertService:
             if not result.isValid():
                 raise RuntimeError(f"转换结果无法加载：{path}")
         logger.info("矢量格式转换完成：%s（%s 要素）", path, result.featureCount())
+        if source_layer is not None:
+            copy_field_aliases(source_layer, result)
         return result
 
     def run(
@@ -427,4 +456,4 @@ class VectorConvertService:
         """同步执行格式转换，返回目标文件对应的图层。"""
         prepared = self.prepare(job)
         path = self.write(prepared, feedback)
-        return self.load_result(path, prepared.layer_name)
+        return self.load_result(path, prepared.layer_name, source_layer=prepared.layer)

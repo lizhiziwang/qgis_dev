@@ -52,6 +52,53 @@ class TileService:
 
         return CreateTileTask("", job)
 
+    def create_group(self, job: TileJob) -> "QgsTask":
+        """构造按缩放级拆分的并行任务（单段 / 内存图层时退回普通任务）。
+
+        多段时每段由独立子进程执行（同进程多线程并发跑 processing 在大会
+        崩溃，见 :mod:`app.core.domain.tiles.parallel`）；返回的任务带
+        ``ranges`` 属性，供对话框显示「并行 N 组」。
+
+        **内存图层不能交给子进程**（子进程里没有这个图层，会报
+        ``Incorrect parameter value for LAYERS``），遇到时退回进程内单任务。
+        """
+        from .parallel import create_work_dir, split_zoom_ranges  # noqa: PLC0415
+        from .task import CreateTileGroupTask  # noqa: PLC0415
+
+        ranges = split_zoom_ranges(job.min_zoom, job.max_zoom)
+        if len(ranges) <= 1 or self._needs_inprocess(job):
+            task = self.create(job)
+            task.ranges = list(ranges) if len(ranges) > 1 else [(job.min_zoom, job.max_zoom)]
+            return task
+        return CreateTileGroupTask("", job, ranges, create_work_dir())
+
+    #: 子进程能按 source 重新打开的矢量 provider（本地文件 / SpatiaLite）
+    _PARALLEL_PROVIDERS = frozenset({"ogr", "spatialite"})
+
+    @classmethod
+    def _needs_inprocess(cls, job: TileJob) -> bool:
+        """作业里有内存图层 / 子进程无法可靠重载的数据源时退回进程内单任务。
+
+        内存图层（``memory`` 或 ``Polygon?…&uid=…``）在子进程里根本不存在；
+        服务器类 provider 的 source 可能带会话 / 凭据，也不冒险拆进子进程。
+        """
+        from qgis.core import QgsProject  # noqa: PLC0415
+
+        sources = {str(src) for src in job.layer_sources}
+        if any(src.startswith("memory:") for src in sources):
+            return True
+        try:
+            layers = list(QgsProject.instance().mapLayers().values())
+        except RuntimeError:
+            return False
+        for layer in layers:
+            try:
+                if layer.source() in sources and layer.providerType() not in cls._PARALLEL_PROVIDERS:
+                    return True
+            except RuntimeError:
+                continue
+        return False
+
     def start(self, task: "QgsTask") -> None:
         """把已构造的任务提交到 :class:`QgsApplication.taskManager`。"""
         from qgis.core import QgsApplication

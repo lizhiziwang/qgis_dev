@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from app.core.domain.geom_cleanup import copy_with_widened_string_fields
+from app.core.domain.geom_cleanup import copy_field_aliases, copy_with_widened_string_fields
 from app.infra.logging import get_logger, log_operation
 
 if TYPE_CHECKING:
@@ -147,6 +147,7 @@ class ReprojectService:
         )
         if layer is None or not layer.isValid():
             raise RuntimeError(f"重投影结果图层无效：{job.output_name}")
+        copy_field_aliases(job.input_layer, layer)
         logger.info(
             "native:reprojectlayer 完成 → %s（%s 要素%s）",
             layer.name(),

@@ -32,8 +32,8 @@ logger = get_logger(__name__)
 
 #: GDAL 算法中文兜底描述。QGIS 4.2 在本环境下 ``shortHelpString()`` 对所有
 #: ``gdal:*`` 都返回空字符串（注册表能拿到 alg，displayName 对，但 help 文本
-#: 没装上），所以这里手工补 57 个算法的中文简介，避免对话框右侧展示「裸 code」。
-#: 描述尽量与算法语义对齐，按 ``tools_dock._GDAL_ALGORITHMS`` 的 6 个分组排版。
+#: 没装上），所以这里手工补各算法的中文简介，避免对话框右侧展示「裸 code」。
+#: 描述尽量与算法语义对齐，按 ``tools_dock`` 的分组顺序排版。
 _GDAL_FALLBACK_DESC: dict[str, str] = {
     # ---- GDAL 栅格分析（18） ----
     "gdal:rastercalculator": (
@@ -106,13 +106,13 @@ _GDAL_FALLBACK_DESC: dict[str, str] = {
         "常用于分类图去噪。</p>"
     ),
     "gdal:rasterize": (
-        "<h2>矢栅转换</h2>"
+        "<h2>矢量转栅格</h2>"
         "<p>把矢量要素（点 / 线 / 面）转成栅格，像素值取自要素属性字段。</p>"
         "<p>适合把行政边界 / 站点等矢量转成栅格参与空间分析。</p>"
     ),
     "gdal:rasterize_over": (
         "<h2>属性值栅格化（覆盖）</h2>"
-        "<p>与「矢栅转换」类似，但仅写入要素覆盖到的像素，其余像素保持不变。</p>"
+        "<p>与「矢量转栅格」类似，但仅写入要素覆盖到的像素，其余像素保持不变。</p>"
     ),
     "gdal:rasterize_over_fixed_value": (
         "<h2>固定值栅格化（覆盖）</h2>"
@@ -183,20 +183,10 @@ _GDAL_FALLBACK_DESC: dict[str, str] = {
         "<p>基于 DEM 与观察点坐标（x, y, 高程）计算可视域栅格（每个像素是否可见），"
         "适合做通信塔 / 瞭望台选址。</p>"
     ),
-    # ---- GDAL 栅格数据源（11） ----
+    # ---- GDAL 栅格数据源（8） ----
     "gdal:overviews": (
         "<h2>构建金字塔</h2>"
         "<p>为栅格生成金字塔（overviews / 概览），加快大影像的缩放浏览速度。</p>"
-    ),
-    "gdal:retile": (
-        "<h2>重切片</h2>"
-        "<p>把大影像按指定瓦片边长切成多个小栅格（适合做瓦片金字塔的中间步骤）。</p>"
-    ),
-    "gdal:gdal2tiles": (
-        "<h2>gdal2tiles 切片</h2>"
-        "<p>把栅格按 XYZ 瓦片金字塔切片输出到目录，按 <code>{z}/{x}/{y}.ext</code> "
-        "组织，可直接作为地图服务的栅格瓦片源。</p>"
-        "<p>可设置最小 / 最大缩放级别、瓦片格式（PNG / JPG）、网页查看器等。</p>"
     ),
     "gdal:gdalinfo": (
         "<h2>栅格信息</h2>"
@@ -236,7 +226,7 @@ _GDAL_FALLBACK_DESC: dict[str, str] = {
         "<p>OGR / GDAL 通用格式转换——栅格或矢量都可转换为指定输出格式，"
         "选项按目标驱动调整。</p>"
     ),
-    # ---- GDAL 栅格元数据（3） ----
+    # ---- GDAL 栅格元数据（2） ----
     "gdal:assignprojection": (
         "<h2>指派投影</h2>"
         "<p>给栅格直接写入 / 指派坐标系（不改几何），适合已知正确 CRS 但文件没记录的"
@@ -253,16 +243,11 @@ _GDAL_FALLBACK_DESC: dict[str, str] = {
         "<p>识别栅格的格式、驱动、像素深度、波段数等元信息，"
         "用于诊断未知栅格。</p>"
     ),
-    # ---- GDAL 矢量分析（10） ----
+    # ---- GDAL 矢量分析（9） ----
     "gdal:dissolve": (
         "<h2>融合</h2>"
         "<p>按指定字段把多边形融合（dissolve）——同字段值合并为单个要素，"
         "可对几何相交的多边形按字段聚合。</p>"
-    ),
-    "gdal:buffervectors": (
-        "<h2>矢量缓冲区</h2>"
-        "<p>对矢量要素做固定距离缓冲区，输出多边形。</p>"
-        "<p>支持正 / 负距离（负值即向内收缩），可设置圆弧分段数。</p>"
     ),
     "gdal:offsetcurve": (
         "<h2>偏移线</h2>"
@@ -331,7 +316,7 @@ _GDAL_FALLBACK_DESC: dict[str, str] = {
 #: 合并到 ``_ALGO_FALLBACK_DESC`` —— ``algorithm_description_html`` 优先查这个
 #: 合并字典，命中则不再走「裸 code 命令」的兜底分支。
 _ALGO_FALLBACK_DESC: dict[str, str] = {
-    **_GDAL_FALLBACK_DESC,  # 57 个 gdal:* 中文描述
+    **_GDAL_FALLBACK_DESC,  # gdal:* 中文描述
     "native:writevectortiles_xyz": (
         "<h2>生成矢量瓦片（XYZ）</h2>"
         "<p>导出一个或多个矢量图层到矢量瓦片格式，为快速地图渲染和小数据量"
@@ -368,8 +353,10 @@ _ALGO_FALLBACK_DESC: dict[str, str] = {
         "结果图层的属性表同时携带输入与叠加图层的字段。</p>"
         "<p><b>交集</b>：仅保留两个图层重叠的部分。</p>"
         "<p><b>并集</b>：合并全部几何，重叠区域分割为独立要素。</p>"
-        "<p><b>差集</b>：输入图层去掉与叠加图层重叠的部分。</p>"
-        "<p><b>对称差</b>：两个图层不重叠的部分。</p>"
+        "<p><b>差集</b>（擦除）：只保留输入图层中不与叠加图层重叠的部分；"
+        "叠加图层自身的部分不会出现在结果中。</p>"
+        "<p><b>对称差</b>：保留输入图层与叠加图层各自不重叠的部分，"
+        "两侧几何都会输出；要素缺失的一侧字段为 NULL。</p>"
         "<p>可同时勾选多种运算；输出图层名为前缀加运算名，自动加入工程。"
         "可填写<b>输出目录</b>把每个结果保存为 GeoPackage 文件；留空则生成临时图层。</p>"
     ),
@@ -386,7 +373,7 @@ _ALGO_FALLBACK_DESC: dict[str, str] = {
         "（GeoPackage / Shapefile）保存到文件；留空则生成临时图层。</p>"
     ),
     "native:reprojectlayer": (
-        "<h2>重投影图层</h2>"
+        "<h2>重投影（矢量）</h2>"
         "<p>把矢量图层转换到另一个<b>坐标系（CRS）</b>，几何坐标按目标坐标系"
         "重新计算，属性保持不变。用于把数据统一到工程坐标系，或在不同坐标系"
         "间转换（如 WGS84 经纬度 → Web Mercator 投影）。</p>"
@@ -395,7 +382,7 @@ _ALGO_FALLBACK_DESC: dict[str, str] = {
         "留空则生成临时图层。</p>"
     ),
     "vector:convert": (
-        "<h2>矢量格式转换</h2>"
+        "<h2>格式转换（矢量）</h2>"
         "<p>把矢量图层转换为 GDAL/OGR 常见的矢量格式，保留几何与属性，"
         "并尽量保留原坐标系。</p>"
         "<p>支持：GeoPackage（.gpkg）、ESRI Shapefile（.shp）、GeoJSON、"

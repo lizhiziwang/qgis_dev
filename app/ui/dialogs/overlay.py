@@ -22,7 +22,15 @@ from app.core.domain.overlay import OPERATION_NAMES, OverlayJob, OverlayRun, Ove
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.ui.common.algo_desc import make_description_panel
-from app.ui.common.base_dialog import BaseDialog, make_scrollable
+from app.ui.common.base_dialog import (
+    ANALYSIS_DIALOG_MAX_HEIGHT,
+    BaseDialog,
+    make_scrollable,
+)
+from app.ui.common.layer_combo import LayerNameWatcher, retitle_layer_combo
+from app.ui.common.layer_order import layers_in_tree_order
+from app.ui.common.message_box import MessageBox
+from app.ui.common.validation import focus_and_highlight
 
 logger = get_logger(__name__)
 
@@ -38,6 +46,9 @@ class OverlayDialog(BaseDialog):
     主线程事件循环不阻塞，进度条按「已完成运算数 + 当前运算进度」折算，
     可随时取消。
     """
+
+    #: 分析工具弹窗统一高度上限，超出后参数区滚动
+    max_window_height = ANALYSIS_DIALOG_MAX_HEIGHT
 
     def __init__(self, parent=None, title: str = "") -> None:
         super().__init__(parent, title)
@@ -60,6 +71,10 @@ class OverlayDialog(BaseDialog):
         #: 最近一条 ERROR 级算法日志（任务失败时展示到 messagebar）
         self._last_error = ""
         self._init_ui()
+        # 图层在面板里改名后下拉框文字同步（对话框实例会被工具树缓存复用）
+        self._name_watcher = LayerNameWatcher(
+            self.project, self._on_layer_renamed, self
+        )
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout()
@@ -159,24 +174,36 @@ class OverlayDialog(BaseDialog):
             self.output_dir_edit.setText(path)
 
     def _populate_layers(self, combo: QComboBox) -> None:
-        """把工程里的矢量图层填充进下拉框（图层对象存 itemData）。"""
+        """把工程里的矢量图层填充进下拉框（图层对象存 itemData）。
+
+        顺序取图层面板从上到下（``mapLayers()`` 按图层 id 排，看着是乱序）。
+        """
         combo.clear()
-        for layer in self.project.mapLayers().values():
+        for layer in layers_in_tree_order(self.project):
             if layer.type() == QgsMapLayer.VectorLayer:
                 combo.addItem(layer.name(), layer)
+
+    def _on_layer_renamed(self) -> None:
+        """图层面板改名后只刷新下拉文字，保留当前选择。"""
+        retitle_layer_combo(self.input_combo)
+        retitle_layer_combo(self.overlay_combo)
 
     def _on_execute(self) -> None:
         input_layer = self.input_combo.currentData()
         overlay_layer = self.overlay_combo.currentData()
-        if input_layer is None or overlay_layer is None:
-            send("warning", "请先在工程中加载矢量图层", duration=3)
+        if input_layer is None:
+            focus_and_highlight(self.input_combo, "请先在工程中加载矢量图层")
+            return
+        if overlay_layer is None:
+            focus_and_highlight(self.overlay_combo, "请选择叠加图层")
             return
         if input_layer is overlay_layer:
-            send("warning", "输入图层与叠加图层不能相同", duration=3)
+            focus_and_highlight(self.overlay_combo, "输入图层与叠加图层不能相同")
             return
         operations = tuple(k for k, check in self.op_checks.items() if check.isChecked())
         if not operations:
-            send("warning", "请至少勾选一种叠加运算", duration=3)
+            first_check = next(iter(self.op_checks.values()), self.input_combo)
+            focus_and_highlight(first_check, "请至少勾选一种叠加运算")
             return
 
         job = OverlayJob(
@@ -337,7 +364,7 @@ class OverlayDialog(BaseDialog):
     def _fail_run(self, message: str) -> None:
         """整轮失败：复位 UI 并弹 critical。"""
         self.loading.setValue(0)
-        send("critical", message, duration=5)
+        MessageBox.critical(self, "叠加分析", message)
         self._end_run()
 
     def _end_run(self) -> None:

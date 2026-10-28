@@ -1855,6 +1855,9 @@ class PagedAttributeTableWidget(QWidget):
         self.model: Optional[PagedAttributeTableModel] = None
         #: 「组织列」隐藏的字段名（按名存，模型 reset/新增字段后仍能对上）
         self._hidden_field_names: set[str] = set()
+        #: 属性表自带的 ID 列（要素 fid，非图层字段）是否显示：默认隐藏，
+        #: 用户可在「组织列」里单独勾选打开。仅影响视图显示，模型列定义不变。
+        self._id_column_visible = False
         #: 被冻结的列（按名存；ID 列用 :data:`_ID_COLUMN_KEY`）。冻结列由**冻结视图**
         #: 显示，主表里对应隐藏（见 :meth:`_sync_column_visibility`）。
         self._frozen_keys: set[str] = set()
@@ -1934,7 +1937,9 @@ class PagedAttributeTableWidget(QWidget):
         self._icon_items.append((self.columns_btn, "organize_columns"))
         self.export_btn = QPushButton()
         self.export_btn.setObjectName("exportCsvBtn")
-        self.export_btn.setToolTip("导出 CSV（导出表格当前内容：含筛选、不含隐藏列）")
+        self.export_btn.setToolTip(
+            "导出 CSV（导出表格当前内容：含筛选、不含隐藏字段；要素 ID 始终导出）"
+        )
         self.export_btn.setFixedSize(26, 26)
         self._icon_items.append((self.export_btn, "export_csv"))
         self.start_btn.clicked.connect(self._start_edit)
@@ -3249,23 +3254,31 @@ class PagedAttributeTableWidget(QWidget):
         return [n for n in self.model.field_names if n not in self._hidden_field_names]
 
     def _organize_columns(self) -> None:
-        """弹「组织列」对话框，按勾选结果隐藏未选中的字段列（ID 列恒显示）。"""
+        """弹「组织列」对话框，按勾选结果隐藏未选中的字段列（ID 列可单独勾选）。"""
         show_modeless(
             self,
             "organize_columns",
             lambda: OrganizeColumnsDialog(
-                self.layer, self._visible_field_names(), parent=self
+                self.layer,
+                self._visible_field_names(),
+                parent=self,
+                include_id=True,
+                id_visible=self._id_column_visible,
             ),
             on_accepted=lambda dlg: self._apply_column_visibility(
-                dlg.checked_field_names()
+                dlg.checked_field_names(), dlg.id_visible()
             ),
             layer=self.layer,
         )
 
-    def _apply_column_visibility(self, names) -> None:
-        """记录要隐藏的字段名并同步到视图（按字段名存，模型结构不动）。"""
+    def _apply_column_visibility(self, names, id_visible: bool = True) -> None:
+        """记录要隐藏的字段名 / ID 列显示状态，并同步到视图（模型结构不动）。"""
         if self.model is None:
             return
+        self._id_column_visible = bool(id_visible)
+        if not self._id_column_visible:
+            # ID 列被隐藏时不允许继续保持冻结（冻结列必须可见）
+            self._frozen_keys.discard(_ID_COLUMN_KEY)
         chosen = set(names)
         self._hidden_field_names = {n for n in self.model.field_names if n not in chosen}
         self._sync_column_visibility()
@@ -3289,7 +3302,11 @@ class PagedAttributeTableWidget(QWidget):
             if col is None or self._column_key(col) in self._hidden_field_names:
                 self._frozen_keys.discard(key)
         frozen_cols = set(self._frozen_columns())
-        self.table_view.setColumnHidden(0, 0 in frozen_cols)
+        # 第 0 列（属性表自带的 fid）默认隐藏；只有用户在「组织列」里勾选后才显示。
+        # 冻结时由冻结视图显示，主表始终隐藏。
+        self.table_view.setColumnHidden(
+            0, (not self._id_column_visible) or 0 in frozen_cols
+        )
         self.frozen_view.setColumnHidden(0, 0 not in frozen_cols)
         for col, name in enumerate(self.model.field_names, start=1):
             hidden = name in self._hidden_field_names

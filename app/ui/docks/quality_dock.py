@@ -147,6 +147,8 @@ class QualityDock(ToolsDock):
             tips=_QUALITY_TIPS,
             dialog_factories=_QUALITY_DIALOG_FACTORIES,
             destroy_on_close=False,
+            # 收藏只属于「分析工具」：质检面板不显示，也不与主面板共用收藏列表
+            favorites_state=None,
         )
         # 质检项不多（7 个专项）：默认展开分组，打开面板就能直接看到全部质检项
         self.tree.expandAll()

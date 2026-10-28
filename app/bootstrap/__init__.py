@@ -91,6 +91,18 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         return tile_worker_main(job_file)
 
+    # 矢量瓦片并行导出子进程入口（tiles/parallel.py 以
+    # ``--vector-tile-worker <job.json>`` 拉起）：同样在单实例 / 登录 / 界面之前处理。
+    if "--vector-tile-worker" in args:
+        index = args.index("--vector-tile-worker")
+        job_file = args[index + 1] if index + 1 < len(args) else ""
+        if not job_file:
+            logger.error("--vector-tile-worker 缺少作业文件参数")
+            return 2
+        from app.core.domain.tiles.worker import main as vector_tile_worker_main  # noqa: PLC0415
+
+        return vector_tile_worker_main(job_file)
+
     # 单实例：更新器安装前会等这个互斥体释放（Inno Setup AppMutex 同名）。
     # 实例必须活到 main 返回；进程退出（含崩溃）时由内核释放。
     instance = SingleInstance(APP_MUTEX)

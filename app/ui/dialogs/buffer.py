@@ -26,7 +26,15 @@ from app.core.domain.buffer import BufferJob, BufferService
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.ui.common.algo_desc import make_description_panel
-from app.ui.common.base_dialog import BaseDialog, make_scrollable
+from app.ui.common.base_dialog import (
+    ANALYSIS_DIALOG_MAX_HEIGHT,
+    BaseDialog,
+    make_scrollable,
+)
+from app.ui.common.layer_combo import LayerNameWatcher, retitle_layer_combo
+from app.ui.common.layer_order import layers_in_tree_order
+from app.ui.common.message_box import MessageBox
+from app.ui.common.validation import focus_and_highlight
 
 logger = get_logger(__name__)
 
@@ -38,6 +46,9 @@ class BufferDialog(BaseDialog):
     对话框同一机制）：主线程事件循环不阻塞，进度经 ``progress_updated`` 信号
     回主线程更新进度条；可随时取消。
     """
+
+    #: 分析工具弹窗统一高度上限，超出后参数区滚动
+    max_window_height = ANALYSIS_DIALOG_MAX_HEIGHT
 
     #: native:buffer 的样式枚举中文名，索引即算法取值（0 圆 / 1 平 / 2 方 等）
     _END_CAP_LABELS = ("圆", "平", "方")
@@ -71,6 +82,10 @@ class BufferDialog(BaseDialog):
         #: 最近一条 ERROR 级算法日志（任务失败时展示到 messagebar）
         self._last_error = ""
         self._init_ui()
+        # 图层在面板里改名后下拉框文字同步（对话框实例会被工具树缓存复用）
+        self._name_watcher = LayerNameWatcher(
+            self.project, self._on_layer_renamed, self
+        )
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout()
@@ -202,20 +217,27 @@ class BufferDialog(BaseDialog):
             self.output_path_edit.setText(path)
 
     def _populate_layers(self) -> None:
-        """把工程里的矢量图层填充进下拉框（图层对象存 itemData）。"""
+        """把工程里的矢量图层填充进下拉框（图层对象存 itemData）。
+
+        顺序取图层面板从上到下（``mapLayers()`` 按图层 id 排，看着是乱序）。
+        """
         self.input_combo.clear()
-        for layer in self.project.mapLayers().values():
+        for layer in layers_in_tree_order(self.project):
             if layer.type() == QgsMapLayer.VectorLayer:
                 self.input_combo.addItem(layer.name(), layer)
+
+    def _on_layer_renamed(self) -> None:
+        """图层面板改名后只刷新下拉文字，保留当前选择。"""
+        retitle_layer_combo(self.input_combo)
 
     def _on_execute(self) -> None:
         layer = self.input_combo.currentData()
         if layer is None:
-            send("warning", "请先在工程中加载一个矢量图层", duration=3)
+            focus_and_highlight(self.input_combo, "请先在工程中加载一个矢量图层")
             return
         distance = self.distance_spin.value()
         if distance <= 0:
-            send("warning", "缓冲距离必须大于 0", duration=3)
+            focus_and_highlight(self.distance_spin, "缓冲距离必须大于 0")
             return
 
         job = BufferJob(
@@ -247,7 +269,7 @@ class BufferDialog(BaseDialog):
         except Exception as exc:
             logger.error("缓冲区任务准备失败: %s", exc, exc_info=True)
             self.execute_btn.setEnabled(True)
-            send("critical", f"缓冲区生成失败：{exc}", duration=5)
+            MessageBox.critical(self, "矢量缓冲区", f"缓冲区生成失败：{exc}")
             return
 
         # context / feedback 必须持有到任务结束（task 内部是裸指针，被 GC 会悬垂）
@@ -303,7 +325,7 @@ class BufferDialog(BaseDialog):
             self.loading.setValue(0)
             detail = f"：{error}" if error else ""
             logger.error("缓冲区生成失败%s", detail)
-            send("critical", f"缓冲区生成失败{detail}", duration=5)
+            MessageBox.critical(self, "矢量缓冲区", f"缓冲区生成失败{detail}")
             return
 
         try:
@@ -311,7 +333,7 @@ class BufferDialog(BaseDialog):
         except Exception as exc:
             logger.error("缓冲区结果装配失败: %s", exc, exc_info=True)
             self.loading.setValue(0)
-            send("critical", f"缓冲区生成失败：{exc}", duration=5)
+            MessageBox.critical(self, "矢量缓冲区", f"缓冲区生成失败：{exc}")
             return
 
         self.loading.setValue(100)
@@ -334,7 +356,7 @@ class BufferDialog(BaseDialog):
             return
         detail = f"：{error}" if error else ""
         logger.error("缓冲区生成失败%s", detail)
-        send("critical", f"缓冲区生成失败{detail}", duration=5)
+        MessageBox.critical(self, "矢量缓冲区", f"缓冲区生成失败{detail}")
 
     def _reset_task_ui(self) -> None:
         """复位「执行中」状态（按钮 / 任务引用），保留 context / feedback。"""

@@ -575,9 +575,12 @@ class ProjectOpsMixin:
         return self._on_save_project_as()
 
     def _confirm_slicing_on_close(self) -> bool:
-        """影像切片进行中时先确认：关闭程序会终止这些切片。
+        """切片任务进行中时先确认：关闭程序会终止这些任务。
 
-        - 没有切片在跑 / 提示被禁用（``prompt_slices_on_close=False``）→ ``True``；
+        覆盖两类：影像切片（子进程，见 ``imagery_tiles.active_tasks``）与
+        **分析工具里的矢量瓦片导出**（工具对话框内的 QgsTask / 待执行队列）。
+
+        - 没有任务在跑 / 提示被禁用（``prompt_slices_on_close=False``）→ ``True``；
         - 「终止切片并退出」→ ``True``（真正的取消在 ``closeEvent`` 里做）；
         - 「取消」→ ``False``，调用方应 ``event.ignore()`` 中止关闭。
 
@@ -594,18 +597,23 @@ class ProjectOpsMixin:
             running = active_descriptions()
         except Exception:  # noqa: BLE001 - 提示失败不能挡住关闭流程
             logger.debug("读取影像切片任务状态失败", exc_info=True)
+            running = []
+        vector_tiles = self._running_vector_tile_dialogs()
+        if not running and not vector_tiles:
             return True
-        if not running:
-            return True
-        listed = "\n".join(f"· {text}" for text in running[:5])
+        listed_items = [f"· {text}" for text in running[:5]]
+        if vector_tiles:
+            listed_items.append("· 矢量瓦片导出（分析工具，进行中）")
         if len(running) > 5:
-            listed += f"\n…另有 {len(running) - 5} 个任务"
+            listed_items.append(f"…另有 {len(running) - 5} 个任务")
+        listed = "\n".join(listed_items)
+        total = len(running) + len(vector_tiles)
         box = MessageBox(self)
         box.setIcon(MessageBox.Icon.Warning)
         box.setWindowTitle("关闭应用")
-        box.setText(f"还有 {len(running)} 个影像切片任务正在进行。")
+        box.setText(f"还有 {total} 个切片任务正在进行。")
         box.setInformativeText(
-            "关闭程序会终止这些切片，尚未生成的瓦片不会继续生成"
+            "关闭程序会终止这些任务，尚未生成的瓦片不会继续生成"
             f"（已生成的瓦片保留在输出目录）。\n\n{listed}"
         )
         stop_btn = box.addButton("终止切片并退出", MessageBox.ButtonRole.DestructiveRole)
@@ -613,6 +621,20 @@ class ProjectOpsMixin:
         box.setDefaultButton(cancel_btn)
         box.exec()
         return box.clickedButton() is stop_btn
+
+    def _running_vector_tile_dialogs(self) -> list:
+        """正在导出的矢量瓦片工具对话框（分析工具 Dock 里缓存的那个实例）。"""
+        dock = getattr(self, "_analyse_dock", None)
+        dialogs = getattr(dock, "_dialogs", None)
+        if not isinstance(dialogs, dict):
+            return []
+        dlg = dialogs.get("native:writevectortiles_xyz")
+        try:
+            if dlg is not None and dlg.is_exporting():
+                return [dlg]
+        except (AttributeError, RuntimeError):
+            pass
+        return []
 
     def _confirm_editing_layers_on_close(self, title: str = "关闭应用") -> bool:
         """关闭前逐个询问：处于编辑态且**有未提交改动**的图层是否保存。

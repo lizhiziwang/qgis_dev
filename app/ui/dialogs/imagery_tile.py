@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import uuid
 from html import escape
 from typing import Optional
@@ -53,10 +54,21 @@ from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.infra.viewer_server import open_viewer
 from app.ui.common.algo_desc import make_description_panel
-from app.ui.common.base_dialog import BaseDialog, make_scrollable
-from app.ui.common.layer_combo import combo_current_layer, populate_layer_combo
+from app.ui.common.base_dialog import (
+    ANALYSIS_DIALOG_MAX_HEIGHT,
+    BaseDialog,
+    make_scrollable,
+)
+from app.ui.common.layer_combo import (
+    LayerNameWatcher,
+    combo_current_layer,
+    populate_layer_combo,
+    retitle_layer_combo,
+)
+from app.ui.common.layer_order import layers_in_tree_order
 from app.ui.common.tile_progress import MetatileProgressTracker
 from app.ui.common.message_box import MessageBox
+from app.ui.common.validation import focus_and_highlight
 from app.ui.common.widgets import open_file_dir
 
 logger = get_logger(__name__)
@@ -73,6 +85,9 @@ _LOG_COLORS = {
 
 class ImageryTileDialog(BaseDialog):
     """影像切片生成 Dialog（后台任务执行）。"""
+
+    #: 分析工具弹窗统一高度上限，超出后参数区滚动
+    max_window_height = ANALYSIS_DIALOG_MAX_HEIGHT
 
     def __init__(self, parent=None, title: str = "", dia_type: Optional[str] = None) -> None:
         super().__init__(parent, title)
@@ -98,6 +113,14 @@ class ImageryTileDialog(BaseDialog):
         # 否则后加入的影像图层不会出现在输入列表里。
         self.project.layersAdded.connect(self._on_project_layers_changed)
         self.project.layersRemoved.connect(self._on_project_layers_changed)
+        # 图层在面板里改名后下拉框文字同步（对话框实例会被工具树缓存复用）
+        self._name_watcher = LayerNameWatcher(
+            self.project, self._on_layer_renamed, self
+        )
+
+    def _on_layer_renamed(self) -> None:
+        """图层面板改名后只刷新下拉文字，保留当前选择。"""
+        retitle_layer_combo(self.input_combo)
 
     def _init_ui(self) -> None:
         layout = QVBoxLayout()
@@ -267,7 +290,7 @@ class ImageryTileDialog(BaseDialog):
         """
         populate_layer_combo(
             self.input_combo,
-            self.project.mapLayers().values(),
+            layers_in_tree_order(self.project),
             layer_type=QgsMapLayer.RasterLayer,
         )
 
@@ -421,21 +444,71 @@ class ImageryTileDialog(BaseDialog):
             )
         return spec
 
+    def _prepare_output_dir(self, out_dir: str) -> bool:
+        """输出目录已存在且非空时确认清空；返回 ``False`` 表示用户取消。
+
+        ``native:tilesxyzdirectory`` 只覆盖同名瓦片，不清掉旧级别 / 旧范围的
+        文件；用户看到旧瓦片残留会误以为切片没更新，所以这里先明确询问。
+        """
+        if not os.path.isdir(out_dir):
+            return True
+        try:
+            entries = os.listdir(out_dir)
+        except OSError:
+            return True
+        if not entries:
+            return True
+        answer = MessageBox.question(
+            self,
+            "输出目录已有文件",
+            f"输出目录已存在且不为空：\n{out_dir}\n\n"
+            f"其中 {len(entries)} 个文件/子目录。继续将清空该目录后重新生成，"
+            "是否继续？",
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
+        )
+        if answer != MessageBox.StandardButton.Yes:
+            return False
+        failures: list[str] = []
+        for name in entries:
+            path = os.path.join(out_dir, name)
+            try:
+                if os.path.isdir(path) and not os.path.islink(path):
+                    shutil.rmtree(path)
+                else:
+                    os.remove(path)
+            except OSError as exc:
+                failures.append(f"{name}：{exc}")
+        if failures:
+            logger.error("清空影像切片输出目录失败：%s", failures)
+            MessageBox.critical(
+                self,
+                "影像切片",
+                "清空输出目录失败，已有文件未完全删除：\n" + "\n".join(failures[:8]),
+            )
+            return False
+        logger.info("影像切片：已清空输出目录 %s", out_dir)
+        return True
+
     def _on_execute(self) -> None:
         layer = combo_current_layer(self.input_combo)
         if layer is None:
-            send("warning", "请先在工程中加载一个影像图层", duration=3)
+            focus_and_highlight(self.input_combo, "请先在工程中加载一个影像图层")
             return
         min_z = self.min_zoom_spin.value()
         max_z = self.max_zoom_spin.value()
         if min_z > max_z:
-            send("warning", "最小等级不能大于最大等级", duration=3)
+            focus_and_highlight(self.max_zoom_spin, "最小等级不能大于最大等级")
             return
         out_dir = self.output_edit.text().strip()
         # 输出目录为空时算法会立刻报 OUTPUT_DIRECTORY 参数错误、什么都不产出，
         # 用户只看到「执行按钮变灰又恢复」+ 目录里没有文件，故先在界面上拦住。
         if not out_dir:
-            send("warning", "请先选择输出目录", duration=3)
+            focus_and_highlight(self.output_edit, "请先选择输出目录")
+            return
+        # 输出目录已有内容：先问是否清空旧瓦片（算法只覆盖同名文件，旧级别 /
+        # 旧范围的瓦片会残留，看起来像“切多了”或“没更新”）。
+        if not self._prepare_output_dir(out_dir):
             return
 
         job = ImageryTileJob(
@@ -489,7 +562,7 @@ class ImageryTileDialog(BaseDialog):
                 if spec is not None:
                     spec.cleanup()
                 self._reset_task_ui()
-                send("critical", "影像切片任务创建失败", duration=5)
+                MessageBox.critical(self, "影像切片", "影像切片任务创建失败")
                 return
             # progress_updated 在 worker 线程发出 → 跨线程 QueuedConnection 投递到主
             # 线程。实测：queued 投递到 QObject 槽（如 self.loading.setValue）在本环境
@@ -513,7 +586,7 @@ class ImageryTileDialog(BaseDialog):
             if spec is not None:
                 spec.cleanup()
             self._reset_task_ui()
-            send("critical", f"影像切片启动失败：{exc}", duration=5)
+            MessageBox.critical(self, "影像切片", f"影像切片启动失败：{exc}")
 
     def _on_cancel(self) -> None:
         """请求取消正在跑的切片任务（子进程直接终止）。"""
@@ -588,7 +661,9 @@ class ImageryTileDialog(BaseDialog):
             # 算法报「完成」但目录里没有瓦片：多为范围 / CRS / 权限问题，明确提示
             self.status_label.setText("完成，但没有生成瓦片")
             logger.warning("影像切片任务完成但输出目录中没有瓦片：%s", out)
-            send("warning", f"影像切片完成，但输出目录中没有瓦片：{out}", duration=5)
+            MessageBox.warning(
+                self, "影像切片", f"影像切片完成，但输出目录中没有瓦片：{out}"
+            )
             return
         self.status_label.setText(f"完成：{n} 个瓦片")
         self.status_label.setToolTip(self._progress.tooltip())
@@ -611,7 +686,7 @@ class ImageryTileDialog(BaseDialog):
         if exc is not None:
             self.status_label.setText("切片失败")
             logger.error("影像切片失败: %s", exc, exc_info=True)
-            send("critical", f"影像切片失败：{exc}", duration=5)
+            MessageBox.critical(self, "影像切片", f"影像切片失败：{exc}")
         else:
             self.status_label.setText("已取消")
             send("warning", "影像切片已取消", duration=3)
@@ -620,11 +695,13 @@ class ImageryTileDialog(BaseDialog):
         """用默认浏览器打开生成的 Leaflet 页面。"""
         path = self._viewer_path
         if not path or not os.path.isfile(path):
-            send("warning", "网页查看器不存在，请重新勾选「生成网页查看器」后执行", duration=3)
+            MessageBox.warning(
+                self, "影像切片", "网页查看器不存在，请重新勾选「生成网页查看器」后执行"
+            )
             self.viewer_btn.setEnabled(False)
             return
         if not open_viewer(path):
-            send("warning", f"无法打开浏览器，请手动打开：{path}", duration=5)
+            MessageBox.warning(self, "影像切片", f"无法打开浏览器，请手动打开：{path}")
 
     @staticmethod
     def _count_output_tiles(out_dir: str) -> int:

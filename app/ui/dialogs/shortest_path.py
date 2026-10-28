@@ -46,8 +46,16 @@ from app.core.domain.shortestpath.task import ShortestPathFeedback, ShortestPath
 from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.ui.common.algo_desc import make_description_panel
-from app.ui.common.base_dialog import BaseDialog, make_scrollable
+from app.ui.common.base_dialog import (
+    ANALYSIS_DIALOG_MAX_HEIGHT,
+    BaseDialog,
+    make_scrollable,
+)
 from app.ui.common.field_combo import make_field_combo_searchable
+from app.ui.common.layer_combo import LayerNameWatcher, retitle_layer_combo
+from app.ui.common.layer_order import layers_in_tree_order
+from app.ui.common.message_box import MessageBox
+from app.ui.common.validation import focus_and_highlight
 
 if TYPE_CHECKING:
     from qgis.gui import QgsMapTool
@@ -57,6 +65,9 @@ logger = get_logger(__name__)
 
 class ShortestPathDialog(BaseDialog):
     """最短路径分析 Dialog（后台执行，交互逻辑与 QGIS processing 对话框一致）。"""
+
+    #: 分析工具弹窗统一高度上限，超出后参数区滚动
+    max_window_height = ANALYSIS_DIALOG_MAX_HEIGHT
 
     def __init__(self, parent=None, title: str = "") -> None:
         super().__init__(parent, title)
@@ -84,6 +95,14 @@ class ShortestPathDialog(BaseDialog):
         # 移除前触发，此时 mapLayers() 仍含该层，刷新无效）。
         self.project.layersAdded.connect(self._refresh_network_layers)
         self.project.layersRemoved.connect(self._refresh_network_layers)
+        # 图层在面板里改名后下拉框文字同步（对话框实例会被工具树缓存复用）
+        self._name_watcher = LayerNameWatcher(
+            self.project, self._on_layer_renamed, self
+        )
+
+    def _on_layer_renamed(self) -> None:
+        """图层面板改名后只刷新下拉文字，保留当前选择。"""
+        retitle_layer_combo(self.network_combo)
 
     # ------------------------------------------------------------------ UI
 
@@ -237,8 +256,9 @@ class ShortestPathDialog(BaseDialog):
     # ------------------------------------------------------------- 数据填充
 
     def _populate_network_layers(self) -> None:
+        """网络图层下拉：顺序取图层面板从上到下。"""
         self.network_combo.clear()
-        for layer in self.project.mapLayers().values():
+        for layer in layers_in_tree_order(self.project):
             if (
                 layer.type() == QgsMapLayer.VectorLayer
                 and layer.geometryType() == QgsWkbTypes.LineGeometry
@@ -294,7 +314,7 @@ class ShortestPathDialog(BaseDialog):
     def _pick_point(self, key: str) -> None:
         canvas = self._canvas()
         if canvas is None:
-            send("warning", "无法获取地图画布", duration=3)
+            MessageBox.warning(self, "最短路径分析", "无法获取地图画布")
             return
         self._pick_key = key
         self._prev_tool = canvas.mapTool()
@@ -440,15 +460,19 @@ class ShortestPathDialog(BaseDialog):
     def _on_execute(self) -> None:
         net = self.network_combo.currentData()
         if net is None:
-            send("warning", "请先在工程中加载线图层作为网络", duration=3)
+            focus_and_highlight(self.network_combo, "请先在工程中加载线图层作为网络")
             return
         start = self._parse_point(self.start_edit.text())
         if start is None:
-            send("warning", "请设置起点（输入坐标或点击画布选择）", duration=3)
+            focus_and_highlight(
+                self.start_edit, "请设置起点（输入坐标或点击画布选择）"
+            )
             return
         end = self._parse_point(self.end_edit.text())
         if end is None:
-            send("warning", "请设置终点（输入坐标或点击画布选择）", duration=3)
+            focus_and_highlight(
+                self.end_edit, "请设置终点（输入坐标或点击画布选择）"
+            )
             return
 
         job = ShortestPathJob(
@@ -480,7 +504,9 @@ class ShortestPathDialog(BaseDialog):
         if alg is None:
             alg = _ensure_processing_algorithm("native:shortestpathpointtopoint")
         if alg is None:
-            send("critical", "无法获取最短路径算法（processing 未初始化）", duration=5)
+            MessageBox.critical(
+                self, "最短路径分析", "无法获取最短路径算法（processing 未初始化）"
+            )
             return
 
         task = ShortestPathRunnerTask(alg, params, context, feedback)
@@ -540,7 +566,7 @@ class ShortestPathDialog(BaseDialog):
         except Exception as exc:  # noqa: BLE001
             logger.error("加载最短路径结果图层失败: %s", exc, exc_info=True)
             self.loading.setValue(0)
-            send("critical", f"加载最短路径结果失败：{exc}", duration=5)
+            MessageBox.critical(self, "最短路径分析", f"加载最短路径结果失败：{exc}")
             return
 
         self.project.addMapLayer(layer)
@@ -562,9 +588,9 @@ class ShortestPathDialog(BaseDialog):
         if feedback is not None and feedback.isCanceled():
             send("warning", "已取消最短路径分析", duration=3)
         elif feedback is not None and feedback.errors:
-            send("critical", "；".join(feedback.errors), duration=5)
+            MessageBox.critical(self, "最短路径分析", "；".join(feedback.errors))
         else:
-            send("critical", "最短路径分析失败", duration=5)
+            MessageBox.critical(self, "最短路径分析", "最短路径分析失败")
 
     def _refresh_canvas(self) -> None:
         canvas = self._canvas()

@@ -268,6 +268,13 @@ class MainWindow(
                 _cancel_imagery_slices()
             except Exception:  # noqa: BLE001 —— 关闭流程不能因切片收尾失败而中断
                 logger.debug("终止影像切片失败", exc_info=True)
+            # 分析工具里的矢量瓦片导出：确认后同样终止，避免关闭过程中任务
+            # 继续往即将清理的工程 / 画布发信号
+            for tile_dialog in self._running_vector_tile_dialogs():
+                try:
+                    tile_dialog.stop_export()
+                except Exception:  # noqa: BLE001
+                    logger.debug("终止矢量瓦片导出失败", exc_info=True)
             self.project.clear()
         finally:
             self._clear_global_messagebar()

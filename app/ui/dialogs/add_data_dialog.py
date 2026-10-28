@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import datetime
@@ -79,6 +80,7 @@ from app.ui.common.fs_places import (
     place_sections,
 )
 from app.ui.common.icons import Icons
+from app.ui.common.message_box import MessageBox
 from app.ui.common.recent_dirs import (
     add_recent_dir,
     clear_recent_dirs,
@@ -1178,7 +1180,72 @@ class AddDataDialog(BaseDialog):
         menu.addSeparator()
         act_refresh = menu.addAction("刷新")
         act_refresh.triggered.connect(self._refresh)
+        if item is not None and self._is_deletable_item(item):
+            menu.addSeparator()
+            act_delete = menu.addAction("删除…")
+            act_delete.triggered.connect(lambda: self._delete_item(item))
         menu.exec(self._tree.viewport().mapToGlobal(pos))
+
+    def _is_deletable_item(self, item: QTreeWidgetItem) -> bool:
+        """树里代表磁盘文件 / 目录的顶层行才可删除。
+
+        数据库 / 工作表内部的子图层行指向的是整个库文件，右键删除会连库
+        一起删掉，容易被误解为「删掉这个图层」，因此不提供删除。
+        """
+        if item.parent() is not None:
+            return False
+        kind = item.data(0, _ROLE_KIND)
+        if kind not in (
+            KIND_DIR,
+            KIND_GDB,
+            KIND_CONTAINER,
+            KIND_VECTOR,
+            KIND_RASTER,
+            KIND_TABLE,
+        ):
+            return False
+        path = str(item.data(0, _ROLE_PATH) or "")
+        if not path or not os.path.lexists(path):
+            return False
+        # 防御：路径不能是盘符 / 文件系统根
+        absolute = os.path.abspath(path)
+        return os.path.dirname(absolute) != absolute
+
+    def _delete_item(self, item: QTreeWidgetItem) -> None:
+        """删除磁盘上的文件 / 目录（递归），删除前二次确认。"""
+        path = str(item.data(0, _ROLE_PATH) or "")
+        if not path or not os.path.lexists(path):
+            self._refresh()
+            return
+        name = item.text(0)
+        is_link = os.path.islink(path)
+        is_dir = os.path.isdir(path) and not is_link
+        what = "文件夹" if is_dir else "文件"
+        extra = " 及其中的全部内容" if is_dir else ""
+        answer = MessageBox.question(
+            self,
+            "删除数据",
+            f"确定删除{what}「{name}」{extra}？\n\n{path}\n\n"
+            "删除后不可恢复；如果该数据已在工程中打开，对应图层也会失效。",
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
+        )
+        if answer != MessageBox.StandardButton.Yes:
+            return
+        try:
+            if is_dir:
+                shutil.rmtree(path)
+            else:
+                os.remove(path)
+        except OSError as exc:
+            logger.warning("添加数据：删除 %s 失败：%s", path, exc)
+            MessageBox.critical(
+                self, "删除失败", f"无法删除{what}「{name}」：\n{exc}"
+            )
+            return
+        logger.info("添加数据：已删除%s %s", what, path)
+        self._refresh()
+        self._set_hint(f"已删除{what}「{name}」")
 
 
 __all__ = ["AddDataDialog", "DataSelection"]

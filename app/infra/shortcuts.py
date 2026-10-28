@@ -81,6 +81,7 @@ DEFAULT_SHORTCUTS: tuple[ShortcutSpec, ...] = (
     ShortcutSpec("save_project_as", "另存为工程", "Ctrl+Shift+S"),
     ShortcutSpec("open_project", "打开工程", "Ctrl+Shift+O"),
     ShortcutSpec("open_file", "打开文件", "Ctrl+O"),
+    ShortcutSpec("export_map_image", "导出图片", "Ctrl+Shift+E"),
     ShortcutSpec("exit_app", "退出", "Ctrl+Q"),
     ShortcutSpec("log_dock", "日志面板", "Ctrl+L"),
     ShortcutSpec("flow_editor", "流程节点编辑器", "Ctrl+Shift+F"),

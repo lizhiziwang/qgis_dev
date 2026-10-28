@@ -249,6 +249,11 @@ class WindowChromeMixin:
             "打开文件", "file", self._on_open_file,
             tooltip="打开数据文件（Ctrl+O）", shortcut="Ctrl+O",
         )
+        self._act_export_map_image = self._tab_action(
+            "导出图片", "export_image", self._on_export_map_image,
+            tooltip="把当前地图导出为图片 / PDF / SVG（Ctrl+Shift+E）",
+            shortcut="Ctrl+Shift+E",
+        )
         self._act_exit = self._tab_action(
             "退出", "exit", self.close,
             tooltip="退出程序（Ctrl+Q）", shortcut="Ctrl+Q",
@@ -264,6 +269,7 @@ class WindowChromeMixin:
                     self._act_open_project,
                 ]),
                 ("数据", [self._act_open_file]),
+                ("地图", [self._act_export_map_image]),
                 ("应用", [self._act_exit]),
             ],
         )
@@ -370,6 +376,7 @@ class WindowChromeMixin:
             "save_project_as": getattr(self, "_act_save_project_as", None),
             "open_project": getattr(self, "_act_open_project", None),
             "open_file": getattr(self, "_act_open_file", None),
+            "export_map_image": getattr(self, "_act_export_map_image", None),
             "exit_app": getattr(self, "_act_exit", None),
             "log_dock": getattr(self, "_act_log", None),
             "flow_editor": getattr(self, "_act_flow_editor", None),

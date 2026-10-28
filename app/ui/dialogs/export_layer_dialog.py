@@ -21,7 +21,8 @@ from __future__ import annotations
 import os
 from typing import TYPE_CHECKING
 
-from qgis.PyQt.QtCore import Qt, QVariant
+from qgis.PyQt import sip
+from qgis.PyQt.QtCore import Qt, QTimer, QVariant
 from qgis.PyQt.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -171,8 +172,11 @@ class ExportLayerDialog(BaseDialog):
         )
         #: 当前筛选条件（QGIS 表达式；空串 = 全部要素）
         self._expression = ""
-        #: 挂了字典的字段名（GDB 写属性域 / GPKG、SQLite 附带字典表用）
-        self._dict_field_names = layer_dict_field_names(layer)
+        #: 挂了字典的字段名（GDB 写属性域 / GPKG、SQLite 附带字典表用）。
+        #: **不在构造时读取**：GDB 要开 OGR 数据源读字段域，首次打开可能很慢；
+        #: 先按空表建界面，窗口显示后再补（见 _load_deferred_metadata）。
+        self._dict_field_names: list[str] = []
+        self._dict_fields_loaded = False
         self._formats = _export_formats(extra_formats)
         #: 重填字段表期间忽略 itemChanged（否则每加一行就刷一次提示）
         self._loading_fields = False
@@ -180,8 +184,14 @@ class ExportLayerDialog(BaseDialog):
             logger.warning("导出：本机没有可用的矢量写驱动")
         self.setMinimumSize(0, 0)
         self.resize(760, 640)
-        self._build()
-        self._apply_format_defaults()
+        # 先关刷新把界面建完：首次打开这一套表格 / 下拉的样式初始化较贵，
+        # 中途反复布局会让弹窗出现得更慢。
+        self.setUpdatesEnabled(False)
+        try:
+            self._build()
+            self._apply_format_defaults()
+        finally:
+            self.setUpdatesEnabled(True)
         # 弹窗是**非模态**的：用户可能边开着导出框边改选中集。选中数提示
         # （「选中数据」的占位 / tooltip / 底部提示）要跟着变；筛选方式本身
         # 不自动改，避免用户已经选好的「导出全部」被悄悄切走。
@@ -191,6 +201,40 @@ class ExportLayerDialog(BaseDialog):
                 layer.selectionChanged.connect(self._on_layer_selection_changed)
             except Exception:  # noqa: BLE001 —— 图层销毁等收尾场景
                 logger.exception("导出：连接图层 selectionChanged 失败")
+        # 首次打开提速：要素数（部分数据源要扫表）和 OGR 字段域都推迟到
+        # 窗口显示后再读，先把界面交给用户。
+        self._deferred_timer = QTimer(self)
+        self._deferred_timer.setSingleShot(True)
+        self._deferred_timer.timeout.connect(self._load_deferred_metadata)
+        self._deferred_timer.start(100)
+
+    def _load_deferred_metadata(self) -> None:
+        """窗口显示后再做首次打开较慢的两件事：要素数 / 字段字典。"""
+        if sip.isdeleted(self._layer):
+            self._dict_fields_loaded = True
+            return
+        try:
+            self._update_head_text()
+        except Exception:  # noqa: BLE001 —— 槽内异常会原生崩溃
+            logger.exception("导出数据：读取要素数失败")
+        try:
+            self._dict_field_names = layer_dict_field_names(self._layer)
+        except Exception:  # noqa: BLE001
+            logger.exception("导出数据：读取字段字典失败")
+            self._dict_field_names = []
+        self._dict_fields_loaded = True
+        try:
+            self._update_dict_checkbox()
+        except Exception:  # noqa: BLE001
+            logger.exception("导出数据：更新字典选项失败")
+
+    def _update_head_text(self) -> None:
+        count = self._layer.featureCount()
+        count_text = f"当前 {count} 个要素" if count >= 0 else "要素数未知"
+        selected_count = self._selected_feature_count()
+        if selected_count:
+            count_text += f"，已选中 {selected_count} 个"
+        self.head.setText(f"导出图层：{self._layer.name()}（{count_text}）")
 
     # --------------------------------------------------------------- 构建
 
@@ -200,14 +244,10 @@ class ExportLayerDialog(BaseDialog):
         root.setSpacing(8)
 
         head = QLabel()
-        count = self._layer.featureCount()
-        count_text = f"当前 {count} 个要素" if count >= 0 else "要素数未知"
-        selected_count = self._selected_feature_count()
-        if selected_count:
-            count_text += f"，已选中 {selected_count} 个"
-        head.setText(f"导出图层：{self._layer.name()}（{count_text}）")
+        head.setText(f"导出图层：{self._layer.name()}")
         head.setObjectName("SectionLabel")
         head.setWordWrap(True)
+        self.head = head
         root.addWidget(head)
 
         form = QFormLayout()
@@ -517,6 +557,23 @@ class ExportLayerDialog(BaseDialog):
             self._auto_limit_shapefile_fields()
         # 字典：GDB / GPKG / SQLite 能落字典表 / 属性域；其它能写属性的格式
         # （Excel / SHP / GeoJSON / KML）勾选后把代码值转成字典名称。
+        self._update_dict_checkbox()
+        self._update_hint()
+
+    def _update_dict_checkbox(self) -> None:
+        """按当前格式 + 字段字典刷新「转换字典」勾选项。
+
+        字段字典可能在窗口显示后才读完（GDB 读属性域较慢），期间先显示
+        「读取中…」并禁用，读完后再调用本方法刷新。
+        """
+        fmt = self._current_format()
+        if fmt is None:
+            return
+        if not self._dict_fields_loaded:
+            self.dict_check.setEnabled(False)
+            self.dict_check.setText("转换字典（读取中…）")
+            self.dict_check.setToolTip("正在读取图层的字段字典…")
+            return
         native_dict = fmt.extension in (".gdb", ".gpkg", ".sqlite", ".sqlite3", ".db")
         value_dict = fmt.extension in (".xlsx", ".shp", ".geojson", ".kml")
         supports_dict = native_dict or value_dict
@@ -549,7 +606,6 @@ class ExportLayerDialog(BaseDialog):
                 "把字段挂接的字典一起导出：FileGDB 写成属性域（coded value domain）；"
                 "GeoPackage / SQLite 把字典表写进目标库。"
             )
-        self._update_hint()
 
     def _update_hint(self) -> None:
         """按当前格式 / 勾选 / 导出名刷新底部提示。"""

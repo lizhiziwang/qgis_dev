@@ -1,6 +1,6 @@
 """通用算法任务数据类与服务门面。
 
-为 tools_dock 上挂的 57 个 ``gdal:*`` 算法（以及将来任意 processing 算法）
+为 tools_dock 上挂的 48 个 ``gdal:*`` 算法（以及将来任意 processing 算法）
 提供统一的 service 接口：dialog 只负责参数收集 + 触发执行，service 负责
 实际 ``processing.run`` + 结果图层装配。
 
@@ -40,6 +40,8 @@ from typing import TYPE_CHECKING, Any, Optional
 from app.core.domain.geom_cleanup import copy_with_widened_string_fields
 from app.infra.logging import get_logger
 
+from .ogr_columns import fid_column_name, geometry_column_name, has_geometry_parameter
+
 if TYPE_CHECKING:
     from qgis.core import (
         QgsMapLayer,
@@ -72,6 +74,10 @@ class GenericAlgJob:
 
 #: result 标记：result 是路径字符串而非图层（dialog 据此只发 messagebar）
 RESULT_IS_PATH = "path"
+
+
+class GenericAlgInputError(RuntimeError):
+    """输入参数在业务层面不合法；消息可直接展示给用户。"""
 
 
 class GenericAlgService:
@@ -135,6 +141,10 @@ class GenericAlgService:
         """
         params = dict(job.params)  # 拷贝避免污染 dialog 状态
         params = self._clean_inputs(alg, params)
+        self._fix_geometry_column(alg, params)
+        self._check_fid_field(alg, params)
+        if job.algo_id == "gdal:merge":
+            self._check_merge_crs(params)
 
         # 注入 OUTPUT 占位符（按 destination 类型）
         primary_output = self._primary_destination(alg)
@@ -204,15 +214,174 @@ class GenericAlgService:
         if primary_output is not None:
             return self._wrap_destination_result(results, primary_output, job)
 
-        # 无 destination（gdal:gdalinfo / gdal:dataset_identify）
-        # 整体当作路径 / 字符串结果返回；dialog 不加图层
+        # 无 destination（gdal:extractprojection / gdal:gdalinfo 等）：结果不一定
+        # 放在 results[output_name]，而是按输出定义逐项返回（如 WORLD_FILE /
+        # PRJ_FILE）。这里把所有文件 / 目录型输出收集成 `(输出名, 路径)` 列表，
+        # 供 dialog 展示完整路径并直接打开。
+        alg = self._get_algorithm(job.algo_id)
+        from qgis.core import QgsProcessingOutputFile, QgsProcessingOutputFolder
+
+        files: list[tuple[str, str]] = []
+        for odef in alg.outputDefinitions():
+            if not isinstance(
+                odef, (QgsProcessingOutputFile, QgsProcessingOutputFolder)
+            ):
+                continue
+            value = results.get(odef.name())
+            text = str(value).strip() if value is not None else ""
+            if text:
+                files.append((odef.name(), text))
+        value = files[0][1] if files else str(results.get(job.output_name, "") or "")
         return {
             RESULT_IS_PATH: True,
             "name": job.output_name,
-            "value": str(results.get(job.output_name, "")),
+            "value": value,
+            "outputs": files,
         }
 
     # ----------------------------------------------------------- helpers
+
+    def _check_merge_crs(self, params: dict) -> None:
+        """``gdal:merge`` 不做重投影：输入 CRS 不一致时直接拦住。
+
+        混用米制（EPSG:3857）与经纬度（EPSG:4490）时，GDAL 会按平均分辨率
+        估算出一个天文数字般的输出范围（实测报 "112.90 TB are at least
+        necessary"），既跑不出来也不好理解。这里提前给出可操作的提示。
+        """
+        from qgis.core import QgsMapLayer, QgsProject, QgsRasterLayer
+
+        value = params.get("INPUT")
+        if value is None:
+            return
+        items = value if isinstance(value, (list, tuple)) else [value]
+        entries: list[tuple[str, str]] = []
+        for item in items:
+            layer = item if isinstance(item, QgsMapLayer) else None
+            text = ""
+            if layer is None:
+                text = str(item or "")
+                layer = QgsProject.instance().mapLayer(text)
+                if layer is None and text:
+                    # wrapper 也可能存数据源字符串：按 source 找回工程里的图层，
+                    # 这样提示里用的是用户看到的图层名，而不是临时新建的空名图层。
+                    for candidate in QgsProject.instance().mapLayers().values():
+                        try:
+                            if candidate.source() == text:
+                                layer = candidate
+                                break
+                        except RuntimeError:
+                            continue
+                if layer is None and text:
+                    layer = QgsRasterLayer(text, "")
+            if layer is None:
+                continue
+            try:
+                if not layer.isValid():
+                    continue
+                crs = layer.crs()
+            except Exception:  # noqa: BLE001 —— 图层正在销毁 / 无效
+                continue
+            if crs is None or not crs.isValid():
+                continue
+            label = crs.authid() or crs.description() or "未知坐标系"
+            # wrapper 有时把多图层值存成数据源字符串（不是图层对象）：新建的
+            # QgsRasterLayer 没有名字，用文件名兜底，提示里能认出是哪个图层。
+            name = layer.name()
+            if not name and text:
+                name = Path(text).name
+            entries.append((name or "未命名图层", label))
+
+        if len(entries) < 2:
+            return
+        by_crs: dict[str, list[str]] = {}
+        for name, label in entries:
+            by_crs.setdefault(label, []).append(name)
+        if len(by_crs) <= 1:
+            return
+
+        detail = "、".join(
+            f"{' / '.join(names)}（{label}）" for label, names in by_crs.items()
+        )
+        raise GenericAlgInputError(
+            f"输入栅格的坐标系不一致：{detail}。\n\n"
+            "「拼接栅格」不会自动重投影；混用不同坐标系会产生异常巨大的输出"
+            "范围（GDAL 可能提示需要上百 TB 磁盘）。\n"
+            "请先用「重投影」工具把所有输入转成同一坐标系，或只选择坐标系相同的"
+            "栅格后再拼接。"
+        )
+
+    def _fix_geometry_column(self, alg, params: dict) -> None:
+        """把 ``GEOMETRY`` 参数修正成输入图层的真实几何列名。
+
+        融合 / 缓冲区等算法把列名直接拼进 ``-sql``，而 QGIS 4.2 只对「导出成
+        临时文件」的输入填真实列名；直接读 GeoPackage（``geom``）/ FileGDB
+        （``SHAPE``）时退回默认值 ``geometry``，GDAL 3.13 的 SQLite 方言会报
+        ``no such column: geometry``。详见 :mod:`.geometry_column`。
+        """
+        if not has_geometry_parameter(alg):
+            return
+        layer = self._vector_layer_input(params.get("INPUT"))
+        if layer is None:
+            return
+        column = geometry_column_name(layer)
+        if column:
+            params["GEOMETRY"] = column
+
+    def _check_fid_field(self, alg, params: dict) -> None:
+        """GDAL 工具不接受 FID 伪字段时提前给出可操作提示。
+
+        QGIS 的 OGR provider 会把 FID 列当普通字段暴露（FileGDB 的
+        ``OBJECTID``、SQLite 的 ``rowid`` 等），但 GDAL 命令行工具按真实
+        属性字段查找，``gdal_rasterize -a OBJECTID`` 只会报
+        ``Failed to find field OBJECTID on layer ...``。
+        """
+        from qgis.core import QgsProcessingParameterField
+
+        if not alg.id().startswith("gdal:"):
+            return
+        for pdef in alg.parameterDefinitions():
+            if not isinstance(pdef, QgsProcessingParameterField):
+                continue
+            value = params.get(pdef.name())
+            values = value if isinstance(value, (list, tuple)) else [value]
+            names = [v for v in values if isinstance(v, str) and v]
+            if not names:
+                continue
+            parent = pdef.parentLayerParameterName()
+            layer = self._vector_layer_input(params.get(parent)) if parent else None
+            if layer is None:
+                continue
+            fid = fid_column_name(layer)
+            if not fid or fid not in names:
+                continue
+            raise GenericAlgInputError(
+                f"字段「{fid}」是数据源自动维护的要素 ID（FID）列，"
+                "GDAL 无法把它当作普通属性字段使用。请重新选择其它字段。"
+            )
+
+    @staticmethod
+    def _vector_layer_input(value):
+        """参数值 → 有效的 ``QgsVectorLayer``（兼容图层对象 / id / source）。"""
+        from qgis.core import (
+            QgsMapLayer,
+            QgsProcessingFeatureSourceDefinition,
+            QgsProject,
+            QgsVectorLayer,
+        )
+
+        if isinstance(value, QgsProcessingFeatureSourceDefinition):
+            value = value.source
+        if isinstance(value, QgsVectorLayer):
+            return value if value.isValid() else None
+        if isinstance(value, QgsMapLayer):
+            return None
+        if isinstance(value, str) and value:
+            layer = QgsProject.instance().mapLayer(value)
+            if layer is None:
+                layer = QgsVectorLayer(value, "", "ogr")
+            if isinstance(layer, QgsVectorLayer) and layer.isValid():
+                return layer
+        return None
 
     def _get_algorithm(self, algo_id: str):
         from qgis.core import QgsApplication

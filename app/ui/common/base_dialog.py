@@ -35,6 +35,11 @@ from app.ui.common.frameless import FramelessMixin
 from app.ui.common.icons import Icons
 from app.ui.common.minimized_bar import MinimizedBar
 
+#: 分析工具弹窗统一的窗口高度上限（px）。
+#: 参数多的算法（勾选「高级」、GDAL 长表单）内容可能远高于一屏，
+#: 超过该高度后不再撑高窗口，改由参数区的滚动条承载。
+ANALYSIS_DIALOG_MAX_HEIGHT = 900
+
 
 def make_scrollable(widget: QWidget, *, horizontal: bool = False) -> QScrollArea:
     """把参数面板装进无边框滚动区。
@@ -56,6 +61,11 @@ def make_scrollable(widget: QWidget, *, horizontal: bool = False) -> QScrollArea
 
 class BaseDialog(FramelessMixin, QDialog):
     """所有自定义 Dialog 的基类（无边框 + 精简标题栏）。"""
+
+    #: 窗口高度上限（px）；``None`` 表示只按屏幕可用高度封顶。
+    #: 子类设成具体值时既限制初始自适应高度，也限制用户拉高 / 最大化，
+    #: 内容超出后由对话框内的滚动区承载（见 :func:`make_scrollable`）。
+    max_window_height: int | None = None
 
     def __init__(
         self,
@@ -82,6 +92,9 @@ class BaseDialog(FramelessMixin, QDialog):
         self._frameless_layout.addWidget(self._content, 1)
         self.setWindowIcon(Icons.app())
         self.setMinimumSize(800, 600)
+        if self.max_window_height:
+            # 硬上限：初始自适应、用户拉高与最大化都不超过该高度
+            self.setMaximumHeight(self.max_window_height)
         #: 最小化到画布底部的细条（懒建）与最小化前几何
         self._mini_bar = None
         self._mini_restore_geo = None
@@ -213,21 +226,28 @@ class BaseDialog(FramelessMixin, QDialog):
         self.resize(self.width(), height)
 
     def _max_window_height(self) -> int | None:
-        """可用的最大窗口高度：优先用屏幕可用高度。
+        """可用的最大窗口高度：屏幕可用高度与 :attr:`max_window_height` 的较小值。
 
         参数特别多的算法（Grid IDW / PostgreSQL 导出等）比主窗口还高；
         按主窗口高度封顶会永远差一点、必须滚动。这里改成屏幕可用高度
-        减 24px（留出任务栏 / 边缘），让这类窗口能完整展开。
+        减 24px（留出任务栏 / 边缘），让这类窗口能完整展开；子类再用
+        :attr:`max_window_height` 加一层更低的上限（分析工具统一 900px）。
         """
+        max_h: int | None = None
         screen = QGuiApplication.screenAt(self.pos()) or QGuiApplication.primaryScreen()
         if screen is not None:
-            return max(400, screen.availableGeometry().height() - 24)
-        node = self.parent()
-        while node is not None:
-            if isinstance(node, QMainWindow) and node.height() > 0:
-                return node.height()
-            node = node.parent()
-        return None
+            max_h = max(400, screen.availableGeometry().height() - 24)
+        else:
+            node = self.parent()
+            while node is not None:
+                if isinstance(node, QMainWindow) and node.height() > 0:
+                    max_h = node.height()
+                    break
+                node = node.parent()
+        limit = self.max_window_height
+        if limit:
+            max_h = min(max_h, limit) if max_h is not None else limit
+        return max_h
 
     def set_ui(self) -> None:
         """子类重写以构建 UI。"""

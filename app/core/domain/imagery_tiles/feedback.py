@@ -57,7 +57,11 @@ class ProcessingLogFeedback(QgsProcessingFeedback):
 
     def reportError(self, error: str, fatalError: bool = False) -> None:
         text = str(error)
-        if "error code" in text.lower():
+        # 「Process returned error code N」在加载 QGIS 中文翻译后会变成
+        # 「进程返回的错误代码 N」——只匹配英文会让失败的任务被当成成功
+        # （结果装配阶段再报一个与真实原因无关的错）。中英两种都要认。
+        lowered = text.lower()
+        if "error code" in lowered or "错误代码" in text:
             self.failed = True
         self.log_line.emit("ERROR", text)
 

@@ -52,6 +52,7 @@ from app.ui.dialogs.check_viewer import CheckViewerDialog
 from app.ui.dialogs.condition_query import ConditionQueryDialog
 from app.ui.dialogs.create_data_dialog import CreateDataDialog, default_output_dir
 from app.ui.dialogs.dict_manage import DictManageDialog
+from app.ui.dialogs.export_map_image import ExportMapImageDialog
 from app.ui.dialogs.import_layer_dialog import ImportLayerDialog
 from app.ui.dialogs.offline_download import OfflineDownloadDialog
 from app.ui.dialogs.qmap_compare import QMapCompareDialog
@@ -420,6 +421,31 @@ class AppActionsMixin:
         dlg.raise_()
         dlg.activateWindow()
 
+    def _on_export_map_image(self) -> None:
+        """「文件 → 导出图片」：把当前地图画布离屏导出成图片 / PDF / SVG。
+
+        无模态单实例：打开后可继续平移 / 缩放地图、调整图层，对话框里的
+        四至与输出尺寸会跟着刷新；再次点击按钮只把已有窗口置前。
+        """
+        if not self.project.mapLayers():
+            MessageBox.information(
+                self, "导出图片", "当前工程没有图层，请先加载数据。"
+            )
+            return
+        try:
+            show_modeless(
+                self,
+                "export_map_image",
+                lambda: ExportMapImageDialog(
+                    self,
+                    canvas=self.canvas,
+                    project_path=self._project_path,
+                ),
+            )
+        except Exception:  # noqa: BLE001 —— 槽内异常会原生崩溃，必须兜住
+            logger.exception("打开导出图片弹窗失败")
+            MessageBox.critical(self, "导出图片", "打开导出窗口失败，详见日志。")
+
     def _on_analyse(self) -> None:
         # 复用单个"分析工具"dock，避免每次点"分析"都新建一个
         if getattr(self, "_analyse_dock", None) is None:
@@ -606,11 +632,33 @@ class AppActionsMixin:
     def _local_db_entries(self, dock) -> list[dict]:
         """「数据管理」里已登记的本地库连接（注入给创建数据对话框当目标候选）。
 
-        Dock 没开过就返回空表（对话框里只剩「浏览…」）。
+        Dock 没开过时从持久化状态（``data_manage`` state）读回已登记的本地库：
+        之前只认活 Dock，用户不先打开数据管理就直接「创建数据」，目标库下拉里
+        只剩「浏览… / 新增数据库」。状态里只存了 name / path（分类、行数每次
+        打开重扫，见 ``DataManageDock.export_state``），这里够下拉框使用。
         """
-        if dock is None:
-            return []
-        return [db for db in getattr(dock, "_databases", []) if db.get("kind") == "local"]
+        if dock is not None:
+            return [
+                db
+                for db in getattr(dock, "_databases", [])
+                if db.get("kind") == "local"
+            ]
+        state = load_state(_DATA_MANAGE_STATE) or {}
+        entries: list[dict] = []
+        for item in state.get("local") or []:
+            if not isinstance(item, dict):
+                continue
+            path = str(item.get("path") or "")
+            if not path or not Path(path).is_file():
+                continue
+            entries.append(
+                {
+                    "kind": "local",
+                    "name": str(item.get("name") or Path(path).stem),
+                    "path": path,
+                }
+            )
+        return entries
 
     def _finish_container_creation(self, outcome, dock) -> None:
         """建完空库：登记进「数据管理」并提示（不往地图上加东西）。"""
@@ -703,9 +751,10 @@ class AppActionsMixin:
             if isinstance(lyr, QgsVectorLayer)
         ]
         dock = getattr(self, "_data_manage_dock", None)
-        databases: list[dict] = []
+        # 本地库允许从持久化状态读回（Dock 没开过也能导入）；服务器连接仍需
+        # 活 Dock（连接信息 / 当前选中项都在 Dock 上）。
+        databases: list[dict] = list(self._local_db_entries(dock))
         if dock is not None:
-            databases.extend(getattr(dock, "_databases", []))
             databases.extend(getattr(dock, "_server_connections", []))
 
         # **工程里没有图层也照样能进**：弹窗里可以用「选择」从本地文件挑。
