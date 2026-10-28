@@ -1,7 +1,7 @@
 """顶部 chrome、状态栏与主题。
 
 标题栏/模式切换、主题 QSS 应用、用户信息、状态栏与图层加载指示，
-以及顶部各工具条（通用/编辑/文件/查看/质检/帮助）与 Tab 切换器。
+以及顶部各工具条（通用/编辑/文件/查看/质检/制图/帮助）与 Tab 切换器。
 
 由 :class:`~app.ui.main_window.main_window.MainWindow` 多继承组合，方法只依赖
 ``self`` 上的共享状态。
@@ -53,7 +53,7 @@ from app.ui.tools.pan_zoom import ShiftZoomTool
 
 logger = get_logger(__name__)
 
-#: 文件 / 查看 / 质检 / 帮助页签的 Ribbon 图标逻辑边长（与「通用」工具条一致）
+#: 文件 / 查看 / 质检 / 制图 / 帮助页签的 Ribbon 图标逻辑边长（与「通用」工具条一致）
 _TAB_ICON = 20
 
 #: 使用手册默认路径（相对项目根 / 便携包根）；``app.help.manual_path`` 未配置时用它。
@@ -154,6 +154,7 @@ class WindowChromeMixin:
         self._file_toolbar = self._build_file_toolbar()
         self._view_toolbar = self._build_view_toolbar()
         self._quality_toolbar = self._build_quality_toolbar()
+        self._cartography_toolbar = self._build_cartography_toolbar()
         self._help_toolbar = self._build_help_toolbar()
 
         #: tab 索引 → 该 tab 下应显示的工具条列表（切换时互斥显示）
@@ -167,6 +168,7 @@ class WindowChromeMixin:
             ]),
             ("通用", [self.tool_bar]),
             ("质检", [self._quality_toolbar]),
+            ("制图", [self._cartography_toolbar]),
             ("帮助", [self._help_toolbar]),
         ):
             self._tab_toolbars[tab_bar.addTab(label)] = toolbars
@@ -492,6 +494,71 @@ class WindowChromeMixin:
         return self._build_ribbon_tab_toolbar(
             "质检", "QualityTabToolbar", [("分析", [act_check])]
         )
+
+    # ===================================================== 制图页签
+
+    def _build_cartography_toolbar(self) -> QToolBar:
+        """「制图」tab：制图出图 / 打印地图（Ribbon 布局，排在「帮助」前）。"""
+        self._act_cartography = self._tab_action(
+            "制图出图",
+            "cartography",
+            self._on_cartography,
+            tooltip="打开版面视图：插入图名/图例/比例尺，摆放后导出或打印",
+        )
+        self._act_map_print = self._tab_action(
+            "打印地图",
+            "print",
+            self._on_map_print,
+            tooltip="打开版面视图并直接弹出打印对话框",
+        )
+        return self._build_ribbon_tab_toolbar(
+            "制图",
+            "CartographyTabToolbar",
+            [
+                ("布局", [self._act_cartography]),
+                ("输出", [self._act_map_print]),
+            ],
+        )
+
+    def _on_cartography(self) -> None:
+        """打开「制图出图」版面视图。"""
+        self._show_cartography_dialog()
+
+    def _on_map_print(self) -> None:
+        """打开「制图出图」版面视图，并直接弹出打印对话框。"""
+        self._show_cartography_dialog(print_now=True)
+
+    def _show_cartography_dialog(self, *, print_now: bool = False) -> None:
+        """懒建单实例版面视图；已有实例直接置前（版面内容保留）。
+
+        ``print_now`` 为真时在窗口显示后打开打印对话框（顶部「打印地图」入口）。
+        """
+        try:
+            dialog = getattr(self, "_cartography_dialog", None)
+            if dialog is not None:
+                try:
+                    dialog.isVisible()
+                except RuntimeError:
+                    # C++ 对象已被销毁（防御性清理）
+                    dialog = None
+                    self._cartography_dialog = None
+            if dialog is None:
+                from app.ui.dialogs.cartography import CartographyDialog  # noqa: PLC0415 —— 重依赖延迟导入
+
+                dialog = CartographyDialog(self, canvas=self.canvas, project=self.project)
+                self._cartography_dialog = dialog
+            if dialog.isMinimized():
+                dialog.showNormal()
+            else:
+                dialog.show()
+            dialog.raise_()
+            dialog.activateWindow()
+            if print_now:
+                # 等窗口显示完成后再弹模态打印框，避免打印框被压在版面窗口后面
+                QTimer.singleShot(0, dialog.open_print_dialog)
+        except Exception as exc:  # 槽内异常会 native 崩溃，这里兜住只提示
+            logger.error("打开制图出图失败：%s", exc, exc_info=True)
+            MessageBox.warning(self, "制图出图", f"打开失败：{exc}")
 
     # ===================================================== 帮助页签
 
@@ -845,7 +912,7 @@ class WindowChromeMixin:
         tbb = getattr(self, "tool_bar_builder", None)
         if tbb is not None:
             tbb.apply_theme(theme)
-        # 文件 / 查看 / 质检 / 帮助页签的 Ribbon 按钮图标与组名颜色
+        # 文件 / 查看 / 质检 / 制图 / 帮助页签的 Ribbon 按钮图标与组名颜色
         for act, key in getattr(self, "_tab_icon_items", []):
             act.setIcon(tool_icons.icon(key, theme.input_focus, _TAB_ICON))
         for ribbon in getattr(self, "_ribbon_tab_toolbars", []):

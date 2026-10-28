@@ -29,6 +29,14 @@ QGIS 4 画布在渲染进行期间显示纯白。于是拖动/缩放后一旦新
 * 8 个相邻视口串行渲染（不并发），并对每个 extent 的瓦片量做估算上限，
   避免在全景等低级别下把上千张瓦片拉进缓存。
 * 同一批 extent 只预热一次（量化去重，容量封顶），进程内不会重复拉。
+* worker 渲染的是图层的**离屏克隆**（:meth:`_clone_for`），不是画布上的
+  工程图层；渲染模板（``QgsMapSettings``）也清空图层列表后再交给 worker。
+  原因：图层随时可能被删除（移除底图、工程切换），而 ``removeMapLayer``
+  会连 C++ 对象一起 delete，worker 渲染中持有的裸指针就悬空了 ——
+  ``QgsMapRendererCustomPainterJob.start()`` 直接 native 崩溃
+  （0xC0000005，见 logs/crash_faulthandler.log 里多次命中 ``_render_one``）。
+  克隆是独立的 provider 实例，瓦片仍进同一份进程级瓦片缓存
+  （实测克隆渲染 0 次网络请求即命中），预热效果不变。
 """
 
 from __future__ import annotations
@@ -85,9 +93,15 @@ class _PrefetchWorker(threading.Thread):
     ) -> None:
         """替换待渲染列表为 ``items``（[(layer, extent), ...]），并刷新渲染模板。
 
-        ``template_settings`` 是画布 ``mapSettings()`` 的拷贝：xyz provider 只在
-        层的源 CRS（EPSG:3857）下正确选瓦片，画布设置里已带好重投影所需的
-        图层变换/变换上下文，直接复用才能保证预热的瓦片与画布将要请求的一致。
+        ``items`` 里的 layer **必须是离屏克隆**（见 :meth:`TilePrefetcher._clone_for`），
+        不能是画布/工程里的图层：工程图层可能在本轮渲染期间被删除，worker
+        线程持有的裸指针会悬空（native 崩溃）。克隆由调用方持有引用直到
+        worker 渲染完，生命周期不受工程图层增删影响。
+
+        ``template_settings`` 是画布 ``mapSettings()`` 的拷贝（调用方需先用
+        :func:`_detached_template` 清空图层列表）：xyz provider 只在层的源 CRS
+        （EPSG:3857）下正确选瓦片，画布设置里已带好重投影所需的变换上下文，
+        直接复用才能保证预热的瓦片与画布将要请求的一致。
 
         ``completion_event`` 可选：传入则当本轮（队列从非空变空）渲染完成时
         触发 ``event.set()``，供 :class:`ZoomTileGuard` 等需要知道何时可解冻
@@ -127,10 +141,8 @@ class _PrefetchWorker(threading.Thread):
     def _render_one(self, layer, extent) -> None:
         from qgis.core import QgsMapRendererCustomPainterJob, QgsMapSettings
 
-        # 图层可能在排队期间被替换 / 删除（底图重载、工程切换）：此时 Python
-        # 包装器还在，但底层 C++ 对象已销毁，setLayers 会报
-        # "index 0 has type 'QgsRasterLayer' but 'QgsMapLayer' is expected"。
-        # 这一类预热已经没有意义，直接跳过（下一轮 renderComplete 会按新图层重排）。
+        # layer 是调用方持有的离屏克隆，正常不会被删除；这里仍做一层兜底
+        # （克隆在极端时序下也可能已被释放，sip 包装器还在）。
         if layer is None or sip.isdeleted(layer):
             return
         try:
@@ -139,7 +151,7 @@ class _PrefetchWorker(threading.Thread):
         except RuntimeError:
             return
 
-        ms = QgsMapSettings(self._template)  # 画布设置拷贝：投影/变换上下文与画布一致
+        ms = QgsMapSettings(self._template)  # 画布设置拷贝（模板已清空图层列表）
         ms.setExtent(extent)
         ms.setLayers([layer])
         ms.setBackgroundColor(QColor(0, 0, 0))
@@ -182,6 +194,8 @@ class TilePrefetcher(QObject):
         # 已预热过的 extent（量化去重，容量封顶）
         self._done: "OrderedDict[str, None]" = OrderedDict()
         self._done_cap = 256
+        # 工程图层的离屏克隆（按 layer id 缓存；worker 只渲染克隆，见 _clone_for）
+        self._clones: dict[str, Any] = {}
         self._worker: Optional[_PrefetchWorker] = None
         self._timer = QTimer(self)
         self._timer.setSingleShot(True)
@@ -203,8 +217,6 @@ class TilePrefetcher(QObject):
             # 画布渲染中（含白屏期）：不抢带宽，等下一次 renderComplete 再调度
             return
         try:
-            from qgis.core import QgsMapSettings
-
             settings = canvas.mapSettings()
             extent = settings.extent()
             if not extent or extent.width() <= 0 or extent.height() <= 0:
@@ -223,13 +235,17 @@ class TilePrefetcher(QObject):
                     "tile prefetch skipped: viewport tiles=%s 超限", viewport_tiles
                 )
                 return
-            items, added = self._build_items(settings, extent, layers[0])
+            # worker 渲染离屏克隆，不碰画布上的工程图层（图层随时可能被删除）
+            clone = self._clone_for(layers[0])
+            if clone is None:
+                return
+            items, added = self._build_items(settings, extent, clone)
             if not items:
                 return
             if self._worker is None:
                 self._worker = _PrefetchWorker(self._project or canvas.project())
                 self._worker.start()
-            self._worker.submit(items, QgsMapSettings(settings))
+            self._worker.submit(items, _detached_template(settings))
             if added:
                 logger.info(
                     "tile prefetch: 预取 %d 个相邻视口（当前视口约 %d 瓦片）",
@@ -263,6 +279,10 @@ class TilePrefetcher(QObject):
         return items, added
 
     # ----------------------------------------------------------- 估算 / 去重
+
+    def _clone_for(self, layer):
+        """:func:`_clone_layer` 的绑定版本（见「worker 渲染克隆」的说明）。"""
+        return _clone_layer(self._clones, layer)
 
     def _estimate_tiles(self, settings, extent) -> Optional[int]:
         """估算 ``extent`` 在当前画布分辨率下需要的 XYZ 瓦片数（近似，仅作限额）。
@@ -313,11 +333,71 @@ class TilePrefetcher(QObject):
 
     def shutdown(self) -> None:
         """停 worker 并解绑（画布销毁时自动调用；也可手动调）。"""
-        if self._worker is not None:
-            self._worker.stop()
-            self._worker.join(timeout=2.0)
-            self._worker = None
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            worker.stop()
+            worker.join(timeout=2.0)
+            if not worker.is_alive():
+                # worker 已退出：克隆的引用只剩主线程，可安全释放
+                self._clones.clear()
+            # 若 worker 仍在收尾（渲染没返回），克隆留到对象销毁时释放——
+            # 避免在 worker 线程里析构仍在使用的 QgsRasterLayer（跨线程析构会崩）
         self._canvas = None
+
+
+def _clone_layer(cache: dict, layer) -> Optional[Any]:
+    """返回 ``layer`` 的离屏克隆（按 ``layer.id()`` 缓存在 ``cache`` 里）。
+
+    为什么 worker 不直接渲染工程图层：
+
+    * ``QgsProject.removeMapLayer`` 会**连 C++ 对象一起 delete**（移除底图、
+      工程切换、关闭工程都会走到），而 worker 线程渲染期间持有的是裸指针 ——
+      图层一删，``QgsMapRendererCustomPainterJob.start()`` 立刻 native 崩溃
+      （0xC0000005，见 logs/crash_faulthandler.log）。
+    * 画布渲染与 worker 还会同时使用同一个 provider 实例，provider 不保证
+      跨线程安全。
+
+    克隆有独立 provider，生命周期与工程无关；XYZ 瓦片缓存在进程内按源 URL
+    共享（实测克隆渲染 0 次网络请求即命中），预热效果不变。
+
+    克隆必须在**主线程**创建并由调用方持有引用，worker 只渲染不析构。
+    """
+    try:
+        key = layer.id()
+    except RuntimeError:  # Python 包装器还在，底层对象已销毁
+        return None
+    clone = cache.get(key)
+    if clone is not None and not sip.isdeleted(clone):
+        return clone
+    try:
+        clone = layer.clone()
+    except Exception:  # noqa: BLE001  克隆失败只是不预热，不影响主流程
+        logger.debug("tile prefetch: 图层克隆失败", exc_info=True)
+        return None
+    if clone is None or sip.isdeleted(clone):
+        return None
+    try:
+        if not clone.isValid():
+            return None
+    except RuntimeError:
+        return None
+    cache[key] = clone
+    return clone
+
+
+def _detached_template(settings) -> Any:
+    """画布 ``mapSettings()`` 的拷贝，但**清空图层列表**。
+
+    模板只用来复用投影 / 输出尺寸 / 变换上下文；保留画布图层列表会让
+    worker 在拷贝模板时间接持有工程图层的裸指针，图层被删除后
+    ``job.start()`` 会踩空（同 :func:`_clone_layer` 的崩溃）。
+    """
+    from qgis.core import QgsMapSettings
+
+    template = QgsMapSettings(settings)
+    template.setLayers([])
+    return template
 
 
 def _is_xyz_layer(layer) -> bool:
@@ -403,6 +483,8 @@ class ZoomTileGuard(QObject):
         self._pending_event: Optional[threading.Event] = None
         self._started_at: Optional[float] = None
         self._worker: Optional[_PrefetchWorker] = None
+        # 工程图层的离屏克隆（按 layer id 缓存；worker 只渲染克隆，见 _clone_for）
+        self._clones: dict[str, Any] = {}
         self._prefetch_layer: Any = None  # 本轮预取的 XYZ 图层（收尾只重绘它）
         # 防抖：缩放空闲 200ms 才调度预取
         self._debounce = QTimer(self)
@@ -418,6 +500,10 @@ class ZoomTileGuard(QObject):
         canvas.destroyed.connect(self.shutdown)
 
     # ----------------------------------------------------------- 事件
+
+    def _clone_for(self, layer):
+        """:func:`_clone_layer` 的绑定版本（见「worker 渲染克隆」的说明）。"""
+        return _clone_layer(self._clones, layer)
 
     def _on_extents_changed(self) -> None:
         canvas = self._canvas
@@ -438,8 +524,6 @@ class ZoomTileGuard(QObject):
         if canvas is None:
             return
         try:
-            from qgis.core import QgsMapSettings
-
             settings = canvas.mapSettings()
             extent = settings.extent()
             if not extent or extent.width() <= 0 or extent.height() <= 0:
@@ -450,6 +534,10 @@ class ZoomTileGuard(QObject):
             ]
             if not layers:
                 return  # 没 XYZ 层就不预取（无瓦片可拉）
+            # worker 渲染离屏克隆，不碰画布上的工程图层（图层随时可能被删除）
+            clone = self._clone_for(layers[0])
+            if clone is None:
+                return
             # 自己持有 worker（不与 TilePrefetcher 共享——见类 docstring）
             if self._worker is None:
                 self._worker = _PrefetchWorker(self._project or canvas.project())
@@ -462,8 +550,8 @@ class ZoomTileGuard(QObject):
             self._started_at = time.monotonic()
             self._prefetch_layer = layers[0]
             self._worker.submit(
-                [(layers[0], extent)],
-                QgsMapSettings(settings),
+                [(clone, extent)],
+                _detached_template(settings),
                 completion_event=evt,
             )
             self._poll.start()
@@ -530,10 +618,16 @@ class ZoomTileGuard(QObject):
         """停 timer + worker 并解绑（画布销毁时自动调用；也可手动调）。"""
         self._debounce.stop()
         self._poll.stop()
-        if self._worker is not None:
-            self._worker.stop()
-            self._worker.join(timeout=2.0)
-            self._worker = None
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            worker.stop()
+            worker.join(timeout=2.0)
+            if not worker.is_alive():
+                # worker 已退出：克隆的引用只剩主线程，可安全释放
+                self._clones.clear()
+            # 若 worker 仍在收尾（渲染没返回），克隆留到对象销毁时释放——
+            # 避免在 worker 线程里析构仍在使用的 QgsRasterLayer（跨线程析构会崩）
         self._prefetch_layer = None
         self._canvas = None
 

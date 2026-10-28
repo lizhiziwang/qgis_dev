@@ -1105,6 +1105,20 @@ def app_qss(t: Theme) -> str:
         width: 0px;
     }}
 
+    /* 图框预设缩略图：通用 QToolButton 的 checked 与 hover 同色，鼠标移到别的
+       按钮上就分不清当前选中项；这里给选中项加强调色底 + 边框。 */
+    QToolButton#FramePresetButton {{
+        border: 2px solid transparent;
+        border-radius: 6px;
+    }}
+    QToolButton#FramePresetButton:hover {{ background-color: {t.btn_hover}; }}
+    /* 键盘 Tab 到缩略图时也要看得出焦点；hover 只有底色，没有焦点提示。 */
+    QToolButton#FramePresetButton:focus {{ border-color: {t.input_focus}; }}
+    QToolButton#FramePresetButton:checked {{
+        background-color: {_with_alpha(t.input_focus, 40)};
+        border-color: {t.input_focus};
+    }}
+
     QCheckBox, QRadioButton {{ color: {t.menu_text}; }}
     QCheckBox:disabled, QRadioButton:disabled {{ color: {t.text_secondary}; }}
 

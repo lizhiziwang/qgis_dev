@@ -174,6 +174,8 @@ class MainWindow(
         self._layer_clipboard: Optional[list] = None
         #: 流程节点编辑器窗口（懒建单实例，见 _open_flow_editor）
         self._flow_editor_window = None
+        #: 制图出图对话框（懒建单实例，见 _show_cartography_dialog）
+        self._cartography_dialog = None
         #: 离线下载弹窗（懒建单实例，保留用户勾选/进度状态）
         self._offline_download_dialog = None
         #: 「选择集」面板（懒建单实例，保留窗口位置，见 MapToolsMixin._on_box_select_complete）

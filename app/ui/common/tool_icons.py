@@ -101,6 +101,14 @@ _GLYPHS: dict[str, str] = {
     "cat_data": "\uf15b",     # file 注册数据表叶子
     "plus_circle": "\uf055",  # plus-circle 新建连接
     "upload": "\uf093",       # upload 导入图层（左栏树节点右键菜单）
+    # ---- 顶部「制图」页签（app/ui/main_window/mixins/chrome.py）----
+    "cartography": "",  # map 地图（制图出图）
+    "print": "",        # print 打印机（打印地图）
+    "page_setup": "",   # cog 页面设置（纸张 / 方向）
+    "heading": "",      # heading 图名（比普通文字更醒目）
+    "text": "",         # font 文字
+    "legend": "",       # list 图例
+    "compass": "",      # compass 指北针
     # ---- 顶部「帮助」页签（app/ui/main_window/mixins/chrome.py）----
     "manual": "",      # book 使用手册
     "feedback": "",    # comments 问题反馈
