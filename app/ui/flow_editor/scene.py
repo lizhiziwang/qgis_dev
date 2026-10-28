@@ -191,9 +191,18 @@ class FlowScene(QGraphicsScene):
             algorithm_id=src.algorithm_id,
         )
         for ins in src.inputs:
-            self._graph.add_input(node.id, ins.name, ins.type, default=ins.default)
+            self._graph.add_input(
+                node.id,
+                ins.name,
+                ins.type,
+                default=ins.default,
+                choices=ins.choices,
+                type_locked=ins.type_locked,
+            )
         for outs in src.outputs:
-            out = self._graph.add_output(node.id, outs.name, outs.type)
+            out = self._graph.add_output(
+                node.id, outs.name, outs.type, type_locked=outs.type_locked
+            )
             out.save_path = outs.save_path
             out.write_temp = outs.write_temp
             out.load_to_canvas = outs.load_to_canvas
@@ -217,9 +226,18 @@ class FlowScene(QGraphicsScene):
         node.code = template.code
         node.algorithm_id = template.key
         for ti in template.inputs:
-            self._graph.add_input(node_id, ti.name, ti.type, default=ti.default)
+            self._graph.add_input(
+                node_id,
+                ti.name,
+                ti.type,
+                default=ti.default,
+                choices=ti.choices,
+                type_locked=template.types_locked,
+            )
         for to in template.outputs:
-            out = self._graph.add_output(node_id, to.name, to.type)
+            out = self._graph.add_output(
+                node_id, to.name, to.type, type_locked=template.types_locked
+            )
             out.write_temp = to.write_temp
             out.load_to_canvas = to.load_to_canvas
         self.sync_node(node_id)

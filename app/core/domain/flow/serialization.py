@@ -40,6 +40,8 @@ class FlowCodec:
                             "type": ins.type.name,
                             "default": ins.default,
                             "required": ins.required,
+                            "choices": list(ins.choices),
+                            "type_locked": ins.type_locked,
                         }
                         for ins in node.inputs
                     ],
@@ -51,6 +53,7 @@ class FlowCodec:
                             "save_path": outs.save_path,
                             "write_temp": outs.write_temp,
                             "load_to_canvas": outs.load_to_canvas,
+                            "type_locked": outs.type_locked,
                         }
                         for outs in node.outputs
                     ],
@@ -98,6 +101,10 @@ class FlowCodec:
                             type=parse_port_type(str(iraw.get("type", "STRING"))),
                             default=str(iraw.get("default", "")),
                             required=bool(iraw.get("required", False)),
+                            choices=tuple(
+                                str(c) for c in iraw.get("choices", []) if str(c)
+                            ),
+                            type_locked=bool(iraw.get("type_locked", False)),
                         )
                     )
                 except (KeyError, ValueError) as exc:
@@ -112,6 +119,7 @@ class FlowCodec:
                             save_path=str(oraw.get("save_path", "")),
                             write_temp=bool(oraw.get("write_temp", True)),
                             load_to_canvas=bool(oraw.get("load_to_canvas", False)),
+                            type_locked=bool(oraw.get("type_locked", False)),
                         )
                     )
                 except (KeyError, ValueError) as exc:

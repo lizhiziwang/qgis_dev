@@ -29,6 +29,8 @@ class TemplateInput:
     type: PortType
     default: str = ""
     required: bool = True
+    #: 可选项（非空时运行参数对话框用下拉框承载，值仍按端口类型强转）。
+    choices: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -52,11 +54,23 @@ class NodeTemplate:
     code: str
     inputs: tuple[TemplateInput, ...] = ()
     outputs: tuple[TemplateOutput, ...] = ()
+    #: 端口类型是否由模板执行逻辑固定（固定时参数面板禁用「类型」下拉，
+    #: 避免用户改了类型却与节点代码不匹配）。自定义空节点的类型不固定。
+    types_locked: bool = True
 
 
 # ------------------------------------------------------------ 内置模板
 
-def _t(key: str, name: str, group: str, code: str, inputs=(), outputs=(), description: str = "") -> NodeTemplate:
+def _t(
+    key: str,
+    name: str,
+    group: str,
+    code: str,
+    inputs=(),
+    outputs=(),
+    description: str = "",
+    types_locked: bool = True,
+) -> NodeTemplate:
     return NodeTemplate(
         key=key,
         name=name,
@@ -65,6 +79,7 @@ def _t(key: str, name: str, group: str, code: str, inputs=(), outputs=(), descri
         code=code.strip(),
         inputs=tuple(inputs),
         outputs=tuple(outputs),
+        types_locked=types_locked,
     )
 
 
@@ -128,9 +143,18 @@ outputs["数值"] = inputs["值"]""",
         "缓冲区",
         "矢量分析",
         """# 缓冲区（native:buffer）
+from qgis.core import QgsUnitTypes
+layer = inputs["输入图层"]
+distance = float(inputs["距离"])
+unit_name = str(inputs.get("距离单位") or "米").strip()
+unit = QgsUnitTypes.DistanceUnit({"米": 0, "千米": 1, "度": 6}.get(unit_name, 0))
+layer_unit = layer.crs().mapUnits()
+if int(layer_unit) != int(QgsUnitTypes.DistanceUnknownUnit):
+    # native:buffer 的 DISTANCE 用图层坐标系单位，这里把用户单位换算过去
+    distance = distance * QgsUnitTypes.fromUnitToUnitFactor(unit, layer_unit)
 params = {
-    "INPUT": inputs["输入图层"],
-    "DISTANCE": inputs["距离"],
+    "INPUT": layer,
+    "DISTANCE": distance,
     "SEGMENTS": inputs["线段数"],
     "OUTPUT": "memory:缓冲区结果",
 }
@@ -140,10 +164,17 @@ outputs["缓冲区结果"] = processing.run(
         inputs=[
             TemplateInput("输入图层", PortType.VECTOR, required=True),
             TemplateInput("距离", PortType.NUMBER, default="100", required=True),
+            TemplateInput(
+                "距离单位",
+                PortType.STRING,
+                default="米",
+                required=False,
+                choices=("米", "千米", "度"),
+            ),
             TemplateInput("线段数", PortType.NUMBER, default="8", required=False),
         ],
         outputs=[TemplateOutput("缓冲区结果", PortType.VECTOR, load_to_canvas=True)],
-        description="为矢量图层按指定距离生成缓冲区面",
+        description="为矢量图层按指定距离生成缓冲区面（距离单位可选 米 / 千米 / 度）",
     ),
     _t(
         "clip",
@@ -386,6 +417,7 @@ outputs["图层"] = layer""",
 outputs["输出"] = inputs""",
         outputs=[TemplateOutput("输出", PortType.STRING, load_to_canvas=False)],
         description="从零开始的空白节点",
+        types_locked=False,
     ),
 ]
 
@@ -410,10 +442,19 @@ def instantiate_template(
     """
     node = graph.add_node(name=template.name, x=x, y=y, code=template.code, algorithm_id=template.key)
     for ti in template.inputs:
-        ins = graph.add_input(node.id, ti.name, ti.type, default=ti.default)
+        ins = graph.add_input(
+            node.id,
+            ti.name,
+            ti.type,
+            default=ti.default,
+            choices=ti.choices,
+            type_locked=template.types_locked,
+        )
         ins.required = ti.required  # 模板声明的必填必须落下来，否则运行前参数对话框不拦空值
     for to in template.outputs:
-        out = graph.add_output(node.id, to.name, to.type)
+        out = graph.add_output(
+            node.id, to.name, to.type, type_locked=template.types_locked
+        )
         out.write_temp = to.write_temp
         out.load_to_canvas = to.load_to_canvas
     return node
