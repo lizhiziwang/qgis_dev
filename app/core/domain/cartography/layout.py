@@ -201,6 +201,11 @@ def create_map_frame(
     page_w, page_h = page_size(layout)
     inset = max(0.0, float(inset_mm))
     map_item = QgsLayoutItemMap(layout)
+    # 装饰网格的间隔按页面毫米换算成地图单位，范围或框尺寸一变（画布联动、
+    # 拖手柄改大小）就得重算。连接放在建图元处只连一次；没有装饰网格时
+    # 回调是空操作。个别构建没有该信号时静默跳过。
+    with contextlib.suppress(AttributeError):  # pragma: no cover - 仅旧构建兜底
+        map_item.extentChanged.connect(lambda item=map_item: _refresh_decoration_intervals(item))
     # 注意：只 setRect 不会刷新 QgsLayoutItem 的尺寸缓存（sizeWithUnits 仍为 0），
     # 后续按宽高比套范围会直接返回；必须走 attemptMove/attemptResize。
     layout.addLayoutItem(map_item)
@@ -298,9 +303,7 @@ _DECORATION_FRAME_STYLES = {
     "zebra": QgsLayoutItemMapGrid.Zebra,
 }
 _FRAME_STYLE_TO_DECORATION = {
-    _qt_enum_value(style): key
-    for key, style in _DECORATION_FRAME_STYLES.items()
-    if key not in ("line", "zebra")
+    _qt_enum_value(style): key for key, style in _DECORATION_FRAME_STYLES.items() if key not in ("line", "zebra")
 }
 
 #: 双线框的识别约定：Zebra 且两个填充色全透明。见 :func:`_decoration_from_grid`。
@@ -364,9 +367,7 @@ def _decoration_interval(value: float, length_mm: float) -> float:
     return nice_grid_interval(value, 0.0, target_divisions=divisions)
 
 
-def _refresh_decoration_intervals(
-    map_item: QgsLayoutItemMap, key: str | None = None
-) -> None:
+def _refresh_decoration_intervals(map_item: QgsLayoutItemMap, key: str | None = None) -> None:
     """重算装饰网格的间隔，保持刻度 / 斑马纹在页面上的密度。
 
     间隔以地图单位计，套用范围后地图范围一变就得跟着重算，否则缩放后
@@ -465,7 +466,6 @@ def apply_map_frame_style(map_item: QgsLayoutItemMap, options: MapFrameStyle) ->
         if grid is not None:
             _remove_grid(map_item, grid)
     map_item.update()
-
 
 
 # ============================================================ 整饰元素
