@@ -387,6 +387,7 @@ class SplitPolygonTool(QgsMapTool):
     def _clear_polygon(self) -> None:
         self._pts = []
         self._preview_pt = None
+        self._set_snap_match(None)
         if self._band is not None:
             try:
                 self._band.reset(QgsWkbTypes.PolygonGeometry)

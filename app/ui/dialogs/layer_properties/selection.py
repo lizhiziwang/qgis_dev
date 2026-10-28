@@ -26,12 +26,17 @@ from qgis.PyQt.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLabel,
+    QPushButton,
     QVBoxLayout,
     QWidget,
 )
 
 from app.infra.logging import get_logger
-from app.ui.common.selection_style import HighlightStyle, SelectionStyleManager
+from app.ui.common.selection_style import (
+    HighlightStyle,
+    SelectionStyleManager,
+    default_style,
+)
 from app.ui.dialogs.layer_properties.base import LayerPropertyTab
 from app.ui.dialogs.layer_properties.render import _PREVIEW_SIZE, _geom_kind
 
@@ -42,6 +47,9 @@ _KIND_NAMES = {"point": "点", "line": "线", "polygon": "面"}
 
 #: 预览里点标记的画布尺寸
 _PREVIEW_MARKER_SIZE = "6.0"
+
+#: 「恢复默认」用的选中高亮颜色（0,255,255）：填充 / 描边都恢复成它
+_DEFAULT_HIGHLIGHT_COLOR = "#00ffff"
 
 
 class _ClickableLabel(QLabel):
@@ -189,7 +197,14 @@ class SelectionTab(LayerPropertyTab):
             " border-radius: 3px; }"
         )
         self.preview_label.clicked.connect(self._open_symbol_settings)
-        row.addWidget(self.preview_label)
+        row.addWidget(self.preview_label, 0, Qt.AlignmentFlag.AlignTop)
+        self.reset_btn = QPushButton("恢复默认", preview_row)
+        self.reset_btn.setToolTip(
+            "恢复默认选中高亮样式：填充 / 描边颜色 #00FFFF（0, 255, 255）"
+        )
+        self.reset_btn.clicked.connect(self._restore_default)
+        # 与预览框**顶边**对齐（右上角），不放到预览右侧的垂直中间
+        row.addWidget(self.reset_btn, 0, Qt.AlignmentFlag.AlignTop)
         row.addStretch(1)
         form.addRow("符号预览", preview_row)
         root.addLayout(form)
@@ -220,6 +235,7 @@ class SelectionTab(LayerPropertyTab):
             # 非矢量 / 无几何（属性表）——不可配置，把入口收起来
             self.preview_label.clear()
             self.preview_label.setEnabled(False)
+            self.reset_btn.setEnabled(False)
             self.caption_label.setText("")
             self.hint_label.setText("当前图层没有几何类型，无法配置选中高亮。")
             return
@@ -228,6 +244,7 @@ class SelectionTab(LayerPropertyTab):
         self._style = manager.style(self._kind)
         name = _KIND_NAMES[self._kind]
         self.preview_label.setEnabled(True)
+        self.reset_btn.setEnabled(True)
         self.caption_label.setText(f"预览当前选中要素符号样式（{self._layer_name}）")
         self.hint_label.setText(
             f"以上样式作用于系统中**所有「{name}」图层**的选中高亮；"
@@ -269,6 +286,22 @@ class SelectionTab(LayerPropertyTab):
             self._style = style_from_symbol(self._kind, chosen, base)
             self._dirty = True
             self._refresh_preview()
+
+    def _restore_default(self) -> None:
+        """恢复默认选中高亮：填充 / 描边 = #00FFFF（0, 255, 255）。
+
+        和本页其它修改一样先进**草稿**，点「确定 / 应用」才写回系统样式。
+        """
+        if self._kind is None:
+            return
+        base = default_style(self._kind)
+        self._style = replace(
+            base,
+            stroke_color=_DEFAULT_HIGHLIGHT_COLOR,
+            fill_color=_DEFAULT_HIGHLIGHT_COLOR,
+        )
+        self._dirty = self._style != SelectionStyleManager.instance().style(self._kind)
+        self._refresh_preview()
 
     def _refresh_preview(self) -> None:
         """把当前（草稿）样式画成该类几何的符号预览。"""

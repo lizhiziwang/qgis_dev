@@ -96,6 +96,7 @@ from qgis.PyQt.QtWidgets import (
     QInputDialog,
     QLabel,
     QPushButton,
+    QSlider,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -349,6 +350,8 @@ def _set_layer_prop(symbol, name, value) -> None:
             layer = symbol.symbolLayer(index)
         except Exception:  # noqa: BLE001
             continue
+        if _call(layer, "isLocked"):
+            continue  # 锁定层与编辑器顶层面板一样不随符号级参数改动
         _call_setter(layer, name, value)
 
 
@@ -686,6 +689,37 @@ class SymbolParamsWidget(QWidget):
         spin.valueChanged.connect(self._on_changed)
         return spin
 
+    def _new_opacity_row(self, parent):
+        """不透明度：滑条 + 百分比数值（与符号编辑器顶层面板一致）。"""
+        host = QWidget(parent)
+        lay = QHBoxLayout(host)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(6)
+        self.opacity_slider = QSlider(Qt.Orientation.Horizontal, host)
+        self.opacity_slider.setRange(0, 100)
+        self.opacity_slider.setSingleStep(1)
+        self.opacity_slider.setPageStep(10)
+        self.opacity_slider.setValue(100)
+        self.opacity_slider.valueChanged.connect(self._on_opacity_changed)
+        lay.addWidget(self.opacity_slider, 1)
+        self.opacity_value = QLabel("100 %", host)
+        self.opacity_value.setMinimumWidth(44)
+        self.opacity_value.setAlignment(
+            Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+        )
+        lay.addWidget(self.opacity_value, 0)
+        return host
+
+    def _on_opacity_changed(self, value: int) -> None:
+        self.opacity_value.setText(f"{int(value)} %")
+        self._on_changed()
+
+    def _set_opacity(self, ratio) -> None:
+        if ratio is None:
+            return
+        value = int(round(max(0.0, min(1.0, float(ratio))) * 100.0))
+        self.opacity_slider.setValue(value)
+
     def _build_fill_group(self) -> QGroupBox:
         box = QGroupBox("面符号（填充 / 描边）", self)
         form = self._new_form(box)
@@ -700,6 +734,8 @@ class SymbolParamsWidget(QWidget):
 
         self.stroke_width_spin = self._new_size_spin(box, 100.0, 0.1, 0.26)
         form.addRow("描边宽度", self.stroke_width_spin)
+
+        form.addRow("不透明度", self._new_opacity_row(box))
         return box
 
     def _build_line_group(self) -> QGroupBox:
@@ -712,6 +748,8 @@ class SymbolParamsWidget(QWidget):
 
         self.line_width_spin = self._new_size_spin(box, 1000.0, 0.1, 0.26)
         form.addRow("线宽", self.line_width_spin)
+
+        form.addRow("不透明度", self._new_opacity_row(box))
         return box
 
     def _build_marker_group(self) -> QGroupBox:
@@ -725,12 +763,23 @@ class SymbolParamsWidget(QWidget):
         self.marker_size_spin = self._new_size_spin(box, 5000.0, 0.5, 4.0)
         form.addRow("大小", self.marker_size_spin)
 
+        self.rotation_spin = QDoubleSpinBox(box)
+        self.rotation_spin.setRange(-360.0, 360.0)
+        self.rotation_spin.setDecimals(1)
+        self.rotation_spin.setSingleStep(1.0)
+        self.rotation_spin.setSuffix(" °")
+        self.rotation_spin.setValue(0.0)
+        self.rotation_spin.valueChanged.connect(self._on_changed)
+        form.addRow("旋转角度", self.rotation_spin)
+
         self.marker_stroke_color_btn = ColorButton(_DEFAULT_STROKE, box)
         self.marker_stroke_color_btn.color_changed.connect(self._on_changed)
         form.addRow("描边颜色", self.marker_stroke_color_btn)
 
         self.marker_stroke_width_spin = self._new_size_spin(box, 100.0, 0.1, 0.0)
         form.addRow("描边宽度", self.marker_stroke_width_spin)
+
+        form.addRow("不透明度", self._new_opacity_row(box))
         return box
 
     def _on_changed(self, *_) -> None:
@@ -754,22 +803,20 @@ class SymbolParamsWidget(QWidget):
             self._loading = False
 
     def _apply_symbol_values(self, symbol) -> None:
-        """把符号（匹配几何的简单层 / 首层）的值回填到控件（读不到的项保持默认）。"""
-        symbol_layer = _simple_layer(symbol, self._kind) or _first_layer(symbol)
+        """按**顶层符号**回填控件（与符号编辑器的顶层参数同一口径）。
+
+        多符号层时不能拿"第一层"的颜色 / 宽度代替顶层：
+        - 颜色 = ``symbol.color()``（第一个**未锁定**层；与编辑器顶层面板一致）；
+        - 线宽 = ``symbol.width()``（各层最大值），点大小 = ``symbol.size()``；
+        - 不透明度 = ``symbol.opacity()``。
+        """
+        opacity = _call(symbol, "opacity")
+        if opacity is not None:
+            self._set_opacity(opacity)
         if self._kind == "polygon":
-            # 面符号的"描边"可能是填充层的 strokeColor，也可能是一条独立的线层
-            # （outline-only / 图案填充的边界）——后者用 color / width。
-            if not isinstance(symbol_layer, QgsLineSymbolLayer):
-                brush = _call(symbol_layer, "brushStyle")
-                self._set_color_or_none(
-                    self.fill_color_btn,
-                    _call(symbol_layer, "color"),
-                    brush,
-                    Qt.BrushStyle.NoBrush,
-                )
-            else:
-                # 只有轮廓线、没有填充
-                self._set_color(self.fill_color_btn, _NO_COLOR)
+            self._set_color_or_none(self.fill_color_btn, _call(symbol, "color"))
+            # 顶层填充色只负责填充；描边仍是层属性：优先独立线层，否则读填充层的
+            # strokeColor（多层时取第一条线层，与旧行为一致）
             border = _first_line_layer(symbol)
             if border is not None:
                 self._set_color_or_none(
@@ -780,6 +827,7 @@ class SymbolParamsWidget(QWidget):
                 )
                 self._set_value(self.stroke_width_spin, _call(border, "width"))
             else:
+                symbol_layer = _first_layer(symbol)
                 self._set_color_or_none(
                     self.stroke_color_btn,
                     _call(symbol_layer, "strokeColor"),
@@ -790,18 +838,13 @@ class SymbolParamsWidget(QWidget):
                     self.stroke_width_spin, _call(symbol_layer, "strokeWidth")
                 )
         elif self._kind == "line":
-            self._set_color_or_none(
-                self.line_color_btn,
-                _call(symbol_layer, "color"),
-                _call(symbol_layer, "penStyle"),
-                Qt.PenStyle.NoPen,
-            )
-            self._set_value(self.line_width_spin, _call(symbol_layer, "width"))
+            self._set_color_or_none(self.line_color_btn, _call(symbol, "color"))
+            self._set_value(self.line_width_spin, _call(symbol, "width"))
         elif self._kind == "point":
-            self._set_color_or_none(
-                self.marker_color_btn, _call(symbol_layer, "color")
-            )
-            self._set_value(self.marker_size_spin, _call(symbol_layer, "size"))
+            self._set_color_or_none(self.marker_color_btn, _call(symbol, "color"))
+            self._set_value(self.marker_size_spin, _call(symbol, "size"))
+            self._set_value(self.rotation_spin, _call(symbol, "angle"))
+            symbol_layer = _first_layer(symbol)
             self._set_color_or_none(
                 self.marker_stroke_color_btn,
                 _call(symbol_layer, "strokeColor"),
@@ -875,15 +918,17 @@ class SymbolParamsWidget(QWidget):
         return symbol
 
     def _update_fill(self, symbol) -> None:
-        """填充色 / 描边逐层改（不支持的层跳过，其它样式 / 层原样保留）。
+        """顶层填充色 / 不透明度按符号级写入，描边仍逐层处理。
 
-        透明色（颜色框选「无颜色」）= 无填充 / 无描边：同时把画刷 / 画笔切成
-        NoBrush / NoPen，下次回填颜色按钮才会显示为「无颜色」；再选回普通颜色
-        时恢复实线，颜色才真正生效。
+        ``QgsSymbol.setColor`` 会跳过锁定层（与编辑器顶层面板一致）；随后再按
+        「描边颜色 / 宽度」逐层设置线层或填充层的 stroke 属性。透明填充同时切
+        NoBrush，避免下次选回颜色时仍是空填充。
         """
         fill = self.fill_color_btn.color()
         stroke = self.stroke_color_btn.color()
         width = self.stroke_width_spin.value()
+        _call_setter(symbol, "setColor", fill)
+        _call_setter(symbol, "setOpacity", self.opacity_slider.value() / 100.0)
         try:
             count = symbol.symbolLayerCount()
         except Exception:  # noqa: BLE001
@@ -893,6 +938,8 @@ class SymbolParamsWidget(QWidget):
                 layer = symbol.symbolLayer(index)
             except Exception:  # noqa: BLE001
                 continue
+            if _call(layer, "isLocked"):
+                continue
             if isinstance(layer, QgsLineSymbolLayer):
                 if stroke.alpha() == 0:
                     _call_setter(layer, "setPenStyle", Qt.PenStyle.NoPen)
@@ -901,12 +948,11 @@ class SymbolParamsWidget(QWidget):
                 _call_setter(layer, "setColor", stroke)
                 _call_setter(layer, "setWidth", width)
                 continue
-            # 填充层
+            # 填充层：填充色已由 symbol.setColor 统一写入，这里只处理画刷 / 描边
             if fill.alpha() == 0:
                 _call_setter(layer, "setBrushStyle", Qt.BrushStyle.NoBrush)
             elif _call(layer, "brushStyle") == Qt.BrushStyle.NoBrush:
                 _call_setter(layer, "setBrushStyle", Qt.BrushStyle.SolidPattern)
-            _call_setter(layer, "setColor", fill)
             if stroke.alpha() == 0:
                 _call_setter(layer, "setStrokeStyle", Qt.PenStyle.NoPen)
             elif _call(layer, "strokeStyle") == Qt.PenStyle.NoPen:
@@ -915,6 +961,11 @@ class SymbolParamsWidget(QWidget):
             _call_setter(layer, "setStrokeWidth", width)
 
     def _update_line(self, symbol) -> None:
+        """顶层线颜色 / 不透明度 / 线宽（与符号编辑器顶层参数一致）。
+
+        ``setColor`` 改所有**未锁定**层、``setWidth`` 按比例缩放各层；不能逐层
+        设成同一个宽度——多符号层会丢掉相对线宽。
+        """
         color = self.line_color_btn.color()
         if color.alpha() == 0:
             _set_layer_prop(symbol, "setPenStyle", Qt.PenStyle.NoPen)
@@ -922,17 +973,25 @@ class SymbolParamsWidget(QWidget):
             try:
                 for index in range(symbol.symbolLayerCount()):
                     layer = symbol.symbolLayer(index)
+                    if _call(layer, "isLocked"):
+                        continue
                     if _call(layer, "penStyle") == Qt.PenStyle.NoPen:
                         _call_setter(layer, "setPenStyle", Qt.PenStyle.SolidLine)
             except Exception:  # noqa: BLE001
                 pass
-        _set_layer_prop(symbol, "setColor", color)
-        _set_layer_prop(symbol, "setWidth", self.line_width_spin.value())
+        _call_setter(symbol, "setColor", color)
+        _call_setter(symbol, "setWidth", self.line_width_spin.value())
+        _call_setter(symbol, "setOpacity", self.opacity_slider.value() / 100.0)
 
     def _update_marker(self, symbol) -> None:
-        """颜色 / 大小对 SVG、字体标记等同样有效；不支持的符号层静默跳过。"""
-        _set_layer_prop(symbol, "setColor", self.marker_color_btn.color())
-        _set_layer_prop(symbol, "setSize", self.marker_size_spin.value())
+        """顶层标记颜色 / 不透明度 / 大小；描边仍是层属性。
+
+        颜色 / 大小走符号级 setter（与编辑器一致：跳过锁定层、按比例缩放各层）。
+        """
+        _call_setter(symbol, "setColor", self.marker_color_btn.color())
+        _call_setter(symbol, "setSize", self.marker_size_spin.value())
+        _call_setter(symbol, "setAngle", self.rotation_spin.value())
+        _call_setter(symbol, "setOpacity", self.opacity_slider.value() / 100.0)
         _set_layer_prop(symbol, "setStrokeColor", self.marker_stroke_color_btn.color())
         _set_layer_prop(
             symbol, "setStrokeWidth", self.marker_stroke_width_spin.value()

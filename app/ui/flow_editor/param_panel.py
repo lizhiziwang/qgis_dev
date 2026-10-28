@@ -16,7 +16,7 @@
 
 from __future__ import annotations
 
-from qgis.PyQt.QtCore import Qt, pyqtSignal
+from qgis.PyQt.QtCore import Qt, QTimer, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -42,8 +42,14 @@ from app.core.domain.flow.algorithm_library import (
     list_processing_algorithms,
 )
 from app.core.domain.flow.model import PortRef
-from app.core.domain.flow.types import PortType, can_connect, parse_port_type
+from app.core.domain.flow.types import (
+    PortType,
+    can_connect,
+    parse_port_type,
+    validate_value,
+)
 from app.infra.logging import get_logger
+from app.ui.common.message_box import MessageBox
 from app.ui.common.theme import ThemeManager, flow_panel_qss
 
 logger = get_logger(__name__)
@@ -313,14 +319,28 @@ class ParamPanelDock(QDockWidget):
         grid.addWidget(name_edit, row, 0)
 
         type_combo = self._make_type_combo(ins.type, node_id, ins.id, is_output=False)
+        if ins.type_locked:
+            type_combo.setEnabled(False)
+            type_combo.setToolTip("该参数类型由工具的执行逻辑固定，不可修改")
         grid.addWidget(type_combo, row, 1)
 
-        default_edit = QLineEdit(ins.default)
-        default_edit.setPlaceholderText("默认值")
-        default_edit.editingFinished.connect(
-            lambda: setattr(ins, "default", default_edit.text())
-        )
-        grid.addWidget(default_edit, row, 2)
+        if ins.choices and ins.type is PortType.STRING:
+            default_combo = QComboBox()
+            for choice in ins.choices:
+                default_combo.addItem(choice)
+            idx = default_combo.findText(ins.default)
+            default_combo.setCurrentIndex(idx if idx >= 0 else 0)
+            default_combo.activated.connect(
+                lambda _idx, c=default_combo, i=ins: setattr(i, "default", c.currentText())
+            )
+            grid.addWidget(default_combo, row, 2)
+        else:
+            default_edit = QLineEdit(ins.default)
+            default_edit.setPlaceholderText("默认值")
+            default_edit.editingFinished.connect(
+                lambda: self._on_default_changed(ins, default_edit)
+            )
+            grid.addWidget(default_edit, row, 2)
 
         required_cb = QCheckBox()
         required_cb.setChecked(ins.required)
@@ -338,6 +358,24 @@ class ParamPanelDock(QDockWidget):
             lambda: self._on_remove_port(node_id, ins.id, is_output=False)
         )
         grid.addWidget(del_btn, row, 5)
+
+    def _on_default_changed(self, ins, default_edit: QLineEdit) -> None:
+        """默认值编辑完成：按当前输入类型校验，不合法则提示并还原。"""
+        text = default_edit.text()
+        problem = validate_value(text, ins.type)
+        if problem is not None:
+            MessageBox.warning(
+                self,
+                "默认值无效",
+                f"「{ins.name}」{problem}，当前输入：{text}",
+            )
+            default_edit.setText(ins.default)
+            return
+        if ins.default != text:
+            ins.default = text
+            scene = self._scene
+            if scene is not None:
+                scene.graph_changed.emit()
 
     def _make_bind_combo(self, node_id: str, ins):
         """绑定上游下拉：列出其它节点的输出端口，类型不兼容的置灰。"""
@@ -448,6 +486,9 @@ class ParamPanelDock(QDockWidget):
         grid.addWidget(name_edit, row, 0)
 
         type_combo = self._make_type_combo(outs.type, node_id, outs.id, is_output=True)
+        if outs.type_locked:
+            type_combo.setEnabled(False)
+            type_combo.setToolTip("该输出类型由工具的执行逻辑固定，不可修改")
         grid.addWidget(type_combo, row, 1)
 
         path_edit = QLineEdit(outs.save_path)
@@ -561,6 +602,16 @@ class ParamPanelDock(QDockWidget):
             if ins is None:
                 return
             ins.type = new_type
+            # 类型变了，默认值要按新类型重新校验；不合法就清空并提示
+            problem = validate_value(ins.default, new_type)
+            if problem is not None:
+                MessageBox.warning(
+                    self,
+                    "默认值无效",
+                    f"「{ins.name}」{problem}，已清空原默认值：{ins.default}",
+                )
+                ins.default = ""
+                QTimer.singleShot(0, self.refresh)
             # 连入该端口的边若不再兼容 → 删除并提示
             edge = graph.edge_into(node_id, port_id)
             if edge is not None:

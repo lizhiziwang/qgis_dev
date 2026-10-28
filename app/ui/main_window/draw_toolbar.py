@@ -317,6 +317,7 @@ class DigitizingToolbar(QObject):
         self.split_feature_action.setCheckable(True)
         self.split_feature_action.setToolTip(
             "先用点选/框选选中要素并进入编辑，再点此：按住左键画切割线、右键完成分割"
+            "（支持磁性捕捉）"
         )
         self.split_feature_action.triggered.connect(
             lambda checked=False: self.enable_split_tool(checked)
@@ -1421,6 +1422,9 @@ class DigitizingToolbar(QObject):
         if not layer.isEditable():
             MessageBox.warning(self.main_window, "警告", "请先开始编辑！")
             return
+        if layer.geometryType() != QgsWkbTypes.PolygonGeometry:
+            QMessageBox.warning(self.main_window, "警告", "合并只支持面图层")
+            return
         # 选中数在点击时再校验一次：按钮可用性已按选中数置灰，这里兜底防直接调用
         if len(layer.selectedFeatureIds()) < 2:
             MessageBox.warning(
@@ -1588,7 +1592,8 @@ class DigitizingToolbar(QObject):
         #     "已激活「线分割」工具：左键双击要素选中后，按住左键画切割线、右键完成分割；Esc 取消 / 退出",
         # )
         self._toast(
-            "已激活「线分割」工具：按住左键画切割线、右键完成分割选中要素；Esc 清除 / 退出",
+            "已激活「线分割」工具：按住左键画切割线、右键完成分割选中要素"
+            "（支持磁性捕捉）；Esc 清除 / 退出",
             level="info",
         )
 
@@ -1796,9 +1801,23 @@ class DigitizingToolbar(QObject):
         if not layer.isEditable():
             MessageBox.warning(self.main_window, "警告", "请先开始编辑！")
             return
-        if not layer.selectedFeatureIds():
+        selected = layer.selectedFeatureIds()
+        if not selected:
             # 走浮动提示条：删除这条链上不该再弹模态框打断操作
             self._toast("请先用点选 / 框选选中要删除的要素", level="info")
+            return
+
+        # 删除是破坏性操作：先确认（默认「否」），避免误点直接删掉选中的图形。
+        # 删除只进编辑缓冲，确认后再由 run_delete 包成一条可撤销的编辑命令。
+        ret = QMessageBox.question(
+            self.main_window,
+            "删除要素",
+            f"确定删除当前编辑图层「{layer.name()}」中的 {len(selected)} 个选中要素吗？\n"
+            "删除后可 Ctrl+Z 撤销。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if ret != QMessageBox.StandardButton.Yes:
             return
 
         deleted = run_delete(
@@ -1922,6 +1941,9 @@ class DigitizingToolbar(QObject):
             return
         if not layer.isEditable():
             MessageBox.warning(self.main_window, "警告", "请先开始编辑！")
+            return
+        if layer.geometryType() != QgsWkbTypes.PolygonGeometry:
+            QMessageBox.warning(self.main_window, "警告", "分解只支持面图层")
             return
         if not layer.selectedFeatureIds():
             MessageBox.warning(
@@ -2718,8 +2740,9 @@ class DigitizingToolbar(QObject):
           * 「开始编辑」「属性录入」恒可用(属性录入激活时自动进编辑态)；
           * 「停止编辑 / 保存编辑」仅编辑中可用（会话控制，不作用于具体图形）；
           * **编辑类工具一律要求「有选中 + 编辑态」**——它们作用的正是选中的图形：
-            节点编辑 / 线分割 / 面分割 / 分解 要至少选中 1 个；挖洞 / 补洞 另需面图层；
-            合并 / 补缝 要选中 ≥ 2 个；边界修改 另需面图层；移动要素 / 删除 类型不限；
+            节点编辑只要编辑态；线分割 / 面分割要选中且**不是点图层**；
+            分解 / 合并 / 补缝 / 挖洞 / 补洞 / 边界修改**仅面图层**（合并 / 补缝
+            还要选中 ≥ 2 个；线图层不亮合并 / 分解）；移动要素 / 删除 类型不限；
           * 「要素分割」仅编辑中且**其它图层有选中要素**时可用（它要的是切割要素，
             不是当前图层的选中集）；
           * 「撤销 / 重做」仅编辑中且当前图层撤销栈上有对应步骤
@@ -2749,25 +2772,28 @@ class DigitizingToolbar(QObject):
         # 切割要素选中，见下）
         selected_fids = layer.selectedFeatureIds() if editing else []
         has_selection = bool(selected_fids)
-        for action in (
-            self.split_feature_action,
-            self.split_polygon_action,
-            self.explode_action,
-        ):
-            action.setEnabled(has_selection)
+        is_point = g_type == QgsWkbTypes.PointGeometry
+        is_polygon = g_type == QgsWkbTypes.PolygonGeometry
+        # 线分割 / 面分割：点要素没有可切的线/面，即使选中也不给亮（工具内部也会再拦一次）
+        split_ok = has_selection and not is_point
+        self.split_feature_action.setEnabled(split_ok)
+        self.split_polygon_action.setEnabled(split_ok)
+        # 分解 / 合并只对**面图层**有意义：点没有多部件可拆，线图层也不做合并/分解
+        # （用户要求：线图层编辑时这两项不要亮）
+        self.explode_action.setEnabled(has_selection and is_polygon)
+        self.merge_geometry_action.setEnabled(
+            has_selection and len(selected_fids) >= 2 and is_polygon
+        )
         # 「节点编辑」与「节点列表」一样，只要**进了编辑态**就能用：它自己在地图上点
         # 哪个图形就编辑哪个，不依赖事先选中的要素——用户要连续改多个图形时不必来回选
         self.feature_edit_action.setEnabled(editing)
         # 挖洞 / 补洞：编辑中、为面图层**且有选中**才可用（画区域 / 点击只作用于选中要素）
-        is_polygon = g_type == QgsWkbTypes.PolygonGeometry
         self.dig_hole_action.setEnabled(has_selection and is_polygon)
         self.fill_hole_action.setEnabled(has_selection and is_polygon)
         # 节点列表：用户明确要求「先启动编辑」才可用（与「属性录入」恒可用、激活时
         # 自动开编辑的做法有意不同）；且只做面图层——点 / 线图层没有"环"可言
         self.node_list_action.setEnabled(editing and is_polygon)
-        # 「合并」要两个及以上才谈得上合并，选中不足即置灰；「补缝」同理（缝隙在
-        # 多个相邻面之间，一个面谈不上补缝）
-        self.merge_geometry_action.setEnabled(has_selection and len(selected_fids) >= 2)
+        # 「补缝」：缝隙在多个相邻面之间，一个面谈不上补缝
         self.gap_repair_action.setEnabled(is_polygon and len(selected_fids) >= 2)
         self.boundary_edit_action.setEnabled(is_polygon and has_selection)
         self.move_action.setEnabled(has_selection)

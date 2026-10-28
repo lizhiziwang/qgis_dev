@@ -22,7 +22,8 @@
 字段控件映射（实测 QGIS 4.2 中 ``feature.attribute(i)`` 的 Python 类型）：
 
 - 文本（String 等）→ ``QLineEdit``（空文本 = 空值 NULL）；
-- 整型 / 浮点 → ``QLineEdit`` + 数值校验（空文本 = NULL；解析失败拒绝保存）；
+- 整型 / 浮点 → ``QLineEdit`` + **输入即校验**（空文本 = NULL；非数字 / 越界
+  立即标红并禁用「确认修改」，不必等到点确定才报错）；
 - 布尔 → 三态 ``QCheckBox``（半选 = NULL，避免把 NULL 悄悄改成 False）；
 - 日期 / 时间 / 日期时间 → :class:`app.ui.common.date_field.DatePickerField`
   （文本框内嵌 × + ▼ 弹选择器；**空文本 = NULL**）。不用 ``QDateEdit`` 一族：
@@ -32,6 +33,7 @@
 
 from __future__ import annotations
 
+import math
 from typing import Callable, Optional
 
 from qgis.PyQt import sip
@@ -61,6 +63,23 @@ from app.ui.tools.feature_attrs import (
 )
 
 logger = get_logger(__name__)
+
+#: 数值字段的合法值域（按 QVariant 类型）；不在表里的数字类型按浮点处理
+_INT_LIMITS = {
+    QVariant.Int: (-(2**31), 2**31 - 1),
+    QVariant.LongLong: (-(2**63), 2**63 - 1),
+    QVariant.UInt: (0, 2**32 - 1),
+    QVariant.ULongLong: (0, 2**64 - 1),
+}
+
+#: 输入不合规时的提示（字段类型 → 一句话要求）
+_NUMERIC_HINTS = {
+    QVariant.Int: "需为 32 位整数",
+    QVariant.LongLong: "需为 64 位整数",
+    QVariant.UInt: "需为非负 32 位整数",
+    QVariant.ULongLong: "需为非负 64 位整数",
+    QVariant.Double: "需为数字",
+}
 
 
 class AttributeEntryDialog(BaseDialog):
@@ -94,6 +113,11 @@ class AttributeEntryDialog(BaseDialog):
         self._rows: list[tuple[int, QWidget, Callable[[], object]]] = []
         #: 确认后用于重新快照的读值回调
         self._readers: list[tuple[int, Callable[[], object]]] = []
+        #: 数值字段即时校验登记：``{"line": QLineEdit, "name": 字段名, "qtype": 类型}``，
+        #: 输入时立即标红 / 提示原因，并在有错时禁用「确认修改」
+        self._numeric_fields: list[dict] = []
+        #: 当前是否有不合规的数值输入（用于状态栏提示的恢复）
+        self._numeric_invalid: bool = False
 
         # 最小化按钮改成"缩成画布底部小条"，不是系统的 showMinimized
         # （无边框弹窗最小化后只剩任务栏一个条目，等于消失了）。FramelessMixin
@@ -216,11 +240,13 @@ class AttributeEntryDialog(BaseDialog):
 
         # 原值快照 = 表单当前读值（含 NULL 归一化），用于确认时比较
         self._orig = {i: read() for i, read in self._readers}
-        self._apply_btn.setEnabled(True)
         if added == 0:
+            self._apply_btn.setEnabled(False)
             self._set_status("该图层没有可编辑的属性字段。")
         else:
             self._set_status("已载入：修改字段后点「确认修改」保存（可 Ctrl+Z 撤销）。")
+            # 初始值可能本身就不合法（旧数据 / 字段类型不匹配）：立即提示并禁用确认
+            self._validate_numeric_fields()
 
     def apply_edits(self) -> None:
         """确认：把表单改动一次性写回编辑缓冲（一个可撤销的编辑命令）。"""
@@ -350,6 +376,12 @@ class AttributeEntryDialog(BaseDialog):
             QVariant.UInt,
             QVariant.ULongLong,
         )
+        if numeric and not readonly:
+            # 输入即校验：不合规立刻标红 / 提示，并禁用「确认修改」，不等点确定才报错
+            self._numeric_fields.append(
+                {"line": line, "name": field_alias(fld) or fld.name(), "qtype": ftype}
+            )
+            line.textChanged.connect(self._validate_numeric_fields)
         box = QWidget()
 
         def read_line(line=line, fname=fld.name(), num=numeric) -> object:
@@ -368,6 +400,59 @@ class AttributeEntryDialog(BaseDialog):
             return text
 
         return box, line, read_line
+
+    # ========================================================== 数值即时校验
+
+    @staticmethod
+    def _numeric_problem(text: str, qtype) -> str | None:
+        """``text`` 是否符合数值字段类型；空串 = NULL，合法返回 ``None``。"""
+        text = (text or "").strip()
+        if text == "":
+            return None
+        if qtype in _INT_LIMITS:
+            try:
+                value = int(text)
+            except ValueError:
+                return _NUMERIC_HINTS.get(qtype, "需为整数")
+            low, high = _INT_LIMITS[qtype]
+            if value < low or value > high:
+                return f"超出范围（{low} ~ {high}）"
+            return None
+        try:
+            value = float(text)
+        except ValueError:
+            return _NUMERIC_HINTS.get(qtype, "需为数字")
+        if not math.isfinite(value):
+            return "需为有限数字"
+        return None
+
+    def _validate_numeric_fields(self, *_args) -> None:
+        """输入时逐字段校验：红框 + 原因，并在有错时禁用「确认修改」。"""
+        invalid: list[str] = []
+        error_color = ThemeManager.instance().current().text_error
+        for item in self._numeric_fields:
+            line: QLineEdit = item["line"]
+            problem = self._numeric_problem(line.text(), item["qtype"])
+            if problem:
+                line.setStyleSheet(
+                    f"QLineEdit {{ border: 1px solid {error_color}; border-radius: 3px; }}"
+                )
+                line.setToolTip(f"「{item['name']}」{problem}")
+                invalid.append(f"「{item['name']}」{problem}")
+            else:
+                line.setStyleSheet("")
+                line.setToolTip("")
+        was_invalid = self._numeric_invalid
+        self._numeric_invalid = bool(invalid)
+        can_apply = (
+            self._layer is not None and self._fid is not None and bool(self._readers)
+        )
+        self._apply_btn.setEnabled(can_apply and not self._numeric_invalid)
+        if invalid:
+            self._set_status(f"字段{invalid[0]}，请修正后再确认。")
+        elif was_invalid:
+            # 改对后恢复常规提示（不覆盖“已保存 N 个字段”等其它状态）
+            self._set_status("已载入：修改字段后点「确认修改」保存（可 Ctrl+Z 撤销）。")
 
     # ========================================================== 内部
 
@@ -409,6 +494,8 @@ class AttributeEntryDialog(BaseDialog):
                     pass
         self._rows.clear()
         self._readers.clear()
+        self._numeric_fields.clear()
+        self._numeric_invalid = False
         self._orig.clear()
         self._layer = None
         self._fid = None

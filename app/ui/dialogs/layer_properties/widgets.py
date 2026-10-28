@@ -24,21 +24,44 @@ from qgis.PyQt.QtWidgets import (
 
 
 class _BasicColorAlphaGuard(QObject):
-    """基本颜色点击后若透明度仍为 0，自动恢复为不透明。
+    """基本颜色点击后若透明度仍为 0，自动恢复为不透明；双击基本颜色直接确定。
 
     先点过「无颜色」后 alpha=0，Qt 的色板点击只改 RGB、不改 alpha，选完颜色
     仍然看不见；这里在颜色格子上拦截鼠标释放，事件处理完再把 alpha 补成 255。
+    双击时（``accept_on_double_click``）同样先补 alpha，再接受对话框——用户不用
+    再点一次「确定」。
     """
 
-    def __init__(self, dialog: QColorDialog, alpha_spin=None) -> None:
+    def __init__(
+        self,
+        dialog: QColorDialog,
+        alpha_spin=None,
+        *,
+        accept_on_double_click: bool = False,
+    ) -> None:
         super().__init__(dialog)
         self._dialog = dialog
         self._alpha_spin = alpha_spin
+        self._accept_on_double_click = accept_on_double_click
 
     def eventFilter(self, obj, event) -> bool:  # noqa: N802 —— Qt 命名
         if event.type() == QEvent.Type.MouseButtonRelease:
             QTimer.singleShot(0, self._restore_alpha)
+        elif (
+            event.type() == QEvent.Type.MouseButtonDblClick
+            and self._accept_on_double_click
+        ):
+            # 双击序列的第二下在 release 里才真正落色；延后一拍再接受，
+            # 保证 currentColor() 已是用户双击的那个颜色。
+            QTimer.singleShot(0, self._accept)
         return False
+
+    def _accept(self) -> None:
+        try:
+            self._restore_alpha()
+            self._dialog.accept()
+        except RuntimeError:  # 对话框已销毁
+            pass
 
     def _restore_alpha(self) -> None:
         try:
@@ -202,22 +225,27 @@ def build_color_dialog(color, parent=None) -> QColorDialog:
     except Exception:  # noqa: BLE001 —— 找不到 alpha 控件就保留 Qt 原样
         pass
 
-    # 先点过「无颜色」(alpha=0) 再点基本 / 自定义颜色：Qt 只改 RGB，这里补回不透明
+    # 先点过「无颜色」(alpha=0) 再点基本 / 自定义颜色：Qt 只改 RGB，这里补回不透明。
+    # 基本颜色格子额外支持**双击直接确定**；自定义颜色仍走单击选中 + 点确定。
     try:
         left = dlg.layout().itemAt(0).layout().itemAt(0).layout()
-        color_wells = []
-        for index in (1, 6):  # 基本颜色网格 / 自定义颜色网格
+        guards = []
+        for index, auto_accept in ((1, True), (6, False)):
             try:
                 widget = left.itemAt(index).widget()
             except Exception:  # noqa: BLE001
                 widget = None
-            if widget is not None:
-                color_wells.append(widget)
-        if color_wells:
-            guard = _BasicColorAlphaGuard(dlg, alpha_spin)
-            for widget in color_wells:
-                widget.installEventFilter(guard)
-            dlg._alpha_guard = guard  # 保活（父对象是 dlg）
+            if widget is None:
+                continue
+            guard = _BasicColorAlphaGuard(
+                dlg, alpha_spin, accept_on_double_click=auto_accept
+            )
+            widget.installEventFilter(guard)
+            if auto_accept:
+                widget.setToolTip("双击基本颜色直接确定")
+            guards.append(guard)
+        if guards:
+            dlg._alpha_guards = guards  # 保活（父对象是 dlg）
     except Exception:  # noqa: BLE001
         pass
     return dlg

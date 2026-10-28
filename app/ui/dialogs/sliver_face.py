@@ -55,6 +55,7 @@ from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.layer_order import vector_layers_in_tree_order
+from app.ui.dialogs.check_dialog_state import CheckDialogRunStateMixin
 
 logger = get_logger(__name__)
 
@@ -139,7 +140,7 @@ class HintDiagram(QWidget):
         painter.end()
 
 
-class SliverFaceDialog(BaseDialog):
+class SliverFaceDialog(CheckDialogRunStateMixin, BaseDialog):
     """狭长面处理（长宽比超限）配置 / 执行 Dialog。"""
 
     def __init__(self, parent=None, title: str = "狭长面处理") -> None:
@@ -292,24 +293,12 @@ class SliverFaceDialog(BaseDialog):
         return self._current_layer()
 
     def _populate_layers(self) -> None:
-        """用工程里的矢量图层填输入图层下拉框，默认选中上下文图层。"""
+        """用工程里的矢量图层填输入图层下拉框；**再次打开时保留上次的选择**。"""
         # 与图层面板从上到下的顺序一致（``mapLayers()`` 按图层 UUID 排，看着是乱序）
         layers = vector_layers_in_tree_order()
         context = self._current_layer()
-        context_id = context.id() if context is not None else None
-
-        self.input_combo.blockSignals(True)
-        self.input_combo.clear()
-        for layer in layers:
-            self.input_combo.addItem(layer.name(), layer)
-        index = 0 if layers else -1
-        for i in range(self.input_combo.count()):
-            item = self.input_combo.itemData(i)
-            if context_id is not None and item is not None and item.id() == context_id:
-                index = i
-                break
-        self.input_combo.setCurrentIndex(index)
-        self.input_combo.blockSignals(False)
+        # 上次选中的图层仍在工程里就用它；否则退回上下文图层
+        self._fill_layer_combo(self.input_combo, layers, self._layer_id(context))
 
     # ------------------------------------------------------------ 交互
 

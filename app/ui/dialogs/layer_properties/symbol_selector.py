@@ -72,6 +72,8 @@ logger = get_logger(__name__)
 _FAVORITES_STATE = "symbol_favorites"
 _SWATCH = QSize(40, 40)
 _GRID = QSize(80, 80)
+#: 符号库网格列数（左侧栏加宽后 5 列：5×80 + 间距仍能放下）
+_GRID_COLUMNS = 5
 _KIND_NAMES = {"point": "点", "line": "线", "polygon": "面"}
 
 
@@ -444,7 +446,7 @@ class SymbolSelectorDialog(BaseDialog):
         self._symbol_buttons: list[tuple[_LibrarySymbol, QToolButton]] = []
         self._group_widgets: list[QWidget] = []
         self.setMinimumSize(0, 0)
-        self.resize(780, 620)
+        self.resize(810, 660)
         self._build()
         self._set_current(self._current_symbol)
         self._rebuild_library()
@@ -497,13 +499,13 @@ class SymbolSelectorDialog(BaseDialog):
         self.scroll_lay.setSpacing(8)
         self.scroll.setWidget(self.scroll_body)
         left_lay.addWidget(self.scroll, 1)
-        # 左侧符号网格固定 4 列（4×80 + 间距），栏宽固定：4 列放得下、又不会把
-        # 右侧「当前符号」撑宽；出现竖向滚动条后也不出横向滚动条
-        left.setFixedWidth(384)
+        # 左侧符号网格固定 5 列：栏宽加宽后能多放一列，右侧参数区不被挤窄
+        left.setFixedWidth(470)
         root.addWidget(left, 0)
 
-        # 右：当前符号 + 参数 + 操作按钮
+        # 右：当前符号 + 参数 + 操作按钮（固定约 300px，左侧符号库占主宽度）
         right = QWidget(self)
+        right.setFixedWidth(300)
         right_lay = QVBoxLayout(right)
         right_lay.setContentsMargins(0, 0, 0, 0)
         right_lay.setSpacing(8)
@@ -511,7 +513,7 @@ class SymbolSelectorDialog(BaseDialog):
         title.setObjectName("SectionLabel")
         right_lay.addWidget(title)
         self.preview = QLabel(right)
-        self.preview.setFixedSize(160, 90)
+        self.preview.setFixedSize(130, 80)
         self.preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.preview.setStyleSheet(
             "QLabel { border: 1px solid palette(mid); background: palette(base);"
@@ -649,8 +651,8 @@ class SymbolSelectorDialog(BaseDialog):
             )
             grid.addWidget(
                 btn,
-                index // 4,
-                index % 4,
+                index // _GRID_COLUMNS,
+                index % _GRID_COLUMNS,
                 Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop,
             )
             self._symbol_buttons.append((entry, btn))
@@ -679,7 +681,7 @@ class SymbolSelectorDialog(BaseDialog):
     def _refresh_current_preview(self) -> None:
         try:
             pixmap = QgsSymbolLayerUtils.symbolPreviewPixmap(
-                self._current_symbol, QSize(148, 78)
+                self._current_symbol, QSize(118, 68)
             )
             self.preview.setPixmap(pixmap)
         except Exception:  # noqa: BLE001

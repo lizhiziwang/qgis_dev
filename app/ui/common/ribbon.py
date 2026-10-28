@@ -54,6 +54,11 @@ class AlignedToolBar(QToolBar):
     ``QToolBarLayout`` 会在 resize / LayoutRequest 之后重新摆扩展按钮的几何，所以
     这里不能在 ``resizeEvent`` 里立即改（会被随后的一次布局覆盖），而是排一个
     0ms 定时器，等布局跑完再按第一个可见 action 按钮的 ``y`` / 高度对齐。
+
+    参照物必须是普通工具按钮（``QToolButton``），而不是 ``addWidget`` 放进去的
+    自定义控件：编辑工具条最左侧是「当前编辑图层」下拉框，它比图标+文字的按钮矮、
+    在内容区里垂直居中，拿它当基准会把扩展按钮对到按钮行偏下的位置（用户报过
+    「三个点位置太靠下」）。没有按钮时才退回用任意可见控件。
     """
 
     def __init__(self, title: str, parent=None) -> None:
@@ -86,13 +91,20 @@ class AlignedToolBar(QToolBar):
         if ext is None or not ext.isVisible():
             return
         reference = None
+        fallback = None
         for action in self.actions():
             if action.isSeparator():
                 continue
             widget = self.widgetForAction(action)
-            if widget is not None and widget.isVisible():
+            if widget is None or not widget.isVisible():
+                continue
+            if isinstance(widget, QToolButton):
                 reference = widget
                 break
+            if fallback is None:
+                fallback = widget
+        if reference is None:
+            reference = fallback
         if reference is None:
             return
         geometry = ext.geometry()

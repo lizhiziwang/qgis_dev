@@ -59,6 +59,7 @@ from app.infra.logging import get_logger
 from app.infra.messagebar import send
 from app.ui.common.base_dialog import BaseDialog
 from app.ui.common.layer_order import vector_layers_in_tree_order
+from app.ui.dialogs.check_dialog_state import CheckDialogRunStateMixin
 
 logger = get_logger(__name__)
 
@@ -221,7 +222,7 @@ class HintDiagram(QWidget):
         painter.end()
 
 
-class CrossBoundaryDialog(BaseDialog):
+class CrossBoundaryDialog(CheckDialogRunStateMixin, BaseDialog):
     """跨边界面不相交（面要素须被参考图层完全包含）配置 / 执行 Dialog。"""
 
     def __init__(self, parent=None, title: str = "跨边界面不相交处理") -> None:
@@ -390,37 +391,59 @@ class CrossBoundaryDialog(BaseDialog):
         return None
 
     def _populate_layers(self) -> None:
-        """用工程里的矢量图层填两个下拉框，默认选中上下文图层。
+        """用工程里的矢量图层填两个下拉框；**再次打开时保留上次的选择**。
 
-        参考图层默认挑一个**跟输入图层不同**的图层：跨边界检查里拿同一个图层当
-        参考（自己包含自己）通常不是用户想要的，但仍保留下拉框里可选。
+        首次打开默认：输入选上下文图层，参考挑一个**跟输入不同**的图层。
+        再次打开时优先沿用上次输入 / 参考图层（只有图层已从工程移除才退回默认）。
         """
         # 与图层面板从上到下的顺序一致（``mapLayers()`` 按图层 UUID 排，看着是乱序）
         layers = vector_layers_in_tree_order()
         context = self._current_layer()
-        context_id = context.id() if context is not None else None
+        context_id = self._layer_id(context)
+        previous_input_id = self._layer_id(self.input_combo.currentData())
+        previous_ref_id = self._layer_id(self.ref_combo.currentData())
 
         for combo in (self.input_combo, self.ref_combo):
             combo.blockSignals(True)
             combo.clear()
             for layer in layers:
                 combo.addItem(layer.name(), layer)
-            combo.blockSignals(False)
 
+        # 输入：上次选择 > 上下文图层 > 第一个
         index = 0 if layers else -1
         for i in range(self.input_combo.count()):
-            item = self.input_combo.itemData(i)
-            if context_id is not None and item is not None and item.id() == context_id:
+            if previous_input_id is not None and self._layer_id(
+                self.input_combo.itemData(i)
+            ) == previous_input_id:
                 index = i
                 break
+        else:
+            for i in range(self.input_combo.count()):
+                if context_id is not None and self._layer_id(
+                    self.input_combo.itemData(i)
+                ) == context_id:
+                    index = i
+                    break
         self.input_combo.setCurrentIndex(index)
 
-        ref_index = 0 if layers else -1
+        # 参考：上次选择 > 第一个与输入不同的 > 第一个
+        ref_index = -1
         for i in range(self.ref_combo.count()):
-            if i != index:
+            if previous_ref_id is not None and self._layer_id(
+                self.ref_combo.itemData(i)
+            ) == previous_ref_id:
                 ref_index = i
                 break
+        if ref_index < 0:
+            ref_index = 0 if layers else -1
+            for i in range(self.ref_combo.count()):
+                if i != index:
+                    ref_index = i
+                    break
         self.ref_combo.setCurrentIndex(ref_index)
+
+        for combo in (self.input_combo, self.ref_combo):
+            combo.blockSignals(False)
 
     # ------------------------------------------------------------ 交互
 

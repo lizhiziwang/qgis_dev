@@ -127,6 +127,18 @@ class _PrefetchWorker(threading.Thread):
     def _render_one(self, layer, extent) -> None:
         from qgis.core import QgsMapRendererCustomPainterJob, QgsMapSettings
 
+        # 图层可能在排队期间被替换 / 删除（底图重载、工程切换）：此时 Python
+        # 包装器还在，但底层 C++ 对象已销毁，setLayers 会报
+        # "index 0 has type 'QgsRasterLayer' but 'QgsMapLayer' is expected"。
+        # 这一类预热已经没有意义，直接跳过（下一轮 renderComplete 会按新图层重排）。
+        if layer is None or sip.isdeleted(layer):
+            return
+        try:
+            if not layer.isValid():
+                return
+        except RuntimeError:
+            return
+
         ms = QgsMapSettings(self._template)  # 画布设置拷贝：投影/变换上下文与画布一致
         ms.setExtent(extent)
         ms.setLayers([layer])
@@ -197,7 +209,10 @@ class TilePrefetcher(QObject):
             extent = settings.extent()
             if not extent or extent.width() <= 0 or extent.height() <= 0:
                 return
-            layers = [l for l in settings.layers() if _is_xyz_layer(l)]
+            layers = [
+                l for l in settings.layers()
+                if not sip.isdeleted(l) and _is_xyz_layer(l)
+            ]
             if not layers:
                 return
             viewport_tiles = self._estimate_tiles(settings, extent)
@@ -429,7 +444,10 @@ class ZoomTileGuard(QObject):
             extent = settings.extent()
             if not extent or extent.width() <= 0 or extent.height() <= 0:
                 return
-            layers = [l for l in settings.layers() if _is_xyz_layer(l)]
+            layers = [
+                l for l in settings.layers()
+                if not sip.isdeleted(l) and _is_xyz_layer(l)
+            ]
             if not layers:
                 return  # 没 XYZ 层就不预取（无瓦片可拉）
             # 自己持有 worker（不与 TilePrefetcher 共享——见类 docstring）

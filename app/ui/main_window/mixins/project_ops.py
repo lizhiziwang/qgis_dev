@@ -328,18 +328,18 @@ class ProjectOpsMixin:
         return False
 
     def _on_new_project(self) -> None:
-        """新建工程：先弹窗输入工程名，创建后把名字带到右侧工程 Dock 显示。"""
-        # 已有图层时先确认清空（避免输入完名字又取消）
-        if self.project.mapLayers():
-            ret = MessageBox.question(
-                self,
-                "新建工程",
-                "将清空当前所有图层并新建工程，是否继续？",
-                MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
-                MessageBox.StandardButton.No,
-            )
-            if ret != MessageBox.StandardButton.Yes:
-                return
+        """新建工程：先处理未提交编辑并确认是否保存，再输入工程名创建。"""
+        # 1. 图层编辑缓冲里的改动：保存工程不会提交它们，必须先逐个问清
+        if not self._confirm_editing_layers_on_close("新建工程"):
+            return
+        # 2. 已有工程 / 用户数据时：保存当前工程并新建 / 不保存直接新建 / 取消。
+        #    启动时自动加载的配置底图不算用户数据（见 _has_data），不在这里打扰用户。
+        if (
+            self.project.mapLayers()
+            and (self._has_open_project() or self._has_data())
+            and not self._confirm_save_before_new_project()
+        ):
+            return
         name = self._ask_project_name()
         if name is None:
             return
@@ -353,6 +353,40 @@ class ProjectOpsMixin:
         self._on_project_create(name)
         self.project_dock.show()
         self.project_dock.raise_()
+
+    def _confirm_save_before_new_project(self) -> bool:
+        """新建工程前询问是否保存当前工程；返回 ``True`` 表示继续新建。
+
+        - 「是」→ 保存当前工程（已关联文件就覆盖，否则走另存）；保存失败或
+          用户在另存对话框取消 → 中止新建（返回 ``False``）；
+        - 「否」→ 不保存，直接新建（当前图层 / 改动会被丢弃）；
+        - 「取消」→ 返回 ``False``，当前工程保持原样。
+        """
+        if not getattr(self, "prompt_save_on_close", True):
+            return True
+        path = getattr(self, "_project_path", None)
+        hint = (
+            f"将保存到：{path}"
+            if path
+            else "当前工程尚未保存到文件，点「是」会先让你选择保存位置。"
+        )
+        ret = MessageBox.question(
+            self,
+            "新建工程",
+            "将清空当前所有图层，是否保存当前工程并新建？\n"
+            f"{hint}\n"
+            "「否」不保存当前工程直接新建；「取消」返回，当前工程不做改动。",
+            MessageBox.StandardButton.Yes
+            | MessageBox.StandardButton.No
+            | MessageBox.StandardButton.Cancel,
+            MessageBox.StandardButton.Yes,
+        )
+        if ret == MessageBox.StandardButton.Cancel:
+            return False
+        if ret == MessageBox.StandardButton.Yes:
+            # 另存对话框取消 / 写盘失败都返回 False：宁可停在这里，也不新建后丢工程
+            return self._save_current_project()
+        return True  # 否：不保存，继续新建
 
     def _ask_project_name(self):
         """弹窗输入工程名；返回工程名，取消或为空则返回 ``None``。"""
@@ -566,30 +600,30 @@ class ProjectOpsMixin:
         listed = "\n".join(f"· {text}" for text in running[:5])
         if len(running) > 5:
             listed += f"\n…另有 {len(running) - 5} 个任务"
-        box = QMessageBox(self)
-        box.setIcon(QMessageBox.Icon.Warning)
+        box = MessageBox(self)
+        box.setIcon(MessageBox.Icon.Warning)
         box.setWindowTitle("关闭应用")
         box.setText(f"还有 {len(running)} 个影像切片任务正在进行。")
         box.setInformativeText(
             "关闭程序会终止这些切片，尚未生成的瓦片不会继续生成"
             f"（已生成的瓦片保留在输出目录）。\n\n{listed}"
         )
-        stop_btn = box.addButton("终止切片并退出", QMessageBox.ButtonRole.DestructiveRole)
-        cancel_btn = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        stop_btn = box.addButton("终止切片并退出", MessageBox.ButtonRole.DestructiveRole)
+        cancel_btn = box.addButton("取消", MessageBox.ButtonRole.RejectRole)
         box.setDefaultButton(cancel_btn)
         box.exec()
         return box.clickedButton() is stop_btn
 
-    def _confirm_editing_layers_on_close(self) -> bool:
+    def _confirm_editing_layers_on_close(self, title: str = "关闭应用") -> bool:
         """关闭前逐个询问：处于编辑态且**有未提交改动**的图层是否保存。
-
+        `title`` 是弹窗标题：关闭应用时用默认值，新建工程时传「新建工程」。
         **必须排在"是否保存工程"之前**：保存工程只写 ``.qgs``，**不会**提交图层
         编辑缓冲里的改动 —— 先过这一轮，用户选保存才真的落盘。
 
         - 「保存」→ 提交该图层（``commitChanges(stopEditing=True)``）；
         - 「放弃」→ 回滚并停止编辑（丢弃缓冲里的改动）；
-        - 「取消」→ 返回 ``False``，调用方应 ``event.ignore()`` 中止关闭；
-        - 提交失败也返回 ``False``：宁可让用户看到错误，也不能静悄悄关掉丢数据。
+        - 「取消」→ 返回 ``False``，调用方应中止操作；
+        - 提交失败也返回 ``False``：宁可让用户看到错误，也不能静悄悄丢数据。
 
         与 :meth:`_confirm_save_project_on_close` 共用 ``prompt_save_on_close``
         开关（无头 / 测试场景置 ``False``，避免模态弹窗阻塞）。
@@ -604,7 +638,7 @@ class ProjectOpsMixin:
         for layer in dirty:
             ret = MessageBox.question(
                 self,
-                "关闭应用",
+                title,
                 f"图层「{layer.name()}」有未保存的修改，是否保存？",
                 MessageBox.StandardButton.Save
                 | MessageBox.StandardButton.Discard
@@ -615,7 +649,7 @@ class ProjectOpsMixin:
                 return False
             if ret == MessageBox.StandardButton.Save:
                 if not self.editing_service.stop(layer, save=True):
-                    logger.error("关闭前保存图层「%s」失败，中止关闭", layer.name())
+                    logger.error("保存图层「%s」失败，中止操作（%s）", layer.name(), title)
                     return False
             else:  # 放弃：回滚 + 停止编辑
                 self.editing_service.stop(layer, save=False)

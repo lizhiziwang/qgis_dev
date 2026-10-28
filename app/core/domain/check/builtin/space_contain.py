@@ -103,21 +103,32 @@ class SpaceContainCheck(BaseCheck):
         index: QgsSpatialIndex,
         cache: dict[int, QgsGeometry],
         bbox,
+        geom: QgsGeometry | None = None,
     ) -> QgsGeometry | None:
         """取参考图层中与该范围相交的要素并集；范围内没有参考要素返回 ``None``。
 
         ``cache`` 一次性预载参考几何（见 :meth:`_reference_geometry_cache`），
         不再逐 fid 回 provider 读要素。
+
+        ``geom`` 非空时先试"单个参考面包含源面"：两个相同图层（或同一版本数据）
+        里每个要素一定能被它自己那个参考面包含，但把相邻的多块并成一个几何做
+        ``contains`` 时，GEOS 会在公共边处产生零面积毛刺，导致 identical 几何也被
+        判成不包含（用户报过"两个相同图层仍提示有结果"）。单面判定精确且更快，
+        命中就直接返回。
         """
         from qgis.core import QgsGeometry  # 延迟 import
 
         parts = []
         for fid in index.intersects(bbox):
-            geom = cache.get(fid)
-            if geom is not None and not geom.isEmpty():
-                parts.append(geom)
+            geom_part = cache.get(fid)
+            if geom_part is not None and not geom_part.isEmpty():
+                parts.append(geom_part)
         if not parts:
             return None
+        if geom is not None:
+            for part in parts:
+                if part.contains(geom):
+                    return part
         return parts[0] if len(parts) == 1 else QgsGeometry.unaryUnion(parts)
 
     def iter_failed(self, p: CheckParam):
@@ -152,7 +163,7 @@ class SpaceContainCheck(BaseCheck):
                 yield seen, None, 0.0
                 continue
 
-            covered = self._reference_union(index, cache, geom.boundingBox())
+            covered = self._reference_union(index, cache, geom.boundingBox(), geom)
             if covered is not None and covered.contains(geom):
                 yield seen, None, 0.0
                 continue
