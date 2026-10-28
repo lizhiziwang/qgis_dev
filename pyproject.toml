@@ -22,6 +22,8 @@ dependencies = [
     "numpy>=1.24",
     "networkx>=3.0",
     "scipy>=1.10",
+    # 无人机航片元数据（QGIS 环境通常已自带）
+    "exifread>=3.0",
     # 服务
     "fastapi>=0.110",
     "uvicorn[standard]>=0.27",

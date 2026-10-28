@@ -11,7 +11,16 @@ from __future__ import annotations
 
 from contextlib import suppress
 
-from qgis.core import Qgis
+from qgis.core import (
+    Qgis,
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsFeature,
+    QgsGeometry,
+    QgsPointXY,
+    QgsRasterLayer,
+    QgsVectorLayer,
+)
 from qgis.gui import (
     QgsMapToolPan,
     QgsMapToolZoom,
@@ -23,7 +32,13 @@ from qgis.PyQt.QtGui import (
     QKeySequence,
     QShortcut,
 )
-from qgis.PyQt.QtWidgets import QApplication, QDialog, QDockWidget, QMessageBox, QToolBar
+from qgis.PyQt.QtWidgets import (
+    QApplication,
+    QDialog,
+    QDockWidget,
+    QMessageBox,
+    QToolBar,
+)
 
 from app.infra.logging import get_logger
 from app.infra.shortcuts import DEFAULT_SHORTCUTS, effective_sequences, load_overrides
@@ -126,6 +141,7 @@ class WindowChromeMixin:
         self._view_toolbar = self._build_view_toolbar()
         self._quality_toolbar = self._build_quality_toolbar()
         self._deep_learning_toolbar = self._build_deep_learning_toolbar()
+        self._uav_toolbar = self._build_uav_toolbar()
 
         #: tab 索引 → 该 tab 下应显示的工具条列表（切换时互斥显示）
         self._tab_toolbars: dict[int, list] = {}
@@ -147,6 +163,8 @@ class WindowChromeMixin:
             # 「深度学习」tab 本身即模式开关：切到该 tab 清空地图组件，切走即恢复，
             # 见 _on_tab_changed / _set_deep_learning_active；工具条只放业务入口
             ("深度学习", [self._deep_learning_toolbar]),
+            # 「无人机」tab：航测影像处理入口，目前只有「无人机影像拼接」
+            ("无人机", [self._uav_toolbar]),
         ):
             index = tab_bar.addTab(label)
             self._tab_toolbars[index] = toolbars
@@ -522,6 +540,160 @@ class WindowChromeMixin:
             QMessageBox.warning(self, "深度学习", "设置窗口不可用（缺少入口方法）")
             return
         QMessageBox.information(self, "深度学习", f"「{name}」功能正在开发中")
+
+    def _build_uav_toolbar(self) -> QToolBar:
+        """「无人机」tab 工具条：航测影像处理业务入口。"""
+        tb = QToolBar("无人机", self)
+        tb.setObjectName("UavTabToolbar")
+        tb.setToolButtonStyle(Qt.ToolButtonStyle.ToolButtonTextOnly)
+
+        act_stitch = QAction("无人机影像拼接", self)
+        act_stitch.setToolTip("把一组无人机航拍影像拼接成一张完整正射影像")
+        act_stitch.triggered.connect(self._on_uav_stitch)
+        tb.addAction(act_stitch)
+        self._act_uav_stitch = act_stitch
+
+        act_engine = QAction("拼接引擎设置", self)
+        act_engine.setToolTip("安装/检测 OpenSfM 拼接引擎组件")
+        act_engine.triggered.connect(self._on_uav_engine_settings)
+        tb.addAction(act_engine)
+        self._act_uav_engine = act_engine
+
+        self.addToolBar(tb)
+        return tb
+
+    def _on_uav_engine_settings(self) -> None:
+        from app.ui.dialogs.uav.engine_dialog import UavEngineDialog
+
+        dialog = UavEngineDialog(self)
+        dialog.exec()
+        dialog.deleteLater()
+
+    def _on_uav_stitch(self) -> None:
+        """「无人机影像拼接」入口：先清空全部图层，再打开六步向导。"""
+        removed = self._remove_all_layers()
+        if removed:
+            self.messageBar.pushMessage(
+                f"已清除 {removed} 个图层", level=Qgis.MessageLevel.Info, duration=3
+            )
+        from app.ui.dialogs.uav import UavSurveyWizard
+
+        wizard = UavSurveyWizard(self)
+        if wizard.exec() != QDialog.DialogCode.Accepted:
+            logger.info("无人机影像拼接：用户取消")
+            return
+        result = wizard.wizard_result()
+        if result is None:
+            return
+        task = getattr(result, "task", None)
+        logger.info(
+            "无人机影像拼接完成：影像=%s 坐标系=EPSG:%s 正射=%s 报告=%s",
+            result.job.image_dir,
+            result.job.crs_epsg,
+            getattr(getattr(task, "outputs", None), "dom", ""),
+            getattr(getattr(task, "outputs", None), "report", ""),
+        )
+        self.messageBar.pushMessage(
+            f"无人机影像拼接完成：{result.job.output_dir}",
+            level=Qgis.MessageLevel.Success,
+            duration=8,
+        )
+        # 图层/画布操作推迟一拍，避免在对话框关闭的事件栈里直接动画布
+        QTimer.singleShot(0, lambda r=result: self._apply_uav_result(r))
+
+    def _apply_uav_result(self, result) -> None:
+        """处理完成后：设置工程坐标系，加载 DOM/DSM/DTM 与影像位置。"""
+        job = result.job
+        crs = QgsCoordinateReferenceSystem(f"EPSG:{job.crs_epsg}")
+        if crs.isValid():
+            self.project.setCrs(crs)
+            self.canvas.setDestinationCrs(crs)
+        else:
+            logger.warning("无人机成果坐标系无效：EPSG:%s", job.crs_epsg)
+
+        task = getattr(result, "task", None)
+        loaded: list[str] = []
+        if task is not None:
+            loaded = self._load_uav_products(task)
+        if job.show_positions and job.images:
+            self._load_uav_positions(job)
+            loaded.append("影像位置")
+        message = (
+            "已加载：" + "、".join(loaded) if loaded else "已设置工程坐标系"
+        )
+        self.messageBar.pushMessage(
+            message,
+            level=Qgis.MessageLevel.Info,
+            duration=6,
+        )
+
+    def _load_uav_products(self, task) -> list[str]:
+        """加载 DOM（可见）与 DSM/DTM（默认隐藏），返回已加载图层名。"""
+        outputs = getattr(task, "outputs", None)
+        if outputs is None:
+            return []
+        loaded: list[str] = []
+        order = [
+            (outputs.dom, "正射影像 DOM", True),
+            (outputs.dsm, "数字表面模型 DSM", False),
+            (outputs.dtm, "数字地面模型 DTM", False),
+        ]
+        for path, name, visible in order:
+            if not path:
+                continue
+            layer = QgsRasterLayer(str(path), name)
+            if not layer.isValid():
+                logger.warning("无人机成果图层无效：%s", path)
+                continue
+            self._add_layer_to_project(layer)
+            if not visible:
+                node = self.project.layerTreeRoot().findLayer(layer.id())
+                if node is not None:
+                    node.setItemVisibilityChecked(False)
+            loaded.append(name)
+        return loaded
+
+    def _load_uav_positions(self, job) -> None:
+        """把有经纬度的影像写成「无人机影像位置」内存点图层（EPSG:4490 → 成果 CRS）。"""
+        target_crs = QgsCoordinateReferenceSystem(f"EPSG:{job.crs_epsg}")
+        if not target_crs.isValid():
+            return
+        uri = (
+            f"Point?crs={target_crs.authid()}"
+            "&field=name:string(160)"
+            "&field=alt:double(20,2)"
+            "&field=agl:double(20,2)"
+            "&field=rtk:string(20)"
+        )
+        layer = QgsVectorLayer(uri, "无人机影像位置", "memory")
+        if not layer.isValid():
+            logger.warning("创建无人机影像位置图层失败")
+            return
+        transform = QgsCoordinateTransform(
+            QgsCoordinateReferenceSystem("EPSG:4490"), target_crs, self.project
+        )
+        features = []
+        for image in job.images:
+            if not image.has_position:
+                continue
+            point = transform.transform(QgsPointXY(image.lon, image.lat))
+            feature = QgsFeature(layer.fields())
+            feature.setGeometry(QgsGeometry.fromPointXY(point))
+            feature.setAttribute("name", image.name)
+            if image.altitude_ellipsoid is not None:
+                feature.setAttribute("alt", float(image.altitude_ellipsoid))
+            if image.relative_altitude is not None:
+                feature.setAttribute("agl", float(image.relative_altitude))
+            if image.rtk_flag == 50:
+                feature.setAttribute("rtk", "固定解")
+            features.append(feature)
+        if not features:
+            logger.info("无人机影像位置图层：没有带经纬度的影像，跳过创建")
+            return
+        layer.dataProvider().addFeatures(features)
+        layer.updateExtents()
+        self._add_layer_to_project(layer)
+        logger.info("无人机影像位置图层：%s 个点", len(features))
 
     def _on_tab_changed(self, index: int) -> None:
         """tab 切换：只显示当前 tab 对应的工具条，其余隐藏（模拟"换工具栏"）。

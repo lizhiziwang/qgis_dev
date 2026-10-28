@@ -537,11 +537,16 @@ class LayerActionsMixin:
                 f"已把 {layer.name()} 移到「{group.name()}」", level=Qgis.MessageLevel.Info, duration=2
             )
 
-    def _remove_layer(self, layer, confirm: bool = False) -> None:
+    def _remove_layer(
+        self, layer, confirm: bool = False, notify: bool = True
+    ) -> None:
         """移除图层：清引用 + 刷新画布。
 
         ``confirm=True`` 时先弹「是否确定移除该图层」确认框（默认 No）。
         组删除 / 数据管理删库这类"上游已确认"的批量调用不传，避免连环弹窗。
+
+        ``notify=False`` 时不逐层推消息条：批量清空（如无人机影像拼接前
+        清场）由调用方汇总一条，避免刷屏。
 
         ``project.removeMapLayer`` 只会把图层从 project 树摘掉，
         画布仍保留最后一次 render 缓存 → 必须显式 ``refresh()`` 否则看到
@@ -612,7 +617,28 @@ class LayerActionsMixin:
             QTimer.singleShot(0, lambda: self._release_gpkg_alias_retry(alias_candidate, 0))
         # 延迟刷新画布到下一个事件循环 tick，让 layersRemoved 信号链走完
         QTimer.singleShot(0, self._deferred_refresh_after_remove)
-        self.messageBar.pushMessage(f"已移除图层：{layer_name}", level=Qgis.MessageLevel.Info, duration=3)
+        if notify:
+            self.messageBar.pushMessage(
+                f"已移除图层：{layer_name}", level=Qgis.MessageLevel.Info, duration=3
+            )
+
+    def _remove_all_layers(self) -> int:
+        """移除工程内的全部图层（图层树与画布同步清空），返回移除数量。
+
+        逐个走 :meth:`_remove_layer`，保留其完整清理时序（退出编辑态、清选中 /
+        编辑引用、回收 gpkg 别名、延迟刷新画布）。批量场景不逐层弹消息，由调用方
+        汇总提示；空图层组（「数据图层」/「参考图层」）保留。
+
+        先清图层树视图的当前 / 选中项：节点随后析构，Qt 持久索引再被事件碰到
+        会堆损坏（同 :meth:`_remove_layer_group` 的 ``_clear_view_current``）。
+        """
+        layers = list(self.project.mapLayers().values())
+        if not layers:
+            return 0
+        self._clear_view_current()
+        for layer in layers:
+            self._remove_layer(layer, notify=False)
+        return len(layers)
 
     def _deferred_refresh_after_remove(self) -> None:
         """延迟到事件循环下一拍才刷新画布（避免半移除状态 native 崩溃）。"""

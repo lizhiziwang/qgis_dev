@@ -2402,13 +2402,17 @@ def repair_gpkg_if_needed(db_path: str | Path) -> int:
 
 
 if __name__ == '__main__':
-    db = local_db_util(db_path=Path(r"D:\zsh\code\py\qgis_dev\scripts\test_spatial.db"), load_spatialite=True)
+    db = local_db_util(db_path=Path(r"C:\Users\zk\Desktop\1.gpkg"), load_spatialite=True)
 
+    # .gpkg 库按设计不加载 mod_spatialite(见 __init__ 里 kind == "gpkg" 分支),
+    # 临时看 WKT 得自己给这条连接装上;函数名是 AsEWKT(没有 ST_ 前缀),
+    # 几何是 GPKG 二进制,要先 GeomFromGPB() 包一层,否则结果是 NULL。
+    db.conn.enable_load_extension(True)
+    db.conn.load_extension("mod_spatialite")
     rows = db.cursor.execute('''
-        SELECT ST_AsText(shape) wkt,* FROM "江西省行政区划县区级修订版"
+        SELECT AsEWKT(GeomFromGPB(geom)) AS wkt, * FROM "___20260902"
     ''')
-    for row in rows:
-        print(row['wkt'])
+    print(rows[0]['wkt'])
 
     # arcgis 矢量转db
     # layer_metadata = db.get_arcgis_layer_metadata(url="http://127.0.0.1:6080/arcgis/rest/services/%E6%B1%9F%E8%A5%BF%E7%9C%81%E5%8E%BF%E7%BA%A7%E8%A1%8C%E6%94%BF%E5%8C%BA%E5%9F%9F/MapServer/0?f=json")
