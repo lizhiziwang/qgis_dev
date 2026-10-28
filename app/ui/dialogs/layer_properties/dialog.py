@@ -10,7 +10,7 @@
 
 from __future__ import annotations
 
-from qgis.core import QgsProject, QgsVectorLayer
+from qgis.core import QgsProject, QgsRasterLayer, QgsVectorLayer
 from qgis.PyQt.QtCore import QTimer, pyqtSignal
 from qgis.PyQt.QtWidgets import (
     QHBoxLayout,
@@ -28,13 +28,14 @@ from app.ui.dialogs.layer_properties.condition import ConditionTab
 from app.ui.dialogs.layer_properties.fields import FieldsTab
 from app.ui.dialogs.layer_properties.general import GeneralTab
 from app.ui.dialogs.layer_properties.labeling import LabelingTab
+from app.ui.dialogs.layer_properties.raster_render import RasterRenderTab
 from app.ui.dialogs.layer_properties.render import RenderTab
 from app.ui.dialogs.layer_properties.selection import SelectionTab
 
 logger = get_logger(__name__)
 
 #: 只对矢量图层有意义的页（栅格图层下禁用）
-_VECTOR_ONLY = frozenset({"条件", "字段", "选择", "标注", "渲染"})
+_VECTOR_ONLY = frozenset({"条件", "字段", "选择", "标注"})
 
 
 class LayerPropertiesDialog(BaseDialog):
@@ -87,7 +88,11 @@ class LayerPropertiesDialog(BaseDialog):
 
         self.tabs = QTabWidget(self)
         is_vector = isinstance(self.layer, QgsVectorLayer)
+        is_raster = isinstance(self.layer, QgsRasterLayer)
         for title, tab_cls in self._TAB_SPECS:
+            # 「渲染」按图层类型分派：矢量用符号 / 分类页，栅格用渲染器页
+            if title == "渲染" and is_raster:
+                tab_cls = RasterRenderTab
             page = tab_cls(self.layer, self) if tab_cls is not None else PlaceholderTab(title, self)
             index = self.tabs.addTab(page, title)
             self._tab_widgets.append(page)

@@ -31,6 +31,10 @@ class InputSpec:
     type: PortType
     default: str = ""
     required: bool = False
+    #: 可选项（如「距离单位」的 米 / 千米 / 度）；非空时运行参数用下拉框。
+    choices: tuple[str, ...] = ()
+    #: 类型是否由算法执行逻辑固定（True 时参数面板禁用「类型」下拉）。
+    type_locked: bool = False
 
 
 @dataclass
@@ -46,6 +50,8 @@ class OutputSpec:
     write_temp: bool = True
     #: 是否把结果图层加载到 QGIS 图层面板（工程「流程输出」分组）。
     load_to_canvas: bool = False
+    #: 类型是否由算法执行逻辑固定（True 时参数面板禁用「类型」下拉）。
+    type_locked: bool = False
 
 
 @dataclass
@@ -137,10 +143,25 @@ class FlowGraph:
         del self.nodes[node_id]
         return removed_edges
 
-    def add_input(self, node_id: str, name: str, type_: PortType, default: str = "") -> InputSpec:
+    def add_input(
+        self,
+        node_id: str,
+        name: str,
+        type_: PortType,
+        default: str = "",
+        choices: tuple[str, ...] = (),
+        type_locked: bool = False,
+    ) -> InputSpec:
         node = self._node(node_id)
         port_id = _fresh_id("in", [i.id for i in node.inputs])
-        spec = InputSpec(id=port_id, name=name, type=type_, default=default)
+        spec = InputSpec(
+            id=port_id,
+            name=name,
+            type=type_,
+            default=default,
+            choices=tuple(choices),
+            type_locked=type_locked,
+        )
         node.inputs.append(spec)
         return spec
 
@@ -151,10 +172,18 @@ class FlowGraph:
             del self.edges[eid]
         node.inputs = [i for i in node.inputs if i.id != input_id]
 
-    def add_output(self, node_id: str, name: str, type_: PortType) -> OutputSpec:
+    def add_output(
+        self,
+        node_id: str,
+        name: str,
+        type_: PortType,
+        type_locked: bool = False,
+    ) -> OutputSpec:
         node = self._node(node_id)
         port_id = _fresh_id("out", [o.id for o in node.outputs])
-        spec = OutputSpec(id=port_id, name=name, type=type_)
+        spec = OutputSpec(
+            id=port_id, name=name, type=type_, type_locked=type_locked
+        )
         node.outputs.append(spec)
         return spec
 

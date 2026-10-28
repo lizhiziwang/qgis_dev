@@ -24,7 +24,7 @@ from qgis.PyQt.QtWidgets import (
     QWidget,
 )
 
-from qgis.core import QgsLayerTreeModel, QgsProject
+from qgis.core import QgsLayerTreeModel, QgsProject, QgsVectorLayer
 
 
 class ProjectDock(QDockWidget):
@@ -172,7 +172,8 @@ class ProjectDock(QDockWidget):
         name = layer.name() if layer is not None else "—"
         self.current_label.setText(f"当前图层：{name}")
         self.render_btn.setEnabled(layer is not None)
-        self.label_btn.setEnabled(layer is not None)
+        # 标注只对矢量图层有意义；栅格图层（含在线影像）禁用，避免点开一个空页
+        self.label_btn.setEnabled(isinstance(layer, QgsVectorLayer))
 
 
 __all__ = ["ProjectDock"]

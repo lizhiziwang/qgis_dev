@@ -12,6 +12,7 @@ dist/
 # 测试报告（本地生成，含截图，不入库）
 docs/test-report/
 docs/qa_report/
+docs/manual_screenshots/
 scripts/qa
 # Python 字节码 / 缓存
 __pycache__/

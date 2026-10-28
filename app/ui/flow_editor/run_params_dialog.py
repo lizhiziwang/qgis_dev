@@ -17,22 +17,25 @@ JSON**；下次运行仍用节点里保存的默认值 / 绑定。
 
 from __future__ import annotations
 
+from qgis.PyQt.QtCore import Qt
 from qgis.PyQt.QtWidgets import (
     QCheckBox,
     QComboBox,
     QFileDialog,
+    QFormLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
     QPushButton,
-    QScrollArea,
     QVBoxLayout,
     QWidget,
 )
 
 from app.core.domain.flow.model import InputSpec, NodeSpec, unbound_inputs
-from app.core.domain.flow.types import PortType
-from app.ui.common.base_dialog import BaseDialog
+from app.core.domain.flow.topo import FlowCycleError, topo_sort
+from app.core.domain.flow.types import PortType, validate_value
+from app.ui.common.base_dialog import BaseDialog, make_scrollable
 from app.ui.common.message_box import MessageBox
 
 #: 文件类端口 → 浏览对话框文件过滤器
@@ -117,88 +120,153 @@ class RunParamsDialog(BaseDialog):
     def __init__(self, graph, parent=None) -> None:
         super().__init__(parent)
         self.setWindowTitle("填写本次运行的输入参数")
-        self.setMinimumWidth(520)
+        # 参数少时不必撑到基类的 800x600，按内容自适应高度
+        self.setMinimumSize(560, 0)
+        self.resize(640, 360)
         #: (node_id, input_id, InputSpec, 控件)
-        self._rows: list[tuple[str, str, InputSpec, QCheckBox | QLineEdit]] = []
+        self._rows: list[tuple[str, str, InputSpec, QCheckBox | QLineEdit | QComboBox]] = []
         self._build(graph)
+
+    def _max_window_height(self) -> int | None:
+        """参数多时也别铺满屏幕：在基类上限基础上再收 30%。"""
+        base = super()._max_window_height()
+        return None if base is None else max(360, int(base * 0.7))
 
     # ------------------------------------------------------------ 构建
 
     def _build(self, graph) -> None:
         root = QVBoxLayout()
-
-        hint = QLabel("以下输入未绑定上游，请填写本次运行使用的值（带 * 为必填）：")
-        hint.setWordWrap(True)
-        root.addWidget(hint)
+        root.setContentsMargins(14, 12, 14, 12)
+        root.setSpacing(10)
 
         container = QWidget()
         v = QVBoxLayout(container)
         v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(10)
+
+        hint = QLabel("以下输入未绑定上游，请填写本次运行使用的值（带 * 为必填）：")
+        hint.setWordWrap(True)
+        v.addWidget(hint)
+
+        # 按拓扑序（连线确定的执行顺序）排列工具，而不是拖入画布的顺序。
+        # 完全没连线的孤立节点不算进主流程，统一排到最后。
+        # 有环时退回图的插入顺序，把环的错误留给运行阶段统一提示。
+        rows = unbound_inputs(graph)
+        connected = {e.src_node for e in graph.edges.values()} | {
+            e.dst_node for e in graph.edges.values()
+        }
+        try:
+            order = {nid: i for i, nid in enumerate(topo_sort(graph))}
+        except FlowCycleError:
+            order = {}
+        rows.sort(
+            key=lambda row: (
+                0 if row[0] in connected else 1,
+                order.get(row[0], len(order)),
+            )
+        )
 
         last_node: str | None = None
-        for node_id, node_name, ins in unbound_inputs(graph):
+        form: QFormLayout | None = None
+        for node_id, node_name, ins in rows:
             if node_id != last_node:
-                hdr = QLabel(f"▎{node_name}")
-                hdr.setStyleSheet("font-weight: bold;")
-                v.addWidget(hdr)
+                # 每个工具（节点）一个分组卡片，参数用表单两列排布
+                group = QGroupBox(node_name)
+                form = QFormLayout(group)
+                form.setContentsMargins(12, 16, 12, 12)
+                form.setHorizontalSpacing(14)
+                form.setVerticalSpacing(8)
+                form.setLabelAlignment(
+                    Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
+                )
+                form.setFieldGrowthPolicy(
+                    QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+                )
+                form.setRowWrapPolicy(QFormLayout.RowWrapPolicy.DontWrapRows)
+                v.addWidget(group)
                 last_node = node_id
-            self._add_row(v, graph.nodes.get(node_id), ins)
+            if form is not None:
+                self._add_param_row(form, graph.nodes.get(node_id), ins)
 
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setWidget(container)
-        root.addWidget(scroll, 1)
+        v.addStretch(1)
+
+        root.addWidget(make_scrollable(container), 1)
 
         btns = QHBoxLayout()
         btns.addStretch(1)
-        run_btn = QPushButton("运行")
-        run_btn.setDefault(True)
-        run_btn.clicked.connect(self.accept)
         cancel_btn = QPushButton("取消")
         cancel_btn.clicked.connect(self.reject)
-        btns.addWidget(run_btn)
+        run_btn = QPushButton("运行")
+        run_btn.setObjectName("DialogPrimary")
+        run_btn.setDefault(True)
+        run_btn.clicked.connect(self.accept)
         btns.addWidget(cancel_btn)
+        btns.addWidget(run_btn)
         root.addLayout(btns)
         self.setLayout(root)
+        self.fit_height_to_content(container, extra=8)
 
-    def _add_row(self, layout: QVBoxLayout, node: NodeSpec | None, ins: InputSpec) -> None:
-        star = " *" if ins.required else ""
-        label = QLabel(f"{ins.name}（{ins.type.value}）{star}")
-        label.setMinimumWidth(160)
-
-        choices = _layer_choices(node, ins)
-        if ins.type is PortType.BOOLEAN:
-            widget: QCheckBox | QLineEdit | QComboBox = QCheckBox()
-            widget.setChecked(str(ins.default).strip().lower() in ("1", "true", "是", "yes"))
-            widget.setToolTip("勾选 = true，不勾选 = false")
-            row = QHBoxLayout()
-            row.addWidget(label)
-            row.addWidget(widget)
-        elif choices:
-            widget = self._make_layer_combo(ins, choices)
-            row = QHBoxLayout()
-            row.addWidget(label)
-            row.addWidget(widget, 1)
-        else:
-            widget = QLineEdit(ins.default)
-            widget.setPlaceholderText(ins.default or "（未设置）")
-            row = QHBoxLayout()
-            row.addWidget(label)
-            row.addWidget(widget, 1)
+    def _add_param_row(
+        self, form: QFormLayout, node: NodeSpec | None, ins: InputSpec
+    ) -> None:
+        value_widget = self._make_value_widget(node, ins)
+        field: QWidget = value_widget
+        if isinstance(value_widget, QLineEdit):
             if ins.type in _FILE_FILTERS:
                 # clicked 信号会传 bool 参数，用 _ 吞掉避免误绑到 edit
-                browse = self._make_browse_button(
-                    lambda _=False, w=widget, t=ins.type: self._browse_file(w, t)
+                field = self._wrap_with_browse(
+                    value_widget,
+                    lambda _=False, w=value_widget, t=ins.type: self._browse_file(w, t),
                 )
-                row.addWidget(browse)
             elif ins.type is PortType.FOLDER:
-                browse = self._make_browse_button(
-                    lambda _=False, w=widget: self._browse_folder(w)
+                field = self._wrap_with_browse(
+                    value_widget,
+                    lambda _=False, w=value_widget: self._browse_folder(w),
                 )
-                row.addWidget(browse)
+        star = " *" if ins.required else ""
+        label = QLabel(f"{ins.name}（{ins.type.value}）{star}")
+        label.setMinimumWidth(150)
+        form.addRow(label, field)
+        self._rows.append(
+            (node.id if node is not None else "", ins.id, ins, value_widget)
+        )
 
-        self._rows.append((node.id if node is not None else "", ins.id, ins, widget))
-        layout.addLayout(row)
+    def _make_value_widget(
+        self, node: NodeSpec | None, ins: InputSpec
+    ) -> QCheckBox | QLineEdit | QComboBox:
+        if ins.type is PortType.BOOLEAN:
+            widget = QCheckBox()
+            widget.setChecked(
+                str(ins.default).strip().lower() in ("1", "true", "是", "yes")
+            )
+            widget.setToolTip("勾选 = true，不勾选 = false")
+            return widget
+        if ins.choices and ins.type is PortType.STRING:
+            return self._make_choices_combo(ins)
+        choices = _layer_choices(node, ins)
+        if choices:
+            return self._make_layer_combo(ins, choices)
+        edit = QLineEdit(ins.default)
+        edit.setPlaceholderText(ins.default or "（未设置）")
+        return edit
+
+    def _wrap_with_browse(self, edit: QLineEdit, slot) -> QWidget:
+        field = QWidget()
+        h = QHBoxLayout(field)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+        h.addWidget(edit, 1)
+        h.addWidget(self._make_browse_button(slot))
+        return field
+
+    def _make_choices_combo(self, ins: InputSpec) -> QComboBox:
+        """固定选项下拉框（如「距离单位」的 米 / 千米 / 度）。"""
+        combo = QComboBox()
+        for choice in ins.choices:
+            combo.addItem(choice, choice)
+        idx = combo.findData(ins.default)
+        combo.setCurrentIndex(idx if idx >= 0 else 0)
+        return combo
 
     def _make_layer_combo(self, ins: InputSpec, choices: list[tuple[str, str]]) -> QComboBox:
         """工程图层下拉框（可编辑）：选图层名，或照旧直接填文件路径。"""
@@ -256,11 +324,9 @@ class RunParamsDialog(BaseDialog):
             text = _row_text(widget).strip()
             if ins.required and not text:
                 return f"「{ins.name}」是必填参数，不能为空。"
-            if text and ins.type is PortType.NUMBER:
-                try:
-                    float(text)
-                except ValueError:
-                    return f"「{ins.name}」需要填数值，当前输入：{text}"
+            problem = validate_value(text, ins.type)
+            if problem is not None:
+                return f"「{ins.name}」{problem}，当前输入：{text}"
         return None
 
     def overrides(self) -> dict[str, dict[str, str]]:

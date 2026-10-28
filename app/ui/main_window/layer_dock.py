@@ -644,6 +644,8 @@ class LayerDock(QDockWidget):
     layer_symbol_edit_requested = pyqtSignal(object)  # QgsMapLayer
     #: 双击分类图例子项 → 编辑该类别符号：(图层, 类别行号)
     legend_symbol_edit_requested = pyqtSignal(object, int)
+    #: 双击栅格图例色块 → 编辑该类颜色：(图层, 图例文本 = 类标签 / 值)
+    raster_legend_color_edit_requested = pyqtSignal(object, str)
     layer_clicked = pyqtSignal(object)
     label_toggle_requested = pyqtSignal(object, bool)  # (QgsVectorLayer, 期望的标注开关)
     #: 图层数据源丢失，用户点了名称前的红色感叹号：请宿主重设数据源
@@ -1315,12 +1317,12 @@ class LayerDock(QDockWidget):
         return "other"
 
     def _on_view_double_clicked(self, index) -> None:
-        """双击：符号 → 符号选择器；图层文字 → 属性表；分类子项 → 该类符号。
+        """双击：符号 → 符号选择器（栅格 → 渲染页）；图层文字 → 属性表；分类子项 → 该类符号。
 
         注意：双击不再用于就地重命名（那条改成 F2 / 编辑键，见 ``view`` 的
         ``EditKeyPressed``），否则一次双击既开属性表又开改名框。
         """
-        from qgis.core import QgsVectorLayer
+        from qgis.core import QgsRasterLayer, QgsVectorLayer
 
         view = self._sender_view()
         # 分类 / 分级的图例子项：双击符号编辑那个类别的符号
@@ -1337,6 +1339,12 @@ class LayerDock(QDockWidget):
                 return
             if isinstance(layer, QgsVectorLayer):
                 self.legend_symbol_edit_requested.emit(layer, index.row())
+            elif isinstance(layer, QgsRasterLayer):
+                # 调色板图例：每个色块对应一个「值 → 颜色」类，双击直接改色
+                # （图例文本就是类标签，空标签时是值）
+                self.raster_legend_color_edit_requested.emit(
+                    layer, str(index.data() or "")
+                )
             return
 
         # 图层行：图标 → 编辑符号；文字 → 属性表；勾选框 / 箭头等不处理
@@ -1346,12 +1354,15 @@ class LayerDock(QDockWidget):
             layer = getter() if callable(getter) else None
         except Exception:  # noqa: BLE001 —— 野索引不该把双击拖垮
             return
-        if not isinstance(layer, QgsVectorLayer):
+        if not isinstance(layer, (QgsVectorLayer, QgsRasterLayer)):
             return
         zone = self._double_click_zone(view, index)
         if zone == "symbol":
+            # 矢量：单一符号弹符号选择器，其它渲染方式开渲染页（见
+            # LayerDialogsMixin._edit_layer_symbol）；栅格：直接开渲染页
             self.layer_symbol_edit_requested.emit(layer)
-        elif zone == "text":
+        elif zone == "text" and isinstance(layer, QgsVectorLayer):
+            # 栅格没有要素表，文字双击不处理
             self.attribute_table_requested.emit(layer)
 
     def set_current_layer(self, layer) -> None:

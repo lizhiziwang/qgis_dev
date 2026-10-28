@@ -16,6 +16,11 @@
 而当前已经是卷帘工具时再点一次（或按 **Esc**）才真正退出，按图层树当前显隐
 还原画布并移除覆盖层；左影像被移除时也会自动退出。
 
+平移 / 缩放期间不逐帧离屏渲染：平移时覆盖层按画布的 ``sceneRect`` 位移同步
+移动；缩放等范围变化等左侧画完（``mapCanvasRefreshed``）后用上一帧按范围差
+补预览，视图稳定 ``_VIEW_IDLE_RENDER_MS`` 后再出清晰帧。旋转或放大倍数变化
+无法做该换算，退回原来的即时重渲染。
+
 安全约束（仓库既定结论，见 ``canvas_zoom.py`` / ``main_window``）：
 
 - 不在 Qt 事件栈内调 ``canvas.refresh()`` / ``zoomScale`` / ``unsetMapTool``，
@@ -31,7 +36,7 @@ from __future__ import annotations
 from typing import Optional
 
 from qgis.PyQt import sip
-from qgis.PyQt.QtCore import QEvent, QRect, Qt, QTimer
+from qgis.PyQt.QtCore import QEvent, QPointF, QRect, QRectF, QSize, Qt, QTimer
 from qgis.PyQt.QtGui import QColor, QImage, QPainter, QPen
 from qgis.PyQt.QtWidgets import QWidget
 from qgis.core import (
@@ -40,6 +45,7 @@ from qgis.core import (
     QgsMapRendererParallelJob,
     QgsMapSettings,
     QgsProject,
+    QgsRectangle,
 )
 from qgis.gui import QgsMapTool
 
@@ -50,6 +56,10 @@ logger = get_logger(__name__)
 #: 右侧离屏画面的最小重绘间隔（毫秒）。平移/缩放时限制在 ~25fps，
 #: 避免和主画布渲染抢 CPU（左右两侧各渲染一遍，不节流会明显卡顿）。
 _RENDER_THROTTLE_MS = 40
+
+#: 视图（范围 / 缩放）停止变化多久后才真正重渲染右侧画面（毫秒）。
+#: 期间先用上一帧做预览（平移跟 ``sceneRect``，缩放按范围差），避免逐帧重渲染。
+_VIEW_IDLE_RENDER_MS = 150
 
 
 class SwipeOverlay(QWidget):
@@ -73,6 +83,17 @@ class SwipeOverlay(QWidget):
         self._canvas = canvas
         self._orientation = orientation
         self._right_image: Optional[QImage] = None
+        #: 上一帧渲染时的视图参数，用于平移/缩放期间做临时预览
+        self._render_extent: Optional[QgsRectangle] = None
+        self._render_size: Optional[QSize] = None
+        #: 左侧画布当前**已经画出来**的范围（跟随 mapCanvasRefreshed 推进）
+        self._display_extent: Optional[QgsRectangle] = None
+        self._render_rotation = 0.0
+        self._render_magnification = 1.0
+        self._render_background = QColor(255, 255, 255)
+        #: 平移位移（sceneRect 在松手时会复位，这里保留到左侧新画面出来）
+        self._pan_translation = QPointF(0, 0)
+
         self._divider = 0.5
         self._dragging = False
         #: 悬浮消息条（懒查找后缓存，避免每帧递归 findChild）
@@ -112,7 +133,29 @@ class SwipeOverlay(QWidget):
             return super().eventFilter(watched, event)
         if self._handle_mouse(watched, event):
             return True
+        etype = event.type()
+        if etype == QEvent.Type.MouseMove:
+            self._sync_pan()
+        elif etype == QEvent.Type.MouseButtonRelease:
+            self._remember_pan_translation()
+            self.update()
         return super().eventFilter(watched, event)
+
+    def _sync_pan(self) -> None:
+        """平移拖动中画布整体挪了 sceneRect；覆盖层跟着重绘才能与左侧同步。
+
+        松手时 ``QgsMapCanvas`` 会把 sceneRect 复位、再异步重画，这里不跟着
+        清零，保留到 ``mapCanvasRefreshed``（新画面出来）再清，否则右侧会先
+        弹回平移前的位置。
+        """
+        try:
+            origin = self._canvas.sceneRect().topLeft()
+        except (AttributeError, RuntimeError):
+            return
+        if origin.isNull():
+            return
+        self._pan_translation = QPointF(-origin.x(), -origin.y())
+        self.update()
 
     def _handle_mouse(self, watched, event) -> bool:
         """分割线拖拽（viewport 事件过滤器）；没命中返回 ``False`` 放行。"""
@@ -182,9 +225,106 @@ class SwipeOverlay(QWidget):
 
     # ------------------------------------------------------------ 状态
 
-    def set_right_image(self, image: QImage) -> None:
-        """设置右侧完整画面（含背景、按图层树顺序合成），触发重绘。"""
+    def set_right_image(
+        self,
+        image: Optional[QImage],
+        extent: Optional[QgsRectangle] = None,
+        output_size: Optional[QSize] = None,
+        rotation: float = 0.0,
+        magnification: float = 1.0,
+        background: Optional[QColor] = None,
+    ) -> None:
+        """设置右侧完整画面及其渲染时的视图参数（供平移/缩放预览换算）。"""
         self._right_image = image
+        self._render_extent = extent
+        self._render_size = output_size
+        self._render_rotation = rotation
+        self._render_magnification = magnification
+        if background is not None:
+            self._render_background = background
+
+    def set_display_extent(self, extent) -> None:
+        """记录左侧画布已经渲染出来的范围（不是刚请求、还没画完的范围）。"""
+        self._display_extent = QgsRectangle(extent) if extent is not None else None
+
+    def can_preview(self) -> bool:
+        """上一帧能否直接用于当前视图的平移/缩放预览。
+
+        旋转或放大倍数变化时，简单的范围换算不再成立，退回离屏重渲染。
+        """
+        if self._right_image is None or self._right_image.isNull():
+            return False
+        if self._render_extent is None or self._render_size is None:
+            return False
+        try:
+            rotation = self._canvas.rotation()
+            magnification = self._canvas.magnificationFactor()
+        except (AttributeError, RuntimeError):
+            return False
+        if abs(rotation - self._render_rotation) > 1e-6:
+            return False
+        if abs(magnification - self._render_magnification) > 1e-9:
+            return False
+        # 范围换算只对“无旋转、无放大倍数”的常规视图成立
+        return abs(rotation) <= 1e-6 and abs(magnification - 1.0) <= 1e-9
+
+    def _preview_target_rect(self) -> QRectF:
+        """上一帧画面在当前视图下的目标矩形（无旋转时按范围差平移/缩放）。"""
+        w, h = self.width(), self.height()
+        full = QRectF(0, 0, w, h)
+        if not self.can_preview():
+            return full
+        current = self._display_extent
+        if current is None:
+            try:
+                current = self._canvas.extent()
+            except (AttributeError, RuntimeError):
+                return full
+        rendered = self._render_extent
+        if rendered is None or self._render_size is None:
+            return full
+        if rendered.isEmpty() or current.isEmpty():
+            return full
+        rw, rh = rendered.width(), rendered.height()
+        cw, ch = current.width(), current.height()
+        ow, oh = self._render_size.width(), self._render_size.height()
+        if rw <= 0 or rh <= 0 or cw <= 0 or ch <= 0 or ow <= 0 or oh <= 0:
+            return full
+        scale_x = rw / cw * (w / ow)
+        scale_y = rh / ch * (h / oh)
+        offset_x = (rendered.xMinimum() - current.xMinimum()) / cw * w
+        offset_y = (current.yMaximum() - rendered.yMaximum()) / ch * h
+        return QRectF(offset_x, offset_y, ow * scale_x, oh * scale_y)
+
+    def _current_pan_translation(self) -> QPointF:
+        """平移中优先读 sceneRect 的实时位移；sceneRect 复位后沿用保留值。"""
+        try:
+            origin = self._canvas.sceneRect().topLeft()
+        except (AttributeError, RuntimeError):
+            return self._pan_translation
+        if not origin.isNull():
+            self._pan_translation = QPointF(-origin.x(), -origin.y())
+        return self._pan_translation
+
+    def has_pan_translation(self) -> bool:
+        return not self._pan_translation.isNull()
+
+    def clear_pan_translation(self) -> None:
+        self._pan_translation = QPointF(0, 0)
+
+    def _remember_pan_translation(self) -> None:
+        """松手前把 sceneRect 的位移记下来。
+
+        QGIS 松手会复位 sceneRect，同时把画布图像项挪到新范围对应的位置，
+        所以左侧屏幕上仍停在平移后的画面；这里右侧也保留同一位移，等左侧
+        新画面出来（``mapCanvasRefreshed``）再一起切换。
+        """
+        try:
+            origin = self._canvas.sceneRect().topLeft()
+        except (AttributeError, RuntimeError):
+            return
+        if not origin.isNull():
+            self._pan_translation = QPointF(-origin.x(), -origin.y())
 
     def set_orientation(self, orientation: str) -> None:
         """切换卷帘方向；分割线回到中间，整幅覆盖层重绘一次。"""
@@ -240,10 +380,19 @@ class SwipeOverlay(QWidget):
                 else:
                     y = int(self._divider * h)
                     clip = QRect(0, y, w, h - y)
+                target = self._preview_target_rect()
+                pan = self._current_pan_translation()
+                if not pan.isNull():
+                    # 平移中 / 松手后等待左侧重画：右侧保持同样的位移
+                    target.translate(pan)
                 painter.save()
                 painter.setClipRect(clip)
-                # 右侧完整画面带 devicePixelRatio（离屏渲染时设置），画逻辑矩形即 1:1 清晰
-                painter.drawImage(QRect(0, 0, w, h), self._right_image)
+                # 预览帧被平移/缩放后可能盖不满右侧：先铺渲染背景色，
+                # 避免露出底下画布的左侧图层栈。
+                if not target.contains(QRectF(clip)):
+                    painter.fillRect(clip, self._render_background)
+                # 静止时 target 就是整幅逻辑矩形，画出来 1:1 清晰
+                painter.drawImage(target, self._right_image)
                 painter.restore()
             self._draw_divider(painter, w, h)
         finally:
@@ -309,16 +458,26 @@ class SwipeTool(QgsMapTool):
         self._project_signals_connected = False
         self._jobs: dict[str, QgsMapRendererParallelJob] = {}
         self._job_connections: dict[str, object] = {}
+        self._job_meta: dict[str, tuple] = {}
         self._images: dict[str, Optional[QImage]] = {}
+        self._image_meta: dict[str, tuple] = {}
         self._pending = 0
         self._render_seq = 0  # 单调递增序号，淘汰过期 job 的 finished
         self._needs_render = True
         self._render_scheduled = False
+        self._view_pending = False  # 视图变了、左侧还没画完
+        self._pan_settling = False  # 刚平移完，等左侧画出新范围后立刻补清晰帧
+        self._rendering_extent: Optional[QgsRectangle] = None  # 左侧当前这帧正在渲染的范围
         #: 右侧画面重绘节流（单次触发；到期渲染最新范围）
         self._render_timer = QTimer(self)
         self._render_timer.setSingleShot(True)
         self._render_timer.setInterval(_RENDER_THROTTLE_MS)
         self._render_timer.timeout.connect(self._run_scheduled_render)
+        #: 视图变化停止后才真正重渲染（期间覆盖层用上一帧做平移/缩放预览）
+        self._view_timer = QTimer(self)
+        self._view_timer.setSingleShot(True)
+        self._view_timer.setInterval(_VIEW_IDLE_RENDER_MS)
+        self._view_timer.timeout.connect(self._on_view_idle)
         self._alive = False  # 会话存活（覆盖层 + 渲染工作中）
         self._active = False  # 本工具是当前激活地图工具
         self._restoring = False  # 自己 setLayers 时置 True，屏蔽 layersChanged 回环
@@ -376,6 +535,10 @@ class SwipeTool(QgsMapTool):
             self._alive = True
             self._connect_canvas_signals()
             self._set_base_content()
+            try:
+                self._overlay.set_display_extent(self.canvas.extent())
+            except (AttributeError, RuntimeError):
+                pass
             self._overlay.show()
         self._active = True
         self._overlay.raise_to_top()
@@ -395,7 +558,11 @@ class SwipeTool(QgsMapTool):
             return
         self._alive = False
         self._render_timer.stop()
+        self._view_timer.stop()
         self._render_scheduled = False
+        self._view_pending = False
+        self._pan_settling = False
+        self._rendering_extent = None
         # 不依赖 mapToolSet：用户在非卷帘工具下删除影像时 unsetMapTool 是空操作，
         # 这里主动通知主窗口把工具条上的卷帘按钮弹起。
         sync = getattr(self.parent_window, "_sync_swipe_session_active", None)
@@ -657,6 +824,7 @@ class SwipeTool(QgsMapTool):
         c.extentsChanged.connect(self._on_canvas_changed)
         c.layersChanged.connect(self._on_layers_changed)
         c.mapCanvasRefreshed.connect(self._on_canvas_refreshed)
+        c.renderStarting.connect(self._on_render_starting)
         c.magnificationChanged.connect(self._on_canvas_changed)
         c.rotationChanged.connect(self._on_canvas_changed)
         self._connect_project_signals()
@@ -667,6 +835,7 @@ class SwipeTool(QgsMapTool):
             c.extentsChanged.disconnect(self._on_canvas_changed)
             c.layersChanged.disconnect(self._on_layers_changed)
             c.mapCanvasRefreshed.disconnect(self._on_canvas_refreshed)
+            c.renderStarting.disconnect(self._on_render_starting)
             c.magnificationChanged.disconnect(self._on_canvas_changed)
             c.rotationChanged.disconnect(self._on_canvas_changed)
         except (TypeError, RuntimeError):
@@ -676,16 +845,80 @@ class SwipeTool(QgsMapTool):
     def _on_canvas_changed(self) -> None:
         if not self._alive:
             return
-        # 这里不 raise：画布还没重绘，置顶没意义；等 mapCanvasRefreshed
-        # 画完再置顶，避免平移时每帧多做一次覆盖层提层。
-        self._schedule_render()
+        # 范围变了，但左侧同步画布还没画出新画面；右侧先保持现有画面
+        # （平移时连同 _pan_translation 一起保留），等 mapCanvasRefreshed
+        # 里拿到“左侧实际画完的范围”再推进，避免两侧范围不一致。
+        self._needs_render = True
+        self._view_pending = True
+        ov = self._overlay
+        if ov is not None and ov.has_pan_translation():
+            self._pan_settling = True
+        self._view_timer.start()
+
+    def _on_render_starting(self) -> None:
+        """记下画布这一帧正在渲染的范围；完成时用它对齐右侧（而非最新请求范围）。"""
+        if not self._alive:
+            return
+        try:
+            self._rendering_extent = QgsRectangle(self.canvas.extent())
+        except (AttributeError, RuntimeError):
+            self._rendering_extent = None
+
+    @staticmethod
+    def _same_extent(a, b) -> bool:
+        if a is None or b is None:
+            return False
+        try:
+            return (
+                a.xMinimum() == b.xMinimum()
+                and a.yMinimum() == b.yMinimum()
+                and a.xMaximum() == b.xMaximum()
+                and a.yMaximum() == b.yMaximum()
+            )
+        except (AttributeError, RuntimeError):
+            return False
 
     def _on_canvas_refreshed(self) -> None:
         ov = self._overlay
-        if ov is not None:
-            ov.raise_to_top()
-        if self._needs_render:
-            self._schedule_render()
+        if ov is None:
+            return
+        ov.raise_to_top()
+        if not self._view_pending:
+            return
+        # 左侧这一帧画完的范围是 _rendering_extent；若期间用户又改了范围，
+        # 画布还会再排一帧，等那一帧画完才算稳定。
+        rendered = self._rendering_extent
+        try:
+            wanted = self.canvas.extent()
+        except (AttributeError, RuntimeError):
+            wanted = rendered
+        if rendered is None:
+            rendered = wanted
+        if rendered is None:
+            return
+        had_pan = ov.has_pan_translation()
+        # 新画面已经出来了：撤掉右侧的平移，改按新范围换算（两者屏幕位置相同）
+        ov.clear_pan_translation()
+        try:
+            ov.set_display_extent(rendered)
+        except (AttributeError, RuntimeError):
+            return
+        ov.update()
+        if self._same_extent(rendered, wanted):
+            self._view_pending = False
+            if self._needs_render:
+                if had_pan or self._pan_settling:
+                    # 平移刚结束、左侧已到位：立刻补右侧清晰帧
+                    self._pan_settling = False
+                    self._schedule_render()
+                else:
+                    self._view_timer.start()
+
+    def _on_view_idle(self) -> None:
+        """视图停止变化：补一帧清晰的右侧画面（取最新范围）。"""
+        if not self._alive or not self._needs_render:
+            return
+        self._schedule_render()
 
     def _on_layers_changed(self) -> None:
         if not self._alive or self._restoring:
@@ -715,6 +948,8 @@ class SwipeTool(QgsMapTool):
     def _schedule_render(self) -> None:
         if not self._alive:
             return
+        # 内容变化 / 视图已稳定：不再等预览防抖
+        self._view_timer.stop()
         self._needs_render = True
         # 节流：平移/缩放时 extentsChanged 很密，每次都起离屏渲染会和主画布
         # 抢 CPU，表现为卡顿。这里最多每 _RENDER_THROTTLE_MS 渲染一帧，
@@ -749,6 +984,7 @@ class SwipeTool(QgsMapTool):
                 pass
         self._jobs = {}
         self._job_connections = {}
+        self._job_meta = {}
         self._pending = 0
 
     def _render_settings(self, layers) -> Optional[QgsMapSettings]:
@@ -772,6 +1008,21 @@ class SwipeTool(QgsMapTool):
         except RuntimeError:
             return None
 
+    def _settings_meta(self, settings: QgsMapSettings) -> tuple:
+        """记录这一帧的视图参数，供覆盖层做平移/缩放预览换算。
+
+        必须用 ``visibleExtent()``（渲染器实际铺满输出画面的范围，已按输出
+        宽高比补齐白边），不能用 ``extent()``；后者只是请求范围，宽高比与
+        窗口不一致时两者不等，预览会整体偏移。
+        """
+        return (
+            QgsRectangle(settings.visibleExtent()),
+            settings.outputSize(),
+            settings.rotation(),
+            settings.magnificationFactor(),
+            QColor(settings.backgroundColor()),
+        )
+
     def _start_render(self) -> None:
         if not self._alive:
             return
@@ -779,8 +1030,10 @@ class SwipeTool(QgsMapTool):
         seq = self._render_seq
         self._cancel_jobs()
         self._images = {"right": None}
+        self._image_meta = {}
         settings = self._render_settings(list(self._right_layers))
         if settings is not None:
+            meta = self._settings_meta(settings)
             try:
                 job = QgsMapRendererParallelJob(settings)
             except RuntimeError:
@@ -788,6 +1041,7 @@ class SwipeTool(QgsMapTool):
             if job is not None:
                 self._pending += 1
                 self._jobs["right"] = job
+                self._job_meta["right"] = meta
                 self._job_connections["right"] = job.finished.connect(
                     lambda s=seq: self._on_render_finished(s, "right")
                 )
@@ -813,8 +1067,10 @@ class SwipeTool(QgsMapTool):
             return
         try:
             self._images[kind] = job.renderedImage()
+            self._image_meta[kind] = self._job_meta.get(kind)
         except RuntimeError:
             self._images[kind] = None
+            self._image_meta[kind] = None
         self._pending -= 1
         if self._pending <= 0:
             self._apply_images()
@@ -823,11 +1079,17 @@ class SwipeTool(QgsMapTool):
         ov = self._overlay
         if ov is None:
             return
+        image = self._images.get("right")
+        meta = self._image_meta.get("right")
         try:
-            ov.set_right_image(self._images.get("right"))
+            if meta is None:
+                ov.set_right_image(image)
+            else:
+                ov.set_right_image(image, *meta)
             ov.update()
         except RuntimeError:
             return
-        # 渲染期间又来了新需求 → 节流后再渲一帧（取最新范围）
-        if self._needs_render:
+        # 渲染期间又来了新需求 → 节流后再渲一帧（取最新范围）。
+        # 但若用户仍在拖动/缩放，交给 _view_timer 在停止后补帧，不要立刻再渲染。
+        if self._needs_render and not self._view_timer.isActive():
             self._schedule_render()
