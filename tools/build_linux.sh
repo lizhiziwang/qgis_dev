@@ -329,6 +329,14 @@ mkdir -p "$DIST_PATH/config" "$DIST_PATH/resource"
 cp -a "$PROJECT_ROOT/config/." "$DIST_PATH/config/"
 cp -a "$PROJECT_ROOT/resource/." "$DIST_PATH/resource/"
 
+# 使用手册 -> 产物根 docs/（「帮助 → 使用手册」按便携包根目录解析相对路径）
+if [ -f "$PROJECT_ROOT/docs/使用手册.docx" ]; then
+    mkdir -p "$DIST_PATH/docs"
+    cp -a "$PROJECT_ROOT/docs/使用手册.docx" "$DIST_PATH/docs/使用手册.docx"
+else
+    echo "WARNING: 未找到 docs/使用手册.docx，「帮助 → 使用手册」在产物中将不可用"
+fi
+
 # ---------------------------------------------------------------- STAGE 4: 收集动态库
 # 把 qgis python 扩展、C++ 插件、Qt 插件依赖的 .so 全量收集到 _internal/，
 # 目标机免装 QGIS/Qt。
@@ -438,6 +446,7 @@ _require "qgis_dev"
 _require "launch_qgis.sh"
 _require "build_info.json"
 _require "config/app.yaml"
+_require "docs/使用手册.docx"
 _require "resource"
 _require "runtime/share/qgis/resources/srs.db"
 _require "runtime/share/qgis/python/plugins/processing"

@@ -176,6 +176,15 @@ if ($LASTEXITCODE -ge 8) {
 Copy-Item -Path (Join-Path $ProjectRoot "config") -Destination (Join-Path $DistPath "config") -Recurse -Force
 Copy-Item -Path (Join-Path $ProjectRoot "resource") -Destination (Join-Path $DistPath "resource") -Recurse -Force
 
+# 4.2.1 使用手册 -> 产物根 docs/（「帮助 → 使用手册」按便携包根目录解析相对路径）
+$ManualSrc = Join-Path $ProjectRoot "docs/使用手册.docx"
+if (Test-Path $ManualSrc) {
+    New-Item -ItemType Directory -Path (Join-Path $DistPath "docs") -Force | Out-Null
+    Copy-Item -Path $ManualSrc -Destination (Join-Path $DistPath "docs/使用手册.docx") -Force
+} else {
+    Write-Host "WARNING: 未找到 docs/使用手册.docx，「帮助 → 使用手册」在产物中将不可用" -ForegroundColor Yellow
+}
+
 # 4.3 少量 Python 运行时文件 -> _internal/（避免污染根目录）
 Copy-Item -Path (Join-Path $QGISInstall "bin/python3*.dll") -Destination $InternalPath -Force
 Copy-Item -Path (Join-Path $QGISInstall "bin/o4w_env.bat") -Destination $InternalPath -Force
@@ -200,7 +209,7 @@ if ($LASTEXITCODE -ne 0) {
 # STAGE 5: 校验关键产物，缺了直接报错退出，避免分发不完整包
 Write-Host "STAGE 5: Verifying build output..." -ForegroundColor Cyan
 $missingFiles = @()
-foreach ($required in @("app.exe", "build_info.json", "start_runtime.bat", "config/app.yaml", "resource", "runtime/proj.db", "runtime/etc", "runtime/i18n", "runtime/plugins/processing", "runtime/platforms", "_internal/qgis", "_internal/qgis_analysis.dll")) {
+foreach ($required in @("app.exe", "build_info.json", "start_runtime.bat", "config/app.yaml", "docs/使用手册.docx", "resource", "runtime/proj.db", "runtime/etc", "runtime/i18n", "runtime/plugins/processing", "runtime/platforms", "_internal/qgis", "_internal/qgis_analysis.dll")) {
     if (-not (Test-Path (Join-Path $DistPath $required))) {
         $missingFiles += $required
     }
