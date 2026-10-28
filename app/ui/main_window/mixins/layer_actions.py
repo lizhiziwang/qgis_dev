@@ -554,6 +554,7 @@ class LayerActionsMixin:
             return
         self._selected_layer = layer
         is_vector = isinstance(layer, QgsVectorLayer)
+        is_raster = isinstance(layer, QgsRasterLayer)
         node = self.project.layerTreeRoot().findLayer(layer.id())
         menu = QMenu(self)
         # 缩放至图层
@@ -565,19 +566,22 @@ class LayerActionsMixin:
             act_sel = QAction("放大至选中要素", self)
             act_sel.triggered.connect(lambda: self._zoom_to_selection(self._selected_layer))
             menu.addAction(act_sel)
-        # 打开属性表 / 图层属性 / 导出数据 / SQL（栅格没有要素表，只留图层属性）
+        # 打开属性表 / 图层属性 / 导出数据 / SQL。矢量是要素表；栅格只有在
+        # 已有 RAT 或当前渲染方式能生成 RAT 时才出现对应入口。
         menu.addSeparator()
         if is_vector:
             act_attr = QAction("打开属性表", self)
             act_attr.triggered.connect(self._open_attribute_table)
             menu.addAction(act_attr)
+        elif is_raster:
+            self._add_raster_attribute_action(menu, layer)
         act_props = QAction("图层属性", self)
         act_props.triggered.connect(lambda: self._open_layer_properties(self._selected_layer))
         menu.addAction(act_props)
-        # 渲染样式：紧跟在图层属性下面。编辑样式跳到图层属性的「渲染」页；
-        # 导入样式 = 从外部 QGIS 样式文件导入。
+        # 渲染样式：紧跟在图层属性下面。编辑样式跳到图层属性的「渲染」页（矢量是
+        # 符号 / 分类，栅格是渲染器）；导入样式 = 从外部 QGIS 样式文件导入。
         sub_style = menu.addMenu("渲染样式")
-        if is_vector:
+        if is_vector or is_raster:
             edit_style = QAction("编辑样式", self)
             edit_style.triggered.connect(
                 lambda: self._show_render_tab(self._selected_layer)
@@ -633,6 +637,27 @@ class LayerActionsMixin:
         # 顺序操作放菜单最后
         self._add_node_move_actions(menu, node)
         menu.exec(global_pos)
+
+    def _add_raster_attribute_action(self, menu: QMenu, layer) -> None:
+        """栅格属性表入口：已有 RAT → 打开；当前渲染可生成 → 创建。
+
+        能力判断用 ``canCreateRasterAttributeTable()``：它只看渲染器是否为
+        调色板 / 单波段伪彩色，**不代表数据格式能存 RAT**（PNG、GPKG 就存不了）。
+        真正的落盘能力在创建时由 ``writeNativeAttributeTable`` + 回读验证，
+        失败会回滚并提示，不会留下“本次会话有、重开就没有”的假属性表。
+        """
+        if not isinstance(layer, QgsRasterLayer):
+            return
+        if layer.attributeTableCount() > 0:
+            act = QAction("打开属性表", self)
+            act.triggered.connect(self._open_raster_attribute_table)
+        elif layer.canCreateRasterAttributeTable():
+            act = QAction("创建栅格属性表", self)
+            act.setToolTip("按当前调色板 / 伪彩色渲染生成属性表，并保存到数据源")
+            act.triggered.connect(self._create_raster_attribute_table)
+        else:
+            return
+        menu.addAction(act)
 
     def _zoom_to_selection(self, layer) -> None:
         """放大至选中要素（与 QGIS 图层面板一致）。"""

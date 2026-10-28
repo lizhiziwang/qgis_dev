@@ -8,13 +8,19 @@
 
 from __future__ import annotations
 
+import math
+from contextlib import suppress
+
 from qgis.core import (
     Qgis,
     QgsCategorizedSymbolRenderer,
+    QgsPalettedRasterRenderer,
+    QgsRasterLayer,
     QgsRendererCategory,
     QgsSingleSymbolRenderer,
     QgsVectorLayer,
 )
+from qgis.PyQt.QtGui import QColor
 from qgis.PyQt.QtWidgets import (
     QDialog,
     QListWidget,
@@ -41,6 +47,115 @@ class LayerDialogsMixin:
         if self._selected_layer is None:
             return
         self._show_attribute_dock(self._selected_layer)
+
+    def _open_raster_attribute_table(self) -> None:
+        """打开栅格属性表（RAT）。
+
+        用自建的 :class:`RasterAttributeTableDialog`（跟随应用的无边框标题栏与
+        主题）只读展示字段 / 行 / 颜色。窗口按图层单实例复用，图层从工程移除时
+        自动关闭。
+        """
+        layer = self._selected_layer
+        if not isinstance(layer, QgsRasterLayer):
+            return
+        if layer.attributeTableCount() <= 0:
+            MessageBox.warning(self, "打开属性表", "该图层没有栅格属性表。")
+            return
+        try:
+            from app.ui.dialogs.raster_attribute_table import (
+                RasterAttributeTableDialog,
+            )
+
+            show_modeless(
+                self,
+                ("raster_attribute_table", layer.id()),
+                lambda: RasterAttributeTableDialog(layer, parent=self),
+                layer=layer,
+            )
+        except Exception as e:  # 交给消息框，别让右键菜单崩掉
+            logger.error("打开栅格属性表失败: %s", e, exc_info=True)
+            MessageBox.warning(self, "打开属性表失败", str(e))
+
+    def _create_raster_attribute_table(self) -> None:
+        """按当前渲染器生成栅格属性表，并写回数据源。
+
+        ``createFromRaster`` 只支持调色板 / 单波段伪彩色渲染器（与 QGIS 一致）。
+        ``writeNativeAttributeTable`` 对不支持的格式不一定报错（例如 GPKG 会
+        静默丢弃），所以写完必须 ``readNativeAttributeTable`` 回读验证；失败
+        就回滚 provider 里的表，避免出现“本次会话能打开、下次打开就没了”。
+        """
+        layer = self._selected_layer
+        if not isinstance(layer, QgsRasterLayer):
+            return
+        if layer.attributeTableCount() > 0:
+            self._open_raster_attribute_table()
+            return
+        if not layer.canCreateRasterAttributeTable():
+            MessageBox.warning(
+                self,
+                "创建栅格属性表",
+                "当前渲染方式无法生成栅格属性表。",
+                informative_text="请先使用「调色板」或「单波段伪彩色」渲染，再创建属性表。",
+            )
+            return
+
+        ret = MessageBox.question(
+            self,
+            "创建栅格属性表",
+            f"将按「{layer.name()}」的当前渲染生成属性表，并写入数据源。",
+            MessageBox.StandardButton.Yes | MessageBox.StandardButton.No,
+            MessageBox.StandardButton.No,
+            informative_text="此操作会修改原始数据文件，是否继续？",
+        )
+        if ret != MessageBox.StandardButton.Yes:
+            return
+
+        from app.core.util.raster_rat import build_raster_attribute_table
+
+        table, band = build_raster_attribute_table(layer)
+        if table is None or band <= 0:
+            MessageBox.warning(self, "创建栅格属性表", "当前渲染方式无法生成属性表。")
+            return
+
+        provider = layer.dataProvider()
+        try:
+            provider.setAttributeTable(band, table)
+        except Exception as e:  # 非 GDAL 数据源可能根本没实现这个方法
+            logger.error("设置栅格属性表失败: %s", e, exc_info=True)
+            MessageBox.warning(
+                self,
+                "创建栅格属性表",
+                "当前数据源不支持保存属性表。",
+                informative_text=str(e),
+            )
+            return
+        try:
+            ok, err = provider.writeNativeAttributeTable()
+            # 不支持的格式可能返回成功但实际上没写进去（GPKG），回读才是准的。
+            written = False
+            if ok:
+                written, _ = provider.readNativeAttributeTable()
+        except Exception as e:  # 写回失败要走回滚，不让异常冒到菜单槽
+            ok, written, err = False, False, str(e)
+            logger.error("写入栅格属性表失败: %s", e, exc_info=True)
+
+        if not ok or not written:
+            with suppress(Exception):
+                provider.removeAttributeTable(band)
+            MessageBox.warning(
+                self,
+                "创建栅格属性表",
+                "当前栅格格式不支持保存属性表。",
+                informative_text=err
+                or "可改用 GeoTIFF、Erdas Imagine（.img）或 VRT 等支持 RAT 的格式。",
+            )
+            return
+
+        self.messageBar.pushMessage(
+            f"已创建栅格属性表：{layer.name()}",
+            level=Qgis.MessageLevel.Success,
+            duration=3,
+        )
 
     def _open_execute_sql(self) -> None:
 
@@ -126,6 +241,9 @@ class LayerDialogsMixin:
     def _edit_layer_symbol(self, layer) -> None:
         """双击图层行的符号图标：单一符号弹符号选择器，其它渲染方式打开渲染页。"""
         if not isinstance(layer, QgsVectorLayer):
+            # 栅格没有“符号”，双击图例直接进渲染页（RGB / 伪彩色 / 山体阴影…）
+            if isinstance(layer, QgsRasterLayer):
+                self._show_render_tab(layer)
             return
         renderer = layer.renderer()
         if not isinstance(renderer, QgsSingleSymbolRenderer):
@@ -172,6 +290,81 @@ class LayerDialogsMixin:
             self.layer_dock.refresh_symbol_icons()
         except Exception as exc:  # noqa: BLE001
             logger.warning("编辑类别符号失败：%s", exc, exc_info=True)
+
+    @staticmethod
+    def _find_palette_class(classes, text: str):
+        """按图例文本找调色板类的下标：先匹配标签，再按数值匹配。"""
+        text = str(text or "").strip()
+        if not text:
+            return None
+        labeled = [
+            index
+            for index, cls in enumerate(classes)
+            if str(cls.label or "").strip() == text
+        ]
+        if len(labeled) == 1:
+            return labeled[0]
+        try:
+            value = float(text)
+        except ValueError:
+            return None
+        hits = [
+            index
+            for index, cls in enumerate(classes)
+            if math.isclose(float(cls.value), value, rel_tol=0.0, abs_tol=1e-9)
+        ]
+        return hits[0] if len(hits) == 1 else None
+
+    def _edit_raster_legend_color(self, layer, text: str) -> None:
+        """双击栅格调色板图例的色块：改对应类的颜色，重建渲染器后刷新图例。
+
+        与矢量分类图例一样重建渲染器而不是原地改类：本构建里渲染器返回的
+        类拷贝与渲染器共享颜色 / 符号指针，原地写回有双重释放风险。
+        """
+        from app.ui.dialogs.layer_properties.widgets import pick_color
+
+        if not isinstance(layer, QgsRasterLayer):
+            return
+        try:
+            renderer = layer.renderer()
+        except RuntimeError:
+            return
+        if not isinstance(renderer, QgsPalettedRasterRenderer):
+            # 伪彩色 / 灰度等没有逐个类的图例，退回渲染设置页
+            self._show_render_tab(layer)
+            return
+        try:
+            classes = list(renderer.classes())
+            band = int(renderer.inputBand())
+        except (RuntimeError, AttributeError):
+            return
+        index = self._find_palette_class(classes, text)
+        if index is None:
+            self._show_render_tab(layer)
+            return
+        target = classes[index]
+        chosen = pick_color(self, QColor(target.color))
+        if chosen is None:
+            return
+        try:
+            updated = [
+                QgsPalettedRasterRenderer.Class(
+                    cls.value,
+                    chosen if position == index else QColor(cls.color),
+                    str(cls.label or ""),
+                )
+                for position, cls in enumerate(classes)
+            ]
+            new_renderer = QgsPalettedRasterRenderer(
+                layer.dataProvider(), band, updated
+            )
+            with suppress(Exception):
+                new_renderer.setOpacity(renderer.opacity())
+            layer.setRenderer(new_renderer)
+            layer.triggerRepaint()
+            self.layer_dock.refresh_symbol_icons()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("编辑栅格图例颜色失败：%s", exc, exc_info=True)
 
     @staticmethod
     def _replace_category_symbol(layer, renderer, row: int, chosen) -> None:

@@ -393,6 +393,10 @@ class WindowShellMixin:
         # 双击图层的符号图标 / 分类图例子项 → 符号选择器（文字双击仍开属性表）
         self.layer_dock.layer_symbol_edit_requested.connect(self._edit_layer_symbol)
         self.layer_dock.legend_symbol_edit_requested.connect(self._edit_legend_symbol)
+        # 双击栅格图例色块 → 调色板对应类改色（与矢量分类图例一致）
+        self.layer_dock.raster_legend_color_edit_requested.connect(
+            self._edit_raster_legend_color
+        )
         # 点击图层树即自动设为编辑目标（与 QGIS 桌面一致）：
         # 用户期望点完一层就能在工具条点"开始编辑"
         self.layer_dock.layer_clicked.connect(self._on_layer_clicked_in_dock)

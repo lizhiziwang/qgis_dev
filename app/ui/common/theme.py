@@ -963,9 +963,27 @@ def app_qss(t: Theme) -> str:
         width: 10px;
         height: 8px;
     }}
-    QLineEdit:disabled, QComboBox:disabled {{
-        background-color: {t.panel_bg};
+    /* 禁用态统一“灰底 + 次要文字色 + 灰边框”：只改文字色时，输入框仍是白底，
+       跟可编辑控件几乎一样，用户要点一下才发现不能输入（用户报过）。
+       spinbox 的上下箭头也是子控件，单独给禁用色，否则箭头保持可点观感。 */
+    QLineEdit:disabled, QTextEdit:disabled, QPlainTextEdit:disabled,
+    QComboBox:disabled, QSpinBox:disabled, QDoubleSpinBox:disabled,
+    QDateEdit:disabled, QDateTimeEdit:disabled, QTimeEdit:disabled {{
+        background-color: {t.window_bg};
         color: {t.text_secondary};
+        border-color: {t.input_border};
+    }}
+    QSpinBox::up-button:disabled, QSpinBox::down-button:disabled,
+    QDoubleSpinBox::up-button:disabled, QDoubleSpinBox::down-button:disabled {{
+        background-color: {t.window_bg};
+        border-left-color: {t.input_border};
+        border-bottom-color: {t.input_border};
+    }}
+    QSpinBox::up-arrow:disabled, QDoubleSpinBox::up-arrow:disabled {{
+        image: url({_arrow_url(t.text_secondary, up=True)});
+    }}
+    QSpinBox::down-arrow:disabled, QDoubleSpinBox::down-arrow:disabled {{
+        image: url({_arrow_url(t.text_secondary)});
     }}
     QComboBox::drop-down {{ border: none; width: 22px; background-color: transparent; }}
     /* 字段搜索下拉（属性筛选 / 图层属性-条件）：清空「×」与下拉箭头挨紧。
@@ -1012,12 +1030,22 @@ def app_qss(t: Theme) -> str:
            而文档里的 `QComboBox:on::down-arrow` 会破坏整个 combo 渲染。 */
         image: url({_arrow_url(t.menu_text, up=True)});
     }}
+    QComboBox::down-arrow:disabled {{
+        /* 禁用组合框的箭头保持正常色会显得还能点，跟着文字一起变灰 */
+        image: url({_arrow_url(t.text_secondary)});
+    }}
     QComboBox QAbstractItemView {{
         background-color: {t.menu_bg};
         color: {t.menu_text};
         border: 1px solid {t.border};
         selection-background-color: {t.menu_hover};
         selection-color: {t.menu_text};
+    }}
+    /* 下拉项被禁用（例如单波段栅格里禁用的「多波段彩色」）：不单独设色时
+       与可选条目完全一样，用户点下去才知道选不中（用户报过）。 */
+    QComboBox QAbstractItemView::item:disabled {{
+        color: {t.text_secondary};
+        background-color: {t.panel_bg};
     }}
 
     QPushButton {{
@@ -1390,6 +1418,13 @@ def app_qss(t: Theme) -> str:
         margin-top: -1px;
     }}
     QTabBar::tab:hover:!selected {{ background-color: {t.menu_hover}; }}
+    /* 禁用页签（栅格属性里的「字段 / 选择 / 标注 / 条件」）：只靠 Qt 原生
+       禁用态在浅色背景下几乎看不出差别，这里压成次要文字色 + 面板底色。 */
+    QTabBar::tab:disabled {{
+        color: {t.text_secondary};
+        background-color: {t.panel_bg};
+        border-color: {t.border};
+    }}
     """
 
 
